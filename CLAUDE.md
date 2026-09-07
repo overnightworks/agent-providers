@@ -30,9 +30,10 @@ uv build                     # what the release attaches
 
 ## Code patterns
 
-- **Deployment facts come from `ProviderRuntimeConfig`.** Nothing reads an
-  environment variable or a global; the host installs one config per process
-  with `configure()` and every module reads it back with `current_config()`.
+- **Deployment facts come from `ProviderRuntimeConfig`.** Nothing reads
+  configuration from an environment variable or a global; the host installs one
+  config per process with `configure()` and every module reads it back with
+  `current_config()`.
 - **Host obligations are ports, passed in.** The tool set (`ToolExecutor`,
   `ToolCatalog`), the MCP server (`McpServerSpec`), and the image constraints
   (`ImagePolicy`) arrive from the host — the library never invents them.

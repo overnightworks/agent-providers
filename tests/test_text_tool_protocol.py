@@ -163,6 +163,43 @@ def test_stream_parser_rejects_a_second_opening_block_after_a_complete_call():
         parser.finish()
 
 
+def test_stream_parser_rejects_a_second_opening_block_after_a_trailing_remark():
+    """The smuggle case: a complete call, a closing remark, then a second call.
+
+    At most one call is ever returned and nothing in the remainder is
+    executed; here the second block is also detected and rejected, since it
+    still starts its own line outside a markdown fence -- the same scan the
+    live parser itself uses to recognize a call.
+    """
+    parser = TextToolStreamParser(COWRITER_TOOL_CATALOG)
+    chunks = [
+        "<songmaker_tool_call>\n",
+        '{"name":"list_songs","arguments":{}}',
+        "\n</songmaker_tool_call>",
+        "\nDone, thanks! One more thing --\n<songmaker_tool_call>\n",
+        '{"name":"list_songs","arguments":{}}\n</songmaker_tool_call>',
+    ]
+    for chunk in chunks:
+        parser.feed(chunk)
+
+    with pytest.raises(TextToolProtocolError):
+        parser.finish()
+
+
+def test_stream_parser_parses_a_lyrics_call_that_mentions_the_close_tag_text():
+    parser = TextToolStreamParser(COWRITER_TOOL_CATALOG)
+    lyrics = "use </songmaker_tool_call> to call a tool"
+    payload = json.dumps(
+        {"name": "update_song_lyrics", "arguments": {"song_id": "song-1", "lyrics": lyrics}},
+    )
+
+    parser.feed("<songmaker_tool_call>\n" + payload + "\n</songmaker_tool_call>")
+
+    assert parser.finish() == TextToolCall(
+        "update_song_lyrics", {"song_id": "song-1", "lyrics": lyrics},
+    )
+
+
 def test_stream_parser_forwards_ordinary_text_and_keeps_only_whitespace_until_finish():
     parser = TextToolStreamParser(COWRITER_TOOL_CATALOG)
 

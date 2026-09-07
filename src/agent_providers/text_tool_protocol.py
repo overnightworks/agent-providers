@@ -153,7 +153,12 @@ class TextToolStreamParser:
         return emitted
 
     def finish(self) -> TextToolCall | FinalText:
-        """Return the call or the final ordinary-text tail at stream completion."""
+        """Return the call or the final ordinary-text tail at stream completion.
+
+        A buffered call is parsed up to its first complete close; any text
+        the model wrote after that (a closing remark, say) is discarded,
+        not returned or forwarded -- see :func:`_parse_streamed_call`.
+        """
         if self._call_buffer is None:
             return FinalText(self._candidate)
         return _parse_streamed_call(self._catalog, self._call_buffer)
@@ -283,12 +288,28 @@ def _parse_streamed_call(catalog: ToolCatalog, buffer: str) -> TextToolCall:
     """Parse the first complete call in a streamed buffer.
 
     A streaming model may keep talking after the closing tag (a closing
-    remark such as "Done -- want another verse?"); that trailing text is
-    ordinary prose, not part of the call, and is dropped here rather than
-    forwarded, since by the time ``finish()`` runs the stream is already
-    over and there is no live text channel left to deliver it on. Exactly
-    one call is still required: a second opening block anywhere in what
-    follows the first close tag is rejected, the same as the one-shot path.
+    remark such as "Done -- want another verse?"). That trailing text is
+    ordinary prose: it is discarded here, not forwarded, because by the
+    time ``finish()`` runs the stream is already over and there is no live
+    text channel left to deliver it on.
+
+    The close is matched by its line delimiter -- a real newline (LF or
+    CRLF) immediately before the tag -- never by a bare substring search
+    for the tag text. A tool argument can legitimately *contain* the tag
+    text (e.g. lyrics that mention it); it can never contain a raw newline
+    there, since that would make the enclosing JSON string invalid. So a
+    newline-prefixed occurrence is always the real close, and an occurrence
+    inside a string value is always skipped.
+
+    A second opening block found in what follows the close is rejected,
+    but that check only ever fires when the block is actually found by the
+    same line-start scan the live parser uses: one hidden inside a
+    markdown fence in the remainder is not detected (fence tracking is not
+    carried once a call starts buffering). The guarantee this function
+    actually keeps is narrower and is the one that matters: at most one
+    call is ever returned, and nothing in the remainder is executed --
+    the reject is defence in depth on top of that, not the guarantee
+    itself.
     """
     markup = catalog.markup
     close_tag = markup.call_close_tag
@@ -300,17 +321,17 @@ def _parse_streamed_call(catalog: ToolCatalog, buffer: str) -> TextToolCall:
     else:
         raise TextToolProtocolError()
 
-    close_index = candidate.find(close_tag, opening_line_length)
-    if close_index == -1:
+    close_delimiter_index = candidate.find(f"\n{close_tag}", opening_line_length)
+    if close_delimiter_index == -1:
         raise TextToolProtocolError()
-    call_end = close_index + len(close_tag)
-    call_content = candidate[opening_line_length:call_end]
-    if call_content.endswith(f"\r\n{close_tag}"):
-        json_text = call_content[: -len(close_tag) - 2]
-    elif call_content.endswith(f"\n{close_tag}"):
-        json_text = call_content[: -len(close_tag) - 1]
+    if (
+        close_delimiter_index > opening_line_length
+        and candidate[close_delimiter_index - 1] == "\r"
+    ):
+        json_text = candidate[opening_line_length : close_delimiter_index - 1]
     else:
-        raise TextToolProtocolError()
+        json_text = candidate[opening_line_length:close_delimiter_index]
+    call_end = close_delimiter_index + 1 + len(close_tag)
 
     remainder = candidate[call_end:]
     if _opening_line_start(

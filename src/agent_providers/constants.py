@@ -10,8 +10,9 @@ every deployment holds the same value and none of them belongs in
 Everything that *does* differ per deployment — binaries, credential mirrors,
 mounted directories, models, keys, process caps — arrives through that
 configuration instead, and product vocabulary (a host's defaults, its cover and
-history rules, its user-facing texts) stays with the host. ``docs/architecture.md``
-in songmaker carries the ruled Go/Stay table for that split (issue #856).
+history rules, its user-facing texts) stays with the host. The rule is simply
+the split: a value stays here when it is the same in every deployment, and goes
+to the config or the host when it is not.
 """
 
 from __future__ import annotations

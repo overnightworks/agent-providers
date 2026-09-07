@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --extra dev --extra image
+
+      - name: Lockfile is current
+        run: uv lock --check
+
+      - name: Ruff
+        run: uv run ruff check src tests
+
+      - name: Import boundaries
+        run: uv run lint-imports
+
+      - name: Tests
+        run: uv run pytest tests -q
+
+      - name: Build the distribution
+        run: uv build

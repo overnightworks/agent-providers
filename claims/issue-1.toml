@@ -1,8 +1,0 @@
-claim_id = "842b3cf5ed9c48d38b6e93aa0b1282a1"
-agent = "songmaker-d8"
-role = "builder"
-base = "370cc88c5727a5ca42d77c4ad0e90b09478100ed"
-branch = "songmaker-d8/issue-1-scaffold"
-scope = ["pyproject.toml", ".importlinter", "README.md", "AGENTS.md", "CLAUDE.md", "LICENSE", ".gitignore", ".python-version", "uv.lock", ".github/workflows/ci.yml", ".github/workflows/release.yml", "tests/conftest.py", "src/agent_providers/__init__.py", "src/agent_providers/constants.py", "src/agent_providers/sandbox/paths.py"]
-opened_commit = "1ad402e227fa96d0225b168531e019a20a83282d"
-whole_reason = "S1.2 Scaffolding: die komplette Verpackung eines frischen Repos ist eine kohaerente Slice"

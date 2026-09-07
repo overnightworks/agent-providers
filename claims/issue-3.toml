@@ -1,0 +1,7 @@
+claim_id = "060ecedce5ef4af2b8ad98064c3412ec"
+agent = "songmaker-d8"
+role = "builder"
+base = "4282704a564522e4bb4c4d02377d1b001d144e6c"
+branch = "songmaker-d8/issue-3-grok-trailing"
+scope = ["src/agent_providers/text_tool_protocol.py", "tests/test_text_tool_protocol.py"]
+opened_commit = "224d255bc767be60d28ca64fef678e264a4d8ad0"

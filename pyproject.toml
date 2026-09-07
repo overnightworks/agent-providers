@@ -1,6 +1,6 @@
 [project]
 name = "overnightworks-agent-providers"
-version = "0.1.0"
+version = "0.1.1"
 description = "Reusable agent provider layer: Claude, Grok and Codex routing, live catalogs, turn streams, tool loop, bounded process runner, status probes, and sandbox building blocks"
 authors = [{ name = "Flex0r (Felix Hummert)", email = "felix.hummert@gmail.com" }]
 readme = "README.md"

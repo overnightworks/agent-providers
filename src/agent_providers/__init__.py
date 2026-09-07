@@ -10,4 +10,4 @@ Independent of `songmaker_cli` so it can be released as its own distribution;
 the boundary is enforced by the `.importlinter` contract.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"

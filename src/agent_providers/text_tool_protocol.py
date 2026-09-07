@@ -156,7 +156,7 @@ class TextToolStreamParser:
         """Return the call or the final ordinary-text tail at stream completion."""
         if self._call_buffer is None:
             return FinalText(self._candidate)
-        return _parse_call(self._catalog, self._call_buffer, self._call_buffer)
+        return _parse_streamed_call(self._catalog, self._call_buffer)
 
     def _record_markdown_text(self, text: str) -> None:
         self._inside_markdown_fence, self._markdown_line_prefix = _advance_markdown_fences(
@@ -272,6 +272,52 @@ def _parse_call(catalog: ToolCatalog, candidate: str, original_response: str) ->
         raise TextToolProtocolError()
     if candidate != original_response.strip():
         raise TextToolProtocolError()
+    try:
+        payload = json.loads(json_text, parse_constant=_reject_non_json_constant)
+    except ValueError:
+        raise TextToolProtocolError() from None
+    return _validated_call(catalog, payload)
+
+
+def _parse_streamed_call(catalog: ToolCatalog, buffer: str) -> TextToolCall:
+    """Parse the first complete call in a streamed buffer.
+
+    A streaming model may keep talking after the closing tag (a closing
+    remark such as "Done -- want another verse?"); that trailing text is
+    ordinary prose, not part of the call, and is dropped here rather than
+    forwarded, since by the time ``finish()`` runs the stream is already
+    over and there is no live text channel left to deliver it on. Exactly
+    one call is still required: a second opening block anywhere in what
+    follows the first close tag is rejected, the same as the one-shot path.
+    """
+    markup = catalog.markup
+    close_tag = markup.call_close_tag
+    candidate = buffer.strip()
+    if candidate.startswith(markup.opening_line_crlf):
+        opening_line_length = len(markup.opening_line_crlf)
+    elif candidate.startswith(markup.opening_line_lf):
+        opening_line_length = len(markup.opening_line_lf)
+    else:
+        raise TextToolProtocolError()
+
+    close_index = candidate.find(close_tag, opening_line_length)
+    if close_index == -1:
+        raise TextToolProtocolError()
+    call_end = close_index + len(close_tag)
+    call_content = candidate[opening_line_length:call_end]
+    if call_content.endswith(f"\r\n{close_tag}"):
+        json_text = call_content[: -len(close_tag) - 2]
+    elif call_content.endswith(f"\n{close_tag}"):
+        json_text = call_content[: -len(close_tag) - 1]
+    else:
+        raise TextToolProtocolError()
+
+    remainder = candidate[call_end:]
+    if _opening_line_start(
+        markup, remainder, inside_markdown_fence=False, markdown_line_prefix="",
+    ) is not None:
+        raise TextToolProtocolError()
+
     try:
         payload = json.loads(json_text, parse_constant=_reject_non_json_constant)
     except ValueError:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 
 import pytest
@@ -115,6 +116,51 @@ def test_stream_parser_executes_an_unfenced_call_after_a_fenced_example():
 )
 def test_nonleading_or_fenced_call_syntax_is_ordinary_final_text(response):
     assert parse_text_tool_response(COWRITER_TOOL_CATALOG, response) == FinalText(response)
+
+
+def test_stream_parser_executes_a_lyrics_call_followed_by_a_trailing_remark():
+    parser = TextToolStreamParser(COWRITER_TOOL_CATALOG)
+    lyrics = (
+        "Verse one, line one\n"
+        "Verse one, line two\n"
+        "\n"
+        "Chorus, the hook line\n"
+        "Chorus, again"
+    )
+    payload = json.dumps(
+        {"name": "update_song_lyrics", "arguments": {"song_id": "song-1", "lyrics": lyrics}},
+    )
+
+    chunks = [
+        "<songmaker_tool_call>\n",
+        payload[:15],
+        payload[15:40],
+        payload[40:],
+        "\n</songmaker_tool_call>",
+        "\nDone — tell me if you want another verse.",
+    ]
+    for chunk in chunks:
+        parser.feed(chunk)
+
+    assert parser.finish() == TextToolCall(
+        "update_song_lyrics", {"song_id": "song-1", "lyrics": lyrics},
+    )
+
+
+def test_stream_parser_rejects_a_second_opening_block_after_a_complete_call():
+    parser = TextToolStreamParser(COWRITER_TOOL_CATALOG)
+    chunks = [
+        "<songmaker_tool_call>\n",
+        '{"name":"list_songs","arguments":{}}',
+        "\n</songmaker_tool_call>",
+        "\n<songmaker_tool_call>\n",
+        '{"name":"list_songs","arguments":{}}\n</songmaker_tool_call>',
+    ]
+    for chunk in chunks:
+        parser.feed(chunk)
+
+    with pytest.raises(TextToolProtocolError):
+        parser.finish()
 
 
 def test_stream_parser_forwards_ordinary_text_and_keeps_only_whitespace_until_finish():

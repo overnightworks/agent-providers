@@ -1,22 +1,16 @@
 """Autouse fixtures for the ``agent_providers`` library tests.
 
-The root ``tests/conftest.py`` installs *songmaker's* provider runtime and its
-probe patches for every test. This package overrides those with library-only
-facts so the tests here prove the provider layer against values the package
-owns, never the application's — which is what lets them travel to the extracted
-``agent_providers`` repository (issue #825, S1) with no ``songmaker_cli`` on the
-path.
+These install a library-only provider runtime and the probe patches every test
+needs, so the suite proves the provider layer against values the package owns —
+never a host application's — with no ``songmaker_cli`` on the path.
 
-``_configure_agent_provider_runtime`` is overridden *by name*: pytest uses the
-nearest fixture of a given name, so this one runs and the root fixture does
-not. That matters because ``agent_providers.config.configure()`` refuses a
-second, differing installation — if both ran, the first to win would make the
-other raise, and every test here would error.
+``agent_providers.config.configure()`` refuses a second, differing
+installation, so ``_configure_agent_provider_runtime`` installs one sample
+runtime and resets it after each test.
 """
 
 from __future__ import annotations
 
-import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -30,34 +24,6 @@ from agent_providers.config import (
     configure,
     reset_config,
 )
-
-
-def pytest_configure(config: pytest.Config) -> None:
-    """Stop this nested conftest from shadowing the root one by its bare name.
-
-    Under pytest's prepend import mode a conftest imports as the top-level
-    module ``conftest``, so loading this one replaces ``sys.modules["conftest"]``
-    and every flat songmaker test collected afterwards would resolve
-    ``from conftest import ...`` to this package instead of the root
-    ``tests/conftest.py``.
-
-    The bare alias is restored to the *pytest-registered* root conftest module,
-    not merely dropped: dropping it makes the next flat import re-execute
-    ``tests/conftest.py`` as a second module object, whose module-level state
-    (the ``_fake_cli_processes`` list its autouse ``_close_fake_cli_pipes``
-    drains) then diverges from the registered instance's — so flat callers'
-    pipes leak, order-dependently. pytest registers each conftest under its
-    absolute path, so the registered instance is retrieved by that key and put
-    back under the bare name. In the extracted lib repo there is no root
-    conftest to restore, so the alias for this module is dropped instead.
-    """
-    root_conftest = config.pluginmanager.get_plugin(
-        str(Path(__file__).parents[1] / "conftest.py"),
-    )
-    if root_conftest is not None:
-        sys.modules["conftest"] = root_conftest
-    elif getattr(sys.modules.get("conftest"), "__file__", None) == __file__:
-        del sys.modules["conftest"]
 
 _SAMPLE_ROOT = Path("/tmp/agent-providers-tests")
 

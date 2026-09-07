@@ -1,0 +1,36 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
+        with:
+          enable-cache: true
+
+      - name: Build the distribution
+        run: uv build
+
+      - name: The tag names the version that was built
+        run: |
+          built="$(basename "$(ls dist/*.whl)")"
+          expected="overnightworks_agent_providers-${GITHUB_REF_NAME#v}-py3-none-any.whl"
+          if [ "$built" != "$expected" ]; then
+            echo "Tag $GITHUB_REF_NAME expects $expected but the build produced $built" >&2
+            exit 1
+          fi
+
+      - name: Publish the release with its wheel
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/*.whl --title "$GITHUB_REF_NAME" --generate-notes

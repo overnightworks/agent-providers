@@ -258,6 +258,13 @@ def _advance_markdown_fences(
 
 
 def _parse_call(catalog: ToolCatalog, candidate: str, original_response: str) -> TextToolCall:
+    """Parse the one call a one-shot response must contain and nothing else.
+
+    The boundary is the first closing tag whose preceding text is valid
+    JSON -- see :func:`_first_json_boundary`. Anything left over after that
+    boundary breaks the "exactly one call and nothing else" rule, whether
+    it is trailing prose or a second call.
+    """
     markup = catalog.markup
     close_tag = markup.call_close_tag
     candidate = candidate.strip()
@@ -267,20 +274,14 @@ def _parse_call(catalog: ToolCatalog, candidate: str, original_response: str) ->
         else len(markup.opening_line_lf)
     )
     call_content = candidate[opening_line_length:]
-    if not call_content.endswith(close_tag):
+    boundary = _first_json_boundary(call_content, close_tag)
+    if boundary is None:
         raise TextToolProtocolError()
-    if call_content.endswith(f"\r\n{close_tag}"):
-        json_text = call_content[: -len(close_tag) - 2]
-    elif call_content.endswith(f"\n{close_tag}"):
-        json_text = call_content[: -len(close_tag) - 1]
-    else:
+    payload, call_end = boundary
+    if call_content[call_end:] != "":
         raise TextToolProtocolError()
     if candidate != original_response.strip():
         raise TextToolProtocolError()
-    try:
-        payload = json.loads(json_text, parse_constant=_reject_non_json_constant)
-    except ValueError:
-        raise TextToolProtocolError() from None
     return _validated_call(catalog, payload)
 
 
@@ -293,13 +294,14 @@ def _parse_streamed_call(catalog: ToolCatalog, buffer: str) -> TextToolCall:
     time ``finish()`` runs the stream is already over and there is no live
     text channel left to deliver it on.
 
-    The close is matched by its line delimiter -- a real newline (LF or
-    CRLF) immediately before the tag -- never by a bare substring search
-    for the tag text. A tool argument can legitimately *contain* the tag
-    text (e.g. lyrics that mention it); it can never contain a raw newline
-    there, since that would make the enclosing JSON string invalid. So a
-    newline-prefixed occurrence is always the real close, and an occurrence
-    inside a string value is always skipped.
+    The close is the first closing tag whose preceding text is valid JSON
+    -- see :func:`_first_json_boundary`. That is what a real close always
+    is (a well-formed call's JSON ends right there), and what an occurrence
+    inside a string value never is (the text up to it is an unterminated
+    JSON string), so a tag written by the model as part of the arguments
+    -- lyrics that mention it, say -- is skipped rather than mistaken for
+    the close. This also means the tag no longer has to sit on its own
+    line: the boundary is derived from the JSON, not from a delimiter.
 
     A second opening block found in what follows the close is rejected,
     but that check only ever fires when the block is actually found by the
@@ -321,29 +323,41 @@ def _parse_streamed_call(catalog: ToolCatalog, buffer: str) -> TextToolCall:
     else:
         raise TextToolProtocolError()
 
-    close_delimiter_index = candidate.find(f"\n{close_tag}", opening_line_length)
-    if close_delimiter_index == -1:
+    call_content = candidate[opening_line_length:]
+    boundary = _first_json_boundary(call_content, close_tag)
+    if boundary is None:
         raise TextToolProtocolError()
-    if (
-        close_delimiter_index > opening_line_length
-        and candidate[close_delimiter_index - 1] == "\r"
-    ):
-        json_text = candidate[opening_line_length : close_delimiter_index - 1]
-    else:
-        json_text = candidate[opening_line_length:close_delimiter_index]
-    call_end = close_delimiter_index + 1 + len(close_tag)
+    payload, call_end = boundary
 
-    remainder = candidate[call_end:]
+    remainder = call_content[call_end:]
     if _opening_line_start(
         markup, remainder, inside_markdown_fence=False, markdown_line_prefix="",
     ) is not None:
         raise TextToolProtocolError()
 
-    try:
-        payload = json.loads(json_text, parse_constant=_reject_non_json_constant)
-    except ValueError:
-        raise TextToolProtocolError() from None
     return _validated_call(catalog, payload)
+
+
+def _first_json_boundary(text: str, close_tag: str) -> tuple[object, int] | None:
+    """Find the call boundary in ``text`` by JSON validity, not a delimiter.
+
+    Walks the candidate closing-tag positions in order and, for each,
+    attempts to parse the text before it as JSON. Returns the parsed
+    payload and the index just past the first tag whose preceding text
+    parses, or ``None`` if no occurrence's preceding text does. This
+    accepts a closing tag on its own line and one immediately following
+    the JSON on the same line alike, and it is never fooled by a closing
+    tag inside a JSON string: the text before such an occurrence is an
+    unterminated string or object, fails to parse, and is skipped in
+    favor of the next occurrence.
+    """
+    for close_start in _all_occurrences(text, close_tag):
+        try:
+            payload = json.loads(text[:close_start], parse_constant=_reject_non_json_constant)
+        except ValueError:
+            continue
+        return payload, close_start + len(close_tag)
+    return None
 
 
 def _reject_non_json_constant(value: str) -> None:

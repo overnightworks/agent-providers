@@ -43,6 +43,17 @@ def test_parses_a_leading_call_with_allowed_newlines_and_outer_whitespace(respon
     assert parse_text_tool_response(COWRITER_TOOL_CATALOG, response) == expected
 
 
+def test_parses_a_call_whose_closing_tag_follows_the_json_on_the_same_line():
+    response = (
+        "<songmaker_tool_call>\n"
+        '{"name":"get_song","arguments":{"song_id":"song-1"}}</songmaker_tool_call>'
+    )
+
+    assert parse_text_tool_response(COWRITER_TOOL_CATALOG, response) == TextToolCall(
+        "get_song", {"song_id": "song-1"},
+    )
+
+
 @pytest.mark.parametrize(
     ("chunks", "expected"),
     [
@@ -71,6 +82,17 @@ def test_stream_parser_buffers_a_call_split_across_text_events(chunks, expected)
 
     assert emitted == [""] * len(chunks)
     assert parser.finish() == expected
+
+
+def test_stream_parser_executes_a_call_whose_closing_tag_follows_the_json_on_the_same_line():
+    parser = TextToolStreamParser(COWRITER_TOOL_CATALOG)
+
+    parser.feed(
+        "<songmaker_tool_call>\n"
+        '{"name":"get_song","arguments":{"song_id":"song-1"}}</songmaker_tool_call>'
+    )
+
+    assert parser.finish() == TextToolCall("get_song", {"song_id": "song-1"})
 
 
 def test_stream_parser_executes_a_line_delimited_call_after_streamed_prose():

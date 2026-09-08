@@ -18,6 +18,10 @@ from agent_providers.tools import ToolCatalog, ToolDeclaration, ToolProtocolMark
 
 _CALL_EXAMPLE = '{"name":"tool_name","arguments":{}}'
 
+# RFC 8259's insignificant-whitespace set -- what json.JSONDecoder itself
+# treats as separator whitespace around a value.
+_JSON_WHITESPACE = " \t\n\r"
+
 
 def _protocol_instructions(markup: ToolProtocolMarkup) -> str:
     return (
@@ -258,6 +262,13 @@ def _advance_markdown_fences(
 
 
 def _parse_call(catalog: ToolCatalog, candidate: str, original_response: str) -> TextToolCall:
+    """Parse the one call a one-shot response must contain and nothing else.
+
+    The boundary is where the call's own JSON value ends -- see
+    :func:`_first_json_boundary`. Anything left over after that boundary
+    breaks the "exactly one call and nothing else" rule, whether it is
+    trailing prose or a second call.
+    """
     markup = catalog.markup
     close_tag = markup.call_close_tag
     candidate = candidate.strip()
@@ -267,20 +278,14 @@ def _parse_call(catalog: ToolCatalog, candidate: str, original_response: str) ->
         else len(markup.opening_line_lf)
     )
     call_content = candidate[opening_line_length:]
-    if not call_content.endswith(close_tag):
+    boundary = _first_json_boundary(call_content, close_tag)
+    if boundary is None:
         raise TextToolProtocolError()
-    if call_content.endswith(f"\r\n{close_tag}"):
-        json_text = call_content[: -len(close_tag) - 2]
-    elif call_content.endswith(f"\n{close_tag}"):
-        json_text = call_content[: -len(close_tag) - 1]
-    else:
+    payload, call_end = boundary
+    if call_content[call_end:] != "":
         raise TextToolProtocolError()
     if candidate != original_response.strip():
         raise TextToolProtocolError()
-    try:
-        payload = json.loads(json_text, parse_constant=_reject_non_json_constant)
-    except ValueError:
-        raise TextToolProtocolError() from None
     return _validated_call(catalog, payload)
 
 
@@ -293,13 +298,13 @@ def _parse_streamed_call(catalog: ToolCatalog, buffer: str) -> TextToolCall:
     time ``finish()`` runs the stream is already over and there is no live
     text channel left to deliver it on.
 
-    The close is matched by its line delimiter -- a real newline (LF or
-    CRLF) immediately before the tag -- never by a bare substring search
-    for the tag text. A tool argument can legitimately *contain* the tag
-    text (e.g. lyrics that mention it); it can never contain a raw newline
-    there, since that would make the enclosing JSON string invalid. So a
-    newline-prefixed occurrence is always the real close, and an occurrence
-    inside a string value is always skipped.
+    The close is whatever immediately follows the call's own JSON value --
+    see :func:`_first_json_boundary`. The JSON decoder consumes a closing
+    tag written inside a string value (lyrics that mention it, say)
+    structurally, as ordinary string content, so it is never mistaken for
+    the close; only the tag right after the value's end counts. This also
+    means the tag no longer has to sit on its own line: the boundary is
+    derived from the JSON, not from a delimiter.
 
     A second opening block found in what follows the close is rejected,
     but that check only ever fires when the block is actually found by the
@@ -321,29 +326,50 @@ def _parse_streamed_call(catalog: ToolCatalog, buffer: str) -> TextToolCall:
     else:
         raise TextToolProtocolError()
 
-    close_delimiter_index = candidate.find(f"\n{close_tag}", opening_line_length)
-    if close_delimiter_index == -1:
+    call_content = candidate[opening_line_length:]
+    boundary = _first_json_boundary(call_content, close_tag)
+    if boundary is None:
         raise TextToolProtocolError()
-    if (
-        close_delimiter_index > opening_line_length
-        and candidate[close_delimiter_index - 1] == "\r"
-    ):
-        json_text = candidate[opening_line_length : close_delimiter_index - 1]
-    else:
-        json_text = candidate[opening_line_length:close_delimiter_index]
-    call_end = close_delimiter_index + 1 + len(close_tag)
+    payload, call_end = boundary
 
-    remainder = candidate[call_end:]
+    remainder = call_content[call_end:]
     if _opening_line_start(
         markup, remainder, inside_markdown_fence=False, markdown_line_prefix="",
     ) is not None:
         raise TextToolProtocolError()
 
-    try:
-        payload = json.loads(json_text, parse_constant=_reject_non_json_constant)
-    except ValueError:
-        raise TextToolProtocolError() from None
     return _validated_call(catalog, payload)
+
+
+def _first_json_boundary(text: str, close_tag: str) -> tuple[object, int] | None:
+    """Find the call boundary in ``text`` by JSON validity, not a delimiter.
+
+    Decodes exactly one JSON value from the front of ``text`` -- one pass,
+    O(len(text)) -- and requires the closing tag to be the next thing after
+    it, modulo JSON whitespace. ``JSONDecoder.raw_decode`` stops the moment
+    the top-level value is complete, so a closing tag written inside a
+    string argument (lyrics that mention it, say) is consumed as ordinary
+    string content on the way there rather than examined as a candidate
+    boundary; a lookalike-stuffed payload still costs one linear parse, not
+    one parse attempt per lookalike.
+
+    Returns the parsed payload and the index just past the closing tag, or
+    ``None`` if the leading text is not JSON or is not immediately followed
+    by the tag.
+    """
+    leading_whitespace = len(text) - len(text.lstrip(_JSON_WHITESPACE))
+    decoder = json.JSONDecoder(parse_constant=_reject_non_json_constant)
+    try:
+        payload, value_end = decoder.raw_decode(text, leading_whitespace)
+    except ValueError:
+        return None
+    after_value = text[value_end:]
+    after_whitespace = after_value.lstrip(_JSON_WHITESPACE)
+    if not after_whitespace.startswith(close_tag):
+        return None
+    trailing_whitespace_length = len(after_value) - len(after_whitespace)
+    call_end = value_end + trailing_whitespace_length + len(close_tag)
+    return payload, call_end
 
 
 def _reject_non_json_constant(value: str) -> None:

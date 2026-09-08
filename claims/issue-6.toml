@@ -1,7 +1,0 @@
-claim_id = "a1c2d97dad09435fa83f20b00f11a821"
-agent = "songmaker-d8"
-role = "builder"
-base = "cb0108e672719b16749307b31a19011e3cbe513b"
-branch = "songmaker-d8/issue-6-sameline"
-scope = ["src/agent_providers/text_tool_protocol.py,tests/test_text_tool_protocol.py"]
-opened_commit = "08a17524d990f9c75fcb49f0b7dab272d64fb322"

@@ -18,6 +18,10 @@ from agent_providers.tools import ToolCatalog, ToolDeclaration, ToolProtocolMark
 
 _CALL_EXAMPLE = '{"name":"tool_name","arguments":{}}'
 
+# RFC 8259's insignificant-whitespace set -- what json.JSONDecoder itself
+# treats as separator whitespace around a value.
+_JSON_WHITESPACE = " \t\n\r"
+
 
 def _protocol_instructions(markup: ToolProtocolMarkup) -> str:
     return (
@@ -260,10 +264,10 @@ def _advance_markdown_fences(
 def _parse_call(catalog: ToolCatalog, candidate: str, original_response: str) -> TextToolCall:
     """Parse the one call a one-shot response must contain and nothing else.
 
-    The boundary is the first closing tag whose preceding text is valid
-    JSON -- see :func:`_first_json_boundary`. Anything left over after that
-    boundary breaks the "exactly one call and nothing else" rule, whether
-    it is trailing prose or a second call.
+    The boundary is where the call's own JSON value ends -- see
+    :func:`_first_json_boundary`. Anything left over after that boundary
+    breaks the "exactly one call and nothing else" rule, whether it is
+    trailing prose or a second call.
     """
     markup = catalog.markup
     close_tag = markup.call_close_tag
@@ -294,14 +298,13 @@ def _parse_streamed_call(catalog: ToolCatalog, buffer: str) -> TextToolCall:
     time ``finish()`` runs the stream is already over and there is no live
     text channel left to deliver it on.
 
-    The close is the first closing tag whose preceding text is valid JSON
-    -- see :func:`_first_json_boundary`. That is what a real close always
-    is (a well-formed call's JSON ends right there), and what an occurrence
-    inside a string value never is (the text up to it is an unterminated
-    JSON string), so a tag written by the model as part of the arguments
-    -- lyrics that mention it, say -- is skipped rather than mistaken for
-    the close. This also means the tag no longer has to sit on its own
-    line: the boundary is derived from the JSON, not from a delimiter.
+    The close is whatever immediately follows the call's own JSON value --
+    see :func:`_first_json_boundary`. The JSON decoder consumes a closing
+    tag written inside a string value (lyrics that mention it, say)
+    structurally, as ordinary string content, so it is never mistaken for
+    the close; only the tag right after the value's end counts. This also
+    means the tag no longer has to sit on its own line: the boundary is
+    derived from the JSON, not from a delimiter.
 
     A second opening block found in what follows the close is rejected,
     but that check only ever fires when the block is actually found by the
@@ -341,23 +344,32 @@ def _parse_streamed_call(catalog: ToolCatalog, buffer: str) -> TextToolCall:
 def _first_json_boundary(text: str, close_tag: str) -> tuple[object, int] | None:
     """Find the call boundary in ``text`` by JSON validity, not a delimiter.
 
-    Walks the candidate closing-tag positions in order and, for each,
-    attempts to parse the text before it as JSON. Returns the parsed
-    payload and the index just past the first tag whose preceding text
-    parses, or ``None`` if no occurrence's preceding text does. This
-    accepts a closing tag on its own line and one immediately following
-    the JSON on the same line alike, and it is never fooled by a closing
-    tag inside a JSON string: the text before such an occurrence is an
-    unterminated string or object, fails to parse, and is skipped in
-    favor of the next occurrence.
+    Decodes exactly one JSON value from the front of ``text`` -- one pass,
+    O(len(text)) -- and requires the closing tag to be the next thing after
+    it, modulo JSON whitespace. ``JSONDecoder.raw_decode`` stops the moment
+    the top-level value is complete, so a closing tag written inside a
+    string argument (lyrics that mention it, say) is consumed as ordinary
+    string content on the way there rather than examined as a candidate
+    boundary; a lookalike-stuffed payload still costs one linear parse, not
+    one parse attempt per lookalike.
+
+    Returns the parsed payload and the index just past the closing tag, or
+    ``None`` if the leading text is not JSON or is not immediately followed
+    by the tag.
     """
-    for close_start in _all_occurrences(text, close_tag):
-        try:
-            payload = json.loads(text[:close_start], parse_constant=_reject_non_json_constant)
-        except ValueError:
-            continue
-        return payload, close_start + len(close_tag)
-    return None
+    leading_whitespace = len(text) - len(text.lstrip(_JSON_WHITESPACE))
+    decoder = json.JSONDecoder(parse_constant=_reject_non_json_constant)
+    try:
+        payload, value_end = decoder.raw_decode(text, leading_whitespace)
+    except ValueError:
+        return None
+    after_value = text[value_end:]
+    after_whitespace = after_value.lstrip(_JSON_WHITESPACE)
+    if not after_whitespace.startswith(close_tag):
+        return None
+    trailing_whitespace_length = len(after_value) - len(after_whitespace)
+    call_end = value_end + trailing_whitespace_length + len(close_tag)
+    return payload, call_end
 
 
 def _reject_non_json_constant(value: str) -> None:

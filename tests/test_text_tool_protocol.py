@@ -208,6 +208,20 @@ def test_stream_parser_rejects_a_second_opening_block_after_a_trailing_remark():
         parser.finish()
 
 
+def test_stream_parser_takes_the_first_complete_call_when_a_later_close_tag_also_appears():
+    parser = TextToolStreamParser(COWRITER_TOOL_CATALOG)
+    chunks = [
+        "<songmaker_tool_call>\n",
+        '{"name":"list_songs","arguments":{}}',
+        "</songmaker_tool_call>",
+        " By the way, </songmaker_tool_call> is just a tag name.",
+    ]
+    for chunk in chunks:
+        parser.feed(chunk)
+
+    assert parser.finish() == TextToolCall("list_songs", {})
+
+
 def test_stream_parser_parses_a_lyrics_call_that_mentions_the_close_tag_text():
     parser = TextToolStreamParser(COWRITER_TOOL_CATALOG)
     lyrics = "use </songmaker_tool_call> to call a tool"
@@ -216,6 +230,28 @@ def test_stream_parser_parses_a_lyrics_call_that_mentions_the_close_tag_text():
     )
 
     parser.feed("<songmaker_tool_call>\n" + payload + "\n</songmaker_tool_call>")
+
+    assert parser.finish() == TextToolCall(
+        "update_song_lyrics", {"song_id": "song-1", "lyrics": lyrics},
+    )
+
+
+def test_stream_parser_parses_a_lyrics_mention_of_the_close_tag_with_a_same_line_real_close():
+    """The production combination: an in-string close tag AND a same-line real close.
+
+    Neither the in-string mention nor the newline-free close is enough on
+    its own to reproduce the original bug's shape; a model that both quotes
+    the tag in lyrics and closes the call on the same line as the final
+    brace needs the JSON decoder to walk past the in-string one structurally
+    and still recognize the real one right after the value ends.
+    """
+    parser = TextToolStreamParser(COWRITER_TOOL_CATALOG)
+    lyrics = "use </songmaker_tool_call> to call a tool"
+    payload = json.dumps(
+        {"name": "update_song_lyrics", "arguments": {"song_id": "song-1", "lyrics": lyrics}},
+    )
+
+    parser.feed("<songmaker_tool_call>\n" + payload + "</songmaker_tool_call>")
 
     assert parser.finish() == TextToolCall(
         "update_song_lyrics", {"song_id": "song-1", "lyrics": lyrics},
@@ -245,6 +281,11 @@ def test_stream_parser_forwards_ordinary_text_and_keeps_only_whitespace_until_fi
         "<songmaker_tool_call>\n{\"name\":\"list_songs\",\"arguments\":{}",
         _call("not json"),
         _call("[]"),
+        "<songmaker_tool_call>\n"
+        '{"name":"list_songs","arguments":{}}</songmaker_tool_call>\nDone!',
+        "<songmaker_tool_call>\n"
+        '{"name":"list_songs","arguments":{}}</songmaker_tool_call>\n'
+        '<songmaker_tool_call>\n{"name":"list_songs","arguments":{}}\n</songmaker_tool_call>',
     ],
 )
 def test_malformed_call_shapes_are_named_protocol_errors(response):

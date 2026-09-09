@@ -32,12 +32,14 @@ from agent_providers.process import (
     CliRunOutcome,
     CliRunReason,
     _cli_output,
+    _run_credentialed_catalog_cli,
     claude_cli_login,
     clear_agent_cli_caches,
     codex_cli_login,
     codex_cli_model_catalog,
     grok_cli_status,
     run_catalog_cli,
+    run_claude_catalog_cli,
     run_cli,
     run_cli_bounded,
     scrubbed_env,
@@ -1090,7 +1092,7 @@ def _run_catalog_python(
     original_home, credential = _prepare_catalog_credential(
         tmp_path, monkeypatch, auth_field=auth_field, auth_payload=auth_payload,
     )
-    run = run_catalog_cli(
+    run = _run_credentialed_catalog_cli(
         sys.executable,
         ("-c", script),
         credential_home_variable=credential_home_variable,
@@ -1117,7 +1119,7 @@ def test_catalog_child_sees_only_the_closed_environment_variables(
         tmp_path, monkeypatch, auth_field=auth_field,
     )
 
-    run = run_catalog_cli(
+    run = _run_credentialed_catalog_cli(
         "/usr/bin/env",
         (),
         credential_home_variable=credential_home_variable,
@@ -1188,6 +1190,82 @@ def test_catalog_child_cannot_write_the_original_credential_directory(
     assert credential.read_text() == _CATALOG_AUTH_PAYLOAD
     assert (original_home / "canary").read_text() == "untouched"
     assert set(original_home.iterdir()) == {original_home / "canary"}
+
+
+def test_claude_catalog_child_sees_only_home_and_path(tmp_path, monkeypatch) -> None:
+    original_home, _credential = _prepare_catalog_credential(
+        tmp_path, monkeypatch, auth_field="grok_cli_auth_file",
+    )
+
+    run = run_claude_catalog_cli("/usr/bin/env", ())
+
+    assert run is not None
+    assert run.complete is True
+    assert run.returncode == 0
+    observed = _parse_env_listing(run.stdout)
+    assert sorted(observed) == ["HOME", "PATH"]
+    assert observed["HOME"] != str(original_home)
+    assert not Path(observed["HOME"]).is_relative_to(original_home)
+    assert observed["PATH"] == os.environ.get("PATH", os.defpath)
+    assert "CATALOG_ENV_LEAK" not in observed
+    assert "GROK_HOME" not in observed
+    assert "CODEX_HOME" not in observed
+    assert "CLAUDE_CONFIG_DIR" not in observed
+    assert not Path(observed["HOME"]).exists()
+
+
+def test_claude_catalog_child_writes_stay_in_the_private_home(tmp_path, monkeypatch) -> None:
+    original_home, _credential = _prepare_catalog_credential(
+        tmp_path, monkeypatch, auth_field="grok_cli_auth_file",
+    )
+    script = (
+        "import os, pathlib, sys\n"
+        "path = pathlib.Path(os.environ['HOME']) / 'wrote'\n"
+        "path.write_text('private')\n"
+        "sys.stdout.write(str(path))\n"
+    )
+
+    run = run_claude_catalog_cli(sys.executable, ("-c", script))
+
+    assert run is not None
+    assert run.complete is True
+    assert run.returncode == 0
+    written = Path(run.stdout)
+    assert not written.is_relative_to(original_home)
+    assert not written.exists()
+    assert (original_home / "canary").read_text() == "untouched"
+    assert set(original_home.iterdir()) == {original_home / "canary"}
+
+
+def test_catalog_spawn_refuses_an_environment_without_home(tmp_path) -> None:
+    with pytest.raises(ValueError, match="must set HOME"):
+        run_catalog_cli(
+            "/usr/bin/env",
+            (),
+            env={"PATH": "/bin"},
+            cwd=tmp_path,
+        )
+
+
+def test_catalog_spawn_uses_the_given_environment_without_a_host_baseline(
+    tmp_path, monkeypatch,
+) -> None:
+    monkeypatch.setenv("CATALOG_ENV_LEAK", "should-not-appear")
+    home = tmp_path / "private-home"
+    home.mkdir()
+
+    run = run_catalog_cli(
+        "/usr/bin/env",
+        (),
+        env={"HOME": str(home), "PATH": "/bin"},
+        cwd=home,
+    )
+
+    assert run is not None
+    assert run.complete is True
+    assert run.returncode == 0
+    observed = _parse_env_listing(run.stdout)
+    assert observed == {"HOME": str(home), "PATH": "/bin"}
 
 
 def test_bounded_runner_still_inherits_home_for_non_catalog_spawns(monkeypatch) -> None:

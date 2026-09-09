@@ -55,6 +55,7 @@ from agent_providers.process import (
     CliLogin,
     claude_cli_login,
     clear_claude_cli_login_cache,
+    run_claude_catalog_cli,
     scrubbed_env,
 )
 
@@ -491,30 +492,23 @@ def list_cli_model_aliases() -> list[str]:
     contain the expected `Available: a, b, c.` fragment.
     """
     binary = _require_claude_binary()
-    try:
-        result = subprocess.run(
-            [binary, "-p", "/model"],
-            capture_output=True,
-            text=True,
-            timeout=COWRITER_MODELS_TIMEOUT_SECONDS,
-            env=scrubbed_env(),
-        )
-    except subprocess.TimeoutExpired as exc:
+    run = run_claude_catalog_cli(binary, ("-p", "/model"))
+    if run is None:
+        raise UnavailableError("Claude CLI /model failed to run")
+    if not run.complete:
         raise UnavailableError(
             f"Claude CLI /model timed out after {COWRITER_MODELS_TIMEOUT_SECONDS}s",
-        ) from exc
-    except OSError as exc:
-        raise UnavailableError(f"Claude CLI /model failed to run: {exc}") from exc
-    if result.returncode != 0:
+        )
+    if run.returncode != 0:
         log.warning(
             "Claude CLI model catalog failed (rc=%d, stderr_chars=%d)",
-            result.returncode,
-            len(result.stderr),
+            run.returncode,
+            len(run.stderr),
         )
         raise UnavailableError(
             CLAUDE_CLI_MODEL_CATALOG_ERROR,
         )
-    return _parse_cli_model_aliases(result.stdout)
+    return _parse_cli_model_aliases(run.stdout)
 
 
 def _parse_cli_model_aliases(stdout: str) -> list[str]:

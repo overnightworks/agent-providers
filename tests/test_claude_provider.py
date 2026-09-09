@@ -6,7 +6,6 @@ import asyncio
 import concurrent.futures
 import json
 import stat
-import subprocess
 import threading
 import time
 from pathlib import Path
@@ -54,6 +53,7 @@ from agent_providers.constants import (
     JUDGE_FAILURE_TIMEOUT,
 )
 from agent_providers.events import AssistantTextEvent, FinalEvent, StreamEvent
+from agent_providers.process import CliRun
 
 # The exact string a co-writer command line must carry, written out rather
 # than derived from the code under test.
@@ -237,28 +237,37 @@ def test_clearing_the_provider_login_cache_delegates_to_the_runner() -> None:
 # ── list_cli_model_aliases ───────────────────────────────────────────
 
 
-def _model_command_result(
-    stdout: str,
+_MODEL_CATALOG_STDOUT = (
+    "Current model: `Opus 5 (1M context)` (effort: high)\n"
+    "Usage: /model <name>. Available: sonnet, opus, haiku, fable, best, "
+    "sonnet[1m], opus[1m], fable[1m], opusplan, default, or a full model ID.\n"
+)
+
+
+def _catalog_run(
+    stdout: str = "",
     returncode: int = 0,
     stderr: str = "",
-) -> MagicMock:
-    return MagicMock(stdout=stdout, stderr=stderr, returncode=returncode)
+    *,
+    complete: bool = True,
+) -> CliRun:
+    return CliRun(
+        returncode=returncode,
+        stdout=stdout,
+        stderr=stderr,
+        complete=complete,
+    )
 
 
 def test_list_cli_model_aliases_parses_available_line() -> None:
-    stdout = (
-        "Current model: `Opus 5 (1M context)` (effort: high)\n"
-        "Usage: /model <name>. Available: sonnet, opus, haiku, fable, best, "
-        "sonnet[1m], opus[1m], fable[1m], opusplan, default, or a full model ID.\n"
-    )
     with (
         patch(
             "agent_providers.claude.provider._find_claude_binary",
             return_value="/usr/bin/claude",
         ),
         patch(
-            "agent_providers.claude.provider.subprocess.run",
-            return_value=_model_command_result(stdout),
+            "agent_providers.claude.provider.run_claude_catalog_cli",
+            return_value=_catalog_run(_MODEL_CATALOG_STDOUT),
         ),
     ):
         aliases = list_cli_model_aliases()
@@ -284,8 +293,8 @@ def test_list_cli_model_aliases_unexpected_output_raises_named_error() -> None:
             return_value="/usr/bin/claude",
         ),
         patch(
-            "agent_providers.claude.provider.subprocess.run",
-            return_value=_model_command_result("no usable output here\n"),
+            "agent_providers.claude.provider.run_claude_catalog_cli",
+            return_value=_catalog_run("no usable output here\n"),
         ),
     ):
         with pytest.raises(UnavailableError, match="did not contain a parseable"):
@@ -305,11 +314,26 @@ def test_list_cli_model_aliases_timeout_raises_named_error() -> None:
             return_value="/usr/bin/claude",
         ),
         patch(
-            "agent_providers.claude.provider.subprocess.run",
-            side_effect=subprocess.TimeoutExpired(cmd="claude", timeout=15),
+            "agent_providers.claude.provider.run_claude_catalog_cli",
+            return_value=_catalog_run(complete=False),
         ),
     ):
         with pytest.raises(UnavailableError, match="timed out"):
+            list_cli_model_aliases()
+
+
+def test_list_cli_model_aliases_spawn_failure_raises_named_error() -> None:
+    with (
+        patch(
+            "agent_providers.claude.provider._find_claude_binary",
+            return_value="/usr/bin/claude",
+        ),
+        patch(
+            "agent_providers.claude.provider.run_claude_catalog_cli",
+            return_value=None,
+        ),
+    ):
+        with pytest.raises(UnavailableError, match="failed to run"):
             list_cli_model_aliases()
 
 
@@ -320,12 +344,33 @@ def test_list_cli_model_aliases_nonzero_exit_raises_named_error() -> None:
             return_value="/usr/bin/claude",
         ),
         patch(
-            "agent_providers.claude.provider.subprocess.run",
-            return_value=_model_command_result("", returncode=1),
+            "agent_providers.claude.provider.run_claude_catalog_cli",
+            return_value=_catalog_run("", returncode=1),
         ),
     ):
         with pytest.raises(UnavailableError, match="Claude CLI could not list models"):
             list_cli_model_aliases()
+
+
+def test_list_cli_model_aliases_runs_the_closed_catalog_spawn(
+    tmp_path, monkeypatch,
+) -> None:
+    fake = tmp_path / "claude"
+    fake.write_text(
+        "#!/bin/sh\n"
+        "if [ -n \"${CATALOG_ENV_LEAK+x}\" ]; then exit 2; fi\n"
+        "printf '%s\\n' "
+        "'Usage: /model <name>. Available: sonnet, opus.'\n"
+    )
+    fake.chmod(0o755)
+    monkeypatch.setenv("CATALOG_ENV_LEAK", "should-not-appear")
+    with patch(
+        "agent_providers.claude.provider._find_claude_binary",
+        return_value=str(fake),
+    ):
+        aliases = list_cli_model_aliases()
+
+    assert aliases == ["sonnet", "opus"]
 
 
 # ── _call_api ───────────────────────────────────────────────────────

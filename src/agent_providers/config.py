@@ -66,11 +66,13 @@ class ProviderRuntimeConfig(BaseModel):
     All three carry the host's name, so the host states them.
 
     ``grok_cli_auth_file`` and ``codex_cli_auth_file`` are the credential
-    files the catalog path copies into a private child home. The catalog
-    child does not inherit the host environment: it receives only ``HOME``,
-    ``GROK_HOME`` or ``CODEX_HOME``, and ``PATH``. Turn spawns still inherit
-    the scrubbed host environment, because Claude's tool-surface probe and
-    Codex image turns still need that broader surface.
+    files the Grok and Codex catalog paths copy into a private child home.
+    Those children receive only ``HOME``, ``GROK_HOME`` or ``CODEX_HOME``,
+    and ``PATH``. The Claude catalog child receives only ``HOME`` and
+    ``PATH`` — measured, it lists ``/model`` aliases without a credential
+    file. Turn spawns still inherit the scrubbed host environment, because
+    Claude's tool-surface probe and Codex image turns still need that
+    broader surface.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")

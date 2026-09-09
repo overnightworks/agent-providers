@@ -313,39 +313,64 @@ def run_catalog_cli(
     binary: str,
     args: tuple[str, ...],
     *,
-    credential_home_variable: str,
-    auth_file: Path,
+    env: Mapping[str, str],
+    cwd: Path,
     stderr: Literal["capture", "devnull"] = "capture",
     output_read_limit_bytes: int | None = None,
 ) -> CliRun | None:
     """Run one catalog probe in a closed child environment.
 
-    The child receives only ``HOME``, the named credential-home variable, and
-    ``PATH``. ``HOME`` is a private directory holding a 0400 copy of the
-    host-named credential file, so a token refresh cannot write the original
-    store. Turn spawns keep :func:`run_cli` and the scrubbed inherited
-    environment: a closed default there would drop the host ``HOME`` Claude's
-    tool-surface probe still needs, and Codex image turns pass only
-    ``CODEX_HOME``.
+    ``env`` is the complete child environment — nothing is inherited or
+    merged onto a host baseline. ``HOME`` must be set: an unset ``HOME``
+    falls back to the passwd home. ``cwd`` is the child's working directory.
+    Each provider's recipe builds that mapping; this spawn does not invent
+    one. Turn spawns keep :func:`run_cli` and the scrubbed inherited
+    environment until those paths move onto this door.
     """
+    if not env.get(_CATALOG_HOME_VARIABLE):
+        raise ValueError("catalog child environment must set HOME")
     limit = (
         CLI_OUTPUT_READ_LIMIT_BYTES
         if output_read_limit_bytes is None
         else output_read_limit_bytes
     )
     deadline = time.monotonic() + COWRITER_MODELS_TIMEOUT_SECONDS
-    with _catalog_credential_home(auth_file) as home:
-        outcome = run_cli_bounded(
-            (binary, *args),
-            stdin_payload=None,
-            read="all",
-            deadline=deadline,
-            stderr=stderr,
-            output_read_limit_bytes=limit,
-            closed_env=_closed_catalog_env(home, credential_home_variable),
-            cwd=str(home),
-        )
+    outcome = run_cli_bounded(
+        (binary, *args),
+        stdin_payload=None,
+        read="all",
+        deadline=deadline,
+        stderr=stderr,
+        output_read_limit_bytes=limit,
+        closed_env=dict(env),
+        cwd=str(cwd),
+    )
     return _cli_run_from_outcome(outcome)
+
+
+def run_claude_catalog_cli(
+    binary: str,
+    args: tuple[str, ...],
+    *,
+    stderr: Literal["capture", "devnull"] = "capture",
+    output_read_limit_bytes: int | None = None,
+) -> CliRun | None:
+    """Run a Claude catalog probe with the measured closed environment.
+
+    Measured on claude 2.1.266: ``claude -p /model`` lists aliases with only
+    ``HOME`` and ``PATH``. Credentials are not read. An unset ``HOME`` writes
+    into the passwd home, so ``HOME`` is a private directory. ``CLAUDE_CONFIG_DIR``
+    is not required when that home is private.
+    """
+    with _catalog_private_home() as home:
+        return run_catalog_cli(
+            binary,
+            args,
+            env=_closed_claude_catalog_env(home),
+            cwd=home,
+            stderr=stderr,
+            output_read_limit_bytes=output_read_limit_bytes,
+        )
 
 
 def _cli_run_from_outcome(outcome: CliRunOutcome) -> CliRun | None:
@@ -1035,7 +1060,7 @@ def _catalog_cli_output(
     binary = shutil.which(binary_name)
     if binary is None:
         return None
-    run = run_catalog_cli(
+    run = _run_credentialed_catalog_cli(
         binary,
         args,
         credential_home_variable=credential_home_variable,
@@ -1044,6 +1069,26 @@ def _catalog_cli_output(
     if run is None or not run.complete or run.returncode != 0:
         return None
     return run.stdout + run.stderr
+
+
+def _run_credentialed_catalog_cli(
+    binary: str,
+    args: tuple[str, ...],
+    *,
+    credential_home_variable: str,
+    auth_file: Path,
+    stderr: Literal["capture", "devnull"] = "capture",
+    output_read_limit_bytes: int | None = None,
+) -> CliRun | None:
+    with _catalog_credential_home(auth_file) as home:
+        return run_catalog_cli(
+            binary,
+            args,
+            env=_closed_catalog_env(home, credential_home_variable),
+            cwd=home,
+            stderr=stderr,
+            output_read_limit_bytes=output_read_limit_bytes,
+        )
 
 
 def _claude_output(binary: str | None) -> str | None:
@@ -1061,7 +1106,7 @@ def _successful_cli_run(binary: str | None, args: tuple[str, ...]) -> CliRun | N
 
 
 @contextmanager
-def _catalog_credential_home(auth_file: Path) -> Iterator[Path]:
+def _catalog_private_home() -> Iterator[Path]:
     home = Path(
         tempfile.mkdtemp(
             prefix=_CATALOG_HOME_PREFIX,
@@ -1070,10 +1115,16 @@ def _catalog_credential_home(auth_file: Path) -> Iterator[Path]:
     )
     try:
         os.chmod(home, 0o700)
-        _install_catalog_credential(home, auth_file)
         yield home
     finally:
         shutil.rmtree(home, ignore_errors=True)
+
+
+@contextmanager
+def _catalog_credential_home(auth_file: Path) -> Iterator[Path]:
+    with _catalog_private_home() as home:
+        _install_catalog_credential(home, auth_file)
+        yield home
 
 
 def _closed_catalog_env(home: Path, credential_home_variable: str) -> dict[str, str]:
@@ -1082,6 +1133,15 @@ def _closed_catalog_env(home: Path, credential_home_variable: str) -> dict[str, 
     return {
         _CATALOG_HOME_VARIABLE: str(home),
         credential_home_variable: str(home),
+        _CATALOG_SEARCH_PATH_VARIABLE: os.environ.get(
+            _CATALOG_SEARCH_PATH_VARIABLE, os.defpath
+        ),
+    }
+
+
+def _closed_claude_catalog_env(home: Path) -> dict[str, str]:
+    return {
+        _CATALOG_HOME_VARIABLE: str(home),
         _CATALOG_SEARCH_PATH_VARIABLE: os.environ.get(
             _CATALOG_SEARCH_PATH_VARIABLE, os.defpath
         ),
@@ -1358,7 +1418,7 @@ def codex_cli_model_catalog() -> str:
     binary = shutil.which(current_config().codex_cli_binary)
     if binary is None:
         raise AgentCliUnavailableError("codex debug models did not return a catalog")
-    run = run_catalog_cli(
+    run = _run_credentialed_catalog_cli(
         binary,
         CODEX_CLI_MODELS_ARGS,
         credential_home_variable=_CODEX_CREDENTIAL_HOME_VARIABLE,

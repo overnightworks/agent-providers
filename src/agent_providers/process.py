@@ -1070,6 +1070,14 @@ def _install_catalog_credential(
     try:
         source = os.open(auth_file, flags)
     except FileNotFoundError:
+        # A probe with no credential answers "logged out", which is
+        # indistinguishable from a typo in the configured path. Name the path
+        # so a mis-wired deployment is readable; never the file's contents.
+        log.warning(
+            "no agent CLI credential at the configured path %s; "
+            "this probe will report a logged-out provider",
+            auth_file,
+        )
         return
     except OSError as exc:
         raise AgentCliUnavailableError("could not read catalog credentials") from exc

@@ -1990,10 +1990,13 @@ def _find_claude_binary() -> Path | None:
         log.debug("Found claude binary on the configured search path: %s", found)
         return found
 
+    # The mirror image of resolve_cli_binary: a glob may match a relative or
+    # unexecutable path, and a child is only ever started from an absolute
+    # binary this process can run.
     for pattern in config.claude_cli_binary_search_globs:
         for candidate in sorted(glob.glob(pattern), reverse=True):
-            path = Path(candidate)
-            if path.is_file():
+            path = Path(candidate).resolve()
+            if path.is_file() and os.access(path, os.X_OK):
                 return path
 
     return None

@@ -120,7 +120,11 @@ class ChildProcess:
 
 
 def open_pipes(child: ChildProcess, *, stderr: StderrPolicy) -> subprocess.Popen[bytes]:
-    """Start one child with pipes on every stream the caller reads."""
+    """Start one child with pipes on every stream the caller reads.
+
+    Its own session, because the caller holds the handle that reaps that
+    whole group.
+    """
     return subprocess.Popen(
         child.command,
         stdin=subprocess.PIPE,
@@ -138,7 +142,14 @@ def run_capturing(
     stdin_text: str,
     timeout_seconds: float,
 ) -> subprocess.CompletedProcess[str]:
-    """Run one child to completion, feeding stdin and capturing both streams."""
+    """Run one child to completion, feeding stdin and capturing both streams.
+
+    Deliberately *not* its own session. A new session is worth taking only
+    where someone reaps the group it creates; this door returns no handle and
+    its timeout kills the direct child alone, so a new session would strand
+    that child's own children instead of leaving them reachable by a
+    group-directed signal to this process.
+    """
     return subprocess.run(
         child.command,
         input=stdin_text,
@@ -147,7 +158,6 @@ def run_capturing(
         timeout=timeout_seconds,
         env=dict(child.environment),
         cwd=str(child.working_directory),
-        start_new_session=True,
         check=False,
     )
 
@@ -157,7 +167,11 @@ async def open_async_pipes(
     *,
     stream_buffer_limit: int | None = None,
 ) -> asyncio.subprocess.Process:
-    """Start one child on the event loop with pipes on every stream."""
+    """Start one child on the event loop with pipes on every stream.
+
+    Its own session, because every failure path in the calling turn reaps
+    that group before it returns.
+    """
     buffer_limit = {} if stream_buffer_limit is None else {"limit": stream_buffer_limit}
     return await asyncio.create_subprocess_exec(
         *child.command,

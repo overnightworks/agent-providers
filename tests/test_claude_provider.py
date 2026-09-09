@@ -898,10 +898,12 @@ def test_find_binary_on_the_configured_search_path() -> None:
         assert _find_claude_binary() == Path("/usr/bin/claude")
 
 
-def _install_vscode_style_binary(root: Path, version: str) -> Path:
+def _install_vscode_style_binary(root: Path, version: str, *, executable: bool = True) -> Path:
     binary = root / f"anthropic.claude-code-{version}" / "resources" / "native-binary" / "claude"
     binary.parent.mkdir(parents=True)
     binary.write_text("#!/bin/sh")
+    if executable:
+        binary.chmod(0o755)
     return binary
 
 
@@ -918,6 +920,19 @@ def test_find_binary_takes_the_newest_match_from_a_configured_search_location(
 
     with patch("agent_providers.claude.provider.resolve_cli_binary", return_value=None):
         assert _find_claude_binary() == newest
+
+
+def test_find_binary_refuses_a_search_location_match_it_cannot_run(tmp_path: Path) -> None:
+    """A glob hit is a candidate, not an answer: a child needs a runnable file."""
+    _install_vscode_style_binary(tmp_path, "1.0.0", executable=False)
+    override_provider_runtime(
+        claude_cli_binary_search_globs=(
+            str(tmp_path / "anthropic.claude-code-*" / "resources" / "native-binary" / "claude"),
+        ),
+    )
+
+    with patch("agent_providers.claude.provider.resolve_cli_binary", return_value=None):
+        assert _find_claude_binary() is None
 
 
 def test_find_binary_not_found() -> None:

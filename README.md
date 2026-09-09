@@ -76,9 +76,13 @@ described below; this layer only stops the child from *finding* the operator's
 credential directory by convention.
 
 The catalog paths go one step further: the host names a credential *file*, and
-the probe copies it mode 0400 into a private home it removes afterwards. A
-renewal write by the child fails visibly instead of rewriting the operator's
-own credentials.
+the probe copies it mode 0400 into a private home it removes afterwards. What
+that buys is exact: the operator's own credential file is never opened for
+writing, a direct overwrite of the copy fails, and any renewal the child does
+manage to write is thrown away with the private home. It is not a guarantee
+that a refresh fails *loudly* — the copy's parent directory is writable, so a
+CLI that renews by writing a new file and renaming it over the old one
+succeeds silently against its own throwaway copy.
 
 ## The ports a host supplies
 

@@ -39,6 +39,8 @@ SPAWN_PRIMITIVES = frozenset(
         "getstatusoutput",
         "create_subprocess_exec",
         "create_subprocess_shell",
+        "subprocess_exec",
+        "subprocess_shell",
         "system",
         "popen",
         "posix_spawn",
@@ -61,39 +63,54 @@ SPAWN_PRIMITIVES = frozenset(
         "spawnlpe",
         "fork",
         "forkpty",
+        "spawn",
+        "Process",
+        "Pool",
     }
 )
 
 SPAWNING_MODULES = frozenset({"subprocess", "os", "asyncio", "pty", "multiprocessing"})
 
 
-def _spawn_calls(tree: ast.Module) -> list[tuple[str, int]]:
-    """Every call in one module that reaches a process-creation primitive."""
-    calls: list[tuple[str, int]] = []
-    imported_primitives = {
+def _imported_primitive_names(tree: ast.Module) -> set[str]:
+    """The local names a ``from … import`` bound to a spawn primitive."""
+    return {
         alias.asname or alias.name
         for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom) and node.module in SPAWNING_MODULES
+        if isinstance(node, ast.ImportFrom)
+        and node.module is not None
+        and node.module.split(".")[0] in SPAWNING_MODULES
         for alias in node.names
         if alias.name in SPAWN_PRIMITIVES
     }
+
+
+def _spawn_calls(tree: ast.Module) -> list[tuple[str, ast.Call]]:
+    """Every call in one module that reaches a process-creation primitive.
+
+    Both call shapes count, and both tests below resolve them the same way:
+    the owner module is the one place where the rule still has to hold, so a
+    bare ``Popen(command)`` there must not read as anything else.
+    """
+    imported = _imported_primitive_names(tree)
+    calls: list[tuple[str, ast.Call]] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         callee = node.func
         if isinstance(callee, ast.Attribute) and callee.attr in SPAWN_PRIMITIVES:
-            calls.append((callee.attr, node.lineno))
-        elif isinstance(callee, ast.Name) and callee.id in imported_primitives:
-            calls.append((callee.id, node.lineno))
+            calls.append((callee.attr, node))
+        elif isinstance(callee, ast.Name) and callee.id in imported:
+            calls.append((callee.id, node))
     return calls
 
 
 def test_only_the_spawn_owner_creates_a_child_process() -> None:
     trespassers = [
-        f"{module.relative_to(SOURCE_ROOT)}:{line} calls {name}"
+        f"{module.relative_to(SOURCE_ROOT)}:{call.lineno} calls {name}"
         for module in sorted(SOURCE_ROOT.rglob("*.py"))
         if module != SPAWN_OWNER
-        for name, line in _spawn_calls(ast.parse(module.read_text(encoding="utf-8")))
+        for name, call in _spawn_calls(ast.parse(module.read_text(encoding="utf-8")))
     ]
     assert trespassers == [], (
         "These call sites start a child outside agent_providers.spawn, so nothing "
@@ -106,21 +123,10 @@ def test_the_spawn_owner_hands_every_primitive_an_explicit_environment() -> None
     tree = ast.parse(SPAWN_OWNER.read_text(encoding="utf-8"))
     incomplete = [
         f"{name} at line {call.lineno}"
-        for call in ast.walk(tree)
-        if isinstance(call, ast.Call)
-        for name in _primitive_name(call)
+        for name, call in _spawn_calls(tree)
         if not _passes_explicit(call, "env") or not _passes_explicit(call, "cwd")
     ]
-    assert incomplete == [], (
-        f"These spawns leave env or cwd to the host process: {incomplete}"
-    )
-
-
-def _primitive_name(call: ast.Call) -> list[str]:
-    callee = call.func
-    if isinstance(callee, ast.Attribute) and callee.attr in SPAWN_PRIMITIVES:
-        return [callee.attr]
-    return []
+    assert incomplete == [], f"These spawns leave env or cwd to the host process: {incomplete}"
 
 
 def _passes_explicit(call: ast.Call, keyword: str) -> bool:

@@ -1256,6 +1256,40 @@ def test_the_claude_catalog_child_reads_the_host_named_credential(tmp_path, monk
     assert run.stdout == _CATALOG_AUTH_PAYLOAD
 
 
+def test_a_direct_overwrite_of_the_credential_copy_fails(tmp_path, monkeypatch) -> None:
+    """The README hands hosts this sentence; only this much of it is true."""
+    _prepare_catalog_credential(tmp_path, monkeypatch, auth_field="claude_cli_auth_file")
+    script = (
+        "import os, pathlib, sys\n"
+        "copy = pathlib.Path(os.environ['HOME']) / '.claude' / '.credentials.json'\n"
+        "try:\n"
+        "    copy.open('w')\n"
+        "except PermissionError:\n"
+        "    sys.stdout.write('refused')\n"
+    )
+
+    run = run_claude_catalog_cli(Path(sys.executable), ("-c", script))
+
+    assert run is not None
+    assert run.stdout == "refused"
+
+
+def test_a_credential_path_that_names_nothing_is_reported_not_swallowed(
+    tmp_path,
+    monkeypatch,
+    caplog,
+) -> None:
+    """A typo in the configured path must not read as a logged-out provider."""
+    missing = tmp_path / "typo" / "auth.json"
+    override_provider_runtime(claude_cli_auth_file=missing)
+    caplog.set_level("WARNING", logger="agent_providers.process")
+
+    run = run_claude_catalog_cli(Path("/bin/sh"), ("-c", ":"))
+
+    assert run is not None
+    assert str(missing) in caplog.text
+
+
 def test_a_bare_binary_name_resolves_only_against_the_named_search_path(
     tmp_path,
     monkeypatch,

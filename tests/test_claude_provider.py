@@ -879,7 +879,7 @@ def test_a_claude_child_gets_the_host_named_home_not_the_operators(
     monkeypatch.setenv("ANTHROPIC_API_KEY", "value-the-child-must-not-see")
     override_turn_runtime(claude_cli_home=claude_home)
 
-    child = provider.claude_child_process(Path("/usr/bin/claude"), ["-p"])
+    child = provider._claude_child_process(Path("/usr/bin/claude"), ["-p"])
 
     assert child.environment["HOME"] == str(claude_home)
     assert child.working_directory == claude_home

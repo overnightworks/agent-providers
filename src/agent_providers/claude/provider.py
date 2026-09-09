@@ -230,7 +230,7 @@ async def acall_claude_with_mcp(
     with _cowriter_cli_arguments(model, user_id, stream=False) as arguments:
         try:
             proc = await _spawn_reserved_async_cli_process(
-                claude_child_process(binary, arguments),
+                _claude_child_process(binary, arguments),
             )
         except FileNotFoundError:
             raise CliBinaryUnavailableError(CLAUDE_CLI_BINARY_NOT_FOUND_DETAIL)
@@ -297,7 +297,7 @@ async def acall_claude_with_mcp_stream(
     with _cowriter_cli_arguments(model, user_id, stream=True) as arguments:
         try:
             proc = await _spawn_reserved_async_cli_process(
-                claude_child_process(binary, arguments),
+                _claude_child_process(binary, arguments),
                 stream_buffer_limit=_STREAM_BUFFER_LIMIT,
             )
         except FileNotFoundError:
@@ -563,7 +563,7 @@ def flatten_messages(prompt: str, messages: list[dict[str, str]] | None) -> str:
     return "\n\n".join(parts)
 
 
-def claude_child_process(binary: Path, arguments: list[str]) -> ChildProcess:
+def _claude_child_process(binary: Path, arguments: list[str]) -> ChildProcess:
     """Describe one Claude child around the host's named Claude home.
 
     The CLI finds its credentials below ``HOME``, so the host names that
@@ -1502,7 +1502,7 @@ def _probe_cli_surface_sync(
 
     try:
         outcome = process.run_cli_bounded(
-            claude_child_process(binary, _tool_surface_probe_arguments(mcp=mcp)),
+            _claude_child_process(binary, _tool_surface_probe_arguments(mcp=mcp)),
             stdin_payload=_TOOL_SURFACE_PROBE_PROMPT.encode(),
             read="first_line",
             deadline=deadline,
@@ -1889,7 +1889,7 @@ def _call_cli(
     binary = verify_no_builtin_cli_tools()
     flat_prompt = flatten_messages(prompt, messages)
     stdin_body = stdin_prompt(system, flat_prompt)
-    child = claude_child_process(binary, _cli_arguments(model))
+    child = _claude_child_process(binary, _cli_arguments(model))
 
     reservation = _reserve_zombie_admission()
     if reservation is None:
@@ -1949,7 +1949,7 @@ async def _acall_cli(
     stdin_body = stdin_prompt(system, flat_prompt)
     try:
         proc = await _spawn_reserved_async_cli_process(
-            claude_child_process(binary, _cli_arguments(model)),
+            _claude_child_process(binary, _cli_arguments(model)),
         )
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(

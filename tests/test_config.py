@@ -7,13 +7,17 @@ from pathlib import Path
 import pytest
 from provider_test_support import override_provider_runtime
 
+from agent_providers.catalog import (
+    ProviderRoute,
+    ProviderRouteReadinessState,
+    probe_provider_route,
+)
 from agent_providers.config import (
     ProviderRuntimeConfig,
     TurnRuntimeNotConfiguredError,
     current_config,
     current_turn_config,
 )
-from agent_providers.process import grok_cli_status
 
 
 def _catalog_only_runtime(tmp_path: Path) -> ProviderRuntimeConfig:
@@ -35,7 +39,9 @@ def test_a_catalog_host_configures_without_inventing_a_turn_fact(tmp_path: Path)
     override_provider_runtime(**catalog_only.model_dump())
 
     assert current_config().turns is None
-    assert grok_cli_status().login.logged_in is False
+    snapshot = probe_provider_route("grok", ProviderRoute.CLI)
+
+    assert snapshot.readiness is ProviderRouteReadinessState.NOT_CONFIGURED
 
 
 def test_a_turn_under_a_catalog_only_configuration_fails_loudly(tmp_path: Path) -> None:

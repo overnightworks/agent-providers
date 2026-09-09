@@ -89,6 +89,13 @@ def override_provider_runtime(**deployment_facts: Any) -> None:
     configure(replacement)
 
 
+def override_turn_runtime(**turn_facts: Any) -> None:
+    """Replace named turn facts for the current test only."""
+    turns = current_config().turns
+    assert turns is not None, "the sample runtime configures turns"
+    override_provider_runtime(turns=turns.model_copy(update=turn_facts))
+
+
 def use_codex_process_pool(monkeypatch, process_pool) -> None:
     """Give every Codex module that admits a process the same test pool."""
     from agent_providers.codex import image, protocol, transport

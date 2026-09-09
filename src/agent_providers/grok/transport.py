@@ -12,6 +12,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Final
 from urllib.parse import quote
 
@@ -19,7 +20,7 @@ from agent_providers.claude.provider import (
     flatten_messages,
     stdin_prompt,
 )
-from agent_providers.config import current_config
+from agent_providers.config import current_config, current_turn_config
 from agent_providers.constants import (
     COWRITER_CLI_TIMEOUT_SECONDS,
     COWRITER_GROK_CLI_LINE_CHANNEL_CAPACITY,
@@ -33,9 +34,10 @@ from agent_providers.errors import (
 from agent_providers.process import (
     CliLineChannel,
     CliRunOutcome,
+    resolve_cli_binary,
     run_cli_bounded,
-    scrubbed_env,
 )
+from agent_providers.spawn import ChildProcess, closed_environment
 from agent_providers.text_tool_protocol import (
     FinalText as ParsedFinalText,
 )
@@ -61,7 +63,7 @@ _AUTH_FAILURE_MARKERS: Final = ("401", "oidc", "unauthenticated")
 # yet. Surfacing them as a `UsageEvent` is named follow-up work on #825
 # (planner gap 7, atelier-2 port requirement 7) and starts here.
 _IGNORED_EVENT_TYPES: Final = frozenset({"thought", "usage", "available_commands", "plan"})
-_PROMPT_FILE_ARGUMENT_INDEX: Final = 2
+_PROMPT_FILE_ARGUMENT_INDEX: Final = 1
 # Grok owns this larger bound because a 600-second streamed turn can include
 # substantial thought and usage NDJSON before its final answer.
 GROK_CLI_TURN_OUTPUT_READ_LIMIT_BYTES: Final = 4 * 1024 * 1024
@@ -103,10 +105,28 @@ class GrokCliToolTransport:
             dir=current_config().cli_working_directory_root,
         )
         os.chmod(self._turn_directory.name, 0o700)
+        # The child is given this resolved path, and Grok keys its session
+        # tree by the working directory it was given.
+        self._working_directory = Path(self._turn_directory.name).resolve()
         self._deadline = time.monotonic() + COWRITER_CLI_TIMEOUT_SECONDS
         self._session_id: str | None = None
         self._round_index = 0
         self._closed = False
+
+    def _child_for(self, arguments: tuple[str, ...]) -> ChildProcess:
+        binary = resolve_cli_binary(current_config().grok_cli_binary)
+        if binary is None:
+            raise ProviderUnavailableError(
+                "grok",
+                "cli",
+                normalize_route_failure(SafeRouteReasonCode.CLI_PROTOCOL_ERROR),
+            )
+        return ChildProcess(
+            binary=binary,
+            arguments=arguments,
+            environment=_grok_turn_environment(),
+            working_directory=self._working_directory,
+        )
 
     async def stream(
         self,
@@ -125,14 +145,14 @@ class GrokCliToolTransport:
             ) from None
         is_resume = self._session_id is not None
         if is_resume:
-            command = _build_grok_cli_tool_command(self._model, self._session_id)
+            arguments = _grok_cli_tool_arguments(self._model, self._session_id)
         else:
-            command = _build_grok_cli_tool_command(self._model)
+            arguments = _grok_cli_tool_arguments(self._model)
         self._round_index += 1
         channel = CliLineChannel(COWRITER_GROK_CLI_LINE_CHANNEL_CAPACITY)
         runner = asyncio.create_task(asyncio.to_thread(
             run_cli_bounded,
-            command,
+            self._child_for(arguments),
             stdin_payload=None,
             read="all",
             deadline=self._deadline,
@@ -140,9 +160,6 @@ class GrokCliToolTransport:
             stdout_line_channel=channel,
             prompt_file_bytes=prompt,
             prompt_file_arg_index=_PROMPT_FILE_ARGUMENT_INDEX,
-            cwd=self._turn_directory.name,
-            extra_env=_grok_cli_env(),
-            unset_env=("GROK_HOME",),
         ))
         parser = TextToolStreamParser(self._catalog)
         state = _GrokToolRoundState()
@@ -199,7 +216,11 @@ class GrokCliToolTransport:
         if self._closed:
             return
         self._closed = True
-        await asyncio.to_thread(_cleanup_grok_turn_directory, self._turn_directory)
+        await asyncio.to_thread(
+            _cleanup_grok_turn_directory,
+            self._turn_directory,
+            self._working_directory,
+        )
 
 
 def _tool_transport_prompt(
@@ -275,15 +296,13 @@ def _finish_grok_tool_round(
     raise _GrokCliStreamFailure("grok_cli_stream_protocol_error")
 
 
-def _build_grok_cli_tool_command(
+def _grok_cli_tool_arguments(
     model: str,
     session_id: str | None = None,
 ) -> tuple[str, ...]:
-    config = current_config()
     command = [
-        config.grok_cli_binary,
         "--prompt-file",
-        config.cli_prompt_file_placeholder,
+        current_turn_config().cli_prompt_file_placeholder,
         "--output-format",
         GROK_CLI_STREAMING_OUTPUT_FORMAT,
         "--deny",
@@ -313,24 +332,30 @@ def _stream_session_id(event: dict[str, object]) -> str:
 
 def _remove_grok_sessions_for_cwd(cwd: str) -> None:
     """Delete the session subtree selected by this private CWD only."""
-    session_tree = current_config().grok_cli_session_root / quote(cwd, safe="")
+    session_tree = current_turn_config().grok_cli_session_root / quote(cwd, safe="")
     if session_tree.exists():
         shutil.rmtree(session_tree)
 
 
-def _cleanup_grok_turn_directory(turn_directory: tempfile.TemporaryDirectory) -> None:
+def _cleanup_grok_turn_directory(
+    turn_directory: tempfile.TemporaryDirectory,
+    working_directory: Path,
+) -> None:
     """Remove one Grok session subtree before its private working directory."""
     try:
-        _remove_grok_sessions_for_cwd(turn_directory.name)
+        _remove_grok_sessions_for_cwd(str(working_directory))
     finally:
         turn_directory.cleanup()
 
 
-def _grok_cli_env() -> dict[str, str]:
-    """Keep Grok's authenticated profile while forbidding profile replacement."""
-    environment = scrubbed_env()
-    environment.pop("GROK_HOME", None)
-    return environment
+def _grok_turn_environment() -> dict[str, str]:
+    """Point the turn at the host's Grok profile and nothing else.
+
+    The closed environment carries no ``GROK_HOME``, so a turn cannot replace
+    the profile it was given, and the account that started this process is not
+    what the CLI discovers.
+    """
+    return closed_environment(current_turn_config().grok_cli_home)
 
 
 def _log_tool_round(

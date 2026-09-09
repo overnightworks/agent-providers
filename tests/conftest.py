@@ -16,11 +16,12 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from provider_test_support import MCP_TOOL_NAMES, SECRET_ENV_KEYS, close_fake_cli_pipes
+from provider_test_support import MCP_TOOL_NAMES, close_fake_cli_pipes
 
 from agent_providers.config import (
     McpServerSpec,
     ProviderRuntimeConfig,
+    TurnRuntimeConfig,
     configure,
     reset_config,
 )
@@ -36,23 +37,30 @@ _SAMPLE_MCP_SERVER = McpServerSpec(
     tool_names=MCP_TOOL_NAMES,
 )
 
-_SAMPLE_RUNTIME = ProviderRuntimeConfig(
+_SAMPLE_TURNS = TurnRuntimeConfig(
     claude_chat_model="claude-test-model",
-    claude_cli_binary="claude",
-    grok_cli_binary="grok",
-    codex_cli_binary="codex",
-    grok_cli_auth_file=_SAMPLE_ROOT / "grok" / "auth.json",
+    claude_cli_home=Path(tempfile.gettempdir()),
+    grok_cli_home=Path(tempfile.gettempdir()),
     grok_cli_session_root=_SAMPLE_ROOT / "grok" / "sessions",
-    codex_cli_auth_file=_SAMPLE_ROOT / "codex" / "auth.json",
     codex_code_mode_host_binary=_SAMPLE_ROOT / "codex" / "code-mode-host",
     codex_resources_directory=_SAMPLE_ROOT / "codex" / "resources",
     codex_max_concurrent_processes=4,
     codex_max_concurrent_image_runs=2,
-    cli_working_directory_root=Path(tempfile.gettempdir()),
     cli_prompt_file_prefix="songmaker-cli-prompt-",
     cli_prompt_file_placeholder="<songmaker-private-prompt>",
-    secret_env_keys=SECRET_ENV_KEYS,
     mcp_server=_SAMPLE_MCP_SERVER,
+)
+
+_SAMPLE_RUNTIME = ProviderRuntimeConfig(
+    claude_cli_binary="claude",
+    grok_cli_binary="grok",
+    codex_cli_binary="codex",
+    cli_binary_search_path=(Path("/usr/local/bin"), Path("/usr/bin"), Path("/bin")),
+    claude_cli_auth_file=_SAMPLE_ROOT / "claude" / "credentials.json",
+    grok_cli_auth_file=_SAMPLE_ROOT / "grok" / "auth.json",
+    codex_cli_auth_file=_SAMPLE_ROOT / "codex" / "auth.json",
+    cli_working_directory_root=Path(tempfile.gettempdir()),
+    turns=_SAMPLE_TURNS,
 )
 
 

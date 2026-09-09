@@ -13,7 +13,6 @@ from __future__ import annotations
 import importlib.util
 import os
 import re
-import shutil
 import tempfile
 import threading
 from dataclasses import dataclass
@@ -34,6 +33,7 @@ from agent_providers.codex.protocol import (
     ITEM_EVENT_TYPES,
     CodexCliStreamFailure,
     CodexLoginMirrorError,
+    codex_child_process,
     codex_cli_failure_reason,
     copy_codex_login_mirror,
     error_item_message,
@@ -44,10 +44,16 @@ from agent_providers.codex.protocol import (
     run_reserved_codex_cli,
     top_level_error_message,
 )
-from agent_providers.config import current_config
+from agent_providers.config import current_config, current_turn_config
 from agent_providers.errors import SafeRouteReasonCode
 from agent_providers.images import ImagePolicy
-from agent_providers.process import CliLineChannel, CliRunOutcome, CliRunReason
+from agent_providers.process import (
+    AgentCliUnavailableError,
+    CliLineChannel,
+    CliRunOutcome,
+    CliRunReason,
+    resolve_cli_binary,
+)
 from agent_providers.sandbox.paths import (
     CODEX_HOME_DIRECTORY_NAME,
     CODEX_IMAGE_TURN_DIRECTORY_PREFIX,
@@ -123,11 +129,11 @@ class CodexImageQuotaError(CodexImageError):
 
 def codex_cover_image_capability_is_available() -> bool:
     """Whether this process has every dependency for a cover image turn."""
-    config = current_config()
-    code_mode_host = config.codex_code_mode_host_binary
-    resources = config.codex_resources_directory
+    turns = current_turn_config()
+    code_mode_host = turns.codex_code_mode_host_binary
+    resources = turns.codex_resources_directory
     return (
-        shutil.which(config.codex_cli_binary) is not None
+        resolve_cli_binary(current_config().codex_cli_binary) is not None
         and code_mode_host.is_file()
         and os.access(code_mode_host, os.X_OK)
         and resources.is_dir()
@@ -179,6 +185,7 @@ def generate_codex_cover_image(
         outcome = _run_codex_image_cli(
             prompt=prompt,
             deadline=deadline,
+            turn_root=root,
             codex_home=codex_home,
             work_dir=work_dir,
             abort_signal=abort_signal,
@@ -197,6 +204,7 @@ def _run_codex_image_cli(
     *,
     prompt: str,
     deadline: float,
+    turn_root: Path,
     codex_home: Path,
     work_dir: Path,
     abort_signal: threading.Event | None = None,
@@ -205,19 +213,28 @@ def _run_codex_image_cli(
     """Reap the CLI promptly when its streamed events leave the image gate."""
     channel = CliLineChannel(CODEX_CLI_LINE_CHANNEL_CAPACITY)
     event_gate = _CodexImageEventGate(codex_home=codex_home)
+    # Described before the runner thread exists: a thread that raises here
+    # would leave the channel unclosed and the loop below waiting forever.
+    try:
+        child = codex_child_process(
+            _codex_image_arguments(model),
+            turn_root=turn_root.resolve(),
+            work_directory=work_dir.resolve(),
+            codex_home=codex_home.resolve(),
+        )
+    except AgentCliUnavailableError as exc:
+        raise CodexImageCliError() from exc
     reservation = get_codex_process_pool().reserve(CodexProcessKind.IMAGE)
 
     def run() -> None:
         result = run_reserved_codex_cli(
             reservation,
-            _build_codex_image_command(model),
+            child,
             stdin_payload=prompt.encode("utf-8"),
             read="all",
             deadline=deadline,
             output_read_limit_bytes=CODEX_CLI_TURN_OUTPUT_READ_LIMIT_BYTES,
             stdout_line_channel=channel,
-            cwd=str(work_dir.resolve()),
-            extra_env={"CODEX_HOME": str(codex_home.resolve())},
         )
         channel._close(result)
 
@@ -249,10 +266,9 @@ def _run_codex_image_cli(
             runner.join()
 
 
-def _build_codex_image_command(model: str) -> tuple[str, ...]:
-    """Return the fixed command for the image-only Codex route."""
+def _codex_image_arguments(model: str) -> tuple[str, ...]:
+    """Return the fixed arguments for the image-only Codex route."""
     return (
-        current_config().codex_cli_binary,
         "exec",
         "--json",
         "--sandbox",

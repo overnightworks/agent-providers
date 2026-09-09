@@ -25,6 +25,14 @@ class SafeRouteReasonCode(StrEnum):
     ROUTE_FAILED = "route_failed"
 
 
+class ToolProtocolRejectionCode(StrEnum):
+    TOOL_RESULT_BATCH_INVALID = "tool_result_batch_invalid"
+    TEXT_TOOL_RESPONSE_INVALID = "text_tool_response_invalid"
+    NATIVE_TOOL_BLOCKED = "native_tool_blocked"
+    TOOL_LOOP_TERMINAL_INVALID = "tool_loop_terminal_invalid"
+    CLI_STREAM_RESPONSE_INVALID = "cli_stream_response_invalid"
+
+
 _SAFE_MESSAGES: dict[SafeRouteReasonCode, str] = {
     SafeRouteReasonCode.API_KEY_NOT_SET: "API key is not set.",
     SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED: "CLI is not signed in.",

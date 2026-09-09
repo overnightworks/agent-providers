@@ -4,15 +4,17 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from provider_test_support import SECRET_ENV_KEYS, override_provider_runtime
+from provider_test_support import SECRET_ENV_KEYS, override_provider_runtime, shell_child
 
 from agent_providers import process
 from agent_providers.constants import (
@@ -30,16 +32,19 @@ from agent_providers.process import (
     CliRun,
     CliRunOutcome,
     CliRunReason,
-    _cli_output,
+    PrivateCredentialHome,
+    _run_credentialed_catalog_cli,
     claude_cli_login,
     clear_agent_cli_caches,
     codex_cli_login,
     codex_cli_model_catalog,
     grok_cli_status,
-    run_cli,
+    resolve_cli_binary,
+    run_catalog_cli,
+    run_claude_catalog_cli,
     run_cli_bounded,
-    scrubbed_env,
 )
+from agent_providers.spawn import INHERITED_MACHINE_VARIABLES, ChildProcess
 
 GROK_LOGGED_IN = """You are logged in with grok.com.
 
@@ -55,6 +60,11 @@ Available models:
 """
 CODEX_LOGGED_IN = "Logged in using ChatGPT"
 CODEX_LOGGED_OUT = "Not logged in"
+_CATALOG_AUTH_PAYLOAD = '{"auth_mode":"catalog-probe"}'
+_CATALOG_PROVIDERS = (
+    ("GROK_HOME", "grok_cli_auth_file"),
+    ("CODEX_HOME", "codex_cli_auth_file"),
+)
 
 
 @pytest.fixture(autouse=True)
@@ -65,7 +75,7 @@ def _clear_probe_caches():
 
 
 def _a_cli_that_says(output: str | None):
-    return patch("agent_providers.process._cli_output", return_value=output)
+    return patch("agent_providers.process._catalog_cli_output", return_value=output)
 
 
 def _a_claude_cli_that_says(output: str | None):
@@ -73,7 +83,7 @@ def _a_claude_cli_that_says(output: str | None):
 
 
 def _a_shell_pretending_to_be_a_cli():
-    return patch("agent_providers.process.shutil.which", return_value="/bin/sh")
+    return patch("agent_providers.process.resolve_cli_binary", return_value=Path("/bin/sh"))
 
 
 def test_claude_reports_the_account_its_json_status_names() -> None:
@@ -82,7 +92,7 @@ def test_claude_reports_the_account_its_json_status_names() -> None:
         CLAUDE_CLI_AUTH_METHOD_FIELD: "claude.ai",
     })
     with _a_claude_cli_that_says(payload):
-        login = claude_cli_login("/mounted/claude")
+        login = claude_cli_login(Path("/mounted/claude"))
 
     assert login.logged_in is True
     assert login.auth_method == "claude.ai"
@@ -91,7 +101,7 @@ def test_claude_reports_the_account_its_json_status_names() -> None:
 @pytest.mark.parametrize("output", (None, "not-json", "{}"))
 def test_claude_without_a_parseable_status_is_logged_out(output: str | None) -> None:
     with _a_claude_cli_that_says(output):
-        login = claude_cli_login("/mounted/claude")
+        login = claude_cli_login(Path("/mounted/claude"))
 
     assert login.logged_in is False
     assert login.auth_method is None
@@ -109,7 +119,7 @@ def test_a_claude_probe_that_exceeds_its_caller_budget_is_logged_out(monkeypatch
     monkeypatch.setattr("agent_providers.process._claude_output", _hanging_output)
     monkeypatch.setattr("agent_providers.process.CLI_PROBE_CALLER_TIMEOUT_SECONDS", 0.05)
     try:
-        login = claude_cli_login("/mounted/claude")
+        login = claude_cli_login(Path("/mounted/claude"))
     finally:
         release.set()
 
@@ -184,7 +194,7 @@ def test_codex_that_cannot_be_asked_counts_as_logged_out() -> None:
 
 def test_codex_model_catalog_reads_past_the_login_probe_limit(monkeypatch) -> None:
     catalog_length = CLI_OUTPUT_READ_LIMIT_BYTES + 1
-    monkeypatch.setattr(process.shutil, "which", lambda _binary: sys.executable)
+    monkeypatch.setattr(process, "resolve_cli_binary", lambda _binary: Path(sys.executable))
     monkeypatch.setattr(
         process,
         "CODEX_CLI_MODELS_ARGS",
@@ -202,7 +212,7 @@ def test_codex_model_catalog_reads_past_the_login_probe_limit(monkeypatch) -> No
 
 
 def test_codex_model_catalog_without_a_binary_raises(monkeypatch) -> None:
-    monkeypatch.setattr(process.shutil, "which", lambda _binary: None)
+    monkeypatch.setattr(process, "resolve_cli_binary", lambda _binary: None)
 
     with pytest.raises(
         AgentCliUnavailableError,
@@ -234,8 +244,8 @@ def test_a_second_ask_reuses_the_recent_answer(ask, answer) -> None:
 
 def test_a_second_claude_ask_reuses_the_recent_answer() -> None:
     with _a_claude_cli_that_says("{}") as spawn:
-        first = claude_cli_login("/mounted/claude")
-        second = claude_cli_login("/mounted/claude")
+        first = claude_cli_login(Path("/mounted/claude"))
+        second = claude_cli_login(Path("/mounted/claude"))
 
     assert first == second
     spawn.assert_called_once()
@@ -398,7 +408,7 @@ def test_run_cli_returns_after_its_answer_budget_and_cleanup_grace(monkeypatch) 
     monkeypatch.setattr("agent_providers.process.CLI_TERMINATION_GRACE_SECONDS", cleanup_grace)
 
     started_at = time.monotonic()
-    run = run_cli("/bin/sh", ("-c", "trap '' TERM; while :; do :; done"))
+    run = run_catalog_cli(shell_child("-c", "trap '' TERM; while :; do :; done"))
     elapsed = time.monotonic() - started_at
 
     assert run is not None
@@ -433,7 +443,7 @@ def test_clearing_a_probe_does_not_restore_its_pre_clear_result() -> None:
 def test_a_cli_that_floods_us_is_read_only_up_to_the_limit() -> None:
     flood = "while :; do printf stdout; printf stderr >&2; done"
     with _a_shell_pretending_to_be_a_cli():
-        run = run_cli("/bin/sh", ("-c", flood))
+        run = run_catalog_cli(shell_child("-c", flood))
 
     assert run is not None
     assert run.complete is False
@@ -445,7 +455,7 @@ def test_a_cli_that_never_answers_is_given_up_on() -> None:
         _a_shell_pretending_to_be_a_cli(),
         patch("agent_providers.process.COWRITER_MODELS_TIMEOUT_SECONDS", 0.2),
     ):
-        assert _cli_output("grok", ("-c", "while :; do :; done")) is None
+        assert run_catalog_cli(shell_child("-c", "while :; do :; done")).complete is False
 
 
 def test_a_cli_that_leaves_a_child_behind_is_terminated_with_its_group() -> None:
@@ -461,9 +471,9 @@ def test_a_cli_that_leaves_a_child_behind_is_terminated_with_its_group() -> None
     with (
         _a_shell_pretending_to_be_a_cli(),
         patch("agent_providers.process.COWRITER_MODELS_TIMEOUT_SECONDS", 0.2),
-        patch("agent_providers.process.subprocess.Popen", side_effect=capture_process),
+        patch("agent_providers.spawn.subprocess.Popen", side_effect=capture_process),
     ):
-        assert _cli_output("grok", ("-c", command)) is None
+        assert run_catalog_cli(shell_child("-c", command)).complete is False
 
     assert started
     with pytest.raises(ProcessLookupError):
@@ -484,9 +494,9 @@ def test_a_sigterm_ignoring_cli_and_child_are_reaped_after_sigkill() -> None:
         _a_shell_pretending_to_be_a_cli(),
         patch("agent_providers.process.COWRITER_MODELS_TIMEOUT_SECONDS", 0.05),
         patch("agent_providers.process.CLI_TERMINATION_GRACE_SECONDS", 0.1),
-        patch("agent_providers.process.subprocess.Popen", side_effect=capture_process),
+        patch("agent_providers.spawn.subprocess.Popen", side_effect=capture_process),
     ):
-        assert _cli_output("grok", ("-c", command)) is None
+        assert run_catalog_cli(shell_child("-c", command)).complete is False
 
     assert started[0].poll() is not None
     with pytest.raises(ProcessLookupError):
@@ -516,10 +526,10 @@ def test_a_spawn_that_returns_after_its_deadline_is_reaped() -> None:
 
     with (
         patch("agent_providers.process.COWRITER_MODELS_TIMEOUT_SECONDS", 0.1),
-        patch("agent_providers.process.subprocess.Popen", side_effect=late_process),
+        patch("agent_providers.spawn.subprocess.Popen", side_effect=late_process),
         patch("agent_providers.process._reap_process_group", side_effect=capture_reap),
     ):
-        assert run_cli("/bin/sh", ("-c", "while :; do :; done")) is None
+        assert run_catalog_cli(shell_child("-c", "while :; do :; done")) is None
         release_spawn.set()
         assert spawned.wait(timeout=1)
         assert reaped.wait(timeout=1)
@@ -557,12 +567,12 @@ def test_bounded_runner_returns_on_a_stalled_spawn_and_reaps_its_late_process() 
         callbacks_reaped.set()
 
     with (
-        patch("agent_providers.process.subprocess.Popen", side_effect=late_process),
+        patch("agent_providers.spawn.subprocess.Popen", side_effect=late_process),
         patch("agent_providers.process._reap_process_group", side_effect=capture_reap),
     ):
         deadline = time.monotonic() + 0.05
         assert run_cli_bounded(
-            ("/bin/sh", "-c", "while :; do :; done"),
+            shell_child("-c", "while :; do :; done"),
             stdin_payload=None,
             read="all",
             deadline=deadline,
@@ -584,9 +594,9 @@ def test_bounded_runner_reports_a_spawn_error() -> None:
     error = OSError("cannot start")
     spawned_process_ids: list[int] = []
     reaped_processes: list[tuple[int, bool]] = []
-    with patch("agent_providers.process.subprocess.Popen", side_effect=error):
+    with patch("agent_providers.spawn.subprocess.Popen", side_effect=error):
         outcome = run_cli_bounded(
-            ("missing-cli",),
+            shell_child("-c", ":"),
             stdin_payload=None,
             read="all",
             deadline=time.monotonic() + 1,
@@ -610,9 +620,9 @@ def test_bounded_runner_reports_a_non_os_spawn_error_immediately() -> None:
     reaped_processes: list[tuple[int, bool]] = []
     deadline = time.monotonic() + 1
 
-    with patch("agent_providers.process.subprocess.Popen", side_effect=error):
+    with patch("agent_providers.spawn.subprocess.Popen", side_effect=error):
         outcome = run_cli_bounded(
-            (),
+            shell_child("-c", ":"),
             stdin_payload=None,
             read="all",
             deadline=deadline,
@@ -638,7 +648,7 @@ def test_bounded_runner_carries_an_output_io_error(monkeypatch) -> None:
     monkeypatch.setattr("agent_providers.process.os.set_blocking", fail_to_set_blocking)
 
     outcome = run_cli_bounded(
-        ("/bin/sh", "-c", "printf output"),
+        shell_child("-c", "printf output"),
         stdin_payload=None,
         read="all",
         deadline=time.monotonic() + 1,
@@ -661,7 +671,7 @@ def test_bounded_runner_reports_a_stdin_close_error_after_spawning(monkeypatch) 
 
     monkeypatch.setattr("agent_providers.process._close_stdin", fail_to_close_stdin)
     outcome = run_cli_bounded(
-        ("/bin/sh", "-c", "exec sleep 10"),
+        shell_child("-c", "exec sleep 10"),
         stdin_payload=None,
         read="all",
         deadline=time.monotonic() + 1,
@@ -689,7 +699,7 @@ def test_bounded_runner_returns_when_its_cleanup_margin_expires(monkeypatch) -> 
 
     monkeypatch.setattr("agent_providers.process._reap_process_group", delayed_reap)
     outcome = run_cli_bounded(
-        ("/bin/sh", "-c", "exec sleep 10"),
+        shell_child("-c", "exec sleep 10"),
         stdin_payload=None,
         read="all",
         deadline=time.monotonic() + 0.02,
@@ -727,7 +737,7 @@ def test_bounded_runner_notifies_a_zombie_reap_only_after_background_confirmatio
     monkeypatch.setattr("agent_providers.process._reap_in_background", await_background_reap)
 
     outcome = run_cli_bounded(
-        ("/bin/sh", "-c", "printf ready"),
+        shell_child("-c", "printf ready"),
         stdin_payload=None,
         read="all",
         deadline=time.monotonic() + 1,
@@ -752,9 +762,9 @@ def test_bounded_runner_stops_a_cli_that_never_reads_its_full_stdin_pipe() -> No
         started.append(child)
         return child
 
-    with patch("agent_providers.process.subprocess.Popen", side_effect=capture_process):
+    with patch("agent_providers.spawn.subprocess.Popen", side_effect=capture_process):
         outcome = run_cli_bounded(
-            ("/bin/sh", "-c", "exec sleep 10"),
+            shell_child("-c", "exec sleep 10"),
             stdin_payload=b"x" * (1024 * 1024),
             read="all",
             deadline=time.monotonic() + 0.05,
@@ -774,9 +784,9 @@ def test_bounded_runner_stops_a_cli_that_never_writes_output() -> None:
         started.append(child)
         return child
 
-    with patch("agent_providers.process.subprocess.Popen", side_effect=capture_process):
+    with patch("agent_providers.spawn.subprocess.Popen", side_effect=capture_process):
         outcome = run_cli_bounded(
-            ("/bin/sh", "-c", "exec sleep 10"),
+            shell_child("-c", "exec sleep 10"),
             stdin_payload=None,
             read="all",
             deadline=time.monotonic() + 0.05,
@@ -801,9 +811,9 @@ def test_bounded_runner_marks_an_unconfirmed_sigkill_as_a_zombie(monkeypatch) ->
         lambda _process, _timeout: False,
     )
     monkeypatch.setattr("agent_providers.process.CLI_TERMINATION_GRACE_SECONDS", 0.01)
-    with patch("agent_providers.process.subprocess.Popen", side_effect=capture_process):
+    with patch("agent_providers.spawn.subprocess.Popen", side_effect=capture_process):
         outcome = run_cli_bounded(
-            ("/bin/sh", "-c", "trap '' TERM; while :; do :; done"),
+            shell_child("-c", "trap '' TERM; while :; do :; done"),
             stdin_payload=None,
             read="all",
             deadline=time.monotonic() + 0.02,
@@ -831,7 +841,7 @@ def test_run_cli_logs_a_sigkill_survivor_without_starting_a_background_reaper(
     caplog.set_level("WARNING")
 
     try:
-        run = run_cli("/bin/sh", ("-c", "printf ready"))
+        run = run_catalog_cli(shell_child("-c", "printf ready"))
         threads_after = {thread.ident for thread in threading.enumerate()}
     finally:
         reaper_may_finish.set()
@@ -875,7 +885,7 @@ def test_bounded_runner_stops_collecting_at_the_byte_limit(monkeypatch) -> None:
     monkeypatch.setattr("agent_providers.process.CLI_OUTPUT_READ_LIMIT_BYTES", 32)
 
     outcome = run_cli_bounded(
-        ("/bin/sh", "-c", "while :; do printf x; done"),
+        shell_child("-c", "while :; do printf x; done"),
         stdin_payload=None,
         read="all",
         deadline=time.monotonic() + 1,
@@ -890,7 +900,7 @@ def test_run_cli_discards_partial_output_when_its_read_deadline_expires(monkeypa
     monkeypatch.setattr("agent_providers.process.COWRITER_MODELS_TIMEOUT_SECONDS", 0.2)
     monkeypatch.setattr("agent_providers.process.CLI_TERMINATION_GRACE_SECONDS", 0.01)
 
-    run = run_cli("/bin/sh", ("-c", "printf partial; exec sleep 10"))
+    run = run_catalog_cli(shell_child("-c", "printf partial; exec sleep 10"))
 
     assert run == CliRun(returncode=-15, stdout="", stderr="", complete=False)
 
@@ -910,8 +920,8 @@ def test_run_cli_keeps_a_started_cli_result_when_cleanup_reports_a_zombie(monkey
         "agent_providers.process._wait_for_process_group_exit",
         lambda _process, _timeout: False,
     )
-    with patch("agent_providers.process.subprocess.Popen", side_effect=capture_process):
-        run = run_cli("/bin/sh", ("-c", "trap '' TERM; while :; do :; done"))
+    with patch("agent_providers.spawn.subprocess.Popen", side_effect=capture_process):
+        run = run_catalog_cli(shell_child("-c", "trap '' TERM; while :; do :; done"))
 
     assert run is not None
     assert run.complete is False
@@ -920,7 +930,7 @@ def test_run_cli_keeps_a_started_cli_result_when_cleanup_reports_a_zombie(monkey
 
 def test_bounded_runner_delivers_stdin_without_a_blocking_write() -> None:
     outcome = run_cli_bounded(
-        ("/bin/sh", "-c", "IFS= read -r line; printf '<%s>' \"$line\""),
+        shell_child("-c", "IFS= read -r line; printf '<%s>' \"$line\""),
         stdin_payload=b"delivered\n",
         read="all",
         deadline=time.monotonic() + 1,
@@ -931,10 +941,9 @@ def test_bounded_runner_delivers_stdin_without_a_blocking_write() -> None:
     assert outcome.stdout == "<delivered>"
 
 
-def test_run_cli_closes_stdin_so_the_child_observes_eof() -> None:
-    run = run_cli(
-        "/bin/sh",
-        ("-c", "if IFS= read -r line; then printf data; else printf eof; fi"),
+def test_a_catalog_probe_closes_stdin_so_the_child_observes_eof() -> None:
+    run = run_catalog_cli(
+        shell_child("-c", "if IFS= read -r line; then printf data; else printf eof; fi"),
     )
 
     assert run == CliRun(returncode=0, stdout="eof", stderr="", complete=True)
@@ -942,7 +951,7 @@ def test_run_cli_closes_stdin_so_the_child_observes_eof() -> None:
 
 def test_bounded_runner_returns_only_the_first_stdout_line() -> None:
     outcome = run_cli_bounded(
-        ("/bin/sh", "-c", "printf 'first\\nsecond\\n'; exec sleep 10"),
+        shell_child("-c", "printf 'first\\nsecond\\n'; exec sleep 10"),
         stdin_payload=None,
         read="first_line",
         deadline=time.monotonic() + 1,
@@ -955,7 +964,7 @@ def test_bounded_runner_returns_only_the_first_stdout_line() -> None:
 
 def test_bounded_runner_returns_the_last_stdout_bytes_at_eof_in_first_line_mode() -> None:
     outcome = run_cli_bounded(
-        ("/bin/sh", "-c", "printf final"),
+        shell_child("-c", "printf final"),
         stdin_payload=None,
         read="first_line",
         deadline=time.monotonic() + 1,
@@ -968,7 +977,7 @@ def test_bounded_runner_returns_the_last_stdout_bytes_at_eof_in_first_line_mode(
 
 def test_bounded_runner_drains_both_output_streams_in_all_mode() -> None:
     outcome = run_cli_bounded(
-        ("/bin/sh", "-c", "printf stdout; printf stderr >&2"),
+        shell_child("-c", "printf stdout; printf stderr >&2"),
         stdin_payload=None,
         read="all",
         deadline=time.monotonic() + 1,
@@ -984,7 +993,7 @@ def test_bounded_runner_applies_its_byte_limit_to_both_streams(monkeypatch) -> N
     monkeypatch.setattr("agent_providers.process.CLI_OUTPUT_READ_LIMIT_BYTES", 4)
 
     outcome = run_cli_bounded(
-        ("/bin/sh", "-c", "printf 123; printf abc >&2"),
+        shell_child("-c", "printf 123; printf abc >&2"),
         stdin_payload=None,
         read="all",
         deadline=time.monotonic() + 1,
@@ -997,7 +1006,7 @@ def test_bounded_runner_applies_its_byte_limit_to_both_streams(monkeypatch) -> N
 
 def test_bounded_runner_can_discard_stderr() -> None:
     outcome = run_cli_bounded(
-        ("/bin/sh", "-c", "printf stdout; printf stderr >&2"),
+        shell_child("-c", "printf stdout; printf stderr >&2"),
         stdin_payload=None,
         read="all",
         deadline=time.monotonic() + 1,
@@ -1017,7 +1026,7 @@ def test_bounded_runner_can_discard_stderr() -> None:
     ],
 )
 def test_an_incomplete_or_failed_run_is_not_accepted_as_authenticated(run: CliRun) -> None:
-    with patch("agent_providers.process.run_cli", return_value=run):
+    with patch("agent_providers.process.run_claude_catalog_cli", return_value=run):
         login = codex_cli_login()
 
     assert login.logged_in is False
@@ -1027,8 +1036,8 @@ def test_claude_parses_only_stdout() -> None:
     stdout = json.dumps({CLAUDE_CLI_LOGGED_IN_FIELD: True})
     stderr = json.dumps({CLAUDE_CLI_LOGGED_IN_FIELD: False})
     run = CliRun(returncode=0, stdout=stdout, stderr=stderr, complete=True)
-    with patch("agent_providers.process.run_cli", return_value=run):
-        login = claude_cli_login("/mounted/claude")
+    with patch("agent_providers.process.run_claude_catalog_cli", return_value=run):
+        login = claude_cli_login(Path("/mounted/claude"))
 
     assert login.logged_in is True
 
@@ -1041,44 +1050,394 @@ def test_claude_parses_only_stdout() -> None:
     ],
 )
 def test_claude_does_not_accept_a_failed_or_incomplete_run(run: CliRun) -> None:
-    with patch("agent_providers.process.run_cli", return_value=run):
-        login = claude_cli_login("/mounted/claude")
+    with patch("agent_providers.process.run_claude_catalog_cli", return_value=run):
+        login = claude_cli_login(Path("/mounted/claude"))
 
     assert login.logged_in is False
 
 
 def test_a_cli_that_is_not_installed_cannot_be_asked() -> None:
-    with patch("agent_providers.process.shutil.which", return_value=None):
-        assert _cli_output("grok", ("models",)) is None
+    with patch("agent_providers.process.resolve_cli_binary", return_value=None):
+        assert grok_cli_status().login.logged_in is False
 
 
-def test_a_spawned_cli_never_sees_our_secrets(monkeypatch) -> None:
-    for key in SECRET_ENV_KEYS:
-        monkeypatch.setenv(key, "leaked-value")
-
-    env = scrubbed_env()
-
-    assert not [key for key in SECRET_ENV_KEYS if key in env]
+def _expected_closed_names(credential_home_variable: str) -> list[str]:
+    """Every name a closed child may carry: its own plus the machine's."""
+    return ["HOME", "PATH", credential_home_variable] + [
+        name for name in INHERITED_MACHINE_VARIABLES if os.environ.get(name)
+    ]
 
 
-def test_child_environment_additions_are_local_to_the_spawned_cli(monkeypatch) -> None:
-    monkeypatch.delenv("CODEX_HOME", raising=False)
+def _prepare_catalog_credential(
+    tmp_path: Path,
+    monkeypatch,
+    *,
+    auth_field: str,
+    auth_payload: str = _CATALOG_AUTH_PAYLOAD,
+) -> tuple[Path, Path]:
+    original_home = tmp_path / "operator-home"
+    original_home.mkdir()
+    (original_home / "canary").write_text("untouched")
+    credential = tmp_path / "host-named" / "auth.json"
+    credential.parent.mkdir()
+    credential.write_text(auth_payload)
+    monkeypatch.setenv("HOME", str(original_home))
+    monkeypatch.setenv("CATALOG_ENV_LEAK", "should-not-appear")
+    override_provider_runtime(**{auth_field: credential})
+    return original_home, credential
 
-    child_env = process._child_env({"CODEX_HOME": "/private/codex-home"})
 
-    assert child_env["CODEX_HOME"] == "/private/codex-home"
-    assert "CODEX_HOME" not in os.environ
+def _run_catalog_python(
+    tmp_path: Path,
+    monkeypatch,
+    *,
+    credential_home_variable: str,
+    auth_field: str,
+    script: str,
+    auth_payload: str = _CATALOG_AUTH_PAYLOAD,
+) -> tuple[CliRun, Path, Path]:
+    original_home, credential = _prepare_catalog_credential(
+        tmp_path, monkeypatch, auth_field=auth_field, auth_payload=auth_payload,
+    )
+    run = _run_credentialed_catalog_cli(
+        Path(sys.executable),
+        ("-c", script),
+        credential_home_variable=credential_home_variable,
+        auth_file=credential,
+    )
+    assert run is not None
+    return run, original_home, credential
 
 
-def test_bounded_runner_can_unset_an_inherited_child_variable(monkeypatch) -> None:
-    monkeypatch.setenv("GROK_HOME", "/outside/profile")
+def _parse_env_listing(listing: str) -> dict[str, str]:
+    parsed: dict[str, str] = {}
+    for line in listing.splitlines():
+        name, separator, value = line.partition("=")
+        if separator:
+            parsed[name] = value
+    return parsed
+
+
+def test_private_credential_home_keeps_its_copy_until_the_last_reap(tmp_path: Path) -> None:
+    source = tmp_path / "source.json"
+    source.write_text(_CATALOG_AUTH_PAYLOAD)
+    home = PrivateCredentialHome(
+        source,
+        Path(".claude/.credentials.json"),
+        prefix="private-home-",
+        missing_credential_is_error=True,
+    )
+    reservation = home.reserve()
+    copy = home.path / ".claude/.credentials.json"
+
+    home.close()
+
+    assert home.path.exists()
+    assert copy.read_text() == _CATALOG_AUTH_PAYLOAD
+    assert stat.S_IMODE(home.path.stat().st_mode) == 0o700
+    assert stat.S_IMODE(copy.stat().st_mode) == 0o400
+    assert source.read_text() == _CATALOG_AUTH_PAYLOAD
+
+    reservation.on_reaped(123, True)
+
+    assert not home.path.exists()
+
+
+def test_private_credential_home_removes_a_failed_setup(tmp_path: Path) -> None:
+    with pytest.raises(AgentCliUnavailableError, match="configured CLI credential is missing"):
+        PrivateCredentialHome(
+            tmp_path / "missing.json",
+            Path(".grok/auth.json"),
+            prefix="private-home-",
+            missing_credential_is_error=True,
+        )
+
+    assert not list(tmp_path.glob("private-home-*"))
+
+
+@pytest.mark.parametrize(("credential_home_variable", "auth_field"), _CATALOG_PROVIDERS)
+def test_catalog_child_sees_only_the_closed_environment_variables(
+    tmp_path, monkeypatch, credential_home_variable: str, auth_field: str,
+) -> None:
+    original_home, credential = _prepare_catalog_credential(
+        tmp_path, monkeypatch, auth_field=auth_field,
+    )
+
+    run = _run_credentialed_catalog_cli(
+        Path("/usr/bin/env"),
+        (),
+        credential_home_variable=credential_home_variable,
+        auth_file=credential,
+    )
+
+    assert run is not None
+    assert run.complete is True
+    assert run.returncode == 0
+    observed = _parse_env_listing(run.stdout)
+    assert sorted(observed) == sorted(_expected_closed_names(credential_home_variable))
+    assert observed["HOME"] == observed[credential_home_variable]
+    assert observed["HOME"] != str(original_home)
+    assert not Path(observed["HOME"]).is_relative_to(original_home)
+    assert observed["PATH"] == os.environ.get("PATH", os.defpath)
+    assert "CATALOG_ENV_LEAK" not in observed
+    assert not Path(observed["HOME"]).exists()
+
+
+@pytest.mark.parametrize(("credential_home_variable", "auth_field"), _CATALOG_PROVIDERS)
+def test_catalog_child_reads_the_host_named_credential_file(
+    tmp_path, monkeypatch, credential_home_variable: str, auth_field: str,
+) -> None:
+    script = (
+        "import os, sys\n"
+        "sys.stdout.write("
+        "open(os.path.join(os.environ['HOME'], 'auth.json')).read()"
+        ")\n"
+    )
+    run, _original_home, credential = _run_catalog_python(
+        tmp_path,
+        monkeypatch,
+        credential_home_variable=credential_home_variable,
+        auth_field=auth_field,
+        script=script,
+    )
+
+    assert run.complete is True
+    assert run.returncode == 0
+    assert run.stdout == _CATALOG_AUTH_PAYLOAD
+    assert credential.read_text() == _CATALOG_AUTH_PAYLOAD
+
+
+@pytest.mark.parametrize(("credential_home_variable", "auth_field"), _CATALOG_PROVIDERS)
+def test_catalog_child_cannot_write_the_original_credential_directory(
+    tmp_path, monkeypatch, credential_home_variable: str, auth_field: str,
+) -> None:
+    script = (
+        "import os, sys\n"
+        "path = os.path.join(os.environ['HOME'], 'auth.json')\n"
+        "try:\n"
+        "    os.open(path, os.O_WRONLY)\n"
+        "    sys.stdout.write('writable')\n"
+        "except OSError:\n"
+        "    sys.stdout.write('not-writable')\n"
+    )
+    run, original_home, credential = _run_catalog_python(
+        tmp_path,
+        monkeypatch,
+        credential_home_variable=credential_home_variable,
+        auth_field=auth_field,
+        script=script,
+    )
+
+    assert run.complete is True
+    assert run.returncode == 0
+    assert run.stdout == "not-writable"
+    assert credential.read_text() == _CATALOG_AUTH_PAYLOAD
+    assert (original_home / "canary").read_text() == "untouched"
+    assert set(original_home.iterdir()) == {original_home / "canary"}
+
+
+def test_claude_catalog_child_never_sees_the_operator_home(tmp_path, monkeypatch) -> None:
+    original_home, _credential = _prepare_catalog_credential(
+        tmp_path, monkeypatch, auth_field="claude_cli_auth_file",
+    )
+
+    run = run_claude_catalog_cli(Path("/usr/bin/env"), ())
+
+    assert run is not None
+    assert run.complete is True
+    assert run.returncode == 0
+    observed = _parse_env_listing(run.stdout)
+    assert observed["HOME"] != str(original_home)
+    assert not Path(observed["HOME"]).is_relative_to(original_home)
+    assert observed["PATH"] == os.environ.get("PATH", os.defpath)
+    assert "CATALOG_ENV_LEAK" not in observed
+    assert "GROK_HOME" not in observed
+    assert "CODEX_HOME" not in observed
+    assert "CLAUDE_CONFIG_DIR" not in observed
+    assert not Path(observed["HOME"]).exists()
+
+
+def test_claude_catalog_child_writes_stay_in_the_private_home(tmp_path, monkeypatch) -> None:
+    original_home, _credential = _prepare_catalog_credential(
+        tmp_path, monkeypatch, auth_field="claude_cli_auth_file",
+    )
+    script = (
+        "import os, pathlib, sys\n"
+        "path = pathlib.Path(os.environ['HOME']) / 'wrote'\n"
+        "path.write_text('private')\n"
+        "sys.stdout.write(str(path))\n"
+    )
+
+    run = run_claude_catalog_cli(Path(sys.executable), ("-c", script))
+
+    assert run is not None
+    assert run.complete is True
+    assert run.returncode == 0
+    written = Path(run.stdout)
+    assert not written.is_relative_to(original_home)
+    assert not written.exists()
+    assert (original_home / "canary").read_text() == "untouched"
+    assert set(original_home.iterdir()) == {original_home / "canary"}
+
+
+def test_the_claude_catalog_child_reads_the_host_named_credential(tmp_path, monkeypatch) -> None:
+    _prepare_catalog_credential(tmp_path, monkeypatch, auth_field="claude_cli_auth_file")
+    script = (
+        "import os, pathlib, sys\n"
+        "credential = pathlib.Path(os.environ['HOME']) / '.claude' / '.credentials.json'\n"
+        "sys.stdout.write(credential.read_text())\n"
+    )
+
+    run = run_claude_catalog_cli(Path(sys.executable), ("-c", script))
+
+    assert run is not None
+    assert run.returncode == 0
+    assert run.stdout == _CATALOG_AUTH_PAYLOAD
+
+
+def test_a_direct_overwrite_of_the_credential_copy_fails(tmp_path, monkeypatch) -> None:
+    """The README hands hosts this sentence; only this much of it is true."""
+    _prepare_catalog_credential(tmp_path, monkeypatch, auth_field="claude_cli_auth_file")
+    script = (
+        "import os, pathlib, sys\n"
+        "copy = pathlib.Path(os.environ['HOME']) / '.claude' / '.credentials.json'\n"
+        "try:\n"
+        "    copy.open('w')\n"
+        "except PermissionError:\n"
+        "    sys.stdout.write('refused')\n"
+    )
+
+    run = run_claude_catalog_cli(Path(sys.executable), ("-c", script))
+
+    assert run is not None
+    assert run.stdout == "refused"
+
+
+def test_a_credential_path_that_names_nothing_is_reported_not_swallowed(
+    tmp_path,
+    monkeypatch,
+    caplog,
+) -> None:
+    """A typo in the configured path must not read as a logged-out provider."""
+    missing = tmp_path / "typo" / "auth.json"
+    override_provider_runtime(claude_cli_auth_file=missing)
+    caplog.set_level("WARNING", logger="agent_providers.process")
+
+    run = run_claude_catalog_cli(Path("/bin/sh"), ("-c", ":"))
+
+    assert run is not None
+    assert str(missing) in caplog.text
+
+
+def test_a_bare_binary_name_resolves_only_against_the_named_search_path(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    mounted = tmp_path / "mounted"
+    mounted.mkdir()
+    binary = mounted / "grok"
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o755)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "codex").write_text("#!/bin/sh\n")
+    (elsewhere / "codex").chmod(0o755)
+    monkeypatch.setenv("PATH", str(elsewhere))
+    override_provider_runtime(cli_binary_search_path=(mounted,))
+
+    assert resolve_cli_binary("grok") == binary
+    assert resolve_cli_binary("codex") is None
+
+
+def test_an_absolute_binary_is_accepted_only_when_it_is_executable(tmp_path) -> None:
+    unreadable = tmp_path / "not-executable"
+    unreadable.write_text("#!/bin/sh\n")
+
+    assert resolve_cli_binary(str(unreadable)) is None
+    assert resolve_cli_binary("/bin/sh") == Path("/bin/sh")
+
+
+def test_a_private_prompt_file_is_written_below_the_host_named_root(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    working_root = tmp_path / "host-root"
+    working_root.mkdir()
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "somewhere-else"))
+    override_provider_runtime(cli_working_directory_root=working_root)
 
     outcome = run_cli_bounded(
-        ("/bin/sh", "-c", 'test -z "${GROK_HOME+x}"'),
+        shell_child("-c", 'printf %s "$1"', "unused", "placeholder"),
         stdin_payload=None,
         read="all",
         deadline=time.monotonic() + 1,
-        unset_env=("GROK_HOME",),
+        prompt_file_bytes=b"private prompt",
+        prompt_file_arg_index=3,
+    )
+
+    assert outcome.complete is True
+    assert Path(outcome.stdout).parent == working_root
+
+
+def test_catalog_spawn_refuses_an_environment_without_home(tmp_path) -> None:
+    with pytest.raises(ValueError, match="must set HOME"):
+        ChildProcess(
+            binary=Path("/usr/bin/env"),
+            arguments=(),
+            environment={"PATH": "/bin"},
+            working_directory=tmp_path,
+        )
+
+
+def test_catalog_spawn_uses_the_given_environment_without_a_host_baseline(
+    tmp_path, monkeypatch,
+) -> None:
+    monkeypatch.setenv("CATALOG_ENV_LEAK", "should-not-appear")
+    home = tmp_path / "private-home"
+    home.mkdir()
+
+    run = run_catalog_cli(
+        ChildProcess(
+            binary=Path("/usr/bin/env"),
+            arguments=(),
+            environment={"HOME": str(home), "PATH": "/bin"},
+            working_directory=home,
+        ),
+    )
+
+    assert run is not None
+    assert run.complete is True
+    assert run.returncode == 0
+    observed = _parse_env_listing(run.stdout)
+    assert observed == {"HOME": str(home), "PATH": "/bin"}
+
+
+def test_a_child_gets_the_home_it_was_described_with_not_the_hosts(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("HOME", "/inherited/operator-home")
+
+    outcome = run_cli_bounded(
+        shell_child("-c", "printf %s \"$HOME\"", home=tmp_path),
+        stdin_payload=None,
+        read="all",
+        deadline=time.monotonic() + 1,
+    )
+
+    assert outcome.complete is True
+    assert outcome.returncode == 0
+    assert outcome.stdout == str(tmp_path)
+
+
+def test_a_variable_the_recipe_does_not_name_never_reaches_the_child(monkeypatch) -> None:
+    monkeypatch.setenv("GROK_HOME", "/outside/profile")
+
+    outcome = run_cli_bounded(
+        shell_child("-c", 'test -z "${GROK_HOME+x}"'),
+        stdin_payload=None,
+        read="all",
+        deadline=time.monotonic() + 1,
     )
 
     assert outcome.complete is True
@@ -1091,7 +1450,7 @@ def test_bounded_runner_does_not_pass_secrets_to_the_spawned_cli(monkeypatch) ->
     secret_checks = " && ".join(f'test -z "${{{key}}}"' for key in SECRET_ENV_KEYS)
 
     outcome = run_cli_bounded(
-        ("/bin/sh", "-c", secret_checks),
+        shell_child("-c", secret_checks),
         stdin_payload=None,
         read="all",
         deadline=time.monotonic() + 1,
@@ -1105,7 +1464,7 @@ def test_bounded_runner_sends_complete_stdout_lines_and_then_its_outcome() -> No
     channel = CliLineChannel(maximum_lines=2)
 
     outcome = run_cli_bounded(
-        ("/bin/sh", "-c", "printf 'one\\ntwo\\n'"),
+        shell_child("-c", "printf 'one\\ntwo\\n'"),
         stdin_payload=None,
         read="all",
         deadline=time.monotonic() + 1,
@@ -1121,7 +1480,7 @@ def test_bounded_runner_sends_a_final_stdout_line_without_a_newline() -> None:
     channel = CliLineChannel(maximum_lines=1)
 
     outcome = run_cli_bounded(
-        ("/bin/sh", "-c", 'printf \'{"type":"end","stopReason":"stop"}\''),
+        shell_child("-c", 'printf \'{"type":"end","stopReason":"stop"}\''),
         stdin_payload=None,
         read="all",
         deadline=time.monotonic() + 1,
@@ -1136,7 +1495,7 @@ def test_bounded_runner_names_a_full_stdout_line_channel() -> None:
     channel = CliLineChannel(maximum_lines=1)
 
     outcome = run_cli_bounded(
-        ("/bin/sh", "-c", "printf 'first\\nsecond\\n'"),
+        shell_child("-c", "printf 'first\\nsecond\\n'"),
         stdin_payload=None,
         read="all",
         deadline=time.monotonic() + 1,
@@ -1154,7 +1513,7 @@ def test_bounded_runner_reaps_after_a_line_consumer_requests_cancellation() -> N
 
     runner = threading.Thread(
         target=lambda: outcomes.append(run_cli_bounded(
-            ("/bin/sh", "-c", "printf 'first\\n'; exec sleep 10"),
+            shell_child("-c", "printf 'first\\n'; exec sleep 10"),
             stdin_payload=None,
             read="all",
             deadline=time.monotonic() + 1,
@@ -1182,14 +1541,14 @@ def test_bounded_runner_uses_and_removes_a_private_prompt_file() -> None:
         observed.append((prompt_path, os.stat(prompt_path).st_mode & 0o777))
         return real_popen(command, **kwargs)
 
-    with patch("agent_providers.process.subprocess.Popen", side_effect=capture_process):
+    with patch("agent_providers.spawn.subprocess.Popen", side_effect=capture_process):
         outcome = run_cli_bounded(
-            ("/bin/sh", "-c", "cat \"$1\"", "unused", "placeholder"),
+            shell_child("-c", "cat \"$1\"", "unused", "placeholder"),
             stdin_payload=None,
             read="all",
             deadline=time.monotonic() + 1,
             prompt_file_bytes=b"private prompt",
-            prompt_file_arg_index=4,
+            prompt_file_arg_index=3,
         )
 
     assert outcome.stdout == "private prompt"
@@ -1210,15 +1569,15 @@ def test_bounded_runner_treats_a_missing_prompt_file_as_already_removed(monkeypa
         raise FileNotFoundError
 
     try:
-        with patch("agent_providers.process.subprocess.Popen", side_effect=capture_process):
+        with patch("agent_providers.spawn.subprocess.Popen", side_effect=capture_process):
             monkeypatch.setattr(process.os, "unlink", report_missing_file)
             outcome = run_cli_bounded(
-                ("/bin/sh", "-c", ":", "unused", "placeholder"),
+                shell_child("-c", ":", "unused", "placeholder"),
                 stdin_payload=None,
                 read="all",
                 deadline=time.monotonic() + 1,
                 prompt_file_bytes=b"private prompt",
-                prompt_file_arg_index=4,
+                prompt_file_arg_index=3,
             )
     finally:
         for prompt_path in prompt_paths:
@@ -1251,16 +1610,16 @@ def test_bounded_runner_publishes_prompt_unlink_errors_to_waiting_consumers(monk
     consumer.start()
     assert ready_to_receive.wait(timeout=1)
     try:
-        with patch("agent_providers.process.subprocess.Popen", side_effect=capture_process):
+        with patch("agent_providers.spawn.subprocess.Popen", side_effect=capture_process):
             monkeypatch.setattr(process.os, "unlink", fail_to_unlink)
             outcome = run_cli_bounded(
-                ("/bin/sh", "-c", ":", "unused", "placeholder"),
+                shell_child("-c", ":", "unused", "placeholder"),
                 stdin_payload=None,
                 read="all",
                 deadline=time.monotonic() + 1,
                 stdout_line_channel=channel,
                 prompt_file_bytes=b"private prompt",
-                prompt_file_arg_index=4,
+                prompt_file_arg_index=3,
             )
     finally:
         for prompt_path in prompt_paths:
@@ -1277,7 +1636,7 @@ def test_bounded_runner_publishes_prompt_unlink_errors_to_waiting_consumers(monk
 def test_bounded_runner_creates_no_prompt_file_without_prompt_bytes() -> None:
     with patch("agent_providers.process.tempfile.mkstemp") as create_prompt_file:
         outcome = run_cli_bounded(
-            ("/bin/sh", "-c", "printf ready"),
+            shell_child("-c", "printf ready"),
             stdin_payload=None,
             read="all",
             deadline=time.monotonic() + 1,
@@ -1302,7 +1661,7 @@ def test_bounded_runner_rejects_an_invalid_private_prompt_contract(
     message: str,
 ) -> None:
     outcome = run_cli_bounded(
-        ("/bin/sh", "-c", ":"),
+        shell_child("-c", ":"),
         stdin_payload=None,
         read="all",
         deadline=time.monotonic() + 1,
@@ -1323,7 +1682,7 @@ def test_bounded_runner_removes_a_private_prompt_file_when_writing_it_fails(
     created_paths: list[str] = []
     real_mkstemp = tempfile.mkstemp
 
-    def create_prompt_file(*, prefix: str) -> tuple[int, str]:
+    def create_prompt_file(*, prefix: str, dir: Path) -> tuple[int, str]:
         descriptor, path = real_mkstemp(dir=tmp_path, prefix=prefix)
         created_paths.append(path)
         return descriptor, path
@@ -1336,12 +1695,12 @@ def test_bounded_runner_removes_a_private_prompt_file_when_writing_it_fails(
     monkeypatch.setattr(process.os, "fdopen", fail_to_open)
 
     outcome = run_cli_bounded(
-        ("/bin/sh", "-c", ":", "placeholder"),
+        shell_child("-c", ":", "placeholder"),
         stdin_payload=None,
         read="all",
         deadline=time.monotonic() + 1,
         prompt_file_bytes=b"private prompt",
-        prompt_file_arg_index=3,
+        prompt_file_arg_index=2,
     )
 
     assert outcome.started is False

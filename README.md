@@ -21,6 +21,7 @@ It owns the machinery that is the same in every deployment:
 | `agent_providers.events` | The `StreamEvent` union a turn emits (assistant text, tool call, tool result, final) |
 | `agent_providers.tool_loop` | The provider-agnostic tool loop driving a `ToolExecutor` over a `ToolTransport` |
 | `agent_providers.tools` | The `ToolCatalog` and its Anthropic/OpenAI schema projections |
+| `agent_providers.spawn` | `ChildProcess` and the only calls in this library that create a child process |
 | `agent_providers.process` | `run_cli_bounded`: the one bounded subprocess layer (start, stdin, first line, deadline, process-group cleanup) |
 | `agent_providers.images` | The `ImagePolicy` an image turn is held to |
 | `agent_providers.sandbox` | The directory-name prefix constants a host's kernel sandbox profile must permit |
@@ -56,15 +57,64 @@ pip install https://github.com/overnightworks/agent-providers/releases/download/
 
 Tags are never moved; a broken release gets the next patch tag.
 
+## The child environment is closed
+
+Every child this library starts is described by one immutable `ChildProcess`:
+an absolute binary, an explicit working directory, and the child's *complete*
+environment. Nothing is inherited and nothing is merged onto a host baseline,
+because an optional set of extras on an inherited environment is a denylist
+seen from the other side. `HOME` is always set — an agent CLI with no `HOME`
+falls back to the passwd home, which is worse than a wrong one.
+
+**This is process configuration, not access control.** A closed environment
+stops discovery by convention — `HOME`, `PATH`, `CODEX_HOME`, `GROK_HOME`,
+`XDG_*` — and nothing else. It does not stop an absolute
+`open("/…/auth.json")`, traversal out of the working directory, or the network,
+and UID, GID, umask, resource limits, namespaces and mounts are inherited
+whatever this library does. A host that needs containment brings the sandbox
+described below; this layer only stops the child from *finding* the operator's
+credential directory by convention.
+
+The host names each provider credential *file*. Catalog probes copy the needed
+file into a private home for their bounded run. Every Claude or Grok turn uses
+a fresh private home below
+`cli_working_directory_root`: directories are mode 0700 and credential copies
+are mode 0400. The source is opened only for reading. The home remains until
+the turn child has been reaped, including a delayed spawn or background reap,
+then is removed. A direct overwrite of the copy fails, while a CLI can create and
+rename a replacement in its disposable directory; that renewal vanishes at
+cleanup. This is not evidence that a CLI refreshes credentials in practice.
+
+## Safe diagnostic codes
+
+The library logs closed diagnostic codes for rejected Grok tool-protocol and
+Codex image-gate paths. They identify a stable rejection class without copying
+provider events, prompts, arguments, paths, IDs, or exception text into logs.
+`ImageToolBlockedError` describes this library's image-gate decision; it is not
+an administrative diagnosis from Codex. The earlier Songmaker #899 evidence
+cannot reconstruct the concrete Grok or image cause, so a new provider run is
+needed to observe these codes.
+
 ## The ports a host supplies
 
 Nothing is configured by default. A host installs one `ProviderRuntimeConfig`
 per process with `configure()`, and every module reads it back through
 `current_config()`; until then `current_config()` raises rather than guessing a
-binary path. The config carries the deployment facts — CLI binaries, credential
-mirrors, mounted directories, models, process caps, the secret-env key set —
-and an optional `McpServerSpec` describing the host's MCP server. A host that
-runs no MCP server passes `mcp_server=None`.
+binary path.
+
+The configuration is cut along the two ways into this library. `ProviderRuntimeConfig`
+carries what the catalog path reads — the CLI binaries, the search path a bare
+binary name is resolved against, the credential files, and the working root
+below which every private directory and temporary file is created. A host that
+also runs turns adds a `TurnRuntimeConfig` as `turns`: the chat model, the
+Codex mounts and process caps, the prompt-file names, and an optional
+`McpServerSpec` describing the host's MCP server. `claude_cli_home`,
+`grok_cli_home`, and `grok_cli_session_root` were removed; provide the existing
+credential files and `cli_working_directory_root` instead. A host
+that runs no MCP server passes `mcp_server=None`; a catalog-only host passes no
+`turns` at all and never invents a value it does not have. A turn path reached
+without one raises `TurnRuntimeNotConfiguredError` instead of running against a
+guess.
 
 The other host obligations arrive as arguments where they are needed:
 

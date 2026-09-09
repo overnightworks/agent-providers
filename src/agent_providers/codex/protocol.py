@@ -19,7 +19,14 @@ from typing import Final
 from agent_providers.codex.pool import CodexProcessReservation, get_codex_process_pool
 from agent_providers.config import current_config
 from agent_providers.errors import SafeRouteReasonCode
-from agent_providers.process import CliRunOutcome, CliRunReason, run_cli_bounded
+from agent_providers.process import (
+    AgentCliUnavailableError,
+    CliRunOutcome,
+    CliRunReason,
+    resolve_cli_binary,
+    run_cli_bounded,
+)
+from agent_providers.spawn import ChildProcess, closed_environment
 
 CODEX_CLI_LINE_CHANNEL_CAPACITY: Final = 64
 CODEX_CLI_TURN_OUTPUT_READ_LIMIT_BYTES: Final = 4 * 1024 * 1024
@@ -67,9 +74,33 @@ class CodexLoginMirrorError(Exception):
     """The redacted Codex login mirror cannot start an isolated CLI."""
 
 
+def codex_child_process(
+    arguments: tuple[str, ...],
+    *,
+    turn_root: Path,
+    work_directory: Path,
+    codex_home: Path,
+) -> ChildProcess:
+    """Describe one Codex child around this turn's own private directories.
+
+    ``HOME`` is the turn root, not the account that started this process, so
+    the CLI discovers only the redacted login this turn installed under
+    ``CODEX_HOME``.
+    """
+    binary = resolve_cli_binary(current_config().codex_cli_binary)
+    if binary is None:
+        raise AgentCliUnavailableError("the configured Codex CLI binary is not on the search path")
+    return ChildProcess(
+        binary=binary,
+        arguments=arguments,
+        environment=closed_environment(turn_root, CODEX_HOME=str(codex_home)),
+        working_directory=work_directory,
+    )
+
+
 def run_reserved_codex_cli(
     reservation: CodexProcessReservation,
-    command: tuple[str, ...],
+    child: ChildProcess,
     **kwargs,
 ) -> CliRunOutcome:
     """Run one already-admitted CLI process through the bounded runner."""
@@ -86,7 +117,7 @@ def run_reserved_codex_cli(
 
     try:
         outcome = run_cli_bounded(
-            command,
+            child,
             on_spawned=on_spawned,
             on_spawn_failed=on_spawn_failed,
             on_reaped=on_reaped,

@@ -16,7 +16,6 @@ import glob
 import json
 import logging
 import os
-import shutil
 import signal
 import subprocess
 import tempfile
@@ -29,7 +28,7 @@ from pathlib import Path
 from typing import Final, Literal
 
 from agent_providers import process
-from agent_providers.config import McpServerSpec, current_config
+from agent_providers.config import McpServerSpec, current_config, current_turn_config
 from agent_providers.constants import (
     CLAUDE_CLI_COMPLETION_TIMEOUT_SECONDS,
     CLAUDE_CLI_MAX_CONCURRENT_PROCESSES,
@@ -55,7 +54,14 @@ from agent_providers.process import (
     CliLogin,
     claude_cli_login,
     clear_claude_cli_login_cache,
-    scrubbed_env,
+    resolve_cli_binary,
+    run_claude_catalog_cli,
+)
+from agent_providers.spawn import (
+    ChildProcess,
+    closed_environment,
+    open_async_pipes,
+    run_capturing,
 )
 
 log = logging.getLogger(__name__)
@@ -102,6 +108,8 @@ _CLI_INIT_EVENT_SUBTYPE: Final = "init"
 _TOOL_SURFACE_PROBE_PROMPT: Final = "."
 
 _STREAM_BUFFER_LIMIT = 4 * 1024 * 1024
+_CLAUDE_TURN_HOME_PREFIX: Final = "agent-cli-claude-turn-"
+_CLAUDE_CREDENTIAL_PATH: Final = Path(".claude/.credentials.json")
 
 
 def clear_client_cache() -> None:
@@ -170,7 +178,7 @@ def call_claude(
     timeout_seconds: float | None = None,
 ) -> ClaudeResponse:
     if model is None:
-        model = current_config().claude_chat_model
+        model = current_turn_config().claude_chat_model
     deadline = time.monotonic() + timeout_seconds if timeout_seconds is not None else None
     if api_key:
         log.info("Claude: using API backend (model=%s)", model)
@@ -188,7 +196,7 @@ async def acall_claude(
     messages: list[dict[str, str]] | None = None,
 ) -> ClaudeResponse:
     if model is None:
-        model = current_config().claude_chat_model
+        model = current_turn_config().claude_chat_model
     if api_key:
         log.info("Claude: using async API backend (model=%s)", model)
         return await _acall_api(prompt, api_key, system, model, max_tokens, messages)
@@ -215,39 +223,39 @@ async def acall_claude_with_mcp(
     does not expose MCP servers).
     """
     if model is None:
-        model = current_config().claude_chat_model
+        model = current_turn_config().claude_chat_model
     binary = await verify_cli_tool_surface()
     flat_prompt = flatten_messages(prompt, messages)
     stdin_body = stdin_prompt(system, flat_prompt)
-    env = scrubbed_env()
     log.info("Claude: MCP+CLI backend (model=%s, user=%s)", model, user_id)
 
-    with _cowriter_cli_command(binary, model, user_id, stream=False) as cmd:
-        try:
-            proc = await _spawn_reserved_async_cli_process(
-                *cmd,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=env,
-                start_new_session=True,
-            )
-        except FileNotFoundError:
-            raise CliBinaryUnavailableError(CLAUDE_CLI_BINARY_NOT_FOUND_DETAIL)
-        try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(stdin_body.encode()),
-                timeout=timeout_seconds,
-            )
-            _release_zombie_reservation(proc.pid)
-        except asyncio.TimeoutError:
-            await _reap_process_group(proc)
-            raise UnavailableError(
-                f"Claude CLI timed out after {timeout_seconds}s",
-            )
-        except BaseException:
-            await _reap_process_group(proc)
-            raise
+    home = _claude_private_home()
+    try:
+        with _cowriter_cli_arguments(model, user_id, stream=False) as arguments:
+            try:
+                home_reservation = home.reserve()
+                proc = await _spawn_reserved_async_cli_process(
+                    _claude_child_process(binary, arguments, home.path),
+                    home_reservation=home_reservation,
+                )
+            except FileNotFoundError:
+                raise CliBinaryUnavailableError(CLAUDE_CLI_BINARY_NOT_FOUND_DETAIL)
+            try:
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                    proc.communicate(stdin_body.encode()),
+                    timeout=timeout_seconds,
+                )
+                _release_zombie_reservation(proc.pid)
+            except asyncio.TimeoutError:
+                await _reap_process_group(proc)
+                raise UnavailableError(
+                    f"Claude CLI timed out after {timeout_seconds}s",
+                )
+            except BaseException:
+                await _reap_process_group(proc)
+                raise
+    finally:
+        home.close()
 
     stdout = stdout_bytes.decode()
     if proc.returncode != 0:
@@ -288,35 +296,35 @@ async def acall_claude_with_mcp_stream(
     payload.
     """
     if model is None:
-        model = current_config().claude_chat_model
+        model = current_turn_config().claude_chat_model
     binary = await verify_cli_tool_surface()
     flat_prompt = flatten_messages(prompt, messages)
     stdin_body = stdin_prompt(system, flat_prompt)
-    env = scrubbed_env()
     log.info("Claude: streaming MCP+CLI (model=%s, user=%s)", model, user_id)
 
-    with _cowriter_cli_command(binary, model, user_id, stream=True) as cmd:
-        try:
-            proc = await _spawn_reserved_async_cli_process(
-                *cmd,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=env,
-                start_new_session=True,
-                limit=_STREAM_BUFFER_LIMIT,
-            )
-        except FileNotFoundError:
-            raise CliBinaryUnavailableError(CLAUDE_CLI_BINARY_NOT_FOUND_DETAIL)
-        try:
-            if proc.stdin is not None:
-                proc.stdin.write(stdin_body.encode())
-                await proc.stdin.drain()
-                proc.stdin.close()
-            async for event in _consume_stream(proc, timeout_seconds, correlation_id):
-                yield event
-        finally:
-            await _reap_stream_process_after_cancellation(proc)
+    home = _claude_private_home()
+    try:
+        with _cowriter_cli_arguments(model, user_id, stream=True) as arguments:
+            try:
+                home_reservation = home.reserve()
+                proc = await _spawn_reserved_async_cli_process(
+                    _claude_child_process(binary, arguments, home.path),
+                    home_reservation=home_reservation,
+                    stream_buffer_limit=_STREAM_BUFFER_LIMIT,
+                )
+            except FileNotFoundError:
+                raise CliBinaryUnavailableError(CLAUDE_CLI_BINARY_NOT_FOUND_DETAIL)
+            try:
+                if proc.stdin is not None:
+                    proc.stdin.write(stdin_body.encode())
+                    await proc.stdin.drain()
+                    proc.stdin.close()
+                async for event in _consume_stream(proc, timeout_seconds, correlation_id):
+                    yield event
+            finally:
+                await _reap_stream_process_after_cancellation(proc)
+    finally:
+        home.close()
 
 
 async def _consume_stream(
@@ -491,30 +499,23 @@ def list_cli_model_aliases() -> list[str]:
     contain the expected `Available: a, b, c.` fragment.
     """
     binary = _require_claude_binary()
-    try:
-        result = subprocess.run(
-            [binary, "-p", "/model"],
-            capture_output=True,
-            text=True,
-            timeout=COWRITER_MODELS_TIMEOUT_SECONDS,
-            env=scrubbed_env(),
-        )
-    except subprocess.TimeoutExpired as exc:
+    run = run_claude_catalog_cli(binary, ("-p", "/model"))
+    if run is None:
+        raise UnavailableError("Claude CLI /model failed to run")
+    if not run.complete:
         raise UnavailableError(
             f"Claude CLI /model timed out after {COWRITER_MODELS_TIMEOUT_SECONDS}s",
-        ) from exc
-    except OSError as exc:
-        raise UnavailableError(f"Claude CLI /model failed to run: {exc}") from exc
-    if result.returncode != 0:
+        )
+    if run.returncode != 0:
         log.warning(
             "Claude CLI model catalog failed (rc=%d, stderr_chars=%d)",
-            result.returncode,
-            len(result.stderr),
+            run.returncode,
+            len(run.stderr),
         )
         raise UnavailableError(
             CLAUDE_CLI_MODEL_CATALOG_ERROR,
         )
-    return _parse_cli_model_aliases(result.stdout)
+    return _parse_cli_model_aliases(run.stdout)
 
 
 def _parse_cli_model_aliases(stdout: str) -> list[str]:
@@ -576,15 +577,39 @@ def flatten_messages(prompt: str, messages: list[dict[str, str]] | None) -> str:
     return "\n\n".join(parts)
 
 
-def _build_cli_cmd(
-    binary: str,
+def _claude_private_home() -> process.PrivateCredentialHome:
+    try:
+        return process.PrivateCredentialHome(
+            current_config().claude_cli_auth_file,
+            _CLAUDE_CREDENTIAL_PATH,
+            prefix=_CLAUDE_TURN_HOME_PREFIX,
+            missing_credential_is_error=True,
+        )
+    except process.AgentCliUnavailableError as exc:
+        raise UnavailableError(CLAUDE_CLI_UNAVAILABLE_DETAIL) from exc
+
+
+def _claude_child_process(
+    binary: Path,
+    arguments: list[str],
+    home: Path,
+) -> ChildProcess:
+    """Describe one Claude child around its disposable credential home."""
+    return ChildProcess(
+        binary=binary,
+        arguments=tuple(arguments),
+        environment=closed_environment(home),
+        working_directory=home,
+    )
+
+
+def _cli_arguments(
     model: str,
     *,
     stream: bool = False,
 ) -> list[str]:
-    """Command for a single-turn completion that needs no tools at all."""
+    """Arguments for a single-turn completion that needs no tools at all."""
     cmd = [
-        binary,
         "-p",
         "--model",
         model,
@@ -641,7 +666,11 @@ def stdin_prompt(system: str | None, prompt: str) -> str:
 
 
 def _write_mcp_config(spec: McpServerSpec, user_id: str) -> str:
-    handle, path = tempfile.mkstemp(prefix=spec.config_file_prefix, suffix=".json")
+    handle, path = tempfile.mkstemp(
+        prefix=spec.config_file_prefix,
+        suffix=".json",
+        dir=current_config().cli_working_directory_root,
+    )
     with os.fdopen(handle, "w", encoding="utf-8") as fh:
         fh.write(_build_mcp_config(spec, user_id))
     os.chmod(path, 0o600)
@@ -655,8 +684,7 @@ def _unlink_quiet(path: str) -> None:
         return
 
 
-def _build_mcp_cli_cmd(
-    binary: str,
+def _mcp_cli_arguments(
     model: str,
     config_path: str,
     spec: McpServerSpec,
@@ -672,7 +700,6 @@ def _build_mcp_cli_cmd(
     """
     output_format = "stream-json" if stream else "json"
     cmd = [
-        binary,
         "-p",
         "--model",
         model,
@@ -690,8 +717,7 @@ def _build_mcp_cli_cmd(
 
 
 @contextmanager
-def _cowriter_cli_command(
-    binary: str,
+def _cowriter_cli_arguments(
     model: str,
     user_id: str,
     *,
@@ -704,13 +730,13 @@ def _cowriter_cli_command(
     and ``verify_cli_tool_surface()`` verified it against the tool-free
     expectation. Nothing is written to disk on that route.
     """
-    spec = current_config().mcp_server
+    spec = current_turn_config().mcp_server
     if spec is None:
-        yield _build_cli_cmd(binary, model, stream=stream)
+        yield _cli_arguments(model, stream=stream)
         return
     config_path = _write_mcp_config(spec, user_id)
     try:
-        yield _build_mcp_cli_cmd(binary, model, config_path, spec, stream=stream)
+        yield _mcp_cli_arguments(model, config_path, spec, stream=stream)
     finally:
         _unlink_quiet(config_path)
 
@@ -880,6 +906,7 @@ class _ZombieReservation:
     """A pool slot before it is bound to the spawned process's PID."""
 
     pid: int | None = None
+    home_reservation: process._PrivateCredentialHomeReservation | None = None
 
 
 # The process-pool reservations are process-wide and shared by probes and real
@@ -955,7 +982,7 @@ async def shutdown_tool_surface_background_tasks() -> None:
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
-async def verify_cli_tool_surface() -> str:
+async def verify_cli_tool_surface() -> Path:
     """Raise unless the mounted CLI reaches nothing but the host's MCP
     tools; return the resolved binary path to run the real turn with.
 
@@ -984,7 +1011,7 @@ async def verify_cli_tool_surface() -> str:
     state always reflects this gate's most recent answer rather than a
     value frozen at boot.
     """
-    spec = current_config().mcp_server
+    spec = current_turn_config().mcp_server
     try:
         if spec is None:
             result = await averify_no_builtin_cli_tools()
@@ -1000,12 +1027,12 @@ async def verify_cli_tool_surface() -> str:
     return result
 
 
-async def _verify_mcp_tool_surface(spec: McpServerSpec) -> str:
+async def _verify_mcp_tool_surface(spec: McpServerSpec) -> Path:
     async def probe(deadline: float) -> _AnnouncedSurface:
         config_path = _write_mcp_config(spec, _TOOL_SURFACE_PROBE_USER_ID)
         try:
             return await _probe_cli_surface_async(
-                build.path,
+                Path(build.path),
                 mcp=_AttachedMcpServer(spec, config_path),
                 deadline=deadline,
             )
@@ -1021,13 +1048,13 @@ async def _verify_mcp_tool_surface(spec: McpServerSpec) -> str:
     )
 
 
-async def averify_no_builtin_cli_tools() -> str:
+async def averify_no_builtin_cli_tools() -> Path:
     """Async twin of ``verify_no_builtin_cli_tools`` for ``_acall_cli``."""
     build, key = _tool_surface_key(_NO_TOOLS_EXPECTED)
 
     async def probe(deadline: float) -> _AnnouncedSurface:
         return await _probe_cli_surface_async(
-            build.path,
+            Path(build.path),
             mcp=None,
             deadline=deadline,
         )
@@ -1040,7 +1067,7 @@ async def averify_no_builtin_cli_tools() -> str:
     )
 
 
-def verify_no_builtin_cli_tools() -> str:
+def verify_no_builtin_cli_tools() -> Path:
     """Raise unless the mounted CLI reaches no tool at all under
     ``_TOOL_ISOLATION_FLAGS``; return the resolved binary path to run the
     real turn with. Sync twin for ``_call_cli``, which has no event loop to
@@ -1051,7 +1078,7 @@ def verify_no_builtin_cli_tools() -> str:
 
     def probe(probe_deadline: float) -> _AnnouncedSurface:
         return _probe_cli_surface_sync(
-            build.path,
+            Path(build.path),
             mcp=None,
             deadline=probe_deadline,
         )
@@ -1072,7 +1099,7 @@ async def _verify_tool_surface_async(
     probe: Callable[[float], Awaitable[_AnnouncedSurface]],
     *,
     timeout_seconds: float,
-) -> str:
+) -> Path:
     """Single-flight through a published future, never a held lock.
 
     The dict lock is taken twice, briefly: once to check the cache, once
@@ -1207,7 +1234,7 @@ def _verify_tool_surface_sync(
     build: BinaryBuild,
     key: _ToolSurfaceKey,
     probe: Callable[[float], _AnnouncedSurface],
-) -> str:
+) -> Path:
     """Sync twin of ``_verify_tool_surface_async`` — a
     ``concurrent.futures.Future`` instead of an ``asyncio.Future``, since
     this runs where ``_call_cli`` has no event loop to publish one on."""
@@ -1392,17 +1419,17 @@ def _evaluate_tool_surface(
     return mismatch
 
 
-def _finish_tool_surface_check(build: BinaryBuild, mismatch: _ToolSurfaceMismatch) -> str:
+def _finish_tool_surface_check(build: BinaryBuild, mismatch: _ToolSurfaceMismatch) -> Path:
     if mismatch:
         raise CliToolSurfaceError(
             f"Claude CLI at {build.path} does not match its expected tool "
             f"surface — {mismatch.describe()}",
         )
-    return build.path
+    return Path(build.path)
 
 
-def _binary_build(binary: str) -> BinaryBuild:
-    resolved = Path(binary).resolve()
+def _binary_build(binary: Path) -> BinaryBuild:
+    resolved = binary.resolve()
     try:
         stat = resolved.stat()
     except OSError as exc:
@@ -1410,9 +1437,8 @@ def _binary_build(binary: str) -> BinaryBuild:
     return BinaryBuild(str(resolved), stat.st_mtime_ns, stat.st_size)
 
 
-def _tool_surface_probe_cmd(binary: str, *, mcp: _AttachedMcpServer | None) -> list[str]:
+def _tool_surface_probe_arguments(*, mcp: _AttachedMcpServer | None) -> list[str]:
     cmd = [
-        binary,
         "-p",
         "--output-format",
         "stream-json",
@@ -1434,7 +1460,7 @@ def _tool_surface_probe_cmd(binary: str, *, mcp: _AttachedMcpServer | None) -> l
 
 
 async def _probe_cli_surface_async(
-    binary: str,
+    binary: Path,
     *,
     mcp: _AttachedMcpServer | None,
     deadline: float,
@@ -1475,7 +1501,7 @@ async def _probe_cli_surface_async(
 
 
 def _probe_cli_surface_sync(
-    binary: str,
+    binary: Path,
     *,
     mcp: _AttachedMcpServer | None,
     deadline: float,
@@ -1483,8 +1509,12 @@ def _probe_cli_surface_sync(
     """Run one tool-surface probe through the shared bounded CLI runner."""
     if deadline <= time.monotonic():
         raise UnavailableError("Claude CLI probe preflight budget was already exhausted")
+    home = _claude_private_home()
+    home_reservation = home.reserve()
     reservation = _reserve_zombie_admission()
     if reservation is None:
+        home_reservation.release()
+        home.close()
         raise _ClaudeCliProcessPoolSaturated(_claude_cli_process_pool_limit_message())
 
     released = False
@@ -1495,11 +1525,15 @@ def _probe_cli_surface_sync(
     def on_reaped(_process_id: int, _became_zombie: bool) -> None:
         nonlocal released
         _release_zombie_reservation(reservation)
+        home_reservation.release()
         released = True
+
+    def on_spawn_failed() -> None:
+        on_reaped(0, False)
 
     try:
         outcome = process.run_cli_bounded(
-            _tool_surface_probe_cmd(binary, mcp=mcp),
+            _claude_child_process(binary, _tool_surface_probe_arguments(mcp=mcp), home.path),
             stdin_payload=_TOOL_SURFACE_PROBE_PROMPT.encode(),
             read="first_line",
             deadline=deadline,
@@ -1507,15 +1541,20 @@ def _probe_cli_surface_sync(
             output_read_limit_bytes=CLI_OUTPUT_READ_LIMIT_BYTES,
             cleanup_margin_seconds=_cleanup_margin_seconds(),
             on_spawned=on_spawned,
+            on_spawn_failed=on_spawn_failed,
             on_reaped=on_reaped,
         )
     except BaseException:
         if not released:
             _release_zombie_reservation(reservation)
+            home_reservation.release()
         raise
+    finally:
+        home.close()
     if outcome.reason is process.CliRunReason.SPAWN_FAILED:
         if not released:
             _release_zombie_reservation(reservation)
+            home_reservation.release()
         raise UnavailableError(f"Claude CLI probe failed to run: {outcome.spawn_error}")
     if outcome.reason is process.CliRunReason.DEADLINE_BEFORE_SPAWN:
         raise UnavailableError("Claude CLI probe did not start within its budget")
@@ -1675,9 +1714,11 @@ def _claude_cli_process_pool_limit_message() -> str:
     )
 
 
-def _reserve_zombie_admission() -> _ZombieReservation | None:
+def _reserve_zombie_admission(
+    home_reservation: process._PrivateCredentialHomeReservation | None = None,
+) -> _ZombieReservation | None:
     """Reserve one shared CLI-process slot before spawning."""
-    reservation = _ZombieReservation()
+    reservation = _ZombieReservation(home_reservation=home_reservation)
     with _zombie_registry_lock:
         if len(_zombie_reap_reservations) >= CLAUDE_CLI_MAX_CONCURRENT_PROCESSES:
             log.error(_claude_cli_process_pool_limit_message())
@@ -1700,6 +1741,8 @@ def _release_zombie_reservation(reservation: _ZombieReservation | int | None) ->
     with _zombie_registry_lock:
         if isinstance(reservation, _ZombieReservation):
             _zombie_reap_reservations.discard(reservation)
+            if reservation.home_reservation is not None:
+                reservation.home_reservation.release()
             return
         handle = next(
             (candidate for candidate in _zombie_reap_reservations if candidate.pid == reservation),
@@ -1707,17 +1750,23 @@ def _release_zombie_reservation(reservation: _ZombieReservation | int | None) ->
         )
         if handle is not None:
             _zombie_reap_reservations.discard(handle)
+            if handle.home_reservation is not None:
+                handle.home_reservation.release()
 
 
 async def _spawn_reserved_async_cli_process(
-    *cmd: str,
-    **kwargs: object,
+    child: ChildProcess,
+    *,
+    home_reservation: process._PrivateCredentialHomeReservation | None = None,
+    stream_buffer_limit: int | None = None,
 ) -> asyncio.subprocess.Process:
-    reservation = _reserve_zombie_admission()
+    reservation = _reserve_zombie_admission(home_reservation)
     if reservation is None:
+        if home_reservation is not None:
+            home_reservation.release()
         raise _ClaudeCliProcessPoolSaturated(_claude_cli_process_pool_limit_message())
     try:
-        proc = await asyncio.create_subprocess_exec(*cmd, **kwargs)
+        proc = await open_async_pipes(child, stream_buffer_limit=stream_buffer_limit)
     except BaseException:
         _release_zombie_reservation(reservation)
         raise
@@ -1775,7 +1824,7 @@ def _parse_cli_output(stdout: str) -> str:
         return stdout
 
 
-def _require_claude_binary() -> str:
+def _require_claude_binary() -> Path:
     binary = _find_claude_binary()
     if not binary:
         raise CliBinaryUnavailableError(
@@ -1881,29 +1930,30 @@ def _call_cli(
     having to remember it.
     """
     if model is None:
-        model = current_config().claude_chat_model
+        model = current_turn_config().claude_chat_model
     binary = verify_no_builtin_cli_tools()
     flat_prompt = flatten_messages(prompt, messages)
     stdin_body = stdin_prompt(system, flat_prompt)
-    cmd = _build_cli_cmd(binary, model)
-    env = scrubbed_env()
+    home = _claude_private_home()
+    home_reservation = home.reserve()
+    child = _claude_child_process(binary, _cli_arguments(model), home.path)
 
     reservation = _reserve_zombie_admission()
     if reservation is None:
+        if home_reservation is not None:
+            home_reservation.release()
+        home.close()
         raise _ClaudeCliProcessPoolSaturated(_claude_cli_process_pool_limit_message())
     try:
         try:
-            proc = subprocess.run(
-                cmd,
-                input=stdin_body,
-                capture_output=True,
-                text=True,
-                timeout=(
+            proc = run_capturing(
+                child,
+                stdin_text=stdin_body,
+                timeout_seconds=(
                     _remaining_judge_timeout(deadline)
                     if deadline is not None
                     else CLAUDE_CLI_COMPLETION_TIMEOUT_SECONDS
                 ),
-                env=env,
             )
         except subprocess.TimeoutExpired as exc:
             if deadline is not None:
@@ -1927,6 +1977,8 @@ def _call_cli(
         # subprocess.run() returns only after its child has exited, including
         # after its own timeout cleanup, so this opaque handle is safe to free.
         _release_zombie_reservation(reservation)
+        home_reservation.release()
+        home.close()
 
 
 async def _acall_cli(
@@ -1943,21 +1995,16 @@ async def _acall_cli(
     sits in the call path both share, not in ``chat_api.py`` itself.
     """
     if model is None:
-        model = current_config().claude_chat_model
+        model = current_turn_config().claude_chat_model
     binary = await averify_no_builtin_cli_tools()
     flat_prompt = flatten_messages(prompt, messages)
     stdin_body = stdin_prompt(system, flat_prompt)
-    cmd = _build_cli_cmd(binary, model)
-    env = scrubbed_env()
-
+    home = _claude_private_home()
     try:
+        home_reservation = home.reserve()
         proc = await _spawn_reserved_async_cli_process(
-            *cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-            start_new_session=True,
+            _claude_child_process(binary, _cli_arguments(model), home.path),
+            home_reservation=home_reservation,
         )
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
@@ -1973,6 +2020,8 @@ async def _acall_cli(
             raise
     except FileNotFoundError:
         raise UnavailableError(CLAUDE_CLI_BINARY_NOT_FOUND_DETAIL)
+    finally:
+        home.close()
 
     stdout = stdout_bytes.decode()
     if proc.returncode != 0:
@@ -1991,17 +2040,21 @@ async def _acall_cli(
 # ── Binary discovery ───────────────────────────────────────────────
 
 
-def _find_claude_binary() -> str | None:
+def _find_claude_binary() -> Path | None:
     config = current_config()
-    found = shutil.which(config.claude_cli_binary)
-    if found:
-        log.debug("Found claude binary on PATH: %s", found)
+    found = resolve_cli_binary(config.claude_cli_binary)
+    if found is not None:
+        log.debug("Found claude binary on the configured search path: %s", found)
         return found
 
+    # The mirror image of resolve_cli_binary: a glob may match a relative or
+    # unexecutable path, and a child is only ever started from an absolute
+    # binary this process can run.
     for pattern in config.claude_cli_binary_search_globs:
         for candidate in sorted(glob.glob(pattern), reverse=True):
-            if Path(candidate).is_file():
-                return candidate
+            path = Path(candidate).resolve()
+            if path.is_file() and os.access(path, os.X_OK):
+                return path
 
     return None
 

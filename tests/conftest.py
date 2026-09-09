@@ -16,11 +16,12 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from provider_test_support import MCP_TOOL_NAMES, SECRET_ENV_KEYS, close_fake_cli_pipes
+from provider_test_support import MCP_TOOL_NAMES, close_fake_cli_pipes
 
 from agent_providers.config import (
     McpServerSpec,
     ProviderRuntimeConfig,
+    TurnRuntimeConfig,
     configure,
     reset_config,
 )
@@ -36,30 +37,48 @@ _SAMPLE_MCP_SERVER = McpServerSpec(
     tool_names=MCP_TOOL_NAMES,
 )
 
-_SAMPLE_RUNTIME = ProviderRuntimeConfig(
+_SAMPLE_TURNS = TurnRuntimeConfig(
     claude_chat_model="claude-test-model",
-    claude_cli_binary="claude",
-    grok_cli_binary="grok",
-    codex_cli_binary="codex",
-    grok_cli_auth_file=_SAMPLE_ROOT / "grok" / "auth.json",
-    grok_cli_session_root=_SAMPLE_ROOT / "grok" / "sessions",
-    codex_cli_auth_file=_SAMPLE_ROOT / "codex" / "auth.json",
     codex_code_mode_host_binary=_SAMPLE_ROOT / "codex" / "code-mode-host",
     codex_resources_directory=_SAMPLE_ROOT / "codex" / "resources",
     codex_max_concurrent_processes=4,
     codex_max_concurrent_image_runs=2,
-    cli_working_directory_root=Path(tempfile.gettempdir()),
     cli_prompt_file_prefix="songmaker-cli-prompt-",
     cli_prompt_file_placeholder="<songmaker-private-prompt>",
-    secret_env_keys=SECRET_ENV_KEYS,
     mcp_server=_SAMPLE_MCP_SERVER,
+)
+
+_SAMPLE_RUNTIME = ProviderRuntimeConfig(
+    # An absolute path that exists on every host, so binary resolution is a
+    # real answer in the suite rather than a patched one.
+    claude_cli_binary="/bin/sh",
+    grok_cli_binary="/bin/sh",
+    codex_cli_binary="/bin/sh",
+    cli_binary_search_path=(Path("/usr/local/bin"), Path("/usr/bin"), Path("/bin")),
+    claude_cli_auth_file=_SAMPLE_ROOT / "claude" / "credentials.json",
+    grok_cli_auth_file=_SAMPLE_ROOT / "grok" / "auth.json",
+    codex_cli_auth_file=_SAMPLE_ROOT / "codex" / "auth.json",
+    cli_working_directory_root=Path(tempfile.gettempdir()),
+    turns=_SAMPLE_TURNS,
 )
 
 
 @pytest.fixture(autouse=True)
-def _configure_agent_provider_runtime():
+def _configure_agent_provider_runtime(tmp_path: Path):
     """Install the library's own sample runtime for every test, then drop it."""
-    configure(_SAMPLE_RUNTIME)
+    credentials = tmp_path / "credentials"
+    credentials.mkdir()
+    claude_auth = credentials / "claude.json"
+    grok_auth = credentials / "grok.json"
+    codex_auth = credentials / "codex.json"
+    for auth_file in (claude_auth, grok_auth, codex_auth):
+        auth_file.write_text("{}")
+    configure(_SAMPLE_RUNTIME.model_copy(update={
+        "claude_cli_auth_file": claude_auth,
+        "grok_cli_auth_file": grok_auth,
+        "codex_cli_auth_file": codex_auth,
+        "cli_working_directory_root": tmp_path,
+    }))
     yield
     reset_config()
 

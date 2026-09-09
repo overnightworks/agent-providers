@@ -17,6 +17,8 @@ against values this package owns.
 from __future__ import annotations
 
 import os
+import tempfile
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -26,6 +28,7 @@ from agent_providers.config import (
     current_config,
     reset_config,
 )
+from agent_providers.spawn import ChildProcess, closed_environment
 from agent_providers.tools import ToolCatalog, ToolDeclaration
 
 _fake_cli_processes: list[MagicMock] = []
@@ -87,6 +90,22 @@ def override_provider_runtime(**deployment_facts: Any) -> None:
     )
     reset_config()
     configure(replacement)
+
+
+def shell_child(
+    *arguments: str,
+    home: Path | None = None,
+    working_directory: Path | None = None,
+    **provider_variables: str,
+) -> ChildProcess:
+    """One described child running the system shell, for runner behaviour tests."""
+    root = home or Path(tempfile.gettempdir())
+    return ChildProcess(
+        binary=Path("/bin/sh"),
+        arguments=arguments,
+        environment=closed_environment(root, **provider_variables),
+        working_directory=working_directory or root,
+    )
 
 
 def override_turn_runtime(**turn_facts: Any) -> None:

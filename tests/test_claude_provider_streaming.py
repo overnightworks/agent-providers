@@ -439,10 +439,10 @@ def test_malformed_stream_log_does_not_include_line_content(caplog) -> None:
 
 def test_stream_cmd_uses_stream_json_and_verbose() -> None:
     from agent_providers.claude.provider import _build_mcp_cli_cmd
-    from agent_providers.config import current_config
+    from agent_providers.config import current_turn_config
 
     cmd = _build_mcp_cli_cmd(
-        "claude", "opus", "/tmp/mcp.json", current_config().mcp_server, stream=True,
+        "claude", "opus", "/tmp/mcp.json", current_turn_config().mcp_server, stream=True,
     )
     assert "--output-format" in cmd
     idx = cmd.index("--output-format")
@@ -452,10 +452,10 @@ def test_stream_cmd_uses_stream_json_and_verbose() -> None:
 
 def test_stream_cmd_non_stream_keeps_json() -> None:
     from agent_providers.claude.provider import _build_mcp_cli_cmd
-    from agent_providers.config import current_config
+    from agent_providers.config import current_turn_config
 
     cmd = _build_mcp_cli_cmd(
-        "claude", "opus", "/tmp/mcp.json", current_config().mcp_server,
+        "claude", "opus", "/tmp/mcp.json", current_turn_config().mcp_server,
     )
     idx = cmd.index("--output-format")
     assert cmd[idx + 1] == "json"

@@ -19,6 +19,7 @@ from provider_test_support import (
     SECRET_ENV_KEYS,
     fake_cli_process,
     override_provider_runtime,
+    override_turn_runtime,
 )
 from pydantic import SecretStr
 
@@ -47,7 +48,7 @@ from agent_providers.claude.provider import (
     verify_cli_tool_surface,
     verify_no_builtin_cli_tools,
 )
-from agent_providers.config import McpServerSpec, current_config
+from agent_providers.config import McpServerSpec, current_turn_config
 from agent_providers.constants import (
     CLAUDE_CLI_COMPLETION_TIMEOUT_SECONDS,
     JUDGE_FAILURE_TIMEOUT,
@@ -62,7 +63,7 @@ SONGMAKER_ALLOWED_TOOLS = "mcp__songmaker__*"
 
 def _configured_mcp_server():
     """The MCP server songmaker installs for the provider layer."""
-    return current_config().mcp_server
+    return current_turn_config().mcp_server
 
 
 def _reset_cli_process_pool_for_test() -> None:
@@ -997,7 +998,7 @@ def test_a_deployment_without_an_mcp_server_runs_the_tool_free_command_line(
     """``mcp_server=None`` is a valid configuration: the co-writer turn then
     runs the same command line the judge does — no ``--mcp-config``, no
     ``--allowedTools`` — and writes no config file at all."""
-    override_provider_runtime(mcp_server=None)
+    override_turn_runtime(mcp_server=None)
     monkeypatch.setattr(provider, "verify_cli_tool_surface", AsyncMock(return_value="claude"))
     monkeypatch.setattr(
         provider,
@@ -1020,7 +1021,7 @@ def test_a_deployment_without_an_mcp_server_runs_the_tool_free_command_line(
 def test_a_deployment_without_an_mcp_server_streams_the_tool_free_command_line(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    override_provider_runtime(mcp_server=None)
+    override_turn_runtime(mcp_server=None)
     monkeypatch.setattr(provider, "verify_cli_tool_surface", AsyncMock(return_value="claude"))
     monkeypatch.setattr(
         provider,
@@ -1347,7 +1348,7 @@ def test_tool_surface_gate_expects_no_tool_when_no_mcp_server_is_configured(
     command line, so its gate must hold the CLI to the tool-free
     expectation — and probe without ``--mcp-config``, which the
     scoring-worker container could not answer anyway."""
-    override_provider_runtime(mcp_server=None)
+    override_turn_runtime(mcp_server=None)
     monkeypatch.setattr(provider, "averify_no_builtin_cli_tools", averify_no_builtin_cli_tools)
     commands = _answer_with(monkeypatch, _init_line([]))
 
@@ -1363,7 +1364,7 @@ def test_tool_surface_gate_refuses_any_tool_when_no_mcp_server_is_configured(
     claude_binary,
     monkeypatch,
 ) -> None:
-    override_provider_runtime(mcp_server=None)
+    override_turn_runtime(mcp_server=None)
     monkeypatch.setattr(provider, "averify_no_builtin_cli_tools", averify_no_builtin_cli_tools)
     _answer_with(monkeypatch, _init_line(["Bash"]))
 

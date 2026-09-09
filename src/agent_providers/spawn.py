@@ -39,7 +39,7 @@ SEARCH_PATH_VARIABLE: Final = "PATH"
 # deployment's locale, or reach the network through its proxy and CA store.
 # Naming them is what makes the child environment an allowlist; their values
 # come from the host process because only the host knows them.
-_INHERITED_MACHINE_VARIABLES: Final[tuple[str, ...]] = (
+INHERITED_MACHINE_VARIABLES: Final[tuple[str, ...]] = (
     "LANG",
     "LC_ALL",
     "LC_CTYPE",
@@ -71,7 +71,7 @@ def closed_environment(home: Path, **provider_variables: str) -> dict[str, str]:
     inherited base, because there is none.
     """
     environment = {
-        name: os.environ[name] for name in _INHERITED_MACHINE_VARIABLES if os.environ.get(name)
+        name: os.environ[name] for name in INHERITED_MACHINE_VARIABLES if os.environ.get(name)
     }
     environment[SEARCH_PATH_VARIABLE] = os.environ.get(SEARCH_PATH_VARIABLE) or os.defpath
     environment[HOME_VARIABLE] = str(home)

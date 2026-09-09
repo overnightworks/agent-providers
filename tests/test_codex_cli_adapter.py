@@ -15,6 +15,7 @@ from PIL import Image
 from provider_test_support import (
     COWRITER_TOOL_CATALOG,
     override_provider_runtime,
+    override_turn_runtime,
     use_codex_process_pool,
 )
 
@@ -80,8 +81,8 @@ def test_cover_image_capability_requires_every_codex_mount(
         binary.write_text("#!/bin/sh\n")
         binary.chmod(0o755)
     resources.mkdir()
-    override_provider_runtime(
-        codex_cli_binary=str(cli),
+    override_provider_runtime(codex_cli_binary=str(cli))
+    override_turn_runtime(
         codex_code_mode_host_binary=code_mode_host,
         codex_resources_directory=resources,
     )
@@ -108,8 +109,8 @@ def test_cover_image_capability_requires_the_installed_image_encoder(
         binary.write_text("#!/bin/sh\n")
         binary.chmod(0o755)
     resources.mkdir()
-    override_provider_runtime(
-        codex_cli_binary=str(cli),
+    override_provider_runtime(codex_cli_binary=str(cli))
+    override_turn_runtime(
         codex_code_mode_host_binary=code_mode_host,
         codex_resources_directory=resources,
     )
@@ -123,8 +124,8 @@ def test_a_deployment_without_the_image_encoder_refuses_before_it_spawns(
 ) -> None:
     spawns: list[tuple[str, ...]] = []
 
-    def run_cli_bounded(command, **_kwargs):
-        spawns.append(command)
+    def run_cli_bounded(child, **_kwargs):
+        spawns.append(child.command)
         raise AssertionError("an unencodable turn must not reach the CLI")
 
     monkeypatch.setattr(codex_protocol, "run_cli_bounded", run_cli_bounded)
@@ -165,8 +166,8 @@ def _outcome(
 
 
 def _runner(lines: list[bytes], outcome: CliRunOutcome, calls: list) -> object:
-    def run_cli_bounded(command, **kwargs):
-        calls.append((command, kwargs))
+    def run_cli_bounded(child, **kwargs):
+        calls.append((child.command, kwargs))
         for line in lines:
             if not kwargs["stdout_line_channel"]._send(line):
                 break
@@ -202,8 +203,8 @@ def _image_runner(
     outcome: CliRunOutcome,
     create_artifacts: Callable[[Path], None] | None = None,
 ):
-    def run_cli_bounded(_command, **kwargs):
-        codex_home = Path(kwargs["extra_env"]["CODEX_HOME"])
+    def run_cli_bounded(child, **kwargs):
+        codex_home = Path(child.environment["CODEX_HOME"])
         if create_artifacts is not None:
             create_artifacts(codex_home)
         kwargs["on_spawned"](1)
@@ -255,20 +256,19 @@ def test_codex_tool_command_pins_read_only_isolation_for_start_and_resume() -> N
         "--model", model,
     )
 
-    assert codex_transport._build_codex_tool_command(model) == (
-        "codex", "exec", "--sandbox", "read-only", *common, "-",
+    assert codex_transport._codex_tool_arguments(model) == (
+        "exec", "--sandbox", "read-only", *common, "-",
     )
-    assert codex_transport._build_codex_tool_command(
+    assert codex_transport._codex_tool_arguments(
         model,
         thread_id=thread_id,
-    ) == ("codex", "exec", "resume", *common, thread_id, "-")
+    ) == ("exec", "resume", *common, thread_id, "-")
 
 
 @pytest.mark.acceptance("ACC-COWRITER-12")
 def test_codex_tool_transport_uses_an_empty_private_work_directory_on_resume(monkeypatch) -> None:
     calls: list = []
     prompts: list[bytes] = []
-    scrubbed_calls = 0
     thread_id = "52700000-0000-4000-8000-000000000000"
     rounds = iter([
         [
@@ -283,10 +283,10 @@ def test_codex_tool_transport_uses_an_empty_private_work_directory_on_resume(mon
         ],
     ])
 
-    def run_cli_bounded(command, **kwargs):
-        calls.append((command, kwargs))
-        work_directory = Path(kwargs["cwd"])
-        codex_home = Path(kwargs["extra_env"]["CODEX_HOME"])
+    def run_cli_bounded(child, **kwargs):
+        calls.append((child, kwargs))
+        work_directory = child.working_directory
+        codex_home = Path(child.environment["CODEX_HOME"])
         assert work_directory.name == "work"
         assert work_directory.parent == codex_home.parent
         assert work_directory != codex_home
@@ -301,13 +301,7 @@ def test_codex_tool_transport_uses_an_empty_private_work_directory_on_resume(mon
         kwargs["on_reaped"](len(calls), False)
         return outcome
 
-    def scrubbed_environment() -> dict[str, str]:
-        nonlocal scrubbed_calls
-        scrubbed_calls += 1
-        return {"PATH": "/test/bin"}
-
     monkeypatch.setattr(codex_protocol, "run_cli_bounded", run_cli_bounded)
-    monkeypatch.setattr(codex_transport, "scrubbed_env", scrubbed_environment)
     transport = _transport()
     events = asyncio.run(_collect_tool_events(_codex_tool_events(
         transport,
@@ -316,30 +310,29 @@ def test_codex_tool_transport_uses_an_empty_private_work_directory_on_resume(mon
 
     assert isinstance(events[0], ToolCallEvent)
     assert events[-1] == FinalEvent(text="done")
-    first_command, first_kwargs = calls[0]
-    second_command, second_kwargs = calls[1]
-    assert first_command[:5] == ("codex", "exec", "--sandbox", "read-only", "--json")
-    assert second_command[:3] == ("codex", "exec", "resume")
+    (first_child, first_kwargs), (second_child, second_kwargs) = calls
+    first_command, second_command = first_child.command, second_child.command
+    assert first_command[1:5] == ("exec", "--sandbox", "read-only", "--json")
+    assert second_command[1:3] == ("exec", "resume")
     assert second_command[-2:] == (thread_id, "-")
-    for command, kwargs in calls:
-        assert "--ephemeral" not in command
+    for child, kwargs in calls:
+        assert "--ephemeral" not in child.command
         assert kwargs["stdin_payload"] in prompts
         assert kwargs["output_read_limit_bytes"] == (
             codex_protocol.CODEX_CLI_TURN_OUTPUT_READ_LIMIT_BYTES
         )
         assert kwargs["deadline"] == first_kwargs["deadline"]
-        assert kwargs["extra_env"]["CODEX_HOME"].endswith("/codex-home")
-        assert kwargs["extra_env"]["PATH"] == "/test/bin"
+        assert child.environment["CODEX_HOME"].endswith("/codex-home")
+        assert child.environment["HOME"] == str(child.working_directory.parent)
         for config in (*codex_transport._CODEX_TOOL_ISOLATION_CONFIGS,
                        'sandbox_mode="read-only"'):
-            assert config in command
+            assert config in child.command
     assert prompts == [
         b"system\n\nUser: hello",
         b'<songmaker_tool_result>\n{"songs":[]}\n</songmaker_tool_result>',
     ]
-    assert not Path(first_kwargs["cwd"]).exists()
-    assert first_kwargs["extra_env"] == second_kwargs["extra_env"]
-    assert scrubbed_calls == 2
+    assert not first_child.working_directory.exists()
+    assert first_child.environment == second_child.environment
 
 
 @pytest.mark.parametrize(
@@ -413,7 +406,7 @@ def test_codex_tool_transport_ignores_its_code_mode_host_isolation_notice(
 def test_codex_tool_transport_aborts_for_an_unrelated_completed_error_item(monkeypatch) -> None:
     aborted = threading.Event()
 
-    def run_cli_bounded(_command, **kwargs):
+    def run_cli_bounded(child, **kwargs):
         channel = kwargs["stdout_line_channel"]
         for line in _fixture_lines("codex-tool-unrelated-error.jsonl"):
             assert channel._send(line)
@@ -447,7 +440,7 @@ def test_codex_tool_transport_aborts_native_tools_before_the_loop_executes(
 ) -> None:
     aborted = threading.Event()
 
-    def run_cli_bounded(_command, **kwargs):
+    def run_cli_bounded(child, **kwargs):
         channel = kwargs["stdout_line_channel"]
         assert channel._send(json.dumps({
             "type": "item.started", "item": {"type": item_type},
@@ -494,9 +487,9 @@ def test_codex_tool_transport_cleans_its_home_and_does_not_log_protocol_text(
         "</songmaker_tool_call>"
     )
 
-    def run_cli_bounded(command, **kwargs):
-        calls.append((command, kwargs))
-        home = Path(kwargs["extra_env"]["CODEX_HOME"])
+    def run_cli_bounded(child, **kwargs):
+        calls.append((child, kwargs))
+        home = Path(child.environment["CODEX_HOME"])
         (home / "sessions").mkdir()
         (home / "sessions" / "private.jsonl").write_text(protocol)
         for line in (
@@ -525,7 +518,7 @@ def test_codex_tool_transport_cleans_its_home_and_does_not_log_protocol_text(
         await transport.aclose()
 
     asyncio.run(collect_and_close())
-    assert not Path(calls[0][1]["cwd"]).exists()
+    assert not calls[0][0].working_directory.exists()
     for forbidden in (lyrics, song_id, protocol, "private stderr", "private.jsonl"):
         assert forbidden not in caplog.text
 
@@ -535,7 +528,7 @@ def test_deadline_before_spawn_keeps_the_codex_slot_until_late_reap(monkeypatch)
     use_codex_process_pool(monkeypatch, process_pool)
     callbacks: dict[str, object] = {}
 
-    def fake_runner(_command, **kwargs):
+    def fake_runner(child, **kwargs):
         callbacks.update(kwargs)
         return CliRunOutcome(
             started=False,
@@ -568,8 +561,8 @@ def test_deadline_before_spawn_keeps_the_codex_slot_until_late_reap(monkeypatch)
 
 def _generated_png_runner() -> object:
     """A Codex run that leaves exactly one generated PNG in its private home."""
-    def run_cli_bounded(_command, **kwargs):
-        codex_home = Path(kwargs["extra_env"]["CODEX_HOME"])
+    def run_cli_bounded(child, **kwargs):
+        codex_home = Path(child.environment["CODEX_HOME"])
         artifact = codex_home / "generated_images" / "thread" / "cover.png"
         artifact.parent.mkdir(parents=True)
         artifact.write_bytes(_png_bytes())
@@ -734,8 +727,8 @@ def test_codex_cover_image_rejects_missing_or_ambiguous_generated_artifacts(
     artifact_count: int,
     expected_error: type[Exception],
 ) -> None:
-    def run_cli_bounded(_command, **kwargs):
-        codex_home = Path(kwargs["extra_env"]["CODEX_HOME"])
+    def run_cli_bounded(child, **kwargs):
+        codex_home = Path(child.environment["CODEX_HOME"])
         for index in range(artifact_count):
             artifact = codex_home / "generated_images" / f"cover-{index}.png"
             artifact.parent.mkdir(parents=True, exist_ok=True)

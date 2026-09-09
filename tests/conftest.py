@@ -52,9 +52,11 @@ _SAMPLE_TURNS = TurnRuntimeConfig(
 )
 
 _SAMPLE_RUNTIME = ProviderRuntimeConfig(
-    claude_cli_binary="claude",
-    grok_cli_binary="grok",
-    codex_cli_binary="codex",
+    # An absolute path that exists on every host, so binary resolution is a
+    # real answer in the suite rather than a patched one.
+    claude_cli_binary="/bin/sh",
+    grok_cli_binary="/bin/sh",
+    codex_cli_binary="/bin/sh",
     cli_binary_search_path=(Path("/usr/local/bin"), Path("/usr/bin"), Path("/bin")),
     claude_cli_auth_file=_SAMPLE_ROOT / "claude" / "credentials.json",
     grok_cli_auth_file=_SAMPLE_ROOT / "grok" / "auth.json",

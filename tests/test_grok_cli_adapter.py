@@ -10,9 +10,9 @@ from pathlib import Path
 from urllib.parse import quote
 
 import pytest
-from provider_test_support import COWRITER_TOOL_CATALOG, override_provider_runtime
+from provider_test_support import COWRITER_TOOL_CATALOG, override_turn_runtime
 
-from agent_providers.config import current_config
+from agent_providers.config import current_turn_config
 from agent_providers.errors import ProviderUnavailableError, SafeRouteReasonCode
 from agent_providers.events import AssistantTextEvent, FinalEvent, ToolCallEvent
 from agent_providers.grok import transport as grok_cli_adapter
@@ -52,8 +52,8 @@ def _outcome(*, returncode: int = 0, complete: bool = True, stderr: str = "") ->
 
 
 def _runner(lines, outcome, calls):
-    def run_cli_bounded(command, **kwargs):
-        calls.append((command, kwargs))
+    def run_cli_bounded(child, **kwargs):
+        calls.append((child.command, kwargs))
         for line in lines:
             assert kwargs["stdout_line_channel"]._send(line)
         kwargs["stdout_line_channel"]._close(outcome)
@@ -104,9 +104,8 @@ def test_grok_tool_command_pins_native_tool_and_web_isolation() -> None:
     model = "grok-test"
     session_id = "3e04bf5b-4e1c-4f26-8e1e-2f17c5f6d9cf"
     common = (
-        "grok",
         "--prompt-file",
-        current_config().cli_prompt_file_placeholder,
+        current_turn_config().cli_prompt_file_placeholder,
         "--output-format",
         "streaming-json",
         "--deny",
@@ -119,8 +118,8 @@ def test_grok_tool_command_pins_native_tool_and_web_isolation() -> None:
         model,
     )
 
-    assert grok_cli_adapter._build_grok_cli_tool_command(model) == common
-    assert grok_cli_adapter._build_grok_cli_tool_command(model, session_id) == (
+    assert grok_cli_adapter._grok_cli_tool_arguments(model) == common
+    assert grok_cli_adapter._grok_cli_tool_arguments(model, session_id) == (
         *common,
         "--resume",
         session_id,
@@ -131,8 +130,8 @@ def test_grok_tool_transport_starts_then_resumes_with_prompt_files_only(monkeypa
     calls = []
     rounds = iter([_tool_round_lines(_tool_call_text()), _tool_round_lines("done")])
 
-    def run_cli_bounded(command, **kwargs):
-        calls.append((command, kwargs))
+    def run_cli_bounded(child, **kwargs):
+        calls.append((child, kwargs))
         for line in next(rounds):
             assert kwargs["stdout_line_channel"]._send(line)
         outcome = _outcome()
@@ -150,28 +149,26 @@ def test_grok_tool_transport_starts_then_resumes_with_prompt_files_only(monkeypa
 
     assert isinstance(events[0], ToolCallEvent)
     assert events[-1] == FinalEvent(text="done")
-    first_command, first_kwargs = calls[0]
-    second_command, second_kwargs = calls[1]
+    (first_child, first_kwargs), (second_child, second_kwargs) = calls
+    first_command, second_command = first_child.command, second_child.command
     assert "--session-id" not in first_command
     assert "--resume" not in first_command
     assert second_command[-2:] == ("--resume", _SESSION_ID)
-    for command, kwargs in calls:
-        assert command.count("--deny") == 1
-        assert command[command.index("--deny") + 1] == "*"
+    for child, kwargs in calls:
+        assert child.command.count("--deny") == 1
+        assert child.command[child.command.index("--deny") + 1] == "*"
         assert kwargs["stdin_payload"] is None
-        assert kwargs["prompt_file_arg_index"] == 2
+        assert kwargs["prompt_file_arg_index"] == 1
         assert kwargs["output_read_limit_bytes"] == (
             grok_cli_adapter.GROK_CLI_TURN_OUTPUT_READ_LIMIT_BYTES
         )
-        assert "GROK_HOME" not in kwargs["extra_env"]
-        assert kwargs["unset_env"] == ("GROK_HOME",)
     assert first_kwargs["prompt_file_bytes"] == b"system\n\nUser: hello"
     assert second_kwargs["prompt_file_bytes"] == (
         b'<songmaker_tool_result>\n{"songs":[]}\n</songmaker_tool_result>'
     )
     assert first_kwargs["deadline"] == second_kwargs["deadline"]
-    assert not Path(first_kwargs["cwd"]).exists()
-
+    assert "GROK_HOME" not in first_child.environment
+    assert not first_child.working_directory.exists()
 
 def test_recorded_grok_tool_stream_executes_then_resumes_without_streaming_protocol(
     monkeypatch,
@@ -182,8 +179,8 @@ def test_recorded_grok_tool_stream_executes_then_resumes_without_streaming_proto
         _tool_round_lines("The fictional song is 68 BPM.", "01a06e35-a690-72b1-889d-804843d68226"),
     ])
 
-    def run_cli_bounded(command, **kwargs):
-        calls.append((command, kwargs))
+    def run_cli_bounded(child, **kwargs):
+        calls.append((child.command, kwargs))
         for line in next(rounds):
             assert kwargs["stdout_line_channel"]._send(line)
         outcome = _outcome()
@@ -221,8 +218,8 @@ def test_grok_tool_stream_executes_a_write_after_prose_and_exposes_its_result_ne
         "</songmaker_tool_call>"
     )
 
-    def run_cli_bounded(command, **kwargs):
-        calls.append((command, kwargs))
+    def run_cli_bounded(child, **kwargs):
+        calls.append((child.command, kwargs))
         lines = (
             _tool_round_lines(tool_call)
             if len(calls) == 1
@@ -462,8 +459,8 @@ def test_grok_tool_transport_rejects_a_changed_resume_session_id(monkeypatch) ->
         _tool_round_lines("second", changed_session_id),
     ])
 
-    def run_cli_bounded(command, **kwargs):
-        calls.append((command, kwargs))
+    def run_cli_bounded(child, **kwargs):
+        calls.append((child.command, kwargs))
         for line in next(rounds):
             assert kwargs["stdout_line_channel"]._send(line)
         outcome = _outcome()
@@ -495,7 +492,7 @@ def test_grok_tool_transport_aborts_native_calls_before_the_loop_executes(
 ) -> None:
     aborted = threading.Event()
 
-    def run_cli_bounded(_command, **kwargs):
+    def run_cli_bounded(_child, **kwargs):
         channel = kwargs["stdout_line_channel"]
         assert channel._send(json.dumps({"type": event_type}).encode() + b"\n")
         while not channel.abort_requested():
@@ -529,7 +526,7 @@ def test_closing_the_tool_loop_aborts_and_reaps_the_grok_runner(monkeypatch) -> 
     started = threading.Event()
     aborted = threading.Event()
 
-    def run_cli_bounded(_command, **kwargs):
+    def run_cli_bounded(_child, **kwargs):
         channel = kwargs["stdout_line_channel"]
         assert channel._send(b'{"type":"text","data":"partial"}\n')
         assert started.wait(timeout=1)
@@ -558,7 +555,7 @@ def test_grok_tool_transport_removes_its_private_session_tree_and_redacts_logs(
     monkeypatch, tmp_path, caplog,
 ) -> None:
     session_root = tmp_path / ".grok" / "sessions"
-    override_provider_runtime(grok_cli_session_root=session_root)
+    override_turn_runtime(grok_cli_session_root=session_root)
     calls = []
     lyrics = "private lyrics"
     song_id = "song-private"
@@ -570,9 +567,9 @@ def test_grok_tool_transport_removes_its_private_session_tree_and_redacts_logs(
         "</songmaker_tool_call>"
     )
 
-    def run_cli_bounded(command, **kwargs):
-        calls.append((command, kwargs))
-        session_tree = session_root / quote(kwargs["cwd"], safe="") / _SESSION_ID
+    def run_cli_bounded(child, **kwargs):
+        calls.append((child, kwargs))
+        session_tree = session_root / quote(str(child.working_directory), safe="") / _SESSION_ID
         session_tree.mkdir(parents=True)
         (session_tree / "prompt_history.jsonl").write_text(f"{lyrics} {song_id}")
         for line in _tool_round_lines(tool_call):
@@ -593,8 +590,8 @@ def test_grok_tool_transport_removes_its_private_session_tree_and_redacts_logs(
         await transport.aclose()
 
     asyncio.run(collect_and_close())
-    cwd = calls[0][1]["cwd"]
-    assert not (session_root / quote(cwd, safe="")).exists()
+    working_directory = str(calls[0][0].working_directory)
+    assert not (session_root / quote(working_directory, safe="")).exists()
     for forbidden in (lyrics, song_id, call_json, stderr_document, "prompt_history"):
         assert forbidden not in caplog.text
 

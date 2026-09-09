@@ -29,11 +29,11 @@ from agent_providers.claude.provider import (
     CliToolSurfaceError,
     UnavailableError,
     _acall_cli,
-    _build_cli_cmd,
-    _build_mcp_cli_cmd,
     _call_api,
     _call_cli,
+    _cli_arguments,
     _find_claude_binary,
+    _mcp_cli_arguments,
     acall_claude,
     acall_claude_with_mcp_stream,
     averify_no_builtin_cli_tools,
@@ -180,7 +180,7 @@ def test_is_available_with_api_key() -> None:
 def test_is_available_with_cli_binary() -> None:
     with patch(
         "agent_providers.claude.provider._find_claude_binary",
-        return_value="/usr/bin/claude",
+        return_value=Path("/usr/bin/claude"),
     ):
         assert is_available(api_key=None) is True
 
@@ -198,7 +198,7 @@ def test_cli_login_status_delegates_to_the_shared_runner() -> None:
     with (
         patch(
             "agent_providers.claude.provider._find_claude_binary",
-            return_value="/mounted/claude",
+            return_value=Path("/mounted/claude"),
         ),
         patch(
             "agent_providers.claude.provider.claude_cli_login",
@@ -208,7 +208,7 @@ def test_cli_login_status_delegates_to_the_shared_runner() -> None:
         status = cli_login_status()
 
     assert status is runner_status
-    login.assert_called_once_with("/mounted/claude")
+    login.assert_called_once_with(Path("/mounted/claude"))
 
 
 def test_cli_login_status_without_a_binary_delegates_the_unavailable_probe() -> None:
@@ -264,7 +264,7 @@ def test_list_cli_model_aliases_parses_available_line() -> None:
     with (
         patch(
             "agent_providers.claude.provider._find_claude_binary",
-            return_value="/usr/bin/claude",
+            return_value=Path("/usr/bin/claude"),
         ),
         patch(
             "agent_providers.claude.provider.run_claude_catalog_cli",
@@ -291,7 +291,7 @@ def test_list_cli_model_aliases_unexpected_output_raises_named_error() -> None:
     with (
         patch(
             "agent_providers.claude.provider._find_claude_binary",
-            return_value="/usr/bin/claude",
+            return_value=Path("/usr/bin/claude"),
         ),
         patch(
             "agent_providers.claude.provider.run_claude_catalog_cli",
@@ -312,7 +312,7 @@ def test_list_cli_model_aliases_timeout_raises_named_error() -> None:
     with (
         patch(
             "agent_providers.claude.provider._find_claude_binary",
-            return_value="/usr/bin/claude",
+            return_value=Path("/usr/bin/claude"),
         ),
         patch(
             "agent_providers.claude.provider.run_claude_catalog_cli",
@@ -327,7 +327,7 @@ def test_list_cli_model_aliases_spawn_failure_raises_named_error() -> None:
     with (
         patch(
             "agent_providers.claude.provider._find_claude_binary",
-            return_value="/usr/bin/claude",
+            return_value=Path("/usr/bin/claude"),
         ),
         patch(
             "agent_providers.claude.provider.run_claude_catalog_cli",
@@ -342,7 +342,7 @@ def test_list_cli_model_aliases_nonzero_exit_raises_named_error() -> None:
     with (
         patch(
             "agent_providers.claude.provider._find_claude_binary",
-            return_value="/usr/bin/claude",
+            return_value=Path("/usr/bin/claude"),
         ),
         patch(
             "agent_providers.claude.provider.run_claude_catalog_cli",
@@ -367,7 +367,7 @@ def test_list_cli_model_aliases_runs_the_closed_catalog_spawn(
     monkeypatch.setenv("CATALOG_ENV_LEAK", "should-not-appear")
     with patch(
         "agent_providers.claude.provider._find_claude_binary",
-        return_value=str(fake),
+        return_value=fake,
     ):
         aliases = list_cli_model_aliases()
 
@@ -492,7 +492,7 @@ def test_nonjudge_api_timeout_keeps_the_provider_exception() -> None:
 def test_judge_cli_gives_the_provider_request_the_remaining_budget(
     incrementing_monotonic_clock,
 ) -> None:
-    gate = MagicMock(return_value="/usr/bin/claude")
+    gate = MagicMock(return_value=Path("/usr/bin/claude"))
     completed = MagicMock(returncode=0, stdout='{"result": "judge verdict"}', stderr="")
 
     incrementing_monotonic_clock.step = 2.5
@@ -531,12 +531,12 @@ def _no_tool_gate_open(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
         provider,
         "verify_no_builtin_cli_tools",
-        lambda *, deadline=None: "/usr/bin/claude",
+        lambda *, deadline=None: Path("/usr/bin/claude"),
     )
     monkeypatch.setattr(
         provider,
         "averify_no_builtin_cli_tools",
-        AsyncMock(return_value="/usr/bin/claude"),
+        AsyncMock(return_value=Path("/usr/bin/claude")),
     )
 
 
@@ -650,7 +650,9 @@ def test_acall_cli_surfaces_a_missing_or_failed_binary(
     monkeypatch: pytest.MonkeyPatch,
     failure: str,
 ) -> None:
-    monkeypatch.setattr(provider, "averify_no_builtin_cli_tools", AsyncMock(return_value="claude"))
+    monkeypatch.setattr(
+        provider, "averify_no_builtin_cli_tools", AsyncMock(return_value=Path("/usr/bin/claude")),
+    )
     if failure == "missing":
         spawn = AsyncMock(side_effect=FileNotFoundError())
     else:
@@ -669,7 +671,9 @@ def test_cowriter_cli_surfaces_a_missing_or_failed_binary(
     monkeypatch: pytest.MonkeyPatch,
     failure: str,
 ) -> None:
-    monkeypatch.setattr(provider, "verify_cli_tool_surface", AsyncMock(return_value="claude"))
+    monkeypatch.setattr(
+        provider, "verify_cli_tool_surface", AsyncMock(return_value=Path("/usr/bin/claude")),
+    )
     monkeypatch.setattr(provider, "_write_mcp_config", lambda _spec, _user_id: "unused")
     monkeypatch.setattr(provider, "_unlink_quiet", lambda _path: None)
     if failure == "missing":
@@ -777,7 +781,9 @@ def test_healthy_cowriter_turn_holds_its_process_pool_reservation_until_it_exits
         return b'{"result":"ok"}', b""
 
     proc.communicate = AsyncMock(side_effect=communicate)
-    monkeypatch.setattr(provider, "verify_cli_tool_surface", AsyncMock(return_value="claude"))
+    monkeypatch.setattr(
+        provider, "verify_cli_tool_surface", AsyncMock(return_value=Path("/usr/bin/claude")),
+    )
     monkeypatch.setattr(provider, "_write_mcp_config", lambda _spec, _user_id: "unused")
     monkeypatch.setattr(provider, "_unlink_quiet", lambda _path: None)
     monkeypatch.setattr(
@@ -804,7 +810,9 @@ def test_cowriter_refuses_a_healthy_turn_when_the_shared_process_pool_is_full(
 ) -> None:
     process_cap = 2
     monkeypatch.setattr(provider, "CLAUDE_CLI_MAX_CONCURRENT_PROCESSES", process_cap)
-    monkeypatch.setattr(provider, "verify_cli_tool_surface", AsyncMock(return_value="claude"))
+    monkeypatch.setattr(
+        provider, "verify_cli_tool_surface", AsyncMock(return_value=Path("/usr/bin/claude")),
+    )
     monkeypatch.setattr(provider, "_write_mcp_config", lambda _spec, _user_id: "unused")
     monkeypatch.setattr(provider, "_unlink_quiet", lambda _path: None)
     release = asyncio.Event()
@@ -861,9 +869,12 @@ def test_cowriter_refuses_a_healthy_turn_when_the_shared_process_pool_is_full(
 # ── _find_claude_binary ─────────────────────────────────────────────
 
 
-def test_find_binary_on_path() -> None:
-    with patch("shutil.which", return_value="/usr/bin/claude"):
-        assert _find_claude_binary() == "/usr/bin/claude"
+def test_find_binary_on_the_configured_search_path() -> None:
+    with patch(
+        "agent_providers.claude.provider.resolve_cli_binary",
+        return_value=Path("/usr/bin/claude"),
+    ):
+        assert _find_claude_binary() == Path("/usr/bin/claude")
 
 
 def _install_vscode_style_binary(root: Path, version: str) -> Path:
@@ -884,14 +895,14 @@ def test_find_binary_takes_the_newest_match_from_a_configured_search_location(
         ),
     )
 
-    with patch("shutil.which", return_value=None):
-        assert _find_claude_binary() == str(newest)
+    with patch("agent_providers.claude.provider.resolve_cli_binary", return_value=None):
+        assert _find_claude_binary() == newest
 
 
 def test_find_binary_not_found() -> None:
     override_provider_runtime(claude_cli_binary_search_globs=())
 
-    with patch("shutil.which", return_value=None):
+    with patch("agent_providers.claude.provider.resolve_cli_binary", return_value=None):
         assert _find_claude_binary() is None
 
 
@@ -923,7 +934,7 @@ def _flag_value(cmd: list[str], flag: str) -> str:
 
 
 def test_cowriter_command_offers_no_builtin_tool() -> None:
-    cmd = _build_mcp_cli_cmd("claude", "opus", "/tmp/mcp.json", _configured_mcp_server())
+    cmd = _mcp_cli_arguments("opus", "/tmp/mcp.json", _configured_mcp_server())
 
     assert _flag_value(cmd, "--tools") == ""
     assert _flag_value(cmd, "--allowedTools") == SONGMAKER_ALLOWED_TOOLS
@@ -932,20 +943,20 @@ def test_cowriter_command_offers_no_builtin_tool() -> None:
 
 
 def test_cowriter_command_ignores_the_mounted_settings_file() -> None:
-    cmd = _build_mcp_cli_cmd("claude", "opus", "/tmp/mcp.json", _configured_mcp_server())
+    cmd = _mcp_cli_arguments("opus", "/tmp/mcp.json", _configured_mcp_server())
 
     assert _flag_value(cmd, "--setting-sources") == ""
     assert "--strict-mcp-config" in cmd
 
 
 def test_cowriter_command_disables_slash_commands() -> None:
-    cmd = _build_mcp_cli_cmd("claude", "opus", "/tmp/mcp.json", _configured_mcp_server())
+    cmd = _mcp_cli_arguments("opus", "/tmp/mcp.json", _configured_mcp_server())
 
     assert "--disable-slash-commands" in cmd
 
 
 def test_tool_free_command_offers_no_tool_at_all() -> None:
-    cmd = _build_cli_cmd("claude", "opus")
+    cmd = _cli_arguments("opus")
 
     assert _flag_value(cmd, "--tools") == ""
     assert "--allowedTools" not in cmd
@@ -999,7 +1010,9 @@ def test_a_deployment_without_an_mcp_server_runs_the_tool_free_command_line(
     runs the same command line the judge does — no ``--mcp-config``, no
     ``--allowedTools`` — and writes no config file at all."""
     override_turn_runtime(mcp_server=None)
-    monkeypatch.setattr(provider, "verify_cli_tool_surface", AsyncMock(return_value="claude"))
+    monkeypatch.setattr(
+        provider, "verify_cli_tool_surface", AsyncMock(return_value=Path("/usr/bin/claude")),
+    )
     monkeypatch.setattr(
         provider,
         "_write_mcp_config",
@@ -1013,16 +1026,18 @@ def test_a_deployment_without_an_mcp_server_runs_the_tool_free_command_line(
     response = asyncio.run(provider.acall_claude_with_mcp("hi", user_id="u-1", model="opus"))
 
     assert response.text == "ok"
-    assert list(spawn.await_args.args) == _build_cli_cmd("claude", "opus")
-    assert "--mcp-config" not in spawn.await_args.args
-    assert "--allowedTools" not in spawn.await_args.args
+    assert list(spawn.await_args.args[0].arguments) == _cli_arguments("opus")
+    assert "--mcp-config" not in spawn.await_args.args[0].arguments
+    assert "--allowedTools" not in spawn.await_args.args[0].arguments
 
 
 def test_a_deployment_without_an_mcp_server_streams_the_tool_free_command_line(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     override_turn_runtime(mcp_server=None)
-    monkeypatch.setattr(provider, "verify_cli_tool_surface", AsyncMock(return_value="claude"))
+    monkeypatch.setattr(
+        provider, "verify_cli_tool_surface", AsyncMock(return_value=Path("/usr/bin/claude")),
+    )
     monkeypatch.setattr(
         provider,
         "_write_mcp_config",
@@ -1046,9 +1061,9 @@ def test_a_deployment_without_an_mcp_server_streams_the_tool_free_command_line(
         ]
 
     assert [event.text for event in asyncio.run(collect())] == ["done"]
-    assert list(spawn.await_args.args) == _build_cli_cmd("claude", "opus", stream=True)
-    assert "--mcp-config" not in spawn.await_args.args
-    assert "--allowedTools" not in spawn.await_args.args
+    assert list(spawn.await_args.args[0].arguments) == _cli_arguments("opus", stream=True)
+    assert "--mcp-config" not in spawn.await_args.args[0].arguments
+    assert "--allowedTools" not in spawn.await_args.args[0].arguments
 
 
 # ── tool-surface verification ───────────────────────────────────────
@@ -1093,7 +1108,7 @@ def claude_binary(tmp_path: Path):
     binary.write_bytes(b"cli-build-one")
     with patch(
         "agent_providers.claude.provider._require_claude_binary",
-        return_value=str(binary),
+        return_value=binary,
     ):
         yield binary
 
@@ -1122,7 +1137,7 @@ def test_tool_surface_accepts_a_cli_offering_exactly_the_configured_mcp_tools(
 
     binary = asyncio.run(verify_cli_tool_surface())
 
-    assert binary == str(claude_binary)
+    assert binary == claude_binary
 
 
 def test_tool_surface_rejects_a_cli_offering_an_unlisted_tool(
@@ -1196,7 +1211,7 @@ def _mounted_build(tmp_path, monkeypatch) -> Path:
     build.write_bytes(b"cli-build-one")
     mounted = tmp_path / "claude"
     mounted.symlink_to(build)
-    monkeypatch.setattr(provider, "_find_claude_binary", lambda: str(mounted))
+    monkeypatch.setattr(provider, "_find_claude_binary", lambda: mounted)
     return build
 
 
@@ -1354,7 +1369,7 @@ def test_tool_surface_gate_expects_no_tool_when_no_mcp_server_is_configured(
 
     binary = asyncio.run(verify_cli_tool_surface())
 
-    assert binary == str(claude_binary)
+    assert binary == claude_binary
     assert "--mcp-config" not in commands[0]
     assert "--allowedTools" not in commands[0]
     assert provider.claude_cli_tool_surface_health() == "ok"
@@ -1667,7 +1682,7 @@ def test_tool_surface_single_flight_shares_one_successful_probe(
     first, second = asyncio.run(asyncio.wait_for(_race(), timeout=5))
 
     assert calls == 1
-    assert first == second == str(claude_binary)
+    assert first == second == claude_binary
 
 
 def test_tool_surface_single_flight_waits_for_the_real_result_not_a_placeholder(
@@ -1889,7 +1904,7 @@ def test_tool_surface_treats_a_failed_mcp_connection_as_a_failure_not_a_permanen
     clock["now"] += provider.CLAUDE_CLI_TOOL_SURFACE_FAILURE_CACHE_SECONDS + 1
     binary = _run_with_clock(verify_cli_tool_surface(), clock)
 
-    assert binary == str(claude_binary)
+    assert binary == claude_binary
     assert len(commands) == 2
 
 
@@ -2079,7 +2094,7 @@ def test_tool_surface_is_reprobed_after_a_genuine_symlink_retarget(
 
     with patch(
         "agent_providers.claude.provider._require_claude_binary",
-        return_value=str(symlink),
+        return_value=symlink,
     ):
         commands = _answer_with(
             monkeypatch,
@@ -2372,7 +2387,7 @@ def test_tool_surface_a_cancelled_leader_does_not_reopen_single_flight(
     result = asyncio.run(asyncio.wait_for(_race(), timeout=5))
 
     assert calls == 1
-    assert result == str(claude_binary)
+    assert result == claude_binary
 
 
 def test_tool_surface_inflight_future_is_resolved_even_when_evaluation_itself_raises(
@@ -2463,7 +2478,7 @@ def test_tool_surface_probe_deadline_includes_the_default_executor_queue(
         await work_started
         deadline = loop.time() + 0.05
         try:
-            binary = str(claude_binary)
+            binary = claude_binary
             probe = provider._probe_cli_surface_async(
                 binary,
                 mcp=None,
@@ -2493,7 +2508,7 @@ def test_delayed_probe_start_is_a_probe_failure_not_a_judge_timeout(
         lambda *_args, **_kwargs: spawned.append(1),
     )
 
-    binary = str(claude_binary)
+    binary = claude_binary
     with pytest.raises(UnavailableError) as exc:
         provider._probe_cli_surface_sync(binary, mcp=None, deadline=100.0)
 
@@ -2656,7 +2671,7 @@ def test_async_probe_returns_a_zombie_after_cleanup_crosses_its_answer_deadline(
         loop = asyncio.get_running_loop()
         probe = asyncio.create_task(
             provider._probe_cli_surface_async(
-                str(claude_binary),
+                claude_binary,
                 mcp=None,
                 deadline=loop.time() + 0.02,
             )
@@ -2920,7 +2935,7 @@ def test_probe_runner_start_failure_releases_its_unbound_reservation(monkeypatch
 
     deadline = time.monotonic() + 1
     with pytest.raises(RuntimeError, match="thread start failed"):
-        provider._probe_cli_surface_sync("claude", mcp=None, deadline=deadline)
+        provider._probe_cli_surface_sync(Path("/usr/bin/claude"), mcp=None, deadline=deadline)
 
     reservation = provider._reserve_zombie_admission()
     assert reservation is not None
@@ -3035,7 +3050,9 @@ def test_public_claude_stream_skips_malformed_cli_output(monkeypatch, caplog) ->
     async def spawn(*_command, **_kwargs):
         return process
 
-    monkeypatch.setattr(provider, "verify_cli_tool_surface", AsyncMock(return_value="claude"))
+    monkeypatch.setattr(
+        provider, "verify_cli_tool_surface", AsyncMock(return_value=Path("/usr/bin/claude")),
+    )
     monkeypatch.setattr(provider, "_spawn_reserved_async_cli_process", spawn)
     monkeypatch.setattr(provider, "_write_mcp_config", lambda _spec, _user_id: "unused")
     monkeypatch.setattr(provider, "_unlink_quiet", lambda _path: None)
@@ -3060,7 +3077,9 @@ def test_public_claude_stream_names_a_nonzero_cli_exit(monkeypatch) -> None:
     async def spawn(*_command, **_kwargs):
         return process
 
-    monkeypatch.setattr(provider, "verify_cli_tool_surface", AsyncMock(return_value="claude"))
+    monkeypatch.setattr(
+        provider, "verify_cli_tool_surface", AsyncMock(return_value=Path("/usr/bin/claude")),
+    )
     monkeypatch.setattr(provider, "_spawn_reserved_async_cli_process", spawn)
     monkeypatch.setattr(provider, "_write_mcp_config", lambda _spec, _user_id: "unused")
     monkeypatch.setattr(provider, "_unlink_quiet", lambda _path: None)
@@ -3075,7 +3094,9 @@ def test_public_claude_stream_names_a_missing_binary(monkeypatch) -> None:
     async def spawn(*_command, **_kwargs):
         raise FileNotFoundError()
 
-    monkeypatch.setattr(provider, "verify_cli_tool_surface", AsyncMock(return_value="claude"))
+    monkeypatch.setattr(
+        provider, "verify_cli_tool_surface", AsyncMock(return_value=Path("/usr/bin/claude")),
+    )
     monkeypatch.setattr(provider, "_spawn_reserved_async_cli_process", spawn)
     monkeypatch.setattr(provider, "_write_mcp_config", lambda _spec, _user_id: "unused")
     monkeypatch.setattr(provider, "_unlink_quiet", lambda _path: None)
@@ -3092,7 +3113,9 @@ def test_stream_reap_completes_before_a_cancelled_closer_returns(monkeypatch) ->
     The reaper itself has awaits for SIGTERM/SIGKILL grace and process wait,
     so cancelling the closer must not cancel that work halfway through.
     """
-    monkeypatch.setattr(provider, "verify_cli_tool_surface", AsyncMock(return_value="claude"))
+    monkeypatch.setattr(
+        provider, "verify_cli_tool_surface", AsyncMock(return_value=Path("/usr/bin/claude")),
+    )
     monkeypatch.setattr(provider, "_write_mcp_config", lambda _spec, _user_id: "unused")
     monkeypatch.setattr(provider, "_unlink_quiet", lambda _path: None)
 
@@ -3271,7 +3294,7 @@ def test_no_builtin_gate_accepts_a_cli_offering_nothing(
 
     binary = asyncio.run(averify_no_builtin_cli_tools())
 
-    assert binary == str(claude_binary)
+    assert binary == claude_binary
     assert "--mcp-config" not in commands[0]
     assert "--allowedTools" not in commands[0]
 
@@ -3327,7 +3350,7 @@ def test_no_builtin_gate_sync_twin_accepts_a_cli_offering_nothing(
 
     binary = verify_no_builtin_cli_tools()
 
-    assert binary == str(claude_binary)
+    assert binary == claude_binary
 
 
 def test_no_builtin_gate_sync_twin_rejects_a_cli_offering_any_tool(

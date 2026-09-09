@@ -1,0 +1,8 @@
+claim_id = "a5bdf6fe7ba0495bac2e8d536c1a0e7d"
+agent = "Claude Fable 5.1 (head)"
+role = "builder"
+base = "66b4e42873626e2279160900e7c89927f4f56d59"
+branch = "claude/issue-10-closed-env"
+scope = ["src/agent_providers/process.py", "src/agent_providers/config.py", "tests"]
+opened_commit = "3386ea23be7e38685ae07b2166708fa0f9878904"
+whole_reason = "die Prozessgrenze, die Konfiguration die sie beschreibt, und die Tests daneben"

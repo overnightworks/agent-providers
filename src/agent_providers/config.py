@@ -64,6 +64,13 @@ class ProviderRuntimeConfig(BaseModel):
     for a command line is written to, and ``cli_prompt_file_placeholder`` is
     the argument a transport writes in that file's place until it exists.
     All three carry the host's name, so the host states them.
+
+    ``grok_cli_auth_file`` and ``codex_cli_auth_file`` are the credential
+    files the catalog path copies into a private child home. The catalog
+    child does not inherit the host environment: it receives only ``HOME``,
+    ``GROK_HOME`` or ``CODEX_HOME``, and ``PATH``. Turn spawns still inherit
+    the scrubbed host environment, because Claude's tool-surface probe and
+    Codex image turns still need that broader surface.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")

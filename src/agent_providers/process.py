@@ -14,9 +14,11 @@ import tempfile
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Collection, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any, Final, Literal, NotRequired, Required, Sequence, TypedDict, Unpack
 
 from agent_providers.config import current_config
@@ -180,6 +182,13 @@ log = logging.getLogger(__name__)
 
 GROK_CLI_CREDENTIALS_INVALID_DETAIL: Final = "could not parse Grok CLI credentials"
 CODEX_CLI_CREDENTIALS_INVALID_DETAIL: Final = "could not parse Codex CLI credentials"
+_CATALOG_HOME_PREFIX: Final = "agent-cli-catalog-"
+_CATALOG_AUTH_FILE_NAME: Final = "auth.json"
+_CATALOG_CREDENTIAL_READ_LIMIT_BYTES: Final = 256 * 1024
+_CATALOG_HOME_VARIABLE: Final = "HOME"
+_CATALOG_SEARCH_PATH_VARIABLE: Final = "PATH"
+_GROK_CREDENTIAL_HOME_VARIABLE: Final = "GROK_HOME"
+_CODEX_CREDENTIAL_HOME_VARIABLE: Final = "CODEX_HOME"
 
 
 def scrubbed_env() -> dict[str, str]:
@@ -284,7 +293,11 @@ class CachedProbe[T]:
 
 
 def run_cli(binary: str, args: tuple[str, ...]) -> CliRun | None:
-    """Run one CLI with one answer budget and separate bounded cleanup."""
+    """Run one CLI with one answer budget and separate bounded cleanup.
+
+    The child inherits the scrubbed host environment. Catalog probes that
+    must not see the operator home use :func:`run_catalog_cli` instead.
+    """
     deadline = time.monotonic() + COWRITER_MODELS_TIMEOUT_SECONDS
     outcome = run_cli_bounded(
         (binary, *args),
@@ -293,6 +306,49 @@ def run_cli(binary: str, args: tuple[str, ...]) -> CliRun | None:
         deadline=deadline,
         output_read_limit_bytes=CLI_OUTPUT_READ_LIMIT_BYTES,
     )
+    return _cli_run_from_outcome(outcome)
+
+
+def run_catalog_cli(
+    binary: str,
+    args: tuple[str, ...],
+    *,
+    credential_home_variable: str,
+    auth_file: Path,
+    stderr: Literal["capture", "devnull"] = "capture",
+    output_read_limit_bytes: int | None = None,
+) -> CliRun | None:
+    """Run one catalog probe in a closed child environment.
+
+    The child receives only ``HOME``, the named credential-home variable, and
+    ``PATH``. ``HOME`` is a private directory holding a 0400 copy of the
+    host-named credential file, so a token refresh cannot write the original
+    store. Turn spawns keep :func:`run_cli` and the scrubbed inherited
+    environment: a closed default there would drop the host ``HOME`` Claude's
+    tool-surface probe still needs, and Codex image turns pass only
+    ``CODEX_HOME``.
+    """
+    limit = (
+        CLI_OUTPUT_READ_LIMIT_BYTES
+        if output_read_limit_bytes is None
+        else output_read_limit_bytes
+    )
+    deadline = time.monotonic() + COWRITER_MODELS_TIMEOUT_SECONDS
+    with _catalog_credential_home(auth_file) as home:
+        outcome = run_cli_bounded(
+            (binary, *args),
+            stdin_payload=None,
+            read="all",
+            deadline=deadline,
+            stderr=stderr,
+            output_read_limit_bytes=limit,
+            closed_env=_closed_catalog_env(home, credential_home_variable),
+            cwd=str(home),
+        )
+    return _cli_run_from_outcome(outcome)
+
+
+def _cli_run_from_outcome(outcome: CliRunOutcome) -> CliRun | None:
     if outcome.reason in {
         CliRunReason.SPAWN_FAILED,
         CliRunReason.DEADLINE_BEFORE_SPAWN,
@@ -322,6 +378,7 @@ class _CliRunKeywordArgs(TypedDict, total=False):
     cwd: NotRequired[str | None]
     extra_env: NotRequired[Mapping[str, str] | None]
     unset_env: NotRequired[Collection[str]]
+    closed_env: NotRequired[Mapping[str, str] | None]
 
 
 @dataclass(frozen=True)
@@ -340,6 +397,7 @@ class _CliRunRequest:
     cwd: str | None
     extra_env: Mapping[str, str] | None
     unset_env: Collection[str]
+    closed_env: Mapping[str, str] | None
 
 
 def run_cli_bounded(
@@ -371,6 +429,7 @@ def run_cli_bounded(
         cwd=options.get("cwd"),
         extra_env=options.get("extra_env"),
         unset_env=tuple(options.get("unset_env", ())),
+        closed_env=options.get("closed_env"),
     )
     state = _BoundedRunState()
     threading.Thread(
@@ -447,6 +506,7 @@ def _run_cli_bounded(
         request.cwd,
         request.extra_env,
         request.unset_env,
+        request.closed_env,
     )
     output = _CliOutput(
         bytearray(),
@@ -486,6 +546,7 @@ def _start_bounded_cli(
     cwd: str | None,
     extra_env: Mapping[str, str] | None,
     unset_env: Collection[str],
+    closed_env: Mapping[str, str] | None,
 ) -> tuple[subprocess.Popen[bytes] | None, str | None, CliRunOutcome | None]:
     prompt_file_path: str | None = None
     try:
@@ -499,7 +560,7 @@ def _start_bounded_cli(
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE if stderr == "capture" else subprocess.DEVNULL,
-            env=_child_env(extra_env, unset_env),
+            env=_child_env(extra_env, unset_env, closed_env),
             start_new_session=True,
             cwd=cwd,
         )
@@ -577,9 +638,10 @@ def _cleanup_bounded_cli_prompt_file(
 def _child_env(
     extra_env: Mapping[str, str] | None,
     unset_env: Collection[str] = (),
+    closed_env: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
-    """Build the scrubbed child environment with explicit local additions."""
-    env = scrubbed_env()
+    """Build the child environment from a closed set or the scrubbed host env."""
+    env = dict(closed_env) if closed_env is not None else scrubbed_env()
     if extra_env is not None:
         env.update(extra_env)
     for key in unset_env:
@@ -963,6 +1025,27 @@ def _combined_cli_output(binary: str | None, args: tuple[str, ...]) -> str | Non
     return None if run is None else run.stdout + run.stderr
 
 
+def _catalog_cli_output(
+    binary_name: str,
+    args: tuple[str, ...],
+    *,
+    credential_home_variable: str,
+    auth_file: Path,
+) -> str | None:
+    binary = shutil.which(binary_name)
+    if binary is None:
+        return None
+    run = run_catalog_cli(
+        binary,
+        args,
+        credential_home_variable=credential_home_variable,
+        auth_file=auth_file,
+    )
+    if run is None or not run.complete or run.returncode != 0:
+        return None
+    return run.stdout + run.stderr
+
+
 def _claude_output(binary: str | None) -> str | None:
     run = _successful_cli_run(binary, CLAUDE_CLI_STATUS_ARGS)
     return None if run is None else run.stdout
@@ -975,6 +1058,85 @@ def _successful_cli_run(binary: str | None, args: tuple[str, ...]) -> CliRun | N
     if run is None or not run.complete or run.returncode != 0:
         return None
     return run
+
+
+@contextmanager
+def _catalog_credential_home(auth_file: Path) -> Iterator[Path]:
+    home = Path(
+        tempfile.mkdtemp(
+            prefix=_CATALOG_HOME_PREFIX,
+            dir=current_config().cli_working_directory_root,
+        )
+    )
+    try:
+        os.chmod(home, 0o700)
+        _install_catalog_credential(home, auth_file)
+        yield home
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def _closed_catalog_env(home: Path, credential_home_variable: str) -> dict[str, str]:
+    # Grok resolves the invoking account's profile when HOME is absent, even
+    # with GROK_HOME set (measured on grok 1.0.4). HOME is containment.
+    return {
+        _CATALOG_HOME_VARIABLE: str(home),
+        credential_home_variable: str(home),
+        _CATALOG_SEARCH_PATH_VARIABLE: os.environ.get(
+            _CATALOG_SEARCH_PATH_VARIABLE, os.defpath
+        ),
+    }
+
+
+def _install_catalog_credential(home: Path, auth_file: Path) -> None:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        source = os.open(auth_file, flags)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise AgentCliUnavailableError("could not read catalog credentials") from exc
+    try:
+        payload = _read_catalog_credential(source)
+        destination_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            destination_flags |= os.O_NOFOLLOW
+        destination = os.open(
+            home / _CATALOG_AUTH_FILE_NAME,
+            destination_flags,
+            0o400,
+        )
+        try:
+            _write_catalog_credential(destination, payload)
+            os.fchmod(destination, 0o400)
+        finally:
+            os.close(destination)
+    finally:
+        os.close(source)
+
+
+def _read_catalog_credential(descriptor: int) -> bytes:
+    chunks: list[bytes] = []
+    size = 0
+    while True:
+        chunk = os.read(descriptor, 65_536)
+        if not chunk:
+            return b"".join(chunks)
+        size += len(chunk)
+        if size > _CATALOG_CREDENTIAL_READ_LIMIT_BYTES:
+            raise AgentCliUnavailableError("catalog credentials exceed the copy bound")
+        chunks.append(chunk)
+
+
+def _write_catalog_credential(descriptor: int, payload: bytes) -> None:
+    view = memoryview(payload)
+    while view:
+        written = os.write(descriptor, view)
+        if written < 1:
+            raise OSError("catalog credential copy made no progress")
+        view = view[written:]
 
 
 def _decode(collected: bytearray) -> str:
@@ -1075,7 +1237,12 @@ def _probe_claude_login(binary: str) -> CliLogin:
 
 
 def _probe_grok_status() -> GrokCliStatus:
-    output = _cli_output(current_config().grok_cli_binary, GROK_CLI_STATUS_ARGS)
+    output = _catalog_cli_output(
+        current_config().grok_cli_binary,
+        GROK_CLI_STATUS_ARGS,
+        credential_home_variable=_GROK_CREDENTIAL_HOME_VARIABLE,
+        auth_file=current_config().grok_cli_auth_file,
+    )
     if output is None:
         return GrokCliStatus(login=LOGGED_OUT, model_names=())
     login = _parse_grok_login(output)
@@ -1175,7 +1342,12 @@ def _grok_model_names_under(lines: list[str]) -> list[str]:
 
 
 def _probe_codex_login() -> CliLogin:
-    output = _cli_output(current_config().codex_cli_binary, CODEX_CLI_STATUS_ARGS)
+    output = _catalog_cli_output(
+        current_config().codex_cli_binary,
+        CODEX_CLI_STATUS_ARGS,
+        credential_home_variable=_CODEX_CREDENTIAL_HOME_VARIABLE,
+        auth_file=current_config().codex_cli_auth_file,
+    )
     if output is None:
         return LOGGED_OUT
     return _parse_codex_login(output)
@@ -1186,17 +1358,17 @@ def codex_cli_model_catalog() -> str:
     binary = shutil.which(current_config().codex_cli_binary)
     if binary is None:
         raise AgentCliUnavailableError("codex debug models did not return a catalog")
-    outcome = run_cli_bounded(
-        (binary, *CODEX_CLI_MODELS_ARGS),
-        stdin_payload=None,
-        read="all",
-        deadline=time.monotonic() + COWRITER_MODELS_TIMEOUT_SECONDS,
+    run = run_catalog_cli(
+        binary,
+        CODEX_CLI_MODELS_ARGS,
+        credential_home_variable=_CODEX_CREDENTIAL_HOME_VARIABLE,
+        auth_file=current_config().codex_cli_auth_file,
         stderr="devnull",
         output_read_limit_bytes=CODEX_CLI_MODEL_CATALOG_OUTPUT_READ_LIMIT_BYTES,
     )
-    if not outcome.complete or outcome.returncode != 0:
+    if run is None or not run.complete or run.returncode != 0:
         raise AgentCliUnavailableError("codex debug models did not return a catalog")
-    return outcome.stdout
+    return run.stdout
 
 
 def _parse_codex_login(output: str) -> CliLogin:

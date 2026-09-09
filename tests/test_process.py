@@ -9,6 +9,7 @@ import sys
 import tempfile
 import threading
 import time
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -36,6 +37,7 @@ from agent_providers.process import (
     codex_cli_login,
     codex_cli_model_catalog,
     grok_cli_status,
+    run_catalog_cli,
     run_cli,
     run_cli_bounded,
     scrubbed_env,
@@ -55,6 +57,11 @@ Available models:
 """
 CODEX_LOGGED_IN = "Logged in using ChatGPT"
 CODEX_LOGGED_OUT = "Not logged in"
+_CATALOG_AUTH_PAYLOAD = '{"auth_mode":"catalog-probe"}'
+_CATALOG_PROVIDERS = (
+    ("GROK_HOME", "grok_cli_auth_file"),
+    ("CODEX_HOME", "codex_cli_auth_file"),
+)
 
 
 @pytest.fixture(autouse=True)
@@ -65,7 +72,7 @@ def _clear_probe_caches():
 
 
 def _a_cli_that_says(output: str | None):
-    return patch("agent_providers.process._cli_output", return_value=output)
+    return patch("agent_providers.process._catalog_cli_output", return_value=output)
 
 
 def _a_claude_cli_that_says(output: str | None):
@@ -1050,6 +1057,156 @@ def test_claude_does_not_accept_a_failed_or_incomplete_run(run: CliRun) -> None:
 def test_a_cli_that_is_not_installed_cannot_be_asked() -> None:
     with patch("agent_providers.process.shutil.which", return_value=None):
         assert _cli_output("grok", ("models",)) is None
+
+
+def _prepare_catalog_credential(
+    tmp_path: Path,
+    monkeypatch,
+    *,
+    auth_field: str,
+    auth_payload: str = _CATALOG_AUTH_PAYLOAD,
+) -> tuple[Path, Path]:
+    original_home = tmp_path / "operator-home"
+    original_home.mkdir()
+    (original_home / "canary").write_text("untouched")
+    credential = tmp_path / "host-named" / "auth.json"
+    credential.parent.mkdir()
+    credential.write_text(auth_payload)
+    monkeypatch.setenv("HOME", str(original_home))
+    monkeypatch.setenv("CATALOG_ENV_LEAK", "should-not-appear")
+    override_provider_runtime(**{auth_field: credential})
+    return original_home, credential
+
+
+def _run_catalog_python(
+    tmp_path: Path,
+    monkeypatch,
+    *,
+    credential_home_variable: str,
+    auth_field: str,
+    script: str,
+    auth_payload: str = _CATALOG_AUTH_PAYLOAD,
+) -> tuple[CliRun, Path, Path]:
+    original_home, credential = _prepare_catalog_credential(
+        tmp_path, monkeypatch, auth_field=auth_field, auth_payload=auth_payload,
+    )
+    run = run_catalog_cli(
+        sys.executable,
+        ("-c", script),
+        credential_home_variable=credential_home_variable,
+        auth_file=credential,
+    )
+    assert run is not None
+    return run, original_home, credential
+
+
+def _parse_env_listing(listing: str) -> dict[str, str]:
+    parsed: dict[str, str] = {}
+    for line in listing.splitlines():
+        name, separator, value = line.partition("=")
+        if separator:
+            parsed[name] = value
+    return parsed
+
+
+@pytest.mark.parametrize(("credential_home_variable", "auth_field"), _CATALOG_PROVIDERS)
+def test_catalog_child_sees_only_the_closed_environment_variables(
+    tmp_path, monkeypatch, credential_home_variable: str, auth_field: str,
+) -> None:
+    original_home, credential = _prepare_catalog_credential(
+        tmp_path, monkeypatch, auth_field=auth_field,
+    )
+
+    run = run_catalog_cli(
+        "/usr/bin/env",
+        (),
+        credential_home_variable=credential_home_variable,
+        auth_file=credential,
+    )
+
+    assert run is not None
+    assert run.complete is True
+    assert run.returncode == 0
+    observed = _parse_env_listing(run.stdout)
+    assert sorted(observed) == sorted(["HOME", "PATH", credential_home_variable])
+    assert observed["HOME"] == observed[credential_home_variable]
+    assert observed["HOME"] != str(original_home)
+    assert not Path(observed["HOME"]).is_relative_to(original_home)
+    assert observed["PATH"] == os.environ.get("PATH", os.defpath)
+    assert "CATALOG_ENV_LEAK" not in observed
+    assert not Path(observed["HOME"]).exists()
+
+
+@pytest.mark.parametrize(("credential_home_variable", "auth_field"), _CATALOG_PROVIDERS)
+def test_catalog_child_reads_the_host_named_credential_file(
+    tmp_path, monkeypatch, credential_home_variable: str, auth_field: str,
+) -> None:
+    script = (
+        "import os, sys\n"
+        "sys.stdout.write("
+        "open(os.path.join(os.environ['HOME'], 'auth.json')).read()"
+        ")\n"
+    )
+    run, _original_home, credential = _run_catalog_python(
+        tmp_path,
+        monkeypatch,
+        credential_home_variable=credential_home_variable,
+        auth_field=auth_field,
+        script=script,
+    )
+
+    assert run.complete is True
+    assert run.returncode == 0
+    assert run.stdout == _CATALOG_AUTH_PAYLOAD
+    assert credential.read_text() == _CATALOG_AUTH_PAYLOAD
+
+
+@pytest.mark.parametrize(("credential_home_variable", "auth_field"), _CATALOG_PROVIDERS)
+def test_catalog_child_cannot_write_the_original_credential_directory(
+    tmp_path, monkeypatch, credential_home_variable: str, auth_field: str,
+) -> None:
+    script = (
+        "import os, sys\n"
+        "path = os.path.join(os.environ['HOME'], 'auth.json')\n"
+        "try:\n"
+        "    os.open(path, os.O_WRONLY)\n"
+        "    sys.stdout.write('writable')\n"
+        "except OSError:\n"
+        "    sys.stdout.write('not-writable')\n"
+    )
+    run, original_home, credential = _run_catalog_python(
+        tmp_path,
+        monkeypatch,
+        credential_home_variable=credential_home_variable,
+        auth_field=auth_field,
+        script=script,
+    )
+
+    assert run.complete is True
+    assert run.returncode == 0
+    assert run.stdout == "not-writable"
+    assert credential.read_text() == _CATALOG_AUTH_PAYLOAD
+    assert (original_home / "canary").read_text() == "untouched"
+    assert set(original_home.iterdir()) == {original_home / "canary"}
+
+
+def test_bounded_runner_still_inherits_home_for_non_catalog_spawns(monkeypatch) -> None:
+    monkeypatch.setenv("HOME", "/inherited/operator-home")
+
+    outcome = run_cli_bounded(
+        (
+            sys.executable,
+            "-c",
+            "import os, sys; sys.stdout.write(os.environ.get('HOME', ''))",
+        ),
+        stdin_payload=None,
+        read="all",
+        deadline=time.monotonic() + 1,
+    )
+
+    assert outcome.complete is True
+    assert outcome.returncode == 0
+    assert outcome.stdout == "/inherited/operator-home"
 
 
 def test_a_spawned_cli_never_sees_our_secrets(monkeypatch) -> None:

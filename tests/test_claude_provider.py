@@ -866,6 +866,27 @@ def test_cowriter_refuses_a_healthy_turn_when_the_shared_process_pool_is_full(
     asyncio.run(run_turns())
 
 
+# ── the child a Claude turn runs as ─────────────────────────────────
+
+
+def test_a_claude_child_gets_the_host_named_home_not_the_operators(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    claude_home = tmp_path / "claude-home"
+    claude_home.mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path / "operator-home"))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "value-the-child-must-not-see")
+    override_turn_runtime(claude_cli_home=claude_home)
+
+    child = provider.claude_child_process(Path("/usr/bin/claude"), ["-p"])
+
+    assert child.environment["HOME"] == str(claude_home)
+    assert child.working_directory == claude_home
+    assert "ANTHROPIC_API_KEY" not in child.environment
+    assert child.command == ("/usr/bin/claude", "-p")
+
+
 # ── _find_claude_binary ─────────────────────────────────────────────
 
 

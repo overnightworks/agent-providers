@@ -37,6 +37,7 @@ from agent_providers.process import (
     codex_cli_login,
     codex_cli_model_catalog,
     grok_cli_status,
+    resolve_cli_binary,
     run_catalog_cli,
     run_claude_catalog_cli,
     run_cli_bounded,
@@ -1238,6 +1239,71 @@ def test_claude_catalog_child_writes_stay_in_the_private_home(tmp_path, monkeypa
     assert not written.exists()
     assert (original_home / "canary").read_text() == "untouched"
     assert set(original_home.iterdir()) == {original_home / "canary"}
+
+
+def test_the_claude_catalog_child_reads_the_host_named_credential(tmp_path, monkeypatch) -> None:
+    _prepare_catalog_credential(tmp_path, monkeypatch, auth_field="claude_cli_auth_file")
+    script = (
+        "import os, pathlib, sys\n"
+        "credential = pathlib.Path(os.environ['HOME']) / '.claude' / '.credentials.json'\n"
+        "sys.stdout.write(credential.read_text())\n"
+    )
+
+    run = run_claude_catalog_cli(Path(sys.executable), ("-c", script))
+
+    assert run is not None
+    assert run.returncode == 0
+    assert run.stdout == _CATALOG_AUTH_PAYLOAD
+
+
+def test_a_bare_binary_name_resolves_only_against_the_named_search_path(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    mounted = tmp_path / "mounted"
+    mounted.mkdir()
+    binary = mounted / "grok"
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o755)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "codex").write_text("#!/bin/sh\n")
+    (elsewhere / "codex").chmod(0o755)
+    monkeypatch.setenv("PATH", str(elsewhere))
+    override_provider_runtime(cli_binary_search_path=(mounted,))
+
+    assert resolve_cli_binary("grok") == binary
+    assert resolve_cli_binary("codex") is None
+
+
+def test_an_absolute_binary_is_accepted_only_when_it_is_executable(tmp_path) -> None:
+    unreadable = tmp_path / "not-executable"
+    unreadable.write_text("#!/bin/sh\n")
+
+    assert resolve_cli_binary(str(unreadable)) is None
+    assert resolve_cli_binary("/bin/sh") == Path("/bin/sh")
+
+
+def test_a_private_prompt_file_is_written_below_the_host_named_root(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    working_root = tmp_path / "host-root"
+    working_root.mkdir()
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "somewhere-else"))
+    override_provider_runtime(cli_working_directory_root=working_root)
+
+    outcome = run_cli_bounded(
+        shell_child("-c", 'printf %s "$1"', "unused", "placeholder"),
+        stdin_payload=None,
+        read="all",
+        deadline=time.monotonic() + 1,
+        prompt_file_bytes=b"private prompt",
+        prompt_file_arg_index=3,
+    )
+
+    assert outcome.complete is True
+    assert Path(outcome.stdout).parent == working_root
 
 
 def test_catalog_spawn_refuses_an_environment_without_home(tmp_path) -> None:

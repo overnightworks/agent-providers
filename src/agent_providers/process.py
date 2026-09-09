@@ -54,6 +54,10 @@ class AgentCliUnavailableError(Exception):
     """Raised when a CLI's login response does not match its contract."""
 
 
+class CliCredentialNotConfiguredError(AgentCliUnavailableError):
+    """Raised when a turn cannot copy its configured credential source."""
+
+
 class CliProbeBudgetExceeded(AgentCliUnavailableError):
     """Raised when one caller outwaits a still-running cached probe."""
 
@@ -1037,32 +1041,105 @@ def _claude_output(binary: Path) -> str | None:
     return run.stdout
 
 
-@contextmanager
-def _catalog_private_home() -> Iterator[Path]:
-    home = Path(
-        tempfile.mkdtemp(
-            prefix=_CATALOG_HOME_PREFIX,
-            dir=current_config().cli_working_directory_root,
+class PrivateCredentialHome:
+    """One disposable CLI home whose cleanup follows its child processes."""
+
+    def __init__(
+        self,
+        auth_file: Path,
+        relative_destination: Path,
+        *,
+        prefix: str,
+        missing_credential_is_error: bool,
+    ) -> None:
+        self._home = Path(
+            tempfile.mkdtemp(prefix=prefix, dir=current_config().cli_working_directory_root),
         )
-    )
-    try:
-        os.chmod(home, 0o700)
-        yield home
-    finally:
-        shutil.rmtree(home, ignore_errors=True)
+        self._reservations = 0
+        self._cleanup_requested = False
+        self._cleaned = False
+        self._lock = threading.Lock()
+        try:
+            os.chmod(self._home, 0o700)
+            _install_credential(
+                self._home,
+                auth_file,
+                relative_destination,
+                missing_credential_is_error=missing_credential_is_error,
+            )
+        except BaseException:
+            shutil.rmtree(self._home, ignore_errors=True)
+            raise
+
+    @property
+    def path(self) -> Path:
+        return self._home
+
+    def reserve(self) -> _PrivateCredentialHomeReservation:
+        with self._lock:
+            if self._cleanup_requested:
+                raise RuntimeError("private credential home is closing")
+            self._reservations += 1
+        return _PrivateCredentialHomeReservation(self)
+
+    def close(self) -> None:
+        with self._lock:
+            self._cleanup_requested = True
+            self._remove_if_unused_locked()
+
+    def _release(self) -> None:
+        with self._lock:
+            self._reservations -= 1
+            if self._reservations < 0:
+                raise RuntimeError("private credential home reservation released twice")
+            self._remove_if_unused_locked()
+
+    def _remove_if_unused_locked(self) -> None:
+        if self._cleanup_requested and not self._reservations and not self._cleaned:
+            shutil.rmtree(self._home, ignore_errors=True)
+            self._cleaned = True
+
+
+class _PrivateCredentialHomeReservation:
+    def __init__(self, home: PrivateCredentialHome) -> None:
+        self._home = home
+        self._released = False
+        self._lock = threading.Lock()
+
+    def release(self) -> None:
+        with self._lock:
+            if self._released:
+                return
+            self._released = True
+        self._home._release()
+
+    def on_spawn_failed(self) -> None:
+        self.release()
+
+    def on_reaped(self, _process_id: int, _became_zombie: bool) -> None:
+        self.release()
 
 
 @contextmanager
 def _catalog_credential_home(auth_file: Path, relative_destination: Path) -> Iterator[Path]:
-    with _catalog_private_home() as home:
-        _install_catalog_credential(home, auth_file, relative_destination)
-        yield home
+    owner = PrivateCredentialHome(
+        auth_file,
+        relative_destination,
+        prefix=_CATALOG_HOME_PREFIX,
+        missing_credential_is_error=False,
+    )
+    try:
+        yield owner.path
+    finally:
+        owner.close()
 
 
-def _install_catalog_credential(
+def _install_credential(
     home: Path,
     auth_file: Path,
     relative_destination: Path,
+    *,
+    missing_credential_is_error: bool,
 ) -> None:
     flags = os.O_RDONLY
     if hasattr(os, "O_NOFOLLOW"):
@@ -1070,6 +1147,8 @@ def _install_catalog_credential(
     try:
         source = os.open(auth_file, flags)
     except FileNotFoundError:
+        if missing_credential_is_error:
+            raise CliCredentialNotConfiguredError("configured CLI credential is missing") from None
         # A probe with no credential answers "logged out", which is
         # indistinguishable from a typo in the configured path. Name the path
         # so a mis-wired deployment is readable; never the file's contents.
@@ -1080,9 +1159,9 @@ def _install_catalog_credential(
         )
         return
     except OSError as exc:
-        raise AgentCliUnavailableError("could not read catalog credentials") from exc
+        raise AgentCliUnavailableError("could not read CLI credentials") from exc
     try:
-        payload = _read_catalog_credential(source)
+        payload = _read_credential(source)
         destination_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         if hasattr(os, "O_NOFOLLOW"):
             destination_flags |= os.O_NOFOLLOW
@@ -1090,7 +1169,7 @@ def _install_catalog_credential(
         destination_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         destination = os.open(destination_path, destination_flags, 0o400)
         try:
-            _write_catalog_credential(destination, payload)
+            _write_credential(destination, payload)
             os.fchmod(destination, 0o400)
         finally:
             os.close(destination)
@@ -1098,7 +1177,7 @@ def _install_catalog_credential(
         os.close(source)
 
 
-def _read_catalog_credential(descriptor: int) -> bytes:
+def _read_credential(descriptor: int) -> bytes:
     chunks: list[bytes] = []
     size = 0
     while True:
@@ -1107,11 +1186,11 @@ def _read_catalog_credential(descriptor: int) -> bytes:
             return b"".join(chunks)
         size += len(chunk)
         if size > _CATALOG_CREDENTIAL_READ_LIMIT_BYTES:
-            raise AgentCliUnavailableError("catalog credentials exceed the copy bound")
+            raise AgentCliUnavailableError("CLI credentials exceed the copy bound")
         chunks.append(chunk)
 
 
-def _write_catalog_credential(descriptor: int, payload: bytes) -> None:
+def _write_credential(descriptor: int, payload: bytes) -> None:
     view = memoryview(payload)
     while view:
         written = os.write(descriptor, view)

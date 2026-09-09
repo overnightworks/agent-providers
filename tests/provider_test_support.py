@@ -17,6 +17,7 @@ against values this package owns.
 from __future__ import annotations
 
 import os
+import stat
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,25 @@ from agent_providers.spawn import ChildProcess, closed_environment
 from agent_providers.tools import ToolCatalog, ToolDeclaration
 
 _fake_cli_processes: list[MagicMock] = []
+
+
+def assert_private_credential_child(
+    child: ChildProcess,
+    *,
+    root: Path,
+    source: Path,
+    destination: Path,
+) -> Path:
+    """Assert the disposable credential home visible at a real spawn boundary."""
+    home = Path(child.environment["HOME"])
+    copied_credential = home / destination
+    assert child.working_directory == home
+    assert home.parent == root
+    assert stat.S_IMODE(home.stat().st_mode) == 0o700
+    assert stat.S_IMODE(copied_credential.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(copied_credential.stat().st_mode) == 0o400
+    assert copied_credential.read_bytes() == source.read_bytes()
+    return home
 
 
 def fake_cli_process(

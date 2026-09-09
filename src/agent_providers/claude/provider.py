@@ -108,6 +108,8 @@ _CLI_INIT_EVENT_SUBTYPE: Final = "init"
 _TOOL_SURFACE_PROBE_PROMPT: Final = "."
 
 _STREAM_BUFFER_LIMIT = 4 * 1024 * 1024
+_CLAUDE_TURN_HOME_PREFIX: Final = "agent-cli-claude-turn-"
+_CLAUDE_CREDENTIAL_PATH: Final = Path(".claude/.credentials.json")
 
 
 def clear_client_cache() -> None:
@@ -227,27 +229,33 @@ async def acall_claude_with_mcp(
     stdin_body = stdin_prompt(system, flat_prompt)
     log.info("Claude: MCP+CLI backend (model=%s, user=%s)", model, user_id)
 
-    with _cowriter_cli_arguments(model, user_id, stream=False) as arguments:
-        try:
-            proc = await _spawn_reserved_async_cli_process(
-                _claude_child_process(binary, arguments),
-            )
-        except FileNotFoundError:
-            raise CliBinaryUnavailableError(CLAUDE_CLI_BINARY_NOT_FOUND_DETAIL)
-        try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(stdin_body.encode()),
-                timeout=timeout_seconds,
-            )
-            _release_zombie_reservation(proc.pid)
-        except asyncio.TimeoutError:
-            await _reap_process_group(proc)
-            raise UnavailableError(
-                f"Claude CLI timed out after {timeout_seconds}s",
-            )
-        except BaseException:
-            await _reap_process_group(proc)
-            raise
+    home = _claude_private_home()
+    try:
+        with _cowriter_cli_arguments(model, user_id, stream=False) as arguments:
+            try:
+                home_reservation = home.reserve()
+                proc = await _spawn_reserved_async_cli_process(
+                    _claude_child_process(binary, arguments, home.path),
+                    home_reservation=home_reservation,
+                )
+            except FileNotFoundError:
+                raise CliBinaryUnavailableError(CLAUDE_CLI_BINARY_NOT_FOUND_DETAIL)
+            try:
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                    proc.communicate(stdin_body.encode()),
+                    timeout=timeout_seconds,
+                )
+                _release_zombie_reservation(proc.pid)
+            except asyncio.TimeoutError:
+                await _reap_process_group(proc)
+                raise UnavailableError(
+                    f"Claude CLI timed out after {timeout_seconds}s",
+                )
+            except BaseException:
+                await _reap_process_group(proc)
+                raise
+    finally:
+        home.close()
 
     stdout = stdout_bytes.decode()
     if proc.returncode != 0:
@@ -294,23 +302,29 @@ async def acall_claude_with_mcp_stream(
     stdin_body = stdin_prompt(system, flat_prompt)
     log.info("Claude: streaming MCP+CLI (model=%s, user=%s)", model, user_id)
 
-    with _cowriter_cli_arguments(model, user_id, stream=True) as arguments:
-        try:
-            proc = await _spawn_reserved_async_cli_process(
-                _claude_child_process(binary, arguments),
-                stream_buffer_limit=_STREAM_BUFFER_LIMIT,
-            )
-        except FileNotFoundError:
-            raise CliBinaryUnavailableError(CLAUDE_CLI_BINARY_NOT_FOUND_DETAIL)
-        try:
-            if proc.stdin is not None:
-                proc.stdin.write(stdin_body.encode())
-                await proc.stdin.drain()
-                proc.stdin.close()
-            async for event in _consume_stream(proc, timeout_seconds, correlation_id):
-                yield event
-        finally:
-            await _reap_stream_process_after_cancellation(proc)
+    home = _claude_private_home()
+    try:
+        with _cowriter_cli_arguments(model, user_id, stream=True) as arguments:
+            try:
+                home_reservation = home.reserve()
+                proc = await _spawn_reserved_async_cli_process(
+                    _claude_child_process(binary, arguments, home.path),
+                    home_reservation=home_reservation,
+                    stream_buffer_limit=_STREAM_BUFFER_LIMIT,
+                )
+            except FileNotFoundError:
+                raise CliBinaryUnavailableError(CLAUDE_CLI_BINARY_NOT_FOUND_DETAIL)
+            try:
+                if proc.stdin is not None:
+                    proc.stdin.write(stdin_body.encode())
+                    await proc.stdin.drain()
+                    proc.stdin.close()
+                async for event in _consume_stream(proc, timeout_seconds, correlation_id):
+                    yield event
+            finally:
+                await _reap_stream_process_after_cancellation(proc)
+    finally:
+        home.close()
 
 
 async def _consume_stream(
@@ -563,16 +577,24 @@ def flatten_messages(prompt: str, messages: list[dict[str, str]] | None) -> str:
     return "\n\n".join(parts)
 
 
-def _claude_child_process(binary: Path, arguments: list[str]) -> ChildProcess:
-    """Describe one Claude child around the host's named Claude home.
+def _claude_private_home() -> process.PrivateCredentialHome:
+    try:
+        return process.PrivateCredentialHome(
+            current_config().claude_cli_auth_file,
+            _CLAUDE_CREDENTIAL_PATH,
+            prefix=_CLAUDE_TURN_HOME_PREFIX,
+            missing_credential_is_error=True,
+        )
+    except process.AgentCliUnavailableError as exc:
+        raise UnavailableError(CLAUDE_CLI_UNAVAILABLE_DETAIL) from exc
 
-    The CLI finds its credentials below ``HOME``, so the host names that
-    directory instead of this layer handing the child the account that
-    started the process. That home is also the child's working directory:
-    Claude keys its session state by the directory it is run in, and a turn
-    has no other place to be.
-    """
-    home = current_turn_config().claude_cli_home
+
+def _claude_child_process(
+    binary: Path,
+    arguments: list[str],
+    home: Path,
+) -> ChildProcess:
+    """Describe one Claude child around its disposable credential home."""
     return ChildProcess(
         binary=binary,
         arguments=tuple(arguments),
@@ -884,6 +906,7 @@ class _ZombieReservation:
     """A pool slot before it is bound to the spawned process's PID."""
 
     pid: int | None = None
+    home_reservation: process._PrivateCredentialHomeReservation | None = None
 
 
 # The process-pool reservations are process-wide and shared by probes and real
@@ -1486,8 +1509,12 @@ def _probe_cli_surface_sync(
     """Run one tool-surface probe through the shared bounded CLI runner."""
     if deadline <= time.monotonic():
         raise UnavailableError("Claude CLI probe preflight budget was already exhausted")
+    home = _claude_private_home()
+    home_reservation = home.reserve()
     reservation = _reserve_zombie_admission()
     if reservation is None:
+        home_reservation.release()
+        home.close()
         raise _ClaudeCliProcessPoolSaturated(_claude_cli_process_pool_limit_message())
 
     released = False
@@ -1498,11 +1525,15 @@ def _probe_cli_surface_sync(
     def on_reaped(_process_id: int, _became_zombie: bool) -> None:
         nonlocal released
         _release_zombie_reservation(reservation)
+        home_reservation.release()
         released = True
+
+    def on_spawn_failed() -> None:
+        on_reaped(0, False)
 
     try:
         outcome = process.run_cli_bounded(
-            _claude_child_process(binary, _tool_surface_probe_arguments(mcp=mcp)),
+            _claude_child_process(binary, _tool_surface_probe_arguments(mcp=mcp), home.path),
             stdin_payload=_TOOL_SURFACE_PROBE_PROMPT.encode(),
             read="first_line",
             deadline=deadline,
@@ -1510,15 +1541,20 @@ def _probe_cli_surface_sync(
             output_read_limit_bytes=CLI_OUTPUT_READ_LIMIT_BYTES,
             cleanup_margin_seconds=_cleanup_margin_seconds(),
             on_spawned=on_spawned,
+            on_spawn_failed=on_spawn_failed,
             on_reaped=on_reaped,
         )
     except BaseException:
         if not released:
             _release_zombie_reservation(reservation)
+            home_reservation.release()
         raise
+    finally:
+        home.close()
     if outcome.reason is process.CliRunReason.SPAWN_FAILED:
         if not released:
             _release_zombie_reservation(reservation)
+            home_reservation.release()
         raise UnavailableError(f"Claude CLI probe failed to run: {outcome.spawn_error}")
     if outcome.reason is process.CliRunReason.DEADLINE_BEFORE_SPAWN:
         raise UnavailableError("Claude CLI probe did not start within its budget")
@@ -1678,9 +1714,11 @@ def _claude_cli_process_pool_limit_message() -> str:
     )
 
 
-def _reserve_zombie_admission() -> _ZombieReservation | None:
+def _reserve_zombie_admission(
+    home_reservation: process._PrivateCredentialHomeReservation | None = None,
+) -> _ZombieReservation | None:
     """Reserve one shared CLI-process slot before spawning."""
-    reservation = _ZombieReservation()
+    reservation = _ZombieReservation(home_reservation=home_reservation)
     with _zombie_registry_lock:
         if len(_zombie_reap_reservations) >= CLAUDE_CLI_MAX_CONCURRENT_PROCESSES:
             log.error(_claude_cli_process_pool_limit_message())
@@ -1703,6 +1741,8 @@ def _release_zombie_reservation(reservation: _ZombieReservation | int | None) ->
     with _zombie_registry_lock:
         if isinstance(reservation, _ZombieReservation):
             _zombie_reap_reservations.discard(reservation)
+            if reservation.home_reservation is not None:
+                reservation.home_reservation.release()
             return
         handle = next(
             (candidate for candidate in _zombie_reap_reservations if candidate.pid == reservation),
@@ -1710,15 +1750,20 @@ def _release_zombie_reservation(reservation: _ZombieReservation | int | None) ->
         )
         if handle is not None:
             _zombie_reap_reservations.discard(handle)
+            if handle.home_reservation is not None:
+                handle.home_reservation.release()
 
 
 async def _spawn_reserved_async_cli_process(
     child: ChildProcess,
     *,
+    home_reservation: process._PrivateCredentialHomeReservation | None = None,
     stream_buffer_limit: int | None = None,
 ) -> asyncio.subprocess.Process:
-    reservation = _reserve_zombie_admission()
+    reservation = _reserve_zombie_admission(home_reservation)
     if reservation is None:
+        if home_reservation is not None:
+            home_reservation.release()
         raise _ClaudeCliProcessPoolSaturated(_claude_cli_process_pool_limit_message())
     try:
         proc = await open_async_pipes(child, stream_buffer_limit=stream_buffer_limit)
@@ -1889,10 +1934,15 @@ def _call_cli(
     binary = verify_no_builtin_cli_tools()
     flat_prompt = flatten_messages(prompt, messages)
     stdin_body = stdin_prompt(system, flat_prompt)
-    child = _claude_child_process(binary, _cli_arguments(model))
+    home = _claude_private_home()
+    home_reservation = home.reserve()
+    child = _claude_child_process(binary, _cli_arguments(model), home.path)
 
     reservation = _reserve_zombie_admission()
     if reservation is None:
+        if home_reservation is not None:
+            home_reservation.release()
+        home.close()
         raise _ClaudeCliProcessPoolSaturated(_claude_cli_process_pool_limit_message())
     try:
         try:
@@ -1927,6 +1977,8 @@ def _call_cli(
         # subprocess.run() returns only after its child has exited, including
         # after its own timeout cleanup, so this opaque handle is safe to free.
         _release_zombie_reservation(reservation)
+        home_reservation.release()
+        home.close()
 
 
 async def _acall_cli(
@@ -1947,9 +1999,12 @@ async def _acall_cli(
     binary = await averify_no_builtin_cli_tools()
     flat_prompt = flatten_messages(prompt, messages)
     stdin_body = stdin_prompt(system, flat_prompt)
+    home = _claude_private_home()
     try:
+        home_reservation = home.reserve()
         proc = await _spawn_reserved_async_cli_process(
-            _claude_child_process(binary, _cli_arguments(model)),
+            _claude_child_process(binary, _cli_arguments(model), home.path),
+            home_reservation=home_reservation,
         )
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
@@ -1965,6 +2020,8 @@ async def _acall_cli(
             raise
     except FileNotFoundError:
         raise UnavailableError(CLAUDE_CLI_BINARY_NOT_FOUND_DETAIL)
+    finally:
+        home.close()
 
     stdout = stdout_bytes.decode()
     if proc.returncode != 0:

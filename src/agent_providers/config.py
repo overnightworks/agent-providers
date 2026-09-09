@@ -64,20 +64,13 @@ class McpServerSpec(BaseModel):
 class TurnRuntimeConfig(BaseModel):
     """The deployment facts a turn needs and a catalog never reads.
 
-    ``claude_cli_home`` and ``grok_cli_home`` are the directories those CLIs
-    receive as ``HOME`` for a turn. A turn child gets a complete, closed
-    environment, so the host names the home its CLI should find instead of the
-    library handing over the account that started the process. Codex turns need
-    no such field: each one runs in its own private home beneath
-    ``cli_working_directory_root``.
+    Claude and Grok turns receive a fresh private credential home beneath
+    ``cli_working_directory_root``. Codex does the same for its own turn paths.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     claude_chat_model: str
-    claude_cli_home: Path
-    grok_cli_home: Path
-    grok_cli_session_root: Path
     codex_code_mode_host_binary: Path
     codex_resources_directory: Path
 

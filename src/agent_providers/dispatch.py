@@ -38,6 +38,7 @@ from agent_providers.errors import (
     ProviderUnavailableError,
     SafeRouteReason,
     SafeRouteReasonCode,
+    ToolProtocolRejectionCode,
     normalize_route_failure,
 )
 from agent_providers.events import StreamEvent
@@ -267,6 +268,11 @@ async def _stream_cli_tool_turn(
             provider, ProviderRoute.CLI, SafeRouteReasonCode.TOOL_LIMIT_EXCEEDED,
         ) from exc
     except ToolLoopProtocolError as exc:
+        log.warning(
+            "Co-writer tool protocol rejection provider=%s route=cli code=%s",
+            provider,
+            ToolProtocolRejectionCode.TOOL_LOOP_TERMINAL_INVALID,
+        )
         raise _unavailable(
             provider, ProviderRoute.CLI, SafeRouteReasonCode.TOOL_PROTOCOL_ERROR,
         ) from exc

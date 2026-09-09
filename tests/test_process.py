@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -31,6 +32,7 @@ from agent_providers.process import (
     CliRun,
     CliRunOutcome,
     CliRunReason,
+    PrivateCredentialHome,
     _run_credentialed_catalog_cli,
     claude_cli_login,
     clear_agent_cli_caches,
@@ -1114,6 +1116,43 @@ def _parse_env_listing(listing: str) -> dict[str, str]:
         if separator:
             parsed[name] = value
     return parsed
+
+
+def test_private_credential_home_keeps_its_copy_until_the_last_reap(tmp_path: Path) -> None:
+    source = tmp_path / "source.json"
+    source.write_text(_CATALOG_AUTH_PAYLOAD)
+    home = PrivateCredentialHome(
+        source,
+        Path(".claude/.credentials.json"),
+        prefix="private-home-",
+        missing_credential_is_error=True,
+    )
+    reservation = home.reserve()
+    copy = home.path / ".claude/.credentials.json"
+
+    home.close()
+
+    assert home.path.exists()
+    assert copy.read_text() == _CATALOG_AUTH_PAYLOAD
+    assert stat.S_IMODE(home.path.stat().st_mode) == 0o700
+    assert stat.S_IMODE(copy.stat().st_mode) == 0o400
+    assert source.read_text() == _CATALOG_AUTH_PAYLOAD
+
+    reservation.on_reaped(123, True)
+
+    assert not home.path.exists()
+
+
+def test_private_credential_home_removes_a_failed_setup(tmp_path: Path) -> None:
+    with pytest.raises(AgentCliUnavailableError, match="configured CLI credential is missing"):
+        PrivateCredentialHome(
+            tmp_path / "missing.json",
+            Path(".grok/auth.json"),
+            prefix="private-home-",
+            missing_credential_is_error=True,
+        )
+
+    assert not list(tmp_path.glob("private-home-*"))
 
 
 @pytest.mark.parametrize(("credential_home_variable", "auth_field"), _CATALOG_PROVIDERS)

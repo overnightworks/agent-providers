@@ -7,12 +7,15 @@ import json
 import threading
 import time
 from pathlib import Path
-from urllib.parse import quote
 
 import pytest
-from provider_test_support import COWRITER_TOOL_CATALOG, override_turn_runtime
+from provider_test_support import (
+    COWRITER_TOOL_CATALOG,
+    assert_private_credential_child,
+    override_provider_runtime,
+)
 
-from agent_providers.config import current_turn_config
+from agent_providers.config import current_config, current_turn_config
 from agent_providers.errors import ProviderUnavailableError, SafeRouteReasonCode
 from agent_providers.events import AssistantTextEvent, FinalEvent, ToolCallEvent
 from agent_providers.grok import transport as grok_cli_adapter
@@ -34,6 +37,15 @@ def _transport() -> grok_cli_adapter.GrokCliToolTransport:
     return grok_cli_adapter.GrokCliToolTransport(
         model="grok-test", catalog=COWRITER_TOOL_CATALOG,
     )
+
+
+def test_grok_turn_without_a_configured_credential_is_logged_out(tmp_path: Path) -> None:
+    override_provider_runtime(grok_cli_auth_file=tmp_path / "missing.json")
+
+    with pytest.raises(ProviderUnavailableError) as raised:
+        _transport()
+
+    assert raised.value.reason.code is SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED
 
 _SESSION_ID = "3e04bf5b-4e1c-4f26-8e1e-2f17c5f6d9cf"
 
@@ -126,30 +138,60 @@ def test_grok_tool_command_pins_native_tool_and_web_isolation() -> None:
     )
 
 
-def test_grok_tool_transport_starts_then_resumes_with_prompt_files_only(monkeypatch) -> None:
+def test_grok_tool_transport_starts_then_resumes_in_one_private_credential_home(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
     calls = []
-    rounds = iter([_tool_round_lines(_tool_call_text()), _tool_round_lines("done")])
+    homes: list[Path] = []
+    source = current_config().grok_cli_auth_file
+    rounds = iter([
+        _tool_round_lines(_tool_call_text()),
+        _tool_round_lines("done"),
+        _tool_round_lines("another turn"),
+    ])
 
     def run_cli_bounded(child, **kwargs):
         calls.append((child, kwargs))
+        homes.append(assert_private_credential_child(
+            child,
+            root=tmp_path,
+            source=source,
+            destination=Path(".grok/auth.json"),
+        ))
         for line in next(rounds):
             assert kwargs["stdout_line_channel"]._send(line)
         outcome = _outcome()
         kwargs["stdout_line_channel"]._close(outcome)
+        kwargs["on_reaped"](1, False)
         return outcome
 
     monkeypatch.setattr(grok_cli_adapter, "run_cli_bounded", run_cli_bounded)
     transport = _transport()
 
-    events = asyncio.run(_collect_tool_events(
-        _tool_transport_events(
-            transport, lambda _name, _arguments: ToolOutcome('{"songs":[]}', False),
-        ),
-    ))
+    async def collect_and_close() -> list[object]:
+        events = await _collect_tool_events(
+            _tool_transport_events(
+                transport, lambda _name, _arguments: ToolOutcome('{"songs":[]}', False),
+            ),
+        )
+        await transport.aclose()
+        return events
+
+    events = asyncio.run(collect_and_close())
+
+    another_transport = _transport()
+
+    async def collect_another_turn() -> list[object]:
+        responses = await _collect_transport_responses(another_transport)
+        await another_transport.aclose()
+        return responses
+
+    assert asyncio.run(collect_another_turn())[-1] == grok_cli_adapter.FinalText("")
 
     assert isinstance(events[0], ToolCallEvent)
     assert events[-1] == FinalEvent(text="done")
-    (first_child, first_kwargs), (second_child, second_kwargs) = calls
+    (first_child, first_kwargs), (second_child, second_kwargs), (third_child, _) = calls
     first_command, second_command = first_child.command, second_child.command
     assert "--session-id" not in first_command
     assert "--resume" not in first_command
@@ -168,7 +210,71 @@ def test_grok_tool_transport_starts_then_resumes_with_prompt_files_only(monkeypa
     )
     assert first_kwargs["deadline"] == second_kwargs["deadline"]
     assert "GROK_HOME" not in first_child.environment
+    first_home = homes[0]
+    second_home = second_child.working_directory
+    third_home = third_child.working_directory
+    assert second_home == first_home
+    assert third_home != first_home
+    assert homes == [first_home, first_home, third_home]
     assert not first_child.working_directory.exists()
+    assert not third_home.exists()
+    assert source.read_text() == "{}"
+
+
+@pytest.mark.parametrize(
+    ("reason", "callback"),
+    (
+        (CliRunReason.DEADLINE_BEFORE_SPAWN, "on_spawn_failed"),
+        (CliRunReason.CLEANUP_OVERRAN, "on_reaped"),
+    ),
+    ids=("late-spawn-failure", "late-reap"),
+)
+def test_grok_turn_keeps_its_private_home_until_late_runner_confirmation(
+    monkeypatch,
+    tmp_path: Path,
+    reason: CliRunReason,
+    callback: str,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def run_cli_bounded(child, **kwargs):
+        captured.update(kwargs)
+        captured["home"] = assert_private_credential_child(
+            child,
+            root=tmp_path,
+            source=current_config().grok_cli_auth_file,
+            destination=Path(".grok/auth.json"),
+        )
+        outcome = CliRunOutcome(
+            started=reason is CliRunReason.CLEANUP_OVERRAN,
+            spawn_error=None,
+            returncode=None,
+            stdout="",
+            stderr="",
+            complete=False,
+            became_zombie=False,
+            reason=reason,
+        )
+        kwargs["stdout_line_channel"]._close(outcome)
+        return outcome
+
+    monkeypatch.setattr(grok_cli_adapter, "run_cli_bounded", run_cli_bounded)
+    transport = _transport()
+
+    async def fail_and_close() -> None:
+        with pytest.raises(ProviderUnavailableError):
+            await _collect_transport_responses(transport)
+        await transport.aclose()
+
+    asyncio.run(fail_and_close())
+    home = captured["home"]
+    assert isinstance(home, Path)
+    assert home.exists()
+    if callback == "on_spawn_failed":
+        captured[callback]()
+    else:
+        captured[callback](2468, True)
+    assert not home.exists()
 
 def test_recorded_grok_tool_stream_executes_then_resumes_without_streaming_protocol(
     monkeypatch,
@@ -252,7 +358,7 @@ def test_grok_tool_stream_executes_a_write_after_prose_and_exposes_its_result_ne
     assert calls[1][0][-2:] == ("--resume", _SESSION_ID)
 
 
-def test_grok_tool_transport_rejects_a_multi_result_batch(monkeypatch) -> None:
+def test_grok_tool_transport_rejects_a_multi_result_batch(monkeypatch, caplog) -> None:
     calls = []
     monkeypatch.setattr(
         grok_cli_adapter,
@@ -273,13 +379,15 @@ def test_grok_tool_transport_rejects_a_multi_result_batch(monkeypatch) -> None:
         assert raised.value.reason.code is SafeRouteReasonCode.TOOL_PROTOCOL_ERROR
         await transport.aclose()
 
+    caplog.set_level("WARNING", logger="agent_providers.grok.transport")
     asyncio.run(reject_batch())
     assert len(calls) == 1
+    assert "tool_result_batch_invalid" in caplog.text
 
 
 @pytest.mark.parametrize("session_id", (None, "not-a-uuid"))
 def test_grok_tool_transport_rejects_missing_or_invalid_session_id(
-    monkeypatch, session_id,
+    monkeypatch, caplog, session_id,
 ) -> None:
     calls = []
     end_event = {"type": "end", "stopReason": "stop"}
@@ -304,10 +412,16 @@ def test_grok_tool_transport_rejects_missing_or_invalid_session_id(
         assert raised.value.reason.code is SafeRouteReasonCode.CLI_PROTOCOL_ERROR
         await transport.aclose()
 
+    caplog.set_level("WARNING", logger="agent_providers.grok.transport")
     asyncio.run(collect())
+    assert "cli_stream_response_invalid" in caplog.text
+    assert "text_tool_response_invalid" not in caplog.text
 
 
-def test_grok_tool_transport_normalizes_malformed_json_without_its_document(monkeypatch) -> None:
+def test_grok_tool_transport_normalizes_malformed_json_without_its_document(
+    monkeypatch,
+    caplog,
+) -> None:
     document = '{"type":"text","data":"private lyrics"'
     calls = []
     monkeypatch.setattr(
@@ -326,7 +440,42 @@ def test_grok_tool_transport_normalizes_malformed_json_without_its_document(monk
         assert document not in str(raised.value)
         await transport.aclose()
 
+    caplog.set_level("WARNING", logger="agent_providers.grok.transport")
     asyncio.run(collect())
+    assert "cli_stream_response_invalid" in caplog.text
+    assert "text_tool_response_invalid" not in caplog.text
+
+
+def test_grok_text_tool_parser_rejection_keeps_its_distinct_safe_reason(
+    monkeypatch,
+    caplog,
+) -> None:
+    marker = "private-parser-marker"
+    malformed_tool_call = (
+        "<songmaker_tool_call>\n"
+        f'{{"name":"list_songs","arguments":{{"value":"{marker}"}}\n'
+        "</songmaker_tool_call>"
+    )
+    calls = []
+    monkeypatch.setattr(
+        grok_cli_adapter,
+        "run_cli_bounded",
+        _runner(_tool_round_lines(malformed_tool_call), _outcome(), calls),
+    )
+    caplog.set_level("WARNING", logger="agent_providers.grok.transport")
+    transport = _transport()
+
+    async def collect() -> None:
+        with pytest.raises(ProviderUnavailableError) as raised:
+            await _collect_transport_responses(transport)
+        assert raised.value.reason.code is SafeRouteReasonCode.TOOL_PROTOCOL_ERROR
+        assert marker not in str(raised.value)
+        await transport.aclose()
+
+    asyncio.run(collect())
+    assert "text_tool_response_invalid" in caplog.text
+    assert "cli_stream_response_invalid" not in caplog.text
+    assert marker not in caplog.text
 
 
 def test_grok_tool_transport_rejects_unknown_events_without_logging_the_protocol(
@@ -349,6 +498,8 @@ def test_grok_tool_transport_rejects_unknown_events_without_logging_the_protocol
         await transport.aclose()
 
     asyncio.run(collect())
+    assert "cli_stream_response_invalid" in caplog.text
+    assert "text_tool_response_invalid" not in caplog.text
     assert event_type not in caplog.text
 
 
@@ -488,7 +639,7 @@ def test_grok_tool_transport_rejects_a_changed_resume_session_id(monkeypatch) ->
 
 @pytest.mark.parametrize("event_type", ("tool_call", "tool_call_update"))
 def test_grok_tool_transport_aborts_native_calls_before_the_loop_executes(
-    monkeypatch, event_type,
+    monkeypatch, event_type, caplog,
 ) -> None:
     aborted = threading.Event()
 
@@ -517,21 +668,43 @@ def test_grok_tool_transport_aborts_native_calls_before_the_loop_executes(
                 pass
         assert raised.value.reason.code is SafeRouteReasonCode.TOOL_PROTOCOL_ERROR
 
+    caplog.set_level("WARNING", logger="agent_providers.grok.transport")
     asyncio.run(collect())
     assert aborted.is_set()
     assert not executed
+    assert "native_tool_blocked" in caplog.text
+    assert event_type not in caplog.text
 
 
-def test_closing_the_tool_loop_aborts_and_reaps_the_grok_runner(monkeypatch) -> None:
+def test_closing_the_tool_loop_keeps_the_grok_home_until_confirmed_reap(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
     started = threading.Event()
     aborted = threading.Event()
+    captured: dict[str, object] = {}
 
-    def run_cli_bounded(_child, **kwargs):
+    def run_cli_bounded(child, **kwargs):
+        captured.update(kwargs)
+        captured["home"] = assert_private_credential_child(
+            child,
+            root=tmp_path,
+            source=current_config().grok_cli_auth_file,
+            destination=Path(".grok/auth.json"),
+        )
         channel = kwargs["stdout_line_channel"]
+        abort_observed = threading.Event()
+        request_abort = channel.request_abort
+
+        def observe_abort() -> None:
+            request_abort()
+            abort_observed.set()
+
+        channel.request_abort = observe_abort
         assert channel._send(b'{"type":"text","data":"partial"}\n')
         assert started.wait(timeout=1)
-        while not channel.abort_requested():
-            time.sleep(0.001)
+        assert abort_observed.wait(timeout=1)
+        assert channel.abort_requested()
         aborted.set()
         channel._close(_outcome(complete=False))
         return _outcome(complete=False)
@@ -549,13 +722,20 @@ def test_closing_the_tool_loop_aborts_and_reaps_the_grok_runner(monkeypatch) -> 
 
     asyncio.run(close_turn())
     assert aborted.is_set()
+    home = captured["home"]
+    assert isinstance(home, Path)
+    assert home.exists()
+    captured["on_reaped"](2468, True)
+    assert not home.exists()
 
 
 def test_grok_tool_transport_removes_its_private_session_tree_and_redacts_logs(
     monkeypatch, tmp_path, caplog,
 ) -> None:
     session_root = tmp_path / ".grok" / "sessions"
-    override_turn_runtime(grok_cli_session_root=session_root)
+    external_session = session_root / "external" / _SESSION_ID
+    external_session.mkdir(parents=True)
+    (external_session / "history.jsonl").write_text("leave me")
     calls = []
     lyrics = "private lyrics"
     song_id = "song-private"
@@ -569,13 +749,14 @@ def test_grok_tool_transport_removes_its_private_session_tree_and_redacts_logs(
 
     def run_cli_bounded(child, **kwargs):
         calls.append((child, kwargs))
-        session_tree = session_root / quote(str(child.working_directory), safe="") / _SESSION_ID
+        session_tree = child.working_directory / ".grok" / "sessions" / _SESSION_ID
         session_tree.mkdir(parents=True)
         (session_tree / "prompt_history.jsonl").write_text(f"{lyrics} {song_id}")
         for line in _tool_round_lines(tool_call):
             assert kwargs["stdout_line_channel"]._send(line)
         outcome = _outcome(stderr=stderr_document)
         kwargs["stdout_line_channel"]._close(outcome)
+        kwargs["on_reaped"](1, False)
         return outcome
 
     monkeypatch.setattr(grok_cli_adapter, "run_cli_bounded", run_cli_bounded)
@@ -591,7 +772,8 @@ def test_grok_tool_transport_removes_its_private_session_tree_and_redacts_logs(
 
     asyncio.run(collect_and_close())
     working_directory = str(calls[0][0].working_directory)
-    assert not (session_root / quote(working_directory, safe="")).exists()
+    assert not Path(working_directory).exists()
+    assert (external_session / "history.jsonl").read_text() == "leave me"
     for forbidden in (lyrics, song_id, call_json, stderr_document, "prompt_history"):
         assert forbidden not in caplog.text
 

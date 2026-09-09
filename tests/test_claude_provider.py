@@ -17,6 +17,7 @@ import pytest
 from provider_test_support import (
     MCP_TOOL_NAMES,
     SECRET_ENV_KEYS,
+    assert_private_credential_child,
     fake_cli_process,
     override_provider_runtime,
     override_turn_runtime,
@@ -48,13 +49,13 @@ from agent_providers.claude.provider import (
     verify_cli_tool_surface,
     verify_no_builtin_cli_tools,
 )
-from agent_providers.config import McpServerSpec, current_turn_config
+from agent_providers.config import McpServerSpec, current_config, current_turn_config
 from agent_providers.constants import (
     CLAUDE_CLI_COMPLETION_TIMEOUT_SECONDS,
     JUDGE_FAILURE_TIMEOUT,
 )
 from agent_providers.events import AssistantTextEvent, FinalEvent, StreamEvent
-from agent_providers.process import CliRun
+from agent_providers.process import CliRun, CliRunOutcome, CliRunReason
 
 # The exact string a co-writer command line must carry, written out rather
 # than derived from the code under test.
@@ -869,22 +870,207 @@ def test_cowriter_refuses_a_healthy_turn_when_the_shared_process_pool_is_full(
 # ── the child a Claude turn runs as ─────────────────────────────────
 
 
-def test_a_claude_child_gets_the_host_named_home_not_the_operators(
+def test_a_claude_child_gets_a_private_credential_home_not_the_operators(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    claude_home = tmp_path / "claude-home"
-    claude_home.mkdir()
     monkeypatch.setenv("HOME", str(tmp_path / "operator-home"))
     monkeypatch.setenv("ANTHROPIC_API_KEY", "value-the-child-must-not-see")
-    override_turn_runtime(claude_cli_home=claude_home)
+    credential = tmp_path / "claude-credentials.json"
+    credential.write_text("{}")
+    override_provider_runtime(claude_cli_auth_file=credential)
 
-    child = provider._claude_child_process(Path("/usr/bin/claude"), ["-p"])
+    home = provider._claude_private_home()
+    child = provider._claude_child_process(Path("/usr/bin/claude"), ["-p"], home.path)
 
-    assert child.environment["HOME"] == str(claude_home)
-    assert child.working_directory == claude_home
+    assert child.environment["HOME"] == str(home.path)
+    assert child.working_directory == home.path
     assert "ANTHROPIC_API_KEY" not in child.environment
     assert child.command == ("/usr/bin/claude", "-p")
+    home.close()
+    assert not child.working_directory.exists()
+
+
+def test_sync_claude_call_owns_a_private_credential_home_until_completion(
+    _no_tool_gate_open,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = current_config().claude_cli_auth_file
+    homes: list[Path] = []
+
+    def run_capturing(child, **_kwargs):
+        homes.append(assert_private_credential_child(
+            child,
+            root=tmp_path,
+            source=source,
+            destination=Path(".claude/.credentials.json"),
+        ))
+        return MagicMock(returncode=0, stdout='{"result":"ok"}', stderr="")
+
+    monkeypatch.setattr(provider, "run_capturing", run_capturing)
+
+    assert call_claude("hello").text == "ok"
+    assert len(homes) == 1
+    assert not homes[0].exists()
+    assert source.read_text() == "{}"
+
+
+@pytest.mark.parametrize(
+    "entrypoint",
+    ("async", "mcp", "stream"),
+    ids=("async-call", "mcp-call", "mcp-stream"),
+)
+def test_async_claude_entrypoints_own_private_credential_homes_until_reap(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    entrypoint: str,
+) -> None:
+    source = current_config().claude_cli_auth_file
+    homes: list[Path] = []
+
+    async def open_async_pipes(child, **_kwargs):
+        homes.append(assert_private_credential_child(
+            child,
+            root=tmp_path,
+            source=source,
+            destination=Path(".claude/.credentials.json"),
+        ))
+        if entrypoint == "stream":
+            return _streaming_cli_process([b'{"type":"result","result":"ok"}\n'])
+        proc = MagicMock(pid=2468, returncode=0)
+        proc.communicate = AsyncMock(return_value=(b'{"result":"ok"}', b""))
+        return proc
+
+    monkeypatch.setattr(provider, "open_async_pipes", open_async_pipes)
+    monkeypatch.setattr(
+        provider,
+        "averify_no_builtin_cli_tools",
+        AsyncMock(return_value=Path("/usr/bin/claude")),
+    )
+    monkeypatch.setattr(
+        provider,
+        "verify_cli_tool_surface",
+        AsyncMock(return_value=Path("/usr/bin/claude")),
+    )
+
+    async def run_entrypoint() -> str:
+        if entrypoint == "async":
+            return (await acall_claude("hello")).text
+        if entrypoint == "mcp":
+            return (await provider.acall_claude_with_mcp("hello", user_id="user-1")).text
+        events = [
+            event
+            async for event in acall_claude_with_mcp_stream("hello", user_id="user-1")
+        ]
+        return events[-1].text
+
+    assert asyncio.run(run_entrypoint()) == "ok"
+    assert len(homes) == 1
+    assert not homes[0].exists()
+    assert source.read_text() == "{}"
+
+
+def test_claude_surface_probe_owns_a_private_home_until_its_runner_reaps(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = current_config().claude_cli_auth_file
+    homes: list[Path] = []
+
+    def run_cli_bounded(child, **kwargs):
+        homes.append(assert_private_credential_child(
+            child,
+            root=tmp_path,
+            source=source,
+            destination=Path(".claude/.credentials.json"),
+        ))
+        kwargs["on_spawned"](2468)
+        kwargs["on_reaped"](2468, False)
+        return CliRunOutcome(
+            started=True,
+            spawn_error=None,
+            returncode=0,
+            stdout=json.dumps({
+                "type": "system",
+                "subtype": "init",
+                "tools": [],
+                "slash_commands": [],
+            }) + "\n",
+            stderr="",
+            complete=True,
+            became_zombie=False,
+            reason=CliRunReason.COMPLETE,
+        )
+
+    monkeypatch.setattr(provider.process, "run_cli_bounded", run_cli_bounded)
+
+    announced = provider._probe_cli_surface_sync(
+        Path("/usr/bin/claude"),
+        mcp=None,
+        deadline=time.monotonic() + 1,
+    )
+
+    assert announced.tools == ()
+    assert len(homes) == 1
+    assert not homes[0].exists()
+    assert source.read_text() == "{}"
+
+
+@pytest.mark.parametrize(
+    ("reason", "callback"),
+    (
+        (CliRunReason.DEADLINE_BEFORE_SPAWN, "on_spawn_failed"),
+        (CliRunReason.CLEANUP_OVERRAN, "on_reaped"),
+    ),
+    ids=("late-spawn-failure", "late-reap"),
+)
+def test_claude_surface_probe_keeps_its_home_until_late_runner_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    reason: CliRunReason,
+    callback: str,
+) -> None:
+    source = current_config().claude_cli_auth_file
+    captured: dict[str, object] = {}
+
+    def run_cli_bounded(child, **kwargs):
+        captured.update(kwargs)
+        captured["home"] = assert_private_credential_child(
+            child,
+            root=tmp_path,
+            source=source,
+            destination=Path(".claude/.credentials.json"),
+        )
+        return CliRunOutcome(
+            started=reason is CliRunReason.CLEANUP_OVERRAN,
+            spawn_error=None,
+            returncode=None,
+            stdout="",
+            stderr="",
+            complete=False,
+            became_zombie=False,
+            reason=reason,
+        )
+
+    monkeypatch.setattr(provider.process, "run_cli_bounded", run_cli_bounded)
+
+    with pytest.raises(UnavailableError):
+        provider._probe_cli_surface_sync(
+            Path("/usr/bin/claude"),
+            mcp=None,
+            deadline=time.monotonic() + 1,
+        )
+
+    home = captured["home"]
+    assert isinstance(home, Path)
+    assert home.exists()
+    if callback == "on_spawn_failed":
+        captured[callback]()
+    else:
+        captured[callback](2468, True)
+    assert not home.exists()
+    assert source.read_text() == "{}"
 
 
 # ── _find_claude_binary ─────────────────────────────────────────────
@@ -3196,6 +3382,60 @@ def test_stream_reap_completes_before_a_cancelled_closer_returns(monkeypatch) ->
     asyncio.run(_run())
 
 
+def test_closing_a_claude_stream_keeps_its_private_home_until_confirmed_reap(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = current_config().claude_cli_auth_file
+
+    async def run() -> None:
+        home_seen: Path | None = None
+        reap_started = asyncio.Event()
+        finish_reap = asyncio.Event()
+
+        async def open_async_pipes(child, **_kwargs):
+            nonlocal home_seen
+            home_seen = assert_private_credential_child(
+                child,
+                root=tmp_path,
+                source=source,
+                destination=Path(".claude/.credentials.json"),
+            )
+            proc = _streaming_cli_process([
+                b'{"type":"assistant","message":{"content":'
+                b'[{"type":"text","text":"partial"}]}}\n',
+            ])
+            proc.returncode = None
+            return proc
+
+        async def reap_process_group(proc) -> bool:
+            reap_started.set()
+            await finish_reap.wait()
+            provider._release_zombie_reservation(proc.pid)
+            return False
+
+        monkeypatch.setattr(provider, "open_async_pipes", open_async_pipes)
+        monkeypatch.setattr(provider, "_reap_process_group", reap_process_group)
+        monkeypatch.setattr(
+            provider,
+            "verify_cli_tool_surface",
+            AsyncMock(return_value=Path("/usr/bin/claude")),
+        )
+
+        stream = acall_claude_with_mcp_stream("hello", user_id="user-1")
+        assert await anext(stream) == AssistantTextEvent(text="partial")
+        closer = asyncio.create_task(stream.aclose())
+        await reap_started.wait()
+        assert home_seen is not None
+        assert home_seen.exists()
+
+        finish_reap.set()
+        await closer
+        assert not home_seen.exists()
+
+    asyncio.run(run())
+
+
 def test_stream_reap_does_not_spin_under_anyio_level_cancellation(monkeypatch) -> None:
     """An ASGI cancellation scope must let the delayed reap make progress.
 
@@ -3502,4 +3742,3 @@ def test_no_builtin_gate_sync_and_async_share_one_cache(
     verify_no_builtin_cli_tools()
 
     assert len(commands) == 1
-

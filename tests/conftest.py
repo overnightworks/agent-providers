@@ -39,9 +39,6 @@ _SAMPLE_MCP_SERVER = McpServerSpec(
 
 _SAMPLE_TURNS = TurnRuntimeConfig(
     claude_chat_model="claude-test-model",
-    claude_cli_home=Path(tempfile.gettempdir()),
-    grok_cli_home=Path(tempfile.gettempdir()),
-    grok_cli_session_root=_SAMPLE_ROOT / "grok" / "sessions",
     codex_code_mode_host_binary=_SAMPLE_ROOT / "codex" / "code-mode-host",
     codex_resources_directory=_SAMPLE_ROOT / "codex" / "resources",
     codex_max_concurrent_processes=4,
@@ -67,9 +64,21 @@ _SAMPLE_RUNTIME = ProviderRuntimeConfig(
 
 
 @pytest.fixture(autouse=True)
-def _configure_agent_provider_runtime():
+def _configure_agent_provider_runtime(tmp_path: Path):
     """Install the library's own sample runtime for every test, then drop it."""
-    configure(_SAMPLE_RUNTIME)
+    credentials = tmp_path / "credentials"
+    credentials.mkdir()
+    claude_auth = credentials / "claude.json"
+    grok_auth = credentials / "grok.json"
+    codex_auth = credentials / "codex.json"
+    for auth_file in (claude_auth, grok_auth, codex_auth):
+        auth_file.write_text("{}")
+    configure(_SAMPLE_RUNTIME.model_copy(update={
+        "claude_cli_auth_file": claude_auth,
+        "grok_cli_auth_file": grok_auth,
+        "codex_cli_auth_file": codex_auth,
+        "cli_working_directory_root": tmp_path,
+    }))
     yield
     reset_config()
 

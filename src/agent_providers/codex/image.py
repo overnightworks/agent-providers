@@ -11,11 +11,13 @@ that install the ``image`` extra ever run a turn.
 from __future__ import annotations
 
 import importlib.util
+import logging
 import os
 import re
 import tempfile
 import threading
 from dataclasses import dataclass
+from enum import StrEnum
 from io import BytesIO
 from pathlib import Path
 from typing import Final
@@ -60,6 +62,7 @@ from agent_providers.sandbox.paths import (
 )
 
 _IMAGE_ENCODER_PACKAGE: Final = "PIL"
+log = logging.getLogger(__name__)
 _IMAGE_ENCODER_MISSING_DETAIL: Final = (
     "This deployment cannot encode an image: install the 'image' extra."
 )
@@ -95,8 +98,22 @@ class CodexImageLoginError(CodexImageError):
     """The isolated Codex CLI home has no usable login mirror."""
 
 
+class ImageToolBlockedReason(StrEnum):
+    UNEXPECTED_EVENT = "unexpected_event"
+    BLOCKED_ITEM = "blocked_item"
+    UNEXPECTED_ITEM = "unexpected_item"
+    BOOTSTRAP_COMMAND_MISMATCH = "bootstrap_command_mismatch"
+    BOOTSTRAP_CWD_PRESENT = "bootstrap_cwd_present"
+    BOOTSTRAP_SEQUENCE_INVALID = "bootstrap_sequence_invalid"
+    BOOTSTRAP_MISSING = "bootstrap_missing"
+
+
 class ImageToolBlockedError(CodexImageError):
     """The CLI reported a tool other than the sole permitted image tool."""
+
+    def __init__(self, reason: ImageToolBlockedReason) -> None:
+        self.reason = reason
+        super().__init__()
 
 
 class CodexImageArtifactError(CodexImageError):
@@ -182,20 +199,24 @@ def generate_codex_cover_image(
             copy_codex_login_mirror(codex_home)
         except CodexLoginMirrorError as exc:
             raise CodexImageLoginError() from exc
-        outcome = _run_codex_image_cli(
-            prompt=prompt,
-            deadline=deadline,
-            turn_root=root,
-            codex_home=codex_home,
-            work_dir=work_dir,
-            abort_signal=abort_signal,
-            model=model,
-        )
-        _raise_for_codex_image_outcome(outcome)
-        _validate_codex_image_events(
-            outcome.stdout,
-            codex_home=codex_home,
-        )
+        try:
+            outcome = _run_codex_image_cli(
+                prompt=prompt,
+                deadline=deadline,
+                turn_root=root,
+                codex_home=codex_home,
+                work_dir=work_dir,
+                abort_signal=abort_signal,
+                model=model,
+            )
+            _raise_for_codex_image_outcome(outcome)
+            _validate_codex_image_events(
+                outcome.stdout,
+                codex_home=codex_home,
+            )
+        except ImageToolBlockedError as exc:
+            log.warning("Codex image tool rejected route=cli code=%s", exc.reason)
+            raise
         artifact = _find_only_generated_png(codex_home)
         return _normalize_generated_png(artifact, policy)
 
@@ -353,7 +374,7 @@ class _CodexImageEventGate:
             if event_type in {"error", "turn.failed"}:
                 raise CodexImageCliError()
             if event_type not in ITEM_EVENT_TYPES:
-                raise ImageToolBlockedError()
+                raise ImageToolBlockedError(ImageToolBlockedReason.UNEXPECTED_EVENT)
             item_type = event_item_type(event)
             if event_type == CODEX_ITEM_COMPLETED_EVENT and item_type == "error":
                 self.completed_error_item_message = error_item_message(event)
@@ -368,10 +389,10 @@ class _CodexImageEventGate:
                 )
                 return
             if item_type in BLOCKED_ITEM_TYPES:
-                raise ImageToolBlockedError()
+                raise ImageToolBlockedError(ImageToolBlockedReason.BLOCKED_ITEM)
             if item_type in INFORMATIONAL_ITEM_TYPES or item_type == "image_gen":
                 return
-            raise ImageToolBlockedError()
+            raise ImageToolBlockedError(ImageToolBlockedReason.UNEXPECTED_ITEM)
         except CodexCliStreamFailure as exc:
             raise CodexImageCliError() from exc
 
@@ -380,7 +401,7 @@ class _CodexImageEventGate:
         if self.saw_completed_turn:
             if self.command_id is not None and self.saw_completed_command:
                 return
-            raise ImageToolBlockedError()
+            raise ImageToolBlockedError(ImageToolBlockedReason.BOOTSTRAP_MISSING)
         if (
             self.completed_error_item_message is not None
             and codex_cli_failure_reason(self.completed_error_item_message)
@@ -406,16 +427,16 @@ def _validate_image_skill_command(
     item = event_item(event)
     item_id = item.get("id")
     if not isinstance(item_id, str) or item.get("command") != expected_command:
-        raise ImageToolBlockedError()
+        raise ImageToolBlockedError(ImageToolBlockedReason.BOOTSTRAP_COMMAND_MISMATCH)
     if item.get("cwd") is not None:
-        raise ImageToolBlockedError()
+        raise ImageToolBlockedError(ImageToolBlockedReason.BOOTSTRAP_CWD_PRESENT)
     if event_type == "item.started":
         if (
             command_id is not None
             or item.get("status") != "in_progress"
             or item.get("exit_code") is not None
         ):
-            raise ImageToolBlockedError()
+            raise ImageToolBlockedError(ImageToolBlockedReason.BOOTSTRAP_SEQUENCE_INVALID)
         return item_id, False
     if event_type == CODEX_ITEM_COMPLETED_EVENT:
         if (
@@ -424,9 +445,9 @@ def _validate_image_skill_command(
             or item.get("status") != "completed"
             or item.get("exit_code") != 0
         ):
-            raise ImageToolBlockedError()
+            raise ImageToolBlockedError(ImageToolBlockedReason.BOOTSTRAP_SEQUENCE_INVALID)
         return command_id, True
-    raise ImageToolBlockedError()
+    raise ImageToolBlockedError(ImageToolBlockedReason.BOOTSTRAP_SEQUENCE_INVALID)
 
 
 def _find_only_generated_png(codex_home: Path) -> Path:

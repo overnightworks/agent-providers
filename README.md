@@ -75,14 +75,25 @@ whatever this library does. A host that needs containment brings the sandbox
 described below; this layer only stops the child from *finding* the operator's
 credential directory by convention.
 
-The catalog paths go one step further: the host names a credential *file*, and
-the probe copies it mode 0400 into a private home it removes afterwards. What
-that buys is exact: the operator's own credential file is never opened for
-writing, a direct overwrite of the copy fails, and any renewal the child does
-manage to write is thrown away with the private home. It is not a guarantee
-that a refresh fails *loudly* — the copy's parent directory is writable, so a
-CLI that renews by writing a new file and renaming it over the old one
-succeeds silently against its own throwaway copy.
+The host names each provider credential *file*. Catalog probes copy the needed
+file into a private home for their bounded run. Every Claude or Grok turn uses
+a fresh private home below
+`cli_working_directory_root`: directories are mode 0700 and credential copies
+are mode 0400. The source is opened only for reading. The home remains until
+the turn child has been reaped, including a delayed spawn or background reap,
+then is removed. A direct overwrite of the copy fails, while a CLI can create and
+rename a replacement in its disposable directory; that renewal vanishes at
+cleanup. This is not evidence that a CLI refreshes credentials in practice.
+
+## Safe diagnostic codes
+
+The library logs closed diagnostic codes for rejected Grok tool-protocol and
+Codex image-gate paths. They identify a stable rejection class without copying
+provider events, prompts, arguments, paths, IDs, or exception text into logs.
+`ImageToolBlockedError` describes this library's image-gate decision; it is not
+an administrative diagnosis from Codex. The earlier Songmaker #899 evidence
+cannot reconstruct the concrete Grok or image cause, so a new provider run is
+needed to observe these codes.
 
 ## The ports a host supplies
 
@@ -96,8 +107,10 @@ carries what the catalog path reads — the CLI binaries, the search path a bare
 binary name is resolved against, the credential files, and the working root
 below which every private directory and temporary file is created. A host that
 also runs turns adds a `TurnRuntimeConfig` as `turns`: the chat model, the
-Claude and Grok homes, the Codex mounts and process caps, the prompt-file
-names, and an optional `McpServerSpec` describing the host's MCP server. A host
+Codex mounts and process caps, the prompt-file names, and an optional
+`McpServerSpec` describing the host's MCP server. `claude_cli_home`,
+`grok_cli_home`, and `grok_cli_session_root` were removed; provide the existing
+credential files and `cli_working_directory_root` instead. A host
 that runs no MCP server passes `mcp_server=None`; a catalog-only host passes no
 `turns` at all and never invents a value it does not have. A turn path reached
 without one raises `TurnRuntimeNotConfiguredError` instead of running against a

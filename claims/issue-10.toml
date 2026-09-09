@@ -1,8 +1,0 @@
-claim_id = "3c5a7da440d144f9bca2b7c3793898a1"
-agent = "Codex head issue-10"
-role = "coordinator"
-base = "0ef2e3229dd705c9459e477743eaf7370fa32720"
-branch = "claude/issue-10-closed-env"
-scope = ["src/agent_providers/process.py", "src/agent_providers/config.py", "tests", "src/agent_providers/claude", "src/agent_providers/grok", "src/agent_providers/codex", "src/agent_providers/catalog.py", "README.md", "src/agent_providers/errors.py", "src/agent_providers/dispatch.py"]
-opened_commit = "6c2b6390ffe99650c45b8feebce162d182c1656c"
-whole_reason = "Ein #10-Korrekturkandidat: seriell private Turn-Homes und nutzlastfreie Ablehnungsgründe an bestehenden Fehlerkanten; gemeinsames Sicherheitsgate, keine parallelen Writer."

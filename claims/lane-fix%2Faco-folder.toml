@@ -1,0 +1,8 @@
+claim_id = "45d5ce92f9084f14bcea19359e67d181"
+agent = "Claude head (coordinator)"
+role = "builder"
+base = "408e6e0769b0f52e6841e4a747da8bb22bf6d094"
+branch = "fix/aco-folder"
+scope = [".aco/board.toml", ".agent-claim/board.toml", "AGENTS.md"]
+opened_commit = "098a9438bfedd75d164f83b4e4812bd537093624"
+whole_reason = "protocol rename, #441"

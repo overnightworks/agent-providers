@@ -4,7 +4,7 @@
 applications and has no deployment of its own. Every change here is a change to
 a public contract that a tag has already frozen somewhere else.
 
-- Before every repository edit, use the globally installed `agent-claim` CLI to
+- Before every repository edit, use the globally installed `aco` CLI to
   check the live ledger and claim the exact write scope. Subagents remain within
   their parent's live claim and do not take overlapping claims.
 - Keep the shared `main` checkout clean. Build in an isolated external worktree,

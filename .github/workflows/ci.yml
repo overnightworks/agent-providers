@@ -142,11 +142,17 @@ jobs:
           "$RUNNER_TEMP/venv/bin/python" -m pytest --noconftest -p no:cacheprovider
           tests/test_keycloak_token_shapes.py -m keycloak -q -rP
 
-      - name: Install the workspace for the service's end-to-end proof
-        run: uv sync --locked --all-packages --extra dev
+      # The workspace's own packages are put on the path rather than built, so
+      # this job runs no setup script: every installed package is a locked wheel.
+      - name: Install the workspace's locked wheels for the service's end-to-end proof
+        run: uv sync --locked --all-packages --extra dev --no-build --no-install-workspace
 
       - name: The service admits real Keycloak tokens end to end
-        run: uv run --no-sync pytest tests/test_service_keycloak.py -m keycloak -q -rP
+        env:
+          PYTHONPATH: src:packages/agent-client/src:packages/agent-service/src
+        run: >-
+          uv run --no-sync --no-build pytest -p no:cacheprovider
+          tests/test_service_keycloak.py -m keycloak -q -rP
 
       - name: Keycloak log on failure
         if: failure()

@@ -89,29 +89,25 @@ jobs:
     env:
       KEYCLOAK_IMAGE: quay.io/keycloak/keycloak:26.8.1@sha256:79c623a22abacf3fe6c00a5fb30f5b7843d717b234033b80995891c06116d244
       KEYCLOAK_URL: http://localhost:8080
-      WEBAUTH_WHEEL_URL: https://github.com/overnightworks/webauth/releases/download/v0.12.0/overnightworks_webauth-0.12.0-py3-none-any.whl
-      WEBAUTH_WHEEL_SHA256: 773cd3d8aed1ce84c629e1f01f93066bfe0e825db4ab6d6b750805a327633f17
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
         with:
           enable-cache: true
+          cache-dependency-glob: tests/keycloak/requirements.txt
 
       - name: Start Keycloak with the test realm
         run: |
           docker run --detach --name keycloak --publish 8080:8080 \
-            --env KC_BOOTSTRAP_ADMIN_USERNAME=admin --env KC_BOOTSTRAP_ADMIN_PASSWORD=admin \
             --volume "$GITHUB_WORKSPACE/tests/keycloak:/opt/keycloak/data/import:ro" \
             "$KEYCLOAK_IMAGE" start-dev --import-realm
 
-      - name: Install dependencies and the pinned webauth wheel
+      - name: Install the job's hash-locked environment
         run: |
-          uv sync --extra dev
-          wheel="$RUNNER_TEMP/overnightworks_webauth-0.12.0-py3-none-any.whl"
-          curl --fail --silent --show-error --location --output "$wheel" "$WEBAUTH_WHEEL_URL"
-          echo "$WEBAUTH_WHEEL_SHA256  $wheel" | sha256sum --check
-          uv pip install "overnightworks-webauth[jwt] @ file://$wheel"
+          uv venv --python 3.12 "$RUNNER_TEMP/venv"
+          uv pip install --python "$RUNNER_TEMP/venv/bin/python" \
+            --require-hashes --no-build -r tests/keycloak/requirements.txt
 
       - name: Wait until the test realm is served
         run: |
@@ -125,7 +121,9 @@ jobs:
           exit 1
 
       - name: Token shapes
-        run: uv run --no-sync pytest tests/test_keycloak_token_shapes.py -m keycloak -q -rP
+        run: >-
+          "$RUNNER_TEMP/venv/bin/python" -m pytest --noconftest -p no:cacheprovider
+          tests/test_keycloak_token_shapes.py -m keycloak -q -rP
 
       - name: Keycloak log on failure
         if: failure()

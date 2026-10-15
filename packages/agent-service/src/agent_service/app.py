@@ -14,6 +14,7 @@ that is never cached. No answer echoes a token.
 
 from __future__ import annotations
 
+import time
 import uuid
 from collections.abc import Mapping
 from http import HTTPStatus
@@ -21,7 +22,7 @@ from typing import Final
 
 from fastapi import FastAPI, Request
 from fastapi.responses import Response, StreamingResponse
-from webauth.jwt_verification import KeySetFetch, fetch_key_set_over_https
+from webauth.jwt_verification import KeySetFetch, MonotonicClock, fetch_key_set_over_https
 
 from agent_client.wire import PROTOCOL_VERSION, RejectionCode, RunRejection, RunRequest
 from agent_service.config import ServiceConfig
@@ -64,8 +65,9 @@ def create_app(
     *,
     runners: Runners | None = None,
     fetch_key_set: KeySetFetch = fetch_key_set_over_https,
+    monotonic_clock: MonotonicClock = time.monotonic,
 ) -> FastAPI:
-    callers = CallerCheck(build_verifier(config.identity, fetch_key_set), config)
+    callers = CallerCheck(build_verifier(config.identity, fetch_key_set, monotonic_clock), config)
     installed_runners = runners or Runners()
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 

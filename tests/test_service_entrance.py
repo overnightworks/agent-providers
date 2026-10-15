@@ -26,6 +26,7 @@ from service_support import (
     SONGMAKER_CLIENT,
     SONGMAKER_GROUP,
     ScriptedRunner,
+    StepClock,
     TokenMint,
     assert_rejected,
     decoded_events,
@@ -35,7 +36,7 @@ from service_support import (
     served,
     service_config,
 )
-from webauth.jwt_verification import KeySetFetchError
+from webauth.jwt_verification import KEY_SET_REFRESH_COOLDOWN_SECONDS, KeySetFetchError
 
 from agent_client.wire import Failed, FailureCode, RejectionCode
 from agent_providers.events import AssistantTextEvent, FinalEvent
@@ -77,6 +78,14 @@ def test_a_subscription_member_with_both_tokens_runs_on_the_cli_route(service, r
     assert events[-1].text == "CLI answer"
     assert runners.cli.admitted[-1].route == Cli("claude-main")
     assert runners.cli.admitted[-1].principal.subject == "user-alice"
+
+
+def test_a_run_request_body_with_a_utf8_byte_order_mark_is_admitted(service):
+    body = b"\xef\xbb\xbf" + json.dumps(run_body()).encode()
+
+    response = post_run(service, run_headers(MINT.workload(), MINT.user()), content=body)
+
+    assert _admitted_events(response) == ["run_started", "assistant_text", "succeeded"]
 
 
 def test_an_app_group_member_runs_on_the_api_route(service, runners):
@@ -161,9 +170,9 @@ def test_an_unfetchable_key_set_answers_unavailable_after_the_workload_token_is_
     ],
 )
 def test_a_token_with_an_unknown_kid_answers_by_whether_the_key_set_can_be_refreshed(
-    monkeypatch, issuer_serves_the_kid, code, status
+    issuer_serves_the_kid, code, status
 ):
-    monkeypatch.setattr("webauth.jwt_verification.KEY_SET_REFRESH_COOLDOWN_SECONDS", 0)
+    clock = StepClock()
     forged = TokenMint(key_id="never-published")
     fetches = 0
 
@@ -174,9 +183,14 @@ def test_a_token_with_an_unknown_kid_answers_by_whether_the_key_set_can_be_refre
             raise KeySetFetchError("the issuer cannot be reached")
         return MINT.fetch_key_set(url)
 
-    app = create_app(service_config(), fetch_key_set=issuer_that_fails_after_the_first_fetch)
+    app = create_app(
+        service_config(),
+        fetch_key_set=issuer_that_fails_after_the_first_fetch,
+        monotonic_clock=clock,
+    )
     with served(app) as base_url:
         post_run(base_url, run_headers(MINT.workload(), MINT.user()))
+        clock.advance(KEY_SET_REFRESH_COOLDOWN_SECONDS)
         response = post_run(base_url, run_headers(forged.workload(), MINT.user()))
 
     assert_rejected(response, code, status)

@@ -24,6 +24,7 @@ import anyio.to_thread
 from webauth.jwt_verification import (
     JwtVerifier,
     KeySetFetch,
+    MonotonicClock,
     Rejected,
     RejectionReason,
     VerifiedClaims,
@@ -53,7 +54,11 @@ class Caller:
     groups: frozenset[str]
 
 
-def build_verifier(identity: IdentityConfig, fetch_key_set: KeySetFetch) -> JwtVerifier:
+def build_verifier(
+    identity: IdentityConfig,
+    fetch_key_set: KeySetFetch,
+    monotonic_clock: MonotonicClock = time.monotonic,
+) -> JwtVerifier:
     """The process's one verifier: it owns the key-set cache, refresh lock and cooldown."""
     return JwtVerifier(
         issuer=identity.issuer,
@@ -62,7 +67,7 @@ def build_verifier(identity: IdentityConfig, fetch_key_set: KeySetFetch) -> JwtV
         leeway_seconds=identity.leeway_seconds,
         fetch_key_set=fetch_key_set,
         wall_clock=time.time,
-        monotonic_clock=time.monotonic,
+        monotonic_clock=monotonic_clock,
     )
 
 

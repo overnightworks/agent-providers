@@ -31,7 +31,10 @@ NonEmptyText = Annotated[str, Field(min_length=1)]
 def _https_url_the_verifier_accepts(url: str) -> str:
     """Stops startup as a field error on the key-set URL webauth's verifier would refuse."""
     if not is_https_url(url):
-        raise ValueError("must be an https URL naming a host and no credentials")
+        raise ValueError(
+            "must be an https URL naming a host, a valid port if any,"
+            " and no credentials, spaces or control characters"
+        )
     return url
 
 

@@ -74,6 +74,19 @@ def run_body(**overrides: object) -> dict[str, Any]:
     }
 
 
+class StepClock:
+    """A monotonic clock that moves only when a test advances it."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
 class TokenMint:
     """Signs RS256 tokens with a throwaway key and serves that key's set, counting each fetch."""
 

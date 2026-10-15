@@ -20,6 +20,7 @@ from service_support import (
     PRESENTATOR_CLIENT,
     SONGMAKER_CLIENT,
     ScriptedRunner,
+    StepClock,
     TokenMint,
     assert_rejected,
     decoded_events,
@@ -39,7 +40,7 @@ from test_keycloak_token_shapes import (
     _fetch_key_set_from_test_keycloak,
     _realm_url,
 )
-from webauth.jwt_verification import KeySetFetchError
+from webauth.jwt_verification import KEY_SET_REFRESH_COOLDOWN_SECONDS, KeySetFetchError
 
 from agent_client.wire import RejectionCode
 from agent_providers.events import AssistantTextEvent, FinalEvent
@@ -149,10 +150,8 @@ def test_another_apps_workload_cannot_act_for_a_user_of_this_app(service):
     assert_rejected(response, RejectionCode.FORBIDDEN, 403)
 
 
-def test_a_token_of_an_unpublished_key_is_unavailable_once_the_key_set_origin_stops(
-    monkeypatch,
-):
-    monkeypatch.setattr("webauth.jwt_verification.KEY_SET_REFRESH_COOLDOWN_SECONDS", 0)
+def test_a_token_of_an_unpublished_key_is_unavailable_once_the_key_set_origin_stops():
+    clock = StepClock()
     origin_stopped = False
 
     def key_set_origin(url: str) -> bytes:
@@ -160,11 +159,14 @@ def test_a_token_of_an_unpublished_key_is_unavailable_once_the_key_set_origin_st
             raise KeySetFetchError("the key-set origin has stopped")
         return _fetch_key_set_from_test_keycloak(url)
 
-    app = create_app(service_config(issuer=_realm_url()), fetch_key_set=key_set_origin)
+    app = create_app(
+        service_config(issuer=_realm_url()), fetch_key_set=key_set_origin, monotonic_clock=clock
+    )
     unpublished_key = TokenMint(key_id="never-published")
     with served(app) as base_url:
         post_run(base_url, run_headers(_songmaker_workload(), _user_token("alice")))
         origin_stopped = True
+        clock.advance(KEY_SET_REFRESH_COOLDOWN_SECONDS)
         response = post_run(
             base_url,
             run_headers(unpublished_key.workload(iss=_realm_url()), _user_token("alice")),

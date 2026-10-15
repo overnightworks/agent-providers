@@ -1,17 +1,28 @@
-# The library is independent of its former host and of the sibling auth
-# library: everything host-specific reaches it through the ports a host
-# supplies. CI runs `lint-imports` over the real import graph, so an indirect
-# chain is caught as well as a direct import.
+# The provider core and the agent client are independent of their former host
+# and of the sibling auth library: everything host-specific reaches them through
+# the ports a host supplies. The core builds on the client and never the other
+# way round, so the client stays installable without the provider machinery.
+# CI runs `lint-imports` over the real import graph, so an indirect chain is
+# caught as well as a direct import.
 [importlinter]
 include_external_packages = True
 root_packages =
     agent_providers
+    agent_client
 
 [importlinter:contract:agent-providers-reaches-back-into-no-host]
-name = agent_providers reaches back into no host
+name = agent_providers and agent_client reach back into no host
 type = forbidden
 source_modules =
     agent_providers
+    agent_client
 forbidden_modules =
     songmaker_cli
     webauth
+
+[importlinter:contract:agent-providers-builds-on-agent-client]
+name = agent_providers builds on agent_client, never the reverse
+type = layers
+layers =
+    agent_providers
+    agent_client

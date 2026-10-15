@@ -31,6 +31,7 @@ def test_every_caller_shares_the_one_process_wide_pool() -> None:
     assert get_codex_process_pool() is get_codex_process_pool()
 
 
+
 def test_total_cap_counts_text_image_and_unspawned_reservations() -> None:
     pool = CodexProcessPool(maximum_processes=2, maximum_image_runs=1)
     pool.reserve(CodexProcessKind.TEXT)

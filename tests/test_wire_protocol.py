@@ -104,7 +104,9 @@ def test_every_variant_round_trips_through_its_json(raw: dict[str, object]) -> N
 @pytest.mark.parametrize(
     ("raw", "kind"),
     [
-        pytest.param(wire("thinking", 1, text="hm"), ViolationKind.UNKNOWN_TYPE, id="unknown type"),
+        pytest.param(
+            wire("thinking", 1, text="hm"), ViolationKind.UNKNOWN_TYPE, id="unknown type"
+        ),
         pytest.param(
             {**wire("heartbeat", 1), "v": 2}, ViolationKind.UNSUPPORTED_VERSION, id="newer version"
         ),

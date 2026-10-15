@@ -32,10 +32,8 @@ A_TOOL_FAILURE_MESSAGE = "Co-Writer tool failed."
 def _transport() -> grok_cli_adapter.GrokCliToolTransport:
     """Build the transport under test with songmaker's own tool catalog."""
     return grok_cli_adapter.GrokCliToolTransport(
-        model="grok-test",
-        catalog=COWRITER_TOOL_CATALOG,
+        model="grok-test", catalog=COWRITER_TOOL_CATALOG,
     )
-
 
 _SESSION_ID = "3e04bf5b-4e1c-4f26-8e1e-2f17c5f6d9cf"
 
@@ -65,20 +63,19 @@ def _runner(lines, outcome, calls):
 
 
 def _tool_call_text() -> str:
-    return '<songmaker_tool_call>\n{"name":"list_songs","arguments":{}}\n</songmaker_tool_call>'
+    return (
+        '<songmaker_tool_call>\n'
+        '{"name":"list_songs","arguments":{}}\n'
+        '</songmaker_tool_call>'
+    )
 
 
 def _tool_round_lines(text: str, session_id: str = _SESSION_ID) -> list[bytes]:
     return [
         json.dumps({"type": "text", "data": text}).encode() + b"\n",
-        json.dumps(
-            {
-                "type": "end",
-                "stopReason": "stop",
-                "sessionId": session_id,
-            }
-        ).encode()
-        + b"\n",
+        json.dumps({
+            "type": "end", "stopReason": "stop", "sessionId": session_id,
+        }).encode() + b"\n",
     ]
 
 
@@ -145,14 +142,11 @@ def test_grok_tool_transport_starts_then_resumes_with_prompt_files_only(monkeypa
     monkeypatch.setattr(grok_cli_adapter, "run_cli_bounded", run_cli_bounded)
     transport = _transport()
 
-    events = asyncio.run(
-        _collect_tool_events(
-            _tool_transport_events(
-                transport,
-                lambda _name, _arguments: ToolOutcome('{"songs":[]}', False),
-            ),
-        )
-    )
+    events = asyncio.run(_collect_tool_events(
+        _tool_transport_events(
+            transport, lambda _name, _arguments: ToolOutcome('{"songs":[]}', False),
+        ),
+    ))
 
     assert isinstance(events[0], ToolCallEvent)
     assert events[-1] == FinalEvent(text="done")
@@ -183,14 +177,10 @@ def test_recorded_grok_tool_stream_executes_then_resumes_without_streaming_proto
     monkeypatch,
 ) -> None:
     calls = []
-    rounds = iter(
-        [
-            _recorded_grok_tool_round_lines(),
-            _tool_round_lines(
-                "The fictional song is 68 BPM.", "01a06e35-a690-72b1-889d-804843d68226"
-            ),
-        ]
-    )
+    rounds = iter([
+        _recorded_grok_tool_round_lines(),
+        _tool_round_lines("The fictional song is 68 BPM.", "01a06e35-a690-72b1-889d-804843d68226"),
+    ])
 
     def run_cli_bounded(command, **kwargs):
         calls.append((command, kwargs))
@@ -210,7 +200,9 @@ def test_recorded_grok_tool_stream_executes_then_resumes_without_streaming_proto
 
     events = asyncio.run(_collect_tool_events(_tool_transport_events(transport, executor)))
 
-    streamed_text = "".join(event.text for event in events if isinstance(event, AssistantTextEvent))
+    streamed_text = "".join(
+        event.text for event in events if isinstance(event, AssistantTextEvent)
+    )
     assert executed == [("get_song", {"song_id": "fixture-song-527"})]
     assert "<songmaker_tool_call>" not in streamed_text
     assert events[-1] == FinalEvent(text="The fictional song is 68 BPM.")
@@ -248,16 +240,13 @@ def test_grok_tool_stream_executes_a_write_after_prose_and_exposes_its_result_ne
         return ToolOutcome('{"song_id":"fixture-song-527","bpm":69}', False)
 
     monkeypatch.setattr(grok_cli_adapter, "run_cli_bounded", run_cli_bounded)
-    events = asyncio.run(
-        _collect_tool_events(
-            _tool_transport_events(
-                _transport(),
-                executor,
-            )
-        )
-    )
+    events = asyncio.run(_collect_tool_events(_tool_transport_events(
+        _transport(), executor,
+    )))
 
-    streamed_text = "".join(event.text for event in events if isinstance(event, AssistantTextEvent))
+    streamed_text = "".join(
+        event.text for event in events if isinstance(event, AssistantTextEvent)
+    )
     assert state == {"bpm": 69}
     assert "<songmaker_tool_call>" not in streamed_text
     assert events[-1] == FinalEvent(
@@ -277,12 +266,10 @@ def test_grok_tool_transport_rejects_a_multi_result_batch(monkeypatch) -> None:
 
     async def reject_batch() -> None:
         assert [item async for item in transport.stream(InitialTurn("system", []))]
-        batch = ToolResultBatch(
-            (
-                ToolResult("one", "1", False),
-                ToolResult("two", "2", False),
-            )
-        )
+        batch = ToolResultBatch((
+            ToolResult("one", "1", False),
+            ToolResult("two", "2", False),
+        ))
         with pytest.raises(ProviderUnavailableError) as raised:
             async for _ in transport.stream(batch):
                 pass
@@ -295,8 +282,7 @@ def test_grok_tool_transport_rejects_a_multi_result_batch(monkeypatch) -> None:
 
 @pytest.mark.parametrize("session_id", (None, "not-a-uuid"))
 def test_grok_tool_transport_rejects_missing_or_invalid_session_id(
-    monkeypatch,
-    session_id,
+    monkeypatch, session_id,
 ) -> None:
     calls = []
     end_event = {"type": "end", "stopReason": "stop"}
@@ -347,8 +333,7 @@ def test_grok_tool_transport_normalizes_malformed_json_without_its_document(monk
 
 
 def test_grok_tool_transport_rejects_unknown_events_without_logging_the_protocol(
-    monkeypatch,
-    caplog,
+    monkeypatch, caplog,
 ) -> None:
     calls = []
     event_type = "unexpected"
@@ -372,8 +357,7 @@ def test_grok_tool_transport_rejects_unknown_events_without_logging_the_protocol
 
 @pytest.mark.parametrize("event_type", ("thought", "usage", "available_commands", "plan"))
 def test_grok_tool_transport_accepts_ignored_observations_without_data(
-    monkeypatch,
-    event_type,
+    monkeypatch, event_type,
 ) -> None:
     calls = []
     lines = [
@@ -441,18 +425,15 @@ def test_grok_tool_transport_rejects_a_second_end_event(monkeypatch) -> None:
             SafeRouteReasonCode.CLI_PROTOCOL_ERROR,
         ),
         (
-            [b'{"type":"end","stopReason":"stop","sessionId":"' + _SESSION_ID.encode() + b'"}\n'],
+            [b'{"type":"end","stopReason":"stop","sessionId":"' + _SESSION_ID.encode()
+             + b'"}\n'],
             _outcome(returncode=1),
             SafeRouteReasonCode.CLI_PROTOCOL_ERROR,
         ),
     ),
 )
 def test_grok_tool_transport_names_failed_or_incomplete_runs_without_leaking_stderr(
-    monkeypatch,
-    caplog,
-    lines,
-    outcome,
-    code,
+    monkeypatch, caplog, lines, outcome, code,
 ) -> None:
     calls = []
     monkeypatch.setattr(
@@ -476,12 +457,10 @@ def test_grok_tool_transport_names_failed_or_incomplete_runs_without_leaking_std
 def test_grok_tool_transport_rejects_a_changed_resume_session_id(monkeypatch) -> None:
     calls = []
     changed_session_id = "4ee93ca6-9a08-4d8a-8539-e113a8d677ed"
-    rounds = iter(
-        [
-            _tool_round_lines("first"),
-            _tool_round_lines("second", changed_session_id),
-        ]
-    )
+    rounds = iter([
+        _tool_round_lines("first"),
+        _tool_round_lines("second", changed_session_id),
+    ])
 
     def run_cli_bounded(command, **kwargs):
         calls.append((command, kwargs))
@@ -512,8 +491,7 @@ def test_grok_tool_transport_rejects_a_changed_resume_session_id(monkeypatch) ->
 
 @pytest.mark.parametrize("event_type", ("tool_call", "tool_call_update"))
 def test_grok_tool_transport_aborts_native_calls_before_the_loop_executes(
-    monkeypatch,
-    event_type,
+    monkeypatch, event_type,
 ) -> None:
     aborted = threading.Event()
 
@@ -566,8 +544,7 @@ def test_closing_the_tool_loop_aborts_and_reaps_the_grok_runner(monkeypatch) -> 
 
     async def close_turn() -> None:
         turn = _tool_transport_events(
-            transport,
-            lambda _name, _arguments: ToolOutcome("unused", False),
+            transport, lambda _name, _arguments: ToolOutcome("unused", False),
         )
         assert await anext(turn) == AssistantTextEvent(text="partial")
         started.set()
@@ -578,9 +555,7 @@ def test_closing_the_tool_loop_aborts_and_reaps_the_grok_runner(monkeypatch) -> 
 
 
 def test_grok_tool_transport_removes_its_private_session_tree_and_redacts_logs(
-    monkeypatch,
-    tmp_path,
-    caplog,
+    monkeypatch, tmp_path, caplog,
 ) -> None:
     session_root = tmp_path / ".grok" / "sessions"
     override_provider_runtime(grok_cli_session_root=session_root)

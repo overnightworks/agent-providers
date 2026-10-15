@@ -86,69 +86,36 @@ def _make_fake_proc(
 
 
 def _assistant_line(text: str) -> bytes:
-    return (
-        json.dumps(
-            {
-                "type": "assistant",
-                "message": {"content": [{"type": "text", "text": text}]},
-            }
-        ).encode()
-        + b"\n"
-    )
+    return json.dumps({
+        "type": "assistant",
+        "message": {"content": [{"type": "text", "text": text}]},
+    }).encode() + b"\n"
 
 
 def _tool_use_line(name: str, use_id: str, inp: dict) -> bytes:
-    return (
-        json.dumps(
-            {
-                "type": "assistant",
-                "message": {
-                    "content": [
-                        {
-                            "type": "tool_use",
-                            "id": use_id,
-                            "name": name,
-                            "input": inp,
-                        }
-                    ]
-                },
-            }
-        ).encode()
-        + b"\n"
-    )
+    return json.dumps({
+        "type": "assistant",
+        "message": {"content": [{
+            "type": "tool_use", "id": use_id, "name": name, "input": inp,
+        }]},
+    }).encode() + b"\n"
 
 
 def _tool_result_line(use_id: str, content: str) -> bytes:
-    return (
-        json.dumps(
-            {
-                "type": "user",
-                "message": {
-                    "content": [
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": use_id,
-                            "content": [{"type": "text", "text": content}],
-                        }
-                    ]
-                },
-            }
-        ).encode()
-        + b"\n"
-    )
+    return json.dumps({
+        "type": "user",
+        "message": {"content": [{
+            "type": "tool_result",
+            "tool_use_id": use_id,
+            "content": [{"type": "text", "text": content}],
+        }]},
+    }).encode() + b"\n"
 
 
 def _result_line(text: str) -> bytes:
-    return (
-        json.dumps(
-            {
-                "type": "result",
-                "subtype": "success",
-                "result": text,
-            }
-        ).encode()
-        + b"\n"
-    )
+    return json.dumps({
+        "type": "result", "subtype": "success", "result": text,
+    }).encode() + b"\n"
 
 
 async def _collect(agen) -> list[StreamEvent]:
@@ -186,14 +153,10 @@ def test_safe_json_loads_non_object_skipped(caplog) -> None:
 
 def test_parse_assistant_text_event() -> None:
     chunks: list[str] = []
-    ev = _parse_stream_event(
-        {
-            "type": "assistant",
-            "message": {"content": [{"type": "text", "text": "hello"}]},
-        },
-        chunks,
-        A_CORRELATION_ID,
-    )
+    ev = _parse_stream_event({
+        "type": "assistant",
+        "message": {"content": [{"type": "text", "text": "hello"}]},
+    }, chunks, A_CORRELATION_ID)
     assert isinstance(ev, AssistantTextEvent)
     assert ev.text == "hello"
     assert ev.correlation_id == A_CORRELATION_ID
@@ -202,23 +165,12 @@ def test_parse_assistant_text_event() -> None:
 
 def test_parse_assistant_tool_use_event() -> None:
     chunks: list[str] = []
-    ev = _parse_stream_event(
-        {
-            "type": "assistant",
-            "message": {
-                "content": [
-                    {
-                        "type": "tool_use",
-                        "id": "tu-1",
-                        "name": "foo",
-                        "input": {"x": 1},
-                    }
-                ]
-            },
-        },
-        chunks,
-        A_CORRELATION_ID,
-    )
+    ev = _parse_stream_event({
+        "type": "assistant",
+        "message": {"content": [{
+            "type": "tool_use", "id": "tu-1", "name": "foo", "input": {"x": 1},
+        }]},
+    }, chunks, A_CORRELATION_ID)
     assert isinstance(ev, ToolCallEvent)
     assert ev.tool_use_id == "tu-1"
     assert ev.name == "foo"
@@ -226,23 +178,15 @@ def test_parse_assistant_tool_use_event() -> None:
 
 
 def test_parse_user_tool_result_event() -> None:
-    ev = _parse_stream_event(
-        {
-            "type": "user",
-            "message": {
-                "content": [
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": "tu-1",
-                        "content": [{"type": "text", "text": "ok"}],
-                        "is_error": False,
-                    }
-                ]
-            },
-        },
-        [],
-        A_CORRELATION_ID,
-    )
+    ev = _parse_stream_event({
+        "type": "user",
+        "message": {"content": [{
+            "type": "tool_result",
+            "tool_use_id": "tu-1",
+            "content": [{"type": "text", "text": "ok"}],
+            "is_error": False,
+        }]},
+    }, [], A_CORRELATION_ID)
     assert isinstance(ev, ToolResultEvent)
     assert ev.tool_use_id == "tu-1"
     assert ev.content == "ok"
@@ -250,42 +194,25 @@ def test_parse_user_tool_result_event() -> None:
 
 
 def test_parse_user_tool_result_string_content() -> None:
-    ev = _parse_stream_event(
-        {
-            "type": "user",
-            "message": {
-                "content": [
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": "tu-1",
-                        "content": "plain",
-                    }
-                ]
-            },
-        },
-        [],
-        A_CORRELATION_ID,
-    )
+    ev = _parse_stream_event({
+        "type": "user",
+        "message": {"content": [{
+            "type": "tool_result",
+            "tool_use_id": "tu-1",
+            "content": "plain",
+        }]},
+    }, [], A_CORRELATION_ID)
     assert isinstance(ev, ToolResultEvent)
     assert ev.content == "plain"
 
 
 def test_parse_user_tool_result_missing_content() -> None:
-    ev = _parse_stream_event(
-        {
-            "type": "user",
-            "message": {
-                "content": [
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": "tu-1",
-                    }
-                ]
-            },
-        },
-        [],
-        A_CORRELATION_ID,
-    )
+    ev = _parse_stream_event({
+        "type": "user",
+        "message": {"content": [{
+            "type": "tool_result", "tool_use_id": "tu-1",
+        }]},
+    }, [], A_CORRELATION_ID)
     assert isinstance(ev, ToolResultEvent)
     assert ev.content == ""
 
@@ -301,25 +228,15 @@ def test_parse_result_event_without_text_returns_none() -> None:
 
 
 def test_parse_assistant_empty_content_returns_none() -> None:
-    assert (
-        _parse_stream_event(
-            {"type": "assistant", "message": {"content": []}},
-            [],
-            A_CORRELATION_ID,
-        )
-        is None
-    )
+    assert _parse_stream_event(
+        {"type": "assistant", "message": {"content": []}}, [], A_CORRELATION_ID,
+    ) is None
 
 
 def test_parse_user_empty_content_returns_none() -> None:
-    assert (
-        _parse_stream_event(
-            {"type": "user", "message": {"content": []}},
-            [],
-            A_CORRELATION_ID,
-        )
-        is None
-    )
+    assert _parse_stream_event(
+        {"type": "user", "message": {"content": []}}, [], A_CORRELATION_ID,
+    ) is None
 
 
 def test_parse_unknown_type_ignored() -> None:
@@ -331,9 +248,7 @@ def test_parse_unknown_type_ignored() -> None:
 
 def test_stream_yields_ordered_events(monkeypatch) -> None:
     monkeypatch.setattr(
-        provider,
-        "_require_claude_binary",
-        lambda: "/bin/claude",
+        provider, "_require_claude_binary", lambda: "/bin/claude",
     )
 
     lines = [
@@ -349,18 +264,13 @@ def test_stream_yields_ordered_events(monkeypatch) -> None:
 
     monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
 
-    events = asyncio.run(
-        _collect(
-            acall_claude_with_mcp_stream(prompt="hi", user_id="u"),
-        )
-    )
+    events = asyncio.run(_collect(
+        acall_claude_with_mcp_stream(prompt="hi", user_id="u"),
+    ))
     kinds = [e.type for e in events]
     assert kinds == [
-        "assistant_text",
-        "tool_call",
-        "tool_result",
-        "assistant_text",
-        "final",
+        "assistant_text", "tool_call", "tool_result",
+        "assistant_text", "final",
     ]
     assert isinstance(events[-1], FinalEvent)
     assert events[-1].text == "Hi, done."
@@ -368,9 +278,7 @@ def test_stream_yields_ordered_events(monkeypatch) -> None:
 
 def test_stream_skips_malformed_lines(monkeypatch, caplog) -> None:
     monkeypatch.setattr(
-        provider,
-        "_require_claude_binary",
-        lambda: "/bin/claude",
+        provider, "_require_claude_binary", lambda: "/bin/claude",
     )
     caplog.set_level("WARNING")
 
@@ -385,11 +293,9 @@ def test_stream_skips_malformed_lines(monkeypatch, caplog) -> None:
 
     monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
 
-    events = asyncio.run(
-        _collect(
-            acall_claude_with_mcp_stream(prompt="hi", user_id="u"),
-        )
-    )
+    events = asyncio.run(_collect(
+        acall_claude_with_mcp_stream(prompt="hi", user_id="u"),
+    ))
     assert [e.type for e in events] == ["assistant_text", "final"]
     assert any("malformed" in r.message.lower() for r in caplog.records)
 
@@ -397,9 +303,7 @@ def test_stream_skips_malformed_lines(monkeypatch, caplog) -> None:
 def test_stream_regression_matches_non_streaming_final_text(monkeypatch) -> None:
     """Final event must equal result.result, matching non-streaming json path."""
     monkeypatch.setattr(
-        provider,
-        "_require_claude_binary",
-        lambda: "/bin/claude",
+        provider, "_require_claude_binary", lambda: "/bin/claude",
     )
     expected = "The quick brown fox"
     lines = [
@@ -413,11 +317,9 @@ def test_stream_regression_matches_non_streaming_final_text(monkeypatch) -> None
 
     monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
 
-    events = asyncio.run(
-        _collect(
-            acall_claude_with_mcp_stream(prompt="hi", user_id="u"),
-        )
-    )
+    events = asyncio.run(_collect(
+        acall_claude_with_mcp_stream(prompt="hi", user_id="u"),
+    ))
     final = [e for e in events if isinstance(e, FinalEvent)]
     assert len(final) == 1
     assert final[0].text == expected
@@ -425,9 +327,7 @@ def test_stream_regression_matches_non_streaming_final_text(monkeypatch) -> None
 
 def test_stream_falls_back_to_assembled_text_when_no_result(monkeypatch) -> None:
     monkeypatch.setattr(
-        provider,
-        "_require_claude_binary",
-        lambda: "/bin/claude",
+        provider, "_require_claude_binary", lambda: "/bin/claude",
     )
     lines = [
         _assistant_line("piece one "),
@@ -439,20 +339,16 @@ def test_stream_falls_back_to_assembled_text_when_no_result(monkeypatch) -> None
 
     monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
 
-    events = asyncio.run(
-        _collect(
-            acall_claude_with_mcp_stream(prompt="hi", user_id="u"),
-        )
-    )
+    events = asyncio.run(_collect(
+        acall_claude_with_mcp_stream(prompt="hi", user_id="u"),
+    ))
     final = [e for e in events if isinstance(e, FinalEvent)][0]
     assert final.text == "piece one piece two"
 
 
 def test_stream_nonzero_exit_raises(monkeypatch) -> None:
     monkeypatch.setattr(
-        provider,
-        "_require_claude_binary",
-        lambda: "/bin/claude",
+        provider, "_require_claude_binary", lambda: "/bin/claude",
     )
 
     async def fake_exec(*_cmd, **_kw):
@@ -468,9 +364,7 @@ def test_stream_nonzero_exit_raises(monkeypatch) -> None:
 
 def test_stream_binary_missing_raises(monkeypatch) -> None:
     monkeypatch.setattr(
-        provider,
-        "_require_claude_binary",
-        lambda: "/bin/claude",
+        provider, "_require_claude_binary", lambda: "/bin/claude",
     )
 
     async def fake_exec(*_cmd, **_kw):
@@ -486,9 +380,7 @@ def test_stream_binary_missing_raises(monkeypatch) -> None:
 
 def test_stream_timeout_kills_subprocess(monkeypatch) -> None:
     monkeypatch.setattr(
-        provider,
-        "_require_claude_binary",
-        lambda: "/bin/claude",
+        provider, "_require_claude_binary", lambda: "/bin/claude",
     )
 
     killed = {"value": False}
@@ -511,9 +403,7 @@ def test_stream_timeout_kills_subprocess(monkeypatch) -> None:
     monkeypatch.setattr(provider.os, "killpg", _killpg)
 
     stream = acall_claude_with_mcp_stream(
-        prompt="hi",
-        user_id="u",
-        timeout_seconds=0.1,
+        prompt="hi", user_id="u", timeout_seconds=0.1,
     )
     collected = _collect(stream)
     with pytest.raises(UnavailableError):
@@ -523,9 +413,7 @@ def test_stream_timeout_kills_subprocess(monkeypatch) -> None:
 
 def test_completed_stream_does_not_signal_process_group(monkeypatch) -> None:
     monkeypatch.setattr(
-        provider,
-        "_require_claude_binary",
-        lambda: "/bin/claude",
+        provider, "_require_claude_binary", lambda: "/bin/claude",
     )
 
     async def fake_exec(*_cmd, **_kw):
@@ -533,11 +421,9 @@ def test_completed_stream_does_not_signal_process_group(monkeypatch) -> None:
 
     monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
 
-    events = asyncio.run(
-        _collect(
-            acall_claude_with_mcp_stream(prompt="hi", user_id="u"),
-        )
-    )
+    events = asyncio.run(_collect(
+        acall_claude_with_mcp_stream(prompt="hi", user_id="u"),
+    ))
 
     assert isinstance(events[-1], FinalEvent)
     provider.os.killpg.assert_not_called()
@@ -556,11 +442,7 @@ def test_stream_cmd_uses_stream_json_and_verbose() -> None:
     from agent_providers.config import current_config
 
     cmd = _build_mcp_cli_cmd(
-        "claude",
-        "opus",
-        "/tmp/mcp.json",
-        current_config().mcp_server,
-        stream=True,
+        "claude", "opus", "/tmp/mcp.json", current_config().mcp_server, stream=True,
     )
     assert "--output-format" in cmd
     idx = cmd.index("--output-format")
@@ -573,10 +455,7 @@ def test_stream_cmd_non_stream_keeps_json() -> None:
     from agent_providers.config import current_config
 
     cmd = _build_mcp_cli_cmd(
-        "claude",
-        "opus",
-        "/tmp/mcp.json",
-        current_config().mcp_server,
+        "claude", "opus", "/tmp/mcp.json", current_config().mcp_server,
     )
     idx = cmd.index("--output-format")
     assert cmd[idx + 1] == "json"
@@ -597,9 +476,7 @@ def test_iter_lines_returns_immediately_when_stdout_missing() -> None:
 
 def test_stream_passes_buffer_limit_above_asyncio_default(monkeypatch) -> None:
     monkeypatch.setattr(
-        provider,
-        "_require_claude_binary",
-        lambda: "/bin/claude",
+        provider, "_require_claude_binary", lambda: "/bin/claude",
     )
 
     captured: dict[str, Any] = {}
@@ -611,11 +488,9 @@ def test_stream_passes_buffer_limit_above_asyncio_default(monkeypatch) -> None:
 
     monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
 
-    asyncio.run(
-        _collect(
-            acall_claude_with_mcp_stream(prompt="hi", user_id="u"),
-        )
-    )
+    asyncio.run(_collect(
+        acall_claude_with_mcp_stream(prompt="hi", user_id="u"),
+    ))
 
     assert "limit" in captured["kwargs"]
     assert captured["kwargs"]["limit"] == provider._STREAM_BUFFER_LIMIT
@@ -624,9 +499,7 @@ def test_stream_passes_buffer_limit_above_asyncio_default(monkeypatch) -> None:
 
 def test_stream_consumes_oversized_tool_result_line(monkeypatch) -> None:
     monkeypatch.setattr(
-        provider,
-        "_require_claude_binary",
-        lambda: "/bin/claude",
+        provider, "_require_claude_binary", lambda: "/bin/claude",
     )
 
     huge_payload = "x" * (256 * 1024)
@@ -641,11 +514,9 @@ def test_stream_consumes_oversized_tool_result_line(monkeypatch) -> None:
 
     monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
 
-    events = asyncio.run(
-        _collect(
-            acall_claude_with_mcp_stream(prompt="hi", user_id="u"),
-        )
-    )
+    events = asyncio.run(_collect(
+        acall_claude_with_mcp_stream(prompt="hi", user_id="u"),
+    ))
     tool_results = [e for e in events if isinstance(e, ToolResultEvent)]
     assert len(tool_results) == 1
     assert tool_results[0].content == huge_payload

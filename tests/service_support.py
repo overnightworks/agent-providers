@@ -205,7 +205,7 @@ def decoded_events(raw: bytes) -> list[RunEvent]:
     decoder = RunStreamDecoder()
     decoded = decoder.feed(raw) + decoder.close()
     events = [item for item in decoded if not isinstance(item, StreamViolation)]
-    assert len(events) == len(decoded), f"the stream broke the contract: {decoded[len(events) :]}"
+    assert len(events) == len(decoded), f"the stream broke the contract: {decoded[len(events):]}"
     return events
 
 

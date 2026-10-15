@@ -940,8 +940,7 @@ def test_the_mcp_config_file_is_readable_only_by_its_owner() -> None:
         assert Path(path).name.startswith(_configured_mcp_server().config_file_prefix)
         assert stat.S_IMODE(Path(path).stat().st_mode) == 0o600
         assert Path(path).read_text() == provider._build_mcp_config(
-            _configured_mcp_server(),
-            "u-1",
+            _configured_mcp_server(), "u-1",
         )
     finally:
         Path(path).unlink()
@@ -996,7 +995,8 @@ def test_a_deployment_without_an_mcp_server_streams_the_tool_free_command_line(
 
     async def collect() -> list[StreamEvent]:
         return [
-            event async for event in acall_claude_with_mcp_stream("hi", user_id="u-1", model="opus")
+            event
+            async for event in acall_claude_with_mcp_stream("hi", user_id="u-1", model="opus")
         ]
 
     assert [event.text for event in asyncio.run(collect())] == ["done"]
@@ -1203,10 +1203,7 @@ def test_the_cowriter_turn_runs_the_same_command_its_probe_verified(
     asyncio.run(provider.acall_claude_with_mcp(prompt="hi", user_id="u-1"))
 
     _assert_the_turn_runs_what_the_probe_verified(
-        list(probe_commands[0]),
-        list(turn_commands[0]),
-        build,
-        mcp_attached=True,
+        list(probe_commands[0]), list(turn_commands[0]), build, mcp_attached=True,
     )
 
 
@@ -1240,14 +1237,14 @@ def test_the_streamed_cowriter_turn_runs_the_same_command_its_probe_verified(
     monkeypatch.setattr(provider, "_consume_stream", one_final_event)
 
     async def collect() -> list[StreamEvent]:
-        return [event async for event in provider.acall_claude_with_mcp_stream("hi", user_id="u-1")]
+        return [
+            event
+            async for event in provider.acall_claude_with_mcp_stream("hi", user_id="u-1")
+        ]
 
     assert [event.text for event in asyncio.run(collect())] == ["done"]
     _assert_the_turn_runs_what_the_probe_verified(
-        list(probe_commands[0]),
-        list(turn_commands[0]),
-        build,
-        mcp_attached=True,
+        list(probe_commands[0]), list(turn_commands[0]), build, mcp_attached=True,
     )
 
 
@@ -1270,10 +1267,7 @@ def test_the_tool_free_turn_runs_the_same_command_its_probe_verified(
         _call_cli("hello")
 
     _assert_the_turn_runs_what_the_probe_verified(
-        list(probe_commands[0]),
-        list(run.call_args[0][0]),
-        build,
-        mcp_attached=False,
+        list(probe_commands[0]), list(run.call_args[0][0]), build, mcp_attached=False,
     )
 
 
@@ -1284,9 +1278,7 @@ def test_the_async_tool_free_turn_runs_the_same_command_its_probe_verified(
     """``_acall_cli`` carries the same assurance as its synchronous twin."""
     build = _mounted_build(tmp_path, monkeypatch)
     monkeypatch.setattr(
-        provider,
-        "averify_no_builtin_cli_tools",
-        averify_no_builtin_cli_tools,
+        provider, "averify_no_builtin_cli_tools", averify_no_builtin_cli_tools,
     )
     probe_commands = _answer_with(monkeypatch, _init_line([]))
     turn_commands: list[tuple[str, ...]] = []
@@ -1298,10 +1290,7 @@ def test_the_async_tool_free_turn_runs_the_same_command_its_probe_verified(
     asyncio.run(_acall_cli("hello"))
 
     _assert_the_turn_runs_what_the_probe_verified(
-        list(probe_commands[0]),
-        list(turn_commands[0]),
-        build,
-        mcp_attached=False,
+        list(probe_commands[0]), list(turn_commands[0]), build, mcp_attached=False,
     )
 
 
@@ -3408,3 +3397,4 @@ def test_no_builtin_gate_sync_and_async_share_one_cache(
     verify_no_builtin_cli_tools()
 
     assert len(commands) == 1
+

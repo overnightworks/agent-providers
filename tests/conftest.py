@@ -79,16 +79,13 @@ def _no_claude_cli_tool_surface_probe():
     """Never let a test spawn the real Claude CLI to read its tool surface."""
     with (
         patch(
-            "agent_providers.claude.provider.verify_cli_tool_surface",
-            AsyncMock(),
+            "agent_providers.claude.provider.verify_cli_tool_surface", AsyncMock(),
         ),
         patch(
-            "agent_providers.claude.provider.averify_no_builtin_cli_tools",
-            AsyncMock(),
+            "agent_providers.claude.provider.averify_no_builtin_cli_tools", AsyncMock(),
         ),
         patch(
-            "agent_providers.claude.provider.verify_no_builtin_cli_tools",
-            MagicMock(),
+            "agent_providers.claude.provider.verify_no_builtin_cli_tools", MagicMock(),
         ),
     ):
         yield

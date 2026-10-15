@@ -33,10 +33,7 @@ _fake_cli_processes: list[MagicMock] = []
 
 
 def fake_cli_process(
-    first_line: bytes | None,
-    *,
-    still_running: bool = False,
-    stdin_blocked: bool = False,
+    first_line: bytes | None, *, still_running: bool = False, stdin_blocked: bool = False,
 ) -> MagicMock:
     """Build a pipe-backed stand-in for the ``subprocess.Popen`` CLI handle."""
     proc = MagicMock()
@@ -71,12 +68,7 @@ def close_fake_cli_pipes() -> None:
     """Close every pipe-backed fake CLI stream built during a test module."""
     for proc in _fake_cli_processes:
         for stream_name in (
-            "stdin",
-            "stdout",
-            "stderr",
-            "_stdin_reader",
-            "_stdout_writer",
-            "_stderr_writer",
+            "stdin", "stdout", "stderr", "_stdin_reader", "_stdout_writer", "_stderr_writer",
         ):
             stream = getattr(proc, stream_name)
             if not stream.closed:
@@ -123,30 +115,27 @@ SECRET_ENV_KEYS: tuple[str, ...] = (
     "GRAFANA_PASSWORD",
 )
 
-MCP_TOOL_NAMES: frozenset[str] = frozenset(
-    {
-        "list_albums",
-        "list_songs",
-        "search_songs",
-        "get_song",
-        "get_version",
-        "get_generation",
-        "create_song",
-        "update_song_lyrics",
-        "update_song_prompt",
-        "update_song_style",
-        "rename_song",
-        "suggest_album_cover",
-    }
-)
+MCP_TOOL_NAMES: frozenset[str] = frozenset({
+    "list_albums",
+    "list_songs",
+    "search_songs",
+    "get_song",
+    "get_version",
+    "get_generation",
+    "create_song",
+    "update_song_lyrics",
+    "update_song_prompt",
+    "update_song_style",
+    "rename_song",
+    "suggest_album_cover",
+})
 
 _STRING = {"type": "string"}
 _INT = {"type": "integer"}
 
 
 def _object(
-    properties: dict[str, Any],
-    required: list[str] | None = None,
+    properties: dict[str, Any], required: list[str] | None = None,
 ) -> dict[str, Any]:
     schema: dict[str, Any] = {
         "type": "object",
@@ -168,7 +157,8 @@ COWRITER_TOOL_CATALOG: ToolCatalog = ToolCatalog(
         ToolDeclaration(
             name="list_songs",
             description=(
-                "List songs. Without album_id, every owned song; with album_id, that album."
+                "List songs. Without album_id, every owned song; "
+                "with album_id, that album."
             ),
             parameters=_object({"album_id": _STRING}),
         ),
@@ -186,8 +176,7 @@ COWRITER_TOOL_CATALOG: ToolCatalog = ToolCatalog(
             name="get_version",
             description="Read a specific version snapshot of a song.",
             parameters=_object(
-                {"song_id": _STRING, "version_id": _STRING},
-                ["song_id", "version_id"],
+                {"song_id": _STRING, "version_id": _STRING}, ["song_id", "version_id"],
             ),
         ),
         ToolDeclaration(
@@ -239,7 +228,8 @@ COWRITER_TOOL_CATALOG: ToolCatalog = ToolCatalog(
         ToolDeclaration(
             name="suggest_album_cover",
             description=(
-                "Request three album cover suggestions. Returns the queued job ID and status."
+                "Request three album cover suggestions. "
+                "Returns the queued job ID and status."
             ),
             parameters=_object({"album_id": _STRING}, ["album_id"]),
         ),

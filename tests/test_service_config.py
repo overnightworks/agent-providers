@@ -70,6 +70,13 @@ def _with(old: str, new: str) -> str:
     return VALID_CONFIG.replace(old, new)
 
 
+def _with_key_set_url(url: str) -> str:
+    return _with(
+        'jwks_url = "https://keycloak.test/realms/agent-test/protocol/openid-connect/certs"',
+        f'jwks_url = "{url}"',
+    )
+
+
 @pytest.mark.parametrize(
     ("text", "named_field"),
     [
@@ -100,6 +107,19 @@ def _with(old: str, new: str) -> str:
             _with('jwks_url = "https://', 'jwks_url = "http://'),
             "identity.jwks_url",
             id="plain-http-key-set",
+        ),
+        pytest.param(
+            _with_key_set_url("https://"), "identity.jwks_url", id="key-set-url-without-a-host"
+        ),
+        pytest.param(
+            _with_key_set_url("https://reader:secret@keycloak.test/certs"),
+            "identity.jwks_url",
+            id="key-set-url-with-credentials",
+        ),
+        pytest.param(
+            _with_key_set_url("https://keycloak.test:99999/certs"),
+            "identity.jwks_url",
+            id="key-set-url-with-an-invalid-port",
         ),
         pytest.param(
             _with('read_song = "read_only"', 'read_song = "harmless"'),

@@ -12,13 +12,35 @@ from enum import StrEnum
 from functools import cached_property
 from pathlib import Path
 from typing import Annotated, Self
+from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    model_validator,
+)
 
 from agent_client.tools import ToolEffect
 
 NonEmptyText = Annotated[str, Field(min_length=1)]
-HttpsUrl = Annotated[str, Field(pattern=r"^https://")]
+
+
+def _https_url_naming_a_host(url: str) -> str:
+    """The key-set URL webauth's verifier accepts, so a bad one stops startup as a field error."""
+    try:
+        parts = urlsplit(url)
+        _ = parts.port
+    except ValueError as error:
+        raise ValueError("must be a URL with a valid port, if any") from error
+    if parts.scheme != "https" or not parts.hostname or "@" in parts.netloc:
+        raise ValueError("must be an https URL naming a host and no credentials")
+    return url
+
+
+HttpsUrl = Annotated[str, AfterValidator(_https_url_naming_a_host)]
 
 
 class ConfigError(ValueError):
@@ -141,8 +163,12 @@ def load_config(path: Path) -> ServiceConfig:
 
 def _named_fields(error: ValidationError) -> str:
     return "; ".join(
-        f"{'.'.join(str(part) for part in problem['loc'])}: {problem['msg']}"
+        f"{'.'.join(str(part) for part in problem['loc'])}: {_message(problem['msg'])}"
         if problem["loc"]
-        else problem["msg"].removeprefix("Value error, ")
+        else _message(problem["msg"])
         for problem in error.errors(include_input=False, include_url=False)
     )
+
+
+def _message(pydantic_message: str) -> str:
+    return pydantic_message.removeprefix("Value error, ")

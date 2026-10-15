@@ -95,9 +95,16 @@ webauth verifier, and holds these facts in CI (job `keycloak-token-shapes`):
   containing `agent-service`, and `groups` as full paths (`/ki-abo`,
   `/apps/songmaker`). A user in no group has the claim absent or empty.
 - A user token's `sub` differs from every service account's `sub`.
-- Two workload clients' service-account tokens differ only in `azp` and
-  `client_id` (besides `sub`, `jti` and the times). The workload binding must
-  therefore check both against the registry.
+- With Keycloak's built-in default scopes (`basic`, `profile`, `email`,
+  `roles`, `web-origins`, `acr`, `service_account`) that the platform realm
+  keeps, a workload client is named only by `azp` and `client_id`. Two
+  workload clients' service-account tokens also differ in the service-account
+  user's own `sub` and `preferred_username` (`service-account-<clientId>`),
+  which no registry knows in advance, and in `allowed-origins`, each client's
+  web origins (besides `jti` and the times). `clientAddress` and `clientHost`
+  name the calling host; the test calls both clients from one host, so it
+  leaves them equal. The workload binding must therefore check `azp` and
+  `client_id` against the registry.
 
 ## H2 Whose subscription
 

@@ -207,23 +207,28 @@ def test_user_token_subject_differs_from_every_service_account_subject(
     )
 
 
-# `exp`, `iat` and `jti` differ between any two tokens; `sub` is the id Keycloak
-# generated for the service-account user, which no registry knows beforehand.
-PER_TOKEN_CLAIMS = {"exp", "iat", "jti", "sub"}
+# These belong to the single token, not to the client that asked for it.
+PER_TOKEN_CLAIMS = {"exp", "iat", "jti"}
 CLIENT_NAMING_CLAIMS = {"azp", "client_id"}
+# The service-account user Keycloak generated for each client: its id and its
+# username, which no registry knows beforehand.
+SERVICE_ACCOUNT_USER_CLAIMS = {"sub", "preferred_username"}
+CLIENT_WEB_ORIGIN_CLAIMS = {"allowed-origins"}
 
 
-def test_service_account_tokens_differ_only_by_the_client_naming_claims(service_account_claims):
+def test_service_account_tokens_differ_in_the_client_its_user_and_its_web_origins(
+    service_account_claims,
+):
     songmaker = service_account_claims["songmaker-test"]
     presentator = service_account_claims["presentator-test"]
-    ignored = PER_TOKEN_CLAIMS | CLIENT_NAMING_CLAIMS
     differing = {
         claim
-        for claim in (songmaker.keys() | presentator.keys()) - ignored
+        for claim in (songmaker.keys() | presentator.keys()) - PER_TOKEN_CLAIMS
         if songmaker.get(claim) != presentator.get(claim)
     }
-    assert not differing, f"service-account tokens also differ in {sorted(differing)}"
-    for claim in CLIENT_NAMING_CLAIMS:
-        assert songmaker.get(claim) != presentator.get(claim), (
-            f"{claim} does not tell the two workload clients apart"
-        )
+    print(f"service-account claims: {sorted(songmaker.keys() | presentator.keys())}")
+    print(f"differing between the two workload clients: {sorted(differing)}")
+    expected = CLIENT_NAMING_CLAIMS | SERVICE_ACCOUNT_USER_CLAIMS | CLIENT_WEB_ORIGIN_CLAIMS
+    assert differing == expected, (
+        f"service-account tokens differ in {sorted(differing)}, not {sorted(expected)}"
+    )

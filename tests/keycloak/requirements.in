@@ -1,0 +1,5 @@
+# The keycloak-token-shapes job's whole environment: the token-shape tests need
+# no workspace package, so they run with --noconftest from these pins alone.
+pytest>=7,<10
+httpx>=0.27,<1
+overnightworks-webauth[jwt] @ https://github.com/overnightworks/webauth/releases/download/v0.12.0/overnightworks_webauth-0.12.0-py3-none-any.whl

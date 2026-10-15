@@ -80,6 +80,32 @@ claim. The principal is `(iss, sub)`. The RS256 verifier comes from webauth W1
 **Consequence.** There is one verifier owner and no copy of it here; no request
 can name its own user.
 
+### Token shapes (proven by A1a1k)
+
+`tests/test_keycloak_token_shapes.py` fetches real tokens from Keycloak 26.8.1
+serving the test realm `tests/keycloak/realm.json`, verifies them with the
+webauth verifier, and holds these facts in CI (job `keycloak-token-shapes`):
+
+- A service-account token has `azp == client_id ==` its client, carries realm
+  role `agent-workload`, and lives at most 300 s (`exp - iat`).
+- A user token never carries `agent-workload`; the role is granted only to
+  service-account users. Whether a user token carries `client_id` is recorded,
+  not relied on.
+- A user token has `azp` equal to the client the user logged in through, `aud`
+  containing `agent-service`, and `groups` as full paths (`/ki-abo`,
+  `/apps/songmaker`). A user in no group has the claim absent or empty.
+- A user token's `sub` differs from every service account's `sub`.
+- With Keycloak's built-in default scopes (`basic`, `profile`, `email`,
+  `roles`, `web-origins`, `acr`, `service_account`) that the platform realm
+  keeps, a workload client is named only by `azp` and `client_id`. Two
+  workload clients' service-account tokens also differ in the service-account
+  user's own `sub` and `preferred_username` (`service-account-<clientId>`),
+  which no registry knows in advance, and in `allowed-origins`, each client's
+  web origins (besides `jti` and the times). `clientAddress` and `clientHost`
+  name the calling host; the test calls both clients from one host, so it
+  leaves them equal. The workload binding must therefore check `azp` and
+  `client_id` against the registry.
+
 ## H2 Whose subscription
 
 **Context.** The operator wants the subscription settled "an einer zentralen
@@ -208,7 +234,7 @@ existing `agent_providers.events` is that contract.
   discriminated on `type`. A new variant or field is a new protocol version.
 - Core events are wrapped, not replaced: `agent_providers.events.StreamEvent`
   stays the core's in-process provider-turn type, which hosts on v0.1.2 still
-  consume. The mapper from it to the run events lands in A1a with its caller.
+  consume. The mapper from it to the run events lands in A1a1 with its caller.
 - (a) An explicit cancel follows the same interrupted rule as a disconnect.
   Whether a cut-short run ends as `cancelled` or `failed: interrupted` is
   decided by the effect class of its emitted tool calls (H9): one
@@ -324,7 +350,7 @@ repository without PyPI.
 - The repository becomes a uv workspace. The core distribution
   `overnightworks-agent-providers` stays at the root. A new member
   `packages/agent-client/` holds the distribution `overnightworks-agent-client`
-  with import package `agent_client`. A1a later adds `packages/agent-service/`.
+  with import package `agent_client`. A1a1 later adds `packages/agent-service/`.
 - Core pins the client exactly (`==X.Y.Z`) through `{ workspace = true }`, and
   the two are released in lockstep. One tag `vX.Y.Z` publishes exactly the two
   wheels. A test pins all version literals as equal, because uv ignores the pin
@@ -391,8 +417,8 @@ the workload client, the principal, the `/ki-abo` membership read from the
 verified user token, the background purpose, the app's job id, and an expiry of
 at most 24 hours. The background run later presents the workload token plus the
 ticket. A CLI profile serves tickets only if it is marked `background: true`.
-The ticket's token format, keys and rotation are settled in A1a's plan together
-with the capability token (H3); one service-owned signing key covers both.
+The ticket's token format, keys and rotation are settled in A1a4 (signing key and
+capability, H3) and A1a5 (job tickets); one service-owned signing key covers both.
 
 **Consequence.** Background runs carry the same verified identity as the live
 request that started them, for at most a day.
@@ -407,9 +433,15 @@ settles the open points named here.
 | #19 A0r Decision record (docs only) | agent-providers | see #19 (this record) | — | none |
 | A0a Packages and tool contract | agent-providers | A uv workspace with core at the root and `packages/agent-client`. Lockstep 0.2.0. One tag publishes both wheels. `ToolDeclaration` lives in the client and is re-exported identically. Import gates run in CI. Existing tag pins are unchanged. | settled by the A0a plan (15.10.2026), recorded by #19 | #19 |
 | A0b Wire protocol | agent-providers | The protocol is fully enumerated: every non-terminal and terminal variant with its payload, protocol version and rejection of unknown versions, sequence rules, SSE framing, and an SSE codec/state machine that validates a stream. The run id is delivered before any fallible body. A tool's effect class (read-only or side-effecting) is part of `ToolDeclaration`, and `failed: interrupted` is defined by it. The existing `agent_providers.events` is either the core's internal event type or replaced, never a second wire owner. | settled by the A0b wire ruling (15.10.2026) | A0a |
-| A1a Service skeleton | agent-providers | Against a test issuer and a fake runner: both tokens are checked, with `azp` equal to the workload client. The H5 routing covers `/ki-abo`, API-eligible, `not_enabled` and job tickets (H12). Every forbidden field is rejected. `GET /runs/{id}` requires the run's exact workload client and principal. Capability and ticket tokens have a ruled format, key source and rotation. The service package and entry point exist. | Token format and keys; restart behaviour of run status (documented or minimal persistence) | A0b, webauth#51 |
-| A1b CLI runner | agent-providers | H7 isolation, and only the selected profile's login is visible to its run. One admission slot is taken, and a second run gets 429. Cancel and disconnect kill and reap the process group. The per-run MCP config carries the capability, and no token appears in argv or logs. | — | A1a |
-| A1m MCP helper | agent-providers | The `agent-client` Streamable HTTP MCP server helper verifies the capability (format from A1a), denies redirects, validates Host/Origin, and refuses a bad audience, an expired capability, a wrong run or a tool off the allowlist. | — | A0b, A1a |
+| #28 A1a0 Wire additions | agent-providers | see #28 | — | A0b |
+| #30 A1a1k Real Keycloak token shapes | agent-providers | see #30; its facts stand under H1 "Token shapes" | — | — |
+| A1a1 Thin authenticated run | agent-providers | `packages/agent-service` exists with its entry point. `POST /runs` checks the workload token (realm role `agent-workload`, `azp == client_id ==` the registered workload client, `exp - iat` ≤ 300 s) and then the user token, applies H5 routing as one pure function, refuses every forbidden field, and streams from a scripted fake runner. The end-to-end proof uses real Keycloak tokens from #30. | Recorded with the slice | A1a0, A1a1k, webauth#51 |
+| A1a2 Run records | agent-providers | In-memory records for 1 h. `GET /runs/{id}` requires the run's exact workload client and principal and answers `not_found` otherwise. Disconnect is handled, and the loss on restart is documented. | — | A1a1 |
+| A1a3 Liveness and limits | agent-providers | Heartbeat, idle timeout, maximum duration, tool-call and byte limits, and slow clients. This row owns H6's limits. | — | A1a1 |
+| A1a4 Signing key and capability | agent-providers | An RS256 capability is minted at admission and handed to the runner, with one key, its `kid` and a documented rotation. The registry gains the MCP origin. | — | A1a1 |
+| A1a5 Job tickets | agent-providers | `POST /job-tickets` (own audience, at most 24 h), ticket runs and the `background` flag. The ticket binds `/ki-abo` and the app group (H12). | — | A1a4 |
+| A1b CLI runner | agent-providers | H7 isolation, and only the selected profile's login is visible to its run. One admission slot is taken, and a second run gets 429. Cancel and disconnect kill and reap the process group. The per-run MCP config carries the capability, and no token appears in argv or logs. | — | A1a1 |
+| A1m MCP helper | agent-providers | The `agent-client` Streamable HTTP MCP server helper verifies the capability (format from A1a4), denies redirects, validates Host/Origin, and refuses a bad audience, an expired capability, a wrong run or a tool off the allowlist. | — | A0b, A1a4 |
 | A1d Deployment | edge | A tagged service image is built from the agent-providers release. It runs in edge compose on an internal network with egress limited to the registered origins and LiteLLM. The profile config is code, each profile's login sits in its own volume from `~/.secrets`, and Keycloak has the `agent-service` audience plus the workload clients. A live smoke test with the operator's account reaches a terminal event. | — | A1b, A1m, edge#12 live |
 | A1s Songmaker co-writer moves | songmaker | The co-writer runs through the service with the operator's real login, and its tools work over MCP with ownership checks. The in-process co-writer route is removed, along with the local provider/model/route choice. | — | A1d, Songmaker on Keycloak (K12) |
 | A1r1 Judge moves | songmaker | The judge runs with job tickets (H12). | — | A1s |
@@ -417,7 +449,7 @@ settles the open points named here.
 | A1r3 Cover image | songmaker, agent-providers | The service gains a Codex image route (the first non-Claude provider), and covers run through it. | — | A1s |
 | A1r4 Credential mounts removed | songmaker | No Songmaker container mounts a subscription credential (checked in CI). | — | A1r1–A1r3 |
 | A2a Gateway | edge | LiteLLM is up with H10 and H10b proven, including the canary. | — | edge#12 live |
-| A2b API route | agent-providers | The service's API route and tool loop serve API-eligible principals. | — | A1a, A2a |
+| A2b API route | agent-providers | The service's API route and tool loop serve API-eligible principals. | — | A1a1, A2a |
 | A2c "KI noch nicht freigeschaltet" | songmaker | A `not_enabled` result renders the message, and a UI test pins it. | — | A2b, A1s |
 | A3 Presentator copresenter moves | agent-presentator | The copresenter goes through the service, and the H11 gate is lifted. | — | A2b, K13 |
 

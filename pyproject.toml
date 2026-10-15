@@ -53,4 +53,7 @@ select = ["E", "F", "W", "I"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["acceptance(identifier): exact Acceptance evidence claim."]
+markers = [
+    "acceptance(identifier): exact Acceptance evidence claim.",
+    "keycloak: needs the test Keycloak at KEYCLOAK_URL (the keycloak-token-shapes CI job).",
+]

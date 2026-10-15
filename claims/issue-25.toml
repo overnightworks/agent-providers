@@ -1,0 +1,8 @@
+claim_id = "2ff6671d56a7456cbaebf08a912565a4"
+agent = "Claude fe12493e-3d52-442e-b01b-4ee4336de2f0"
+role = "builder"
+base = "e3660f2255904901bb9ca5f32cbbce052d66494d"
+branch = "claude/issue-25-a0b2-sse-codec"
+scope = ["README.md", "docs/decisions/0001-agent-service.md", "packages/agent-client/src/agent_client", "tests/test_sse_codec.py", "tests/test_wire_protocol.py"]
+opened_commit = "bfd56eba237d2633cf75ebf306516266a86e8291"
+whole_reason = "The frame codec and the stream-rule additions it enforces land as one contract step."

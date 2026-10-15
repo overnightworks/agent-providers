@@ -240,10 +240,12 @@ existing `agent_providers.events` is that contract.
   with the whole event, ended by a blank line; no frame exceeds
   `MAX_EVENT_BYTES` (1 MiB). The decoder accepts LF, CRLF and CR line ends, a
   leading byte order mark, `:` comments and `retry:`, and names any other
-  field as `malformed_frame`, a larger frame as `oversized_frame`, data that
-  is not a JSON object as `invalid_json`, and an `event` or `id` that
-  disagrees with the data's `type` or `seq` as `event_type_mismatch` or
-  `id_mismatch`. The first violation ends the decoding.
+  field as `malformed_frame`; a frame missing or repeating `id`, `event` or
+  `data`, or a line that is not UTF-8, is `malformed_frame` too. It names a
+  larger frame as `oversized_frame`, data that is not a JSON object as
+  `invalid_json`, and an `event` or `id` that disagrees with the data's
+  `type` or `seq` as `event_type_mismatch` or `id_mismatch`. The first
+  violation ends the decoding.
 
 **Consequence.** A client validates a stream against one contract, and a
 second wire owner cannot appear without contradicting this ruling.

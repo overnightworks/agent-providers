@@ -15,11 +15,13 @@ a public contract that a tag has already frozen somewhere else.
 ## Repository layout
 
 The repository root holds only what a tool must find there — the package
-manifest and its lockfile, the import-boundary configuration, the licence — and
-the entry documents `README.md`, `AGENTS.md` and `CLAUDE.md`. Everything else
-lives in the directory of its owner: the library under `src/agent_providers/`,
-its suite under `tests/`. No catch-all directory (`tooling/`, `misc/`) and no
-deeper hierarchy than the owner needs.
+manifest and its lockfile, the import-boundary configuration, the licence —
+and the entry documents `README.md`, `AGENTS.md` and `CLAUDE.md`.
+Everything else lives in the directory of its owner: the library under
+`src/agent_providers/`, its suite under `tests/`, and the decision records
+under `docs/decisions/` — among them the decision that this repository will
+also host the agent service. No catch-all directory (`tooling/`, `misc/`)
+and no deeper hierarchy than the owner needs.
 
 ## Boundaries
 

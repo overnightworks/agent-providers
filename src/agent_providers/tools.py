@@ -11,8 +11,12 @@ The text protocol's markers carry a brand, so they are declared here too
 that declares nothing renders the prompt this package shipped with, byte
 for byte.
 
-Self-contained by design: pydantic only, no application import, so the
-package can be released on its own.
+Each tool is a ``ToolDeclaration`` from ``agent_client.tools``, its one
+owner; this module re-exports that identical class, so a host importing it
+from here keeps working.
+
+Self-contained by design: pydantic and the agent client only, no application
+import, so the package can be released on its own.
 """
 
 from __future__ import annotations
@@ -21,18 +25,10 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from agent_client.tools import ToolDeclaration
+
 _DEFAULT_TAG_NAMESPACE = "songmaker"
 _DEFAULT_PRODUCT_NAME = "Songmaker"
-
-
-class ToolDeclaration(BaseModel):
-    """One tool as a model sees it: its name, its purpose, its arguments."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    name: str = Field(min_length=1)
-    description: str = Field(min_length=1)
-    parameters: dict[str, Any]
 
 
 class ToolProtocolMarkup(BaseModel):

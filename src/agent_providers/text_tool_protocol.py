@@ -14,7 +14,8 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-from agent_providers.tools import ToolCatalog, ToolDeclaration, ToolProtocolMarkup
+from agent_client.tools import ToolDeclaration
+from agent_providers.tools import ToolCatalog, ToolProtocolMarkup
 
 _CALL_EXAMPLE = '{"name":"tool_name","arguments":{}}'
 

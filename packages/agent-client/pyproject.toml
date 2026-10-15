@@ -1,0 +1,25 @@
+[project]
+name = "overnightworks-agent-client"
+version = "0.2.0"
+description = "Light client of the overnightworks agent service: the tool contract an app declares and the agent service consumes"
+authors = [{ name = "Flex0r (Felix Hummert)", email = "felix.hummert@gmail.com" }]
+license = { text = "MIT" }
+requires-python = ">=3.12"
+
+dependencies = [
+    "pydantic>=2,<3",
+]
+
+[project.urls]
+Repository = "https://github.com/overnightworks/agent-providers"
+
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["agent_client*"]
+
+[tool.setuptools.package-data]
+agent_client = ["py.typed"]

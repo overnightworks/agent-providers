@@ -253,6 +253,9 @@ existing `agent_providers.events` is that contract.
   `invalid_json`, and an `event` or `id` that disagrees with the data's
   `type` or `seq` as `event_type_mismatch` or `id_mismatch`. The first
   violation ends the decoding.
+  A `tool_call`'s `input` nests at most `MAX_TOOL_INPUT_DEPTH` (128) objects
+  and arrays deep, so every input a service can build also encodes; a deeper
+  one is refused when built and decoded as `schema_mismatch`.
 
 **Consequence.** A client validates a stream against one contract, and a
 second wire owner cannot appear without contradicting this ruling.

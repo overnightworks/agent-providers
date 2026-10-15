@@ -27,6 +27,7 @@ from agent_client.tools import ToolEffect
 
 PROTOCOL_VERSION: Final = 1
 MAX_EVENT_BYTES: Final = 1_048_576
+MAX_TOOL_INPUT_DEPTH: Final = 128
 MAX_MESSAGE_LENGTH: Final = 500
 
 
@@ -75,8 +76,8 @@ class _LeaveContainer:
 
 
 def _refuse_non_json_object(value: dict[Any, Any]) -> dict[str, Any]:
-    # An explicit stack, not recursion: a frame within the size limit can nest
-    # deeper than Python's recursion limit, and that depth is still valid JSON.
+    # The depth limit keeps every accepted input encodable: pydantic's serializer
+    # refuses a value nested about 255 levels deep, whatever its size.
     # Only the containers on the current path count as open, so a value shared
     # by two branches is accepted, as ``json.dumps`` accepts it.
     open_containers: set[int] = set()
@@ -97,6 +98,8 @@ def _refuse_non_json_object(value: dict[Any, Any]) -> dict[str, Any]:
 def _enter_container(container: dict[Any, Any] | list[Any], open_containers: set[int]) -> None:
     if id(container) in open_containers:
         raise ValueError("a value that contains itself is not JSON")
+    if len(open_containers) == MAX_TOOL_INPUT_DEPTH:
+        raise ValueError(f"tool input nests deeper than {MAX_TOOL_INPUT_DEPTH} objects and arrays")
     open_containers.add(id(container))
     if isinstance(container, dict):
         for key in container:

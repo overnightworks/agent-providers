@@ -7,7 +7,11 @@ event off the contract named once, with nothing decoded after it.
 
 from __future__ import annotations
 
+import json
+from typing import Any
+
 import pytest
+from pydantic import ValidationError
 from wire_builders import call, heartbeat, result, started, succeeded, text
 
 from agent_client.run_stream import StreamViolation, ViolationKind
@@ -20,6 +24,7 @@ from agent_client.sse import (
 )
 from agent_client.wire import (
     MAX_EVENT_BYTES,
+    MAX_TOOL_INPUT_DEPTH,
     PROTOCOL_VERSION,
     AssistantText,
     Heartbeat,
@@ -173,15 +178,35 @@ def test_a_broken_frame_is_named_and_nothing_is_decoded_after_it(
     assert decoder.close() == []
 
 
-def test_tool_input_nested_a_thousand_levels_deep_decodes_as_a_call() -> None:
-    depth = 1000
-    shallow_call = encode_event(call(1, "call-1", tool_input={"a": 1}))
-    deep_call = shallow_call.replace(b'{"a":1}', b'{"a":' * depth + b"1" + b"}" * depth)
+def _tool_input_nested(depth: int) -> dict[str, Any]:
+    tool_input: dict[str, Any] = {"a": 1}
+    for _ in range(depth - 1):
+        tool_input = {"a": tool_input}
+    return tool_input
 
-    opening, decoded = RunStreamDecoder().feed(OPENING + deep_call)
+
+def test_tool_input_at_the_depth_limit_survives_encoding_and_decoding() -> None:
+    deep_call = call(1, "call-1", tool_input=_tool_input_nested(MAX_TOOL_INPUT_DEPTH))
+
+    opening, decoded = RunStreamDecoder().feed(OPENING + encode_event(deep_call))
 
     assert opening == A_RUN[0]
-    assert decoded.type == "tool_call"
+    assert decoded == deep_call
+
+
+def test_tool_input_deeper_than_the_limit_is_neither_built_nor_decoded() -> None:
+    too_deep = _tool_input_nested(MAX_TOOL_INPUT_DEPTH + 1)
+    compact_too_deep = json.dumps(too_deep, separators=(",", ":")).encode()
+    shallow_call = encode_event(call(1, "call-1", tool_input={"a": 1}))
+    deep_frame = shallow_call.replace(b'{"a":1}', compact_too_deep)
+
+    with pytest.raises(ValidationError):
+        call(1, "call-1", tool_input=too_deep)
+    opening, violation = RunStreamDecoder().feed(OPENING + deep_frame)
+
+    assert opening == A_RUN[0]
+    assert isinstance(violation, StreamViolation)
+    assert violation.kind is ViolationKind.SCHEMA_MISMATCH
 
 
 def test_a_closed_decoder_refuses_a_second_close() -> None:

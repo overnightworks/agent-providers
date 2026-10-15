@@ -89,7 +89,7 @@ class ToolCall(_RunEvent):
     """A tool the model asked for, emitted before the tool runs."""
 
     type: Literal["tool_call"] = "tool_call"
-    tool_use_id: str
+    tool_use_id: str = Field(min_length=1)
     name: str
     input: dict[str, Any]
     effect: Annotated[ToolEffect, Field(strict=False)]
@@ -97,7 +97,7 @@ class ToolCall(_RunEvent):
 
 class ToolResult(_RunEvent):
     type: Literal["tool_result"] = "tool_result"
-    tool_use_id: str
+    tool_use_id: str = Field(min_length=1)
     content: str
     is_error: bool
 
@@ -110,7 +110,7 @@ class Heartbeat(_RunEvent):
 
 class Succeeded(_RunEvent):
     type: Literal["succeeded"] = "succeeded"
-    text: str
+    text: str = Field(min_length=1)
 
 
 class Failed(_RunEvent):
@@ -140,4 +140,4 @@ class RunRejection(_WireModel):
     """The HTTP body of a run the service refused before admission."""
 
     code: Annotated[RejectionCode, Field(strict=False)]
-    message: str
+    message: str = Field(max_length=MAX_MESSAGE_LENGTH)

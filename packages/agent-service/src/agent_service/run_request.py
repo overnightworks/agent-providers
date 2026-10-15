@@ -29,7 +29,7 @@ class _NotStrictJson(ValueError):
 def parse_run_request(body: bytes) -> RunRequest | RejectionCode:
     try:
         document = json.loads(
-            body.decode("utf-8"),
+            body.decode("utf-8-sig"),
             object_pairs_hook=_refuse_duplicate_members,
             parse_constant=_refuse_constant,
         )

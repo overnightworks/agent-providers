@@ -188,7 +188,7 @@ one terminal event: `succeeded`, `failed` (a typed code and a safe message) or
   there is no database.
 - A client disconnect cancels the run, which kills and reaps its process. It is
   recorded as `cancelled`, or as `failed: interrupted` if a side-effecting tool
-  call had already run.
+  call had already been emitted (A0b wire ruling (a)).
 - Presentator's speech events (`sentence`, `audio`, `done`) stay in Presentator
   and are not added to this contract.
 
@@ -381,7 +381,7 @@ settles the open points named here.
 |---|---|---|---|---|
 | #19 A0r Decision record (docs only) | agent-providers | see #19 (this record) | — | none |
 | A0a Packages and tool contract | agent-providers | A uv workspace with core at the root and `packages/agent-client`. Lockstep 0.2.0. One tag publishes both wheels. `ToolDeclaration` lives in the client and is re-exported identically. Import gates run in CI. Existing tag pins are unchanged. | settled by the A0a plan (15.10.2026), recorded by #19 | #19 |
-| A0b Wire protocol | agent-providers | The protocol is fully enumerated: every non-terminal and terminal variant with its payload, protocol version and rejection of unknown versions, sequence rules, SSE framing, and an SSE codec/state machine that validates a stream. The run id is delivered before any fallible body. A tool's effect class (read-only or side-effecting) is part of `ToolDeclaration`, and `failed: interrupted` is defined by it. The existing `agent_providers.events` is either the core's internal event type or replaced, never a second wire owner. | Replace or wrap the existing events | A0a |
+| A0b Wire protocol | agent-providers | The protocol is fully enumerated: every non-terminal and terminal variant with its payload, protocol version and rejection of unknown versions, sequence rules, SSE framing, and an SSE codec/state machine that validates a stream. The run id is delivered before any fallible body. A tool's effect class (read-only or side-effecting) is part of `ToolDeclaration`, and `failed: interrupted` is defined by it. The existing `agent_providers.events` is either the core's internal event type or replaced, never a second wire owner. | settled by the A0b wire ruling (15.10.2026) | A0a |
 | A1a Service skeleton | agent-providers | Against a test issuer and a fake runner: both tokens are checked, with `azp` equal to the workload client. The H5 routing covers `/ki-abo`, API-eligible, `not_enabled` and job tickets (H12). Every forbidden field is rejected. `GET /runs/{id}` requires the run's exact workload client and principal. Capability and ticket tokens have a ruled format, key source and rotation. The service package and entry point exist. | Token format and keys; restart behaviour of run status (documented or minimal persistence) | A0b, webauth#51 |
 | A1b CLI runner | agent-providers | H7 isolation, and only the selected profile's login is visible to its run. One admission slot is taken, and a second run gets 429. Cancel and disconnect kill and reap the process group. The per-run MCP config carries the capability, and no token appears in argv or logs. | — | A1a |
 | A1m MCP helper | agent-providers | The `agent-client` Streamable HTTP MCP server helper verifies the capability (format from A1a), denies redirects, validates Host/Origin, and refuses a bad audience, an expired capability, a wrong run or a tool off the allowlist. | — | A0b, A1a |

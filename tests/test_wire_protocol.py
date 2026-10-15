@@ -29,6 +29,7 @@ from agent_client.wire import (
     ToolCall,
     ToolResult,
 )
+from agent_providers.text_tool_protocol import render_tool_catalog
 from agent_providers.tools import ToolCatalog, anthropic_tool_schemas, openai_tool_schemas
 
 
@@ -45,7 +46,9 @@ def test_a_tool_declared_without_an_effect_counts_as_side_effecting() -> None:
     assert _declaration("write_lyrics").effect is ToolEffect.SIDE_EFFECTING
 
 
-@pytest.mark.parametrize("project", [anthropic_tool_schemas, openai_tool_schemas])
+@pytest.mark.parametrize(
+    "project", [anthropic_tool_schemas, openai_tool_schemas, render_tool_catalog]
+)
 def test_the_effect_class_never_reaches_a_model(project) -> None:
     catalog = ToolCatalog(
         tools=(
@@ -54,7 +57,10 @@ def test_the_effect_class_never_reaches_a_model(project) -> None:
         )
     )
 
-    assert "effect" not in json.dumps(project(catalog))
+    seen_by_the_model = json.dumps(project(catalog))
+
+    for leak in ("effect", ToolEffect.READ_ONLY, ToolEffect.SIDE_EFFECTING):
+        assert leak not in seen_by_the_model
 
 
 RUN_ID = UUID("8c2f6c1e-3b5a-4d8e-9f10-2a7b4c6d8e01")
@@ -186,6 +192,16 @@ def test_a_rejection_body_round_trips_through_its_json() -> None:
 def test_a_rejection_body_off_the_contract_is_refused(body: dict[str, object]) -> None:
     with pytest.raises(ValidationError):
         RunRejection.model_validate_json(json.dumps(body))
+
+
+def test_an_unsupported_version_is_named_without_echoing_it_whole() -> None:
+    oversized_version = "9" * 2000
+
+    violation = parse_event({**_wire("heartbeat", 1), "v": oversized_version})
+
+    assert isinstance(violation, StreamViolation)
+    assert violation.kind is ViolationKind.UNSUPPORTED_VERSION
+    assert oversized_version not in violation.detail
 
 
 def _started() -> RunStarted:
@@ -338,3 +354,18 @@ def test_a_cut_short_run_ends_by_the_effect_of_its_calls(
     assert terminal.model_dump(mode="json", include=set(expected)) == expected
     assert stream.accept(terminal) is None
     assert stream.close() is None
+
+
+@pytest.mark.parametrize(
+    "events",
+    [
+        pytest.param([], id="a run that never started"),
+        pytest.param([_started(), _succeeded(1)], id="a run that already ended"),
+    ],
+)
+def test_only_a_running_run_can_be_cut_short(events: list[RunEvent]) -> None:
+    stream = RunStream()
+    _accept_all(stream, events)
+
+    with pytest.raises(RuntimeError):
+        stream.cancellation_terminal()

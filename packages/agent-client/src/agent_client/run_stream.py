@@ -29,6 +29,7 @@ from agent_client.wire import (
 )
 
 INTERRUPTED_MESSAGE: Final = "The run was cut short after a side-effecting tool call."
+_SHOWN_VERSION_LENGTH: Final = 20
 
 _RUN_EVENT: Final[TypeAdapter[RunEvent]] = TypeAdapter(RunEvent)
 _PROTOCOL_VERSION: Final[TypeAdapter[ProtocolVersion]] = TypeAdapter(ProtocolVersion)
@@ -70,7 +71,10 @@ def parse_event(raw: dict[str, Any]) -> RunEvent | StreamViolation:
     except ValidationError:
         return StreamViolation(
             kind=ViolationKind.UNSUPPORTED_VERSION,
-            detail=f"protocol version {version!r}, this client speaks {PROTOCOL_VERSION}",
+            detail=(
+                f"protocol version {repr(version)[:_SHOWN_VERSION_LENGTH]}, "
+                f"this client speaks {PROTOCOL_VERSION}"
+            ),
         )
     try:
         return _RUN_EVENT.validate_python(raw)

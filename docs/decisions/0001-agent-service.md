@@ -117,8 +117,11 @@ body rules be fixed before the build.
 - **The workload binding (U1').** A workload token binds its app only when it
   carries realm role `agent-workload` (which only service accounts hold), its
   `azp == client_id ==` one registered `workload_client`, `exp - iat` is at
-  most 300 s, and `sub`, `azp` and `client_id` are present. `client_id` alone
-  proves nothing. A `workload_client` registered for two apps stops startup.
+  most 300 s, `sub` is present, and `azp` and `client_id` are non-empty
+  strings. `client_id` alone proves nothing. An empty `sub` never reaches the
+  binding: webauth's verifier refuses it as an invalid claim, so the token is
+  an unusable credential. No refusal is decided from unverified claims. A
+  `workload_client` registered for two apps stops startup.
   One process-scoped webauth `JwtVerifier` holds the key-set cache, refresh
   lock and cooldown, and runs off the event loop.
 - **The order of checks.** The first failure answers:
@@ -127,7 +130,7 @@ body rules be fixed before the build.
   |---|---|
   | The workload token, then the user token: missing, not a bearer, or not verified (signature, issuer, `aud` ∌ `agent-service`, time, an empty `sub`); a user token without `sub` or with a malformed group claim | 401 `unauthorized`, one body, `WWW-Authenticate: Bearer` |
   | The key set cannot be fetched | 503 `unavailable`, `Retry-After: 30` |
-  | The workload binding above fails; the user's `azp` differs from the workload's; the user's `sub` equals the workload's | 403 `forbidden` |
+  | The workload binding above fails (among others: an absent workload `sub`, an absent or empty `azp` or `client_id`); the user's `azp` differs from the workload's; the user's `sub` equals the workload's | 403 `forbidden` |
   | The body, at most 256 KiB enforced before buffering, parsed as strict JSON (no `NaN`, no member twice): its `v` is not 1, or absent | 400 `unsupported_version` |
   | The body is not strict JSON, too large, or not exactly a `RunRequest` | 422 `invalid_request` |
   | The purpose is not in the app's list | 403 `forbidden` |

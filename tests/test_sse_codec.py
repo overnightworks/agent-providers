@@ -75,6 +75,19 @@ SPELLINGS = {
     "retry": b"retry: 3000\n\n" + ENCODED.replace(b"event:", b"retry: 1000\nevent:"),
 }
 
+UMLAUT_TEXT_FRAME = (
+    b"id: 1\n"
+    b"event: assistant_text\n"
+    b'data: {"v":1,"run_id":"8c2f6c1e-3b5a-4d8e-9f10-2a7b4c6d8e01","seq":1,'
+    b'"type":"assistant_text","text":"Ein erster Vers \xe2\x80\x93 \xc3\xbcber Gr\xc3\xbcn."}\n'
+    b"\n"
+)
+
+
+def test_an_event_travels_as_one_frame_of_compact_utf8_json() -> None:
+    assert encode_event(A_RUN[1]) == UMLAUT_TEXT_FRAME
+    assert _decode(OPENING, UMLAUT_TEXT_FRAME)[1] == A_RUN[1]
+
 
 @pytest.mark.parametrize("spelled", SPELLINGS.values(), ids=SPELLINGS.keys())
 def test_a_run_decodes_the_same_wherever_its_bytes_split(spelled: bytes) -> None:

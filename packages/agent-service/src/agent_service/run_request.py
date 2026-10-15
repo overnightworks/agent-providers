@@ -3,8 +3,9 @@
 The body is strict JSON — no ``NaN`` or infinities, no member named twice — and
 is parsed before its protocol version is read, so only a parsed object whose
 ``v`` this service does not speak is ``unsupported_version``; everything else
-that is not a ``RunRequest`` is ``invalid_request``. The size limit is the
-transport's to enforce before it buffers the body.
+that is not a ``RunRequest`` is ``invalid_request``. The body is UTF-8 only
+(``json.loads`` on bytes would also sniff UTF-16 and UTF-32). The size limit is
+the transport's to enforce before it buffers the body.
 """
 
 from __future__ import annotations
@@ -28,7 +29,9 @@ class _NotStrictJson(ValueError):
 def parse_run_request(body: bytes) -> RunRequest | RejectionCode:
     try:
         document = json.loads(
-            body, object_pairs_hook=_refuse_duplicate_members, parse_constant=_refuse_constant
+            body.decode("utf-8"),
+            object_pairs_hook=_refuse_duplicate_members,
+            parse_constant=_refuse_constant,
         )
     except (ValueError, RecursionError):
         return RejectionCode.INVALID_REQUEST

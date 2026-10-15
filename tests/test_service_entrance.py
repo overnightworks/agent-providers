@@ -367,6 +367,15 @@ BODY_REJECTIONS = [
     pytest.param(b"[1]", RejectionCode.INVALID_REQUEST, 422, id="not-an-object"),
     pytest.param(b'{"v": 1,', RejectionCode.INVALID_REQUEST, 422, id="not-json"),
     pytest.param(_too_large(), RejectionCode.INVALID_REQUEST, 422, id="over-256-kib"),
+    *(
+        pytest.param(
+            json.dumps(run_body()).encode(encoding),
+            RejectionCode.INVALID_REQUEST,
+            422,
+            id=encoding,
+        )
+        for encoding in ("utf-16", "utf-16-le", "utf-32", "utf-32-be")
+    ),
     pytest.param(
         json.dumps(run_body(turn={"system": "x", "messages": []})).encode(),
         RejectionCode.INVALID_REQUEST,

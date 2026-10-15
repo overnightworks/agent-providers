@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import re
+from enum import Enum, auto
 from typing import Any, Final
 
 from agent_client.run_stream import RunStream, StreamViolation, ViolationKind, parse_event
@@ -30,6 +31,12 @@ _IGNORED_FIELD: Final = "retry"
 _COMMENT_MARK: Final = ":"
 
 Decoded = RunEvent | StreamViolation
+
+
+class _DecoderState(Enum):
+    OPEN = auto()
+    ENDED = auto()
+    BROKE_CONTRACT = auto()
 
 
 class EventTooLarge(ValueError):
@@ -58,17 +65,17 @@ class RunStreamDecoder:
     ``feed`` takes chunks split anywhere and returns the events they
     complete; a violation is always the last item, and it closes the
     decoder. ``close`` ends the stream: an unfinished frame is dropped and a
-    run without its terminal event is reported as truncated; on a decoder a
-    violation already closed it returns nothing, so a consumer may feed every
-    chunk and close at the end of its input. Lines may end in
+    run without its terminal event is reported as truncated; after ``feed``
+    returned a violation it returns nothing, so a consumer may feed every
+    chunk and close at the end of its input. A second ``close`` raises
+    ``DecoderClosed``. Lines may end in
     LF, CRLF or CR, the stream may open with a byte order mark, and comments
     and ``retry`` fields are ignored.
     """
 
     def __init__(self) -> None:
         self._stream = RunStream()
-        self._closed = False
-        self._broke_contract = False
+        self._state = _DecoderState.OPEN
         self._first_line = True
         self._line_feed_may_follow = False
         self._unfinished_line = bytearray()
@@ -79,7 +86,7 @@ class RunStreamDecoder:
         self._refuse_if_closed()
         decoded: list[Decoded] = []
         position = self._skip_line_feed_of_split_crlf(chunk)
-        while not self._closed:
+        while self._state is _DecoderState.OPEN:
             line_end = _LINE_END.search(chunk, position)
             if line_end is None:
                 self._hold(chunk[position:], decoded)
@@ -96,15 +103,15 @@ class RunStreamDecoder:
         return decoded
 
     def close(self) -> list[Decoded]:
-        if self._broke_contract:
+        if self._state is _DecoderState.BROKE_CONTRACT:
             return []
         self._refuse_if_closed()
-        self._closed = True
+        self._state = _DecoderState.ENDED
         violation = self._stream.close()
         return [] if violation is None else [violation]
 
     def _refuse_if_closed(self) -> None:
-        if self._closed:
+        if self._state is not _DecoderState.OPEN:
             raise DecoderClosed("the stream already ended or broke the contract")
 
     def _skip_line_feed_of_split_crlf(self, chunk: bytes) -> int:
@@ -136,8 +143,7 @@ class RunStreamDecoder:
             return
         decoded.append(outcome)
         if isinstance(outcome, StreamViolation):
-            self._closed = True
-            self._broke_contract = True
+            self._state = _DecoderState.BROKE_CONTRACT
 
     def _read_line(self, line: bytes) -> Decoded | None:
         if self._first_line:

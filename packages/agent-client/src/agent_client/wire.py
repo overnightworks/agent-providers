@@ -4,7 +4,7 @@ This module is the one owner of what travels between a client and the
 service (decision record 0001, H6): the request that starts a run, the run's
 event stream as a closed union discriminated on ``type`` with every event
 carrying the protocol version, the run id and its sequence number, and the
-typed body the service answers with when it refuses a run before admission.
+typed body the service answers with when it refuses a request.
 A new variant or a new field is a new ``PROTOCOL_VERSION``.
 
 Validation is strict, so the wire's JSON types are the contract: a sequence
@@ -41,7 +41,7 @@ class FailureCode(StrEnum):
 
 
 class RejectionCode(StrEnum):
-    """Why the service refused a run before admitting it."""
+    """Why the service refused a request: to start a run, or to read one."""
 
     NOT_ENABLED = "not_enabled"
     BUSY = "busy"
@@ -201,7 +201,7 @@ def is_run_event(value: object) -> TypeGuard[RunEvent]:
 
 
 class RunRejection(_WireModel):
-    """The HTTP body of a run the service refused before admission."""
+    """The HTTP body of a request the service refused."""
 
     code: Annotated[RejectionCode, Field(strict=False)]
     message: str = Field(max_length=MAX_MESSAGE_LENGTH)

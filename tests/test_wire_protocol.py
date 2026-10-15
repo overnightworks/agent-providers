@@ -19,6 +19,7 @@ from agent_client.wire import (
     MAX_MESSAGE_LENGTH,
     PROTOCOL_VERSION,
     Cancelled,
+    Failed,
     FailureCode,
     Heartbeat,
     RejectionCode,
@@ -160,6 +161,21 @@ def test_every_variant_round_trips_through_its_json(raw: dict[str, object]) -> N
             ViolationKind.SCHEMA_MISMATCH,
             id="message too long",
         ),
+        pytest.param(
+            {**WIRE_VARIANTS["tool_call"], "tool_use_id": ""},
+            ViolationKind.SCHEMA_MISMATCH,
+            id="tool call with an empty tool_use_id",
+        ),
+        pytest.param(
+            {**WIRE_VARIANTS["tool_result"], "tool_use_id": ""},
+            ViolationKind.SCHEMA_MISMATCH,
+            id="tool result with an empty tool_use_id",
+        ),
+        pytest.param(
+            {**WIRE_VARIANTS["succeeded"], "text": ""},
+            ViolationKind.SCHEMA_MISMATCH,
+            id="succeeded with an empty text",
+        ),
     ],
 )
 def test_an_event_off_the_contract_names_its_violation(
@@ -169,6 +185,14 @@ def test_an_event_off_the_contract_names_its_violation(
 
     assert isinstance(violation, StreamViolation)
     assert violation.kind is kind
+
+
+def test_an_unknown_type_is_named_without_an_empty_location() -> None:
+    violation = parse_event(_wire("thinking", 1, text="hm"))
+
+    assert isinstance(violation, StreamViolation)
+    assert "'thinking'" in violation.detail
+    assert not violation.detail.startswith(":")
 
 
 REJECTION = {"v": PROTOCOL_VERSION, "code": "busy", "message": "Another run is active."}
@@ -187,6 +211,9 @@ def test_a_rejection_body_round_trips_through_its_json() -> None:
         pytest.param({**REJECTION, "v": True}, id="version true"),
         pytest.param({**REJECTION, "v": 1.0}, id="version as a float"),
         pytest.param({"code": "busy", "message": "Another run is active."}, id="no version"),
+        pytest.param(
+            {**REJECTION, "message": "x" * (MAX_MESSAGE_LENGTH + 1)}, id="message too long"
+        ),
     ],
 )
 def test_a_rejection_body_off_the_contract_is_refused(body: dict[str, object]) -> None:
@@ -260,6 +287,16 @@ def _cancelled(seq: int) -> Cancelled:
     return Cancelled(v=PROTOCOL_VERSION, run_id=RUN_ID, seq=seq)
 
 
+def _interrupted(seq: int) -> Failed:
+    return Failed(
+        v=PROTOCOL_VERSION,
+        run_id=RUN_ID,
+        seq=seq,
+        code=FailureCode.INTERRUPTED,
+        message="The run was cut short.",
+    )
+
+
 def _accept_all(stream: RunStream, events: list[RunEvent]) -> list[ViolationKind | None]:
     return [_kind(stream.accept(event)) for event in events]
 
@@ -323,6 +360,16 @@ def test_a_well_formed_run_breaks_no_rule() -> None:
             [_started(), _call(1, "call-1"), _cancelled(2)],
             ViolationKind.CANCELLED_AFTER_SIDE_EFFECT,
             id="cancelled after a side-effecting call",
+        ),
+        pytest.param(
+            [_started(), _call(1, "call-1"), _result(2, "call-1"), _result(3, "call-1")],
+            ViolationKind.DUPLICATE_TOOL_RESULT,
+            id="second result for one call",
+        ),
+        pytest.param(
+            [_started(), _call(1, "call-1", ToolEffect.READ_ONLY), _interrupted(2)],
+            ViolationKind.INTERRUPTED_WITHOUT_SIDE_EFFECT,
+            id="interrupted without a side-effecting call",
         ),
     ],
 )

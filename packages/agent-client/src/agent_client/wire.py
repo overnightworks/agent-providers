@@ -60,6 +60,9 @@ def _json_integer(value: object) -> object:
 ProtocolVersion = Annotated[Literal[1], BeforeValidator(_json_integer)]
 """The one decider of whether a ``v`` is the version this package speaks."""
 
+ToolUseId = Annotated[str, Field(min_length=1)]
+"""The one decider of a valid call id, so a call and its result accept the same ids."""
+
 
 class _WireModel(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
@@ -89,7 +92,7 @@ class ToolCall(_RunEvent):
     """A tool the model asked for, emitted before the tool runs."""
 
     type: Literal["tool_call"] = "tool_call"
-    tool_use_id: str
+    tool_use_id: ToolUseId
     name: str
     input: dict[str, Any]
     effect: Annotated[ToolEffect, Field(strict=False)]
@@ -97,7 +100,7 @@ class ToolCall(_RunEvent):
 
 class ToolResult(_RunEvent):
     type: Literal["tool_result"] = "tool_result"
-    tool_use_id: str
+    tool_use_id: ToolUseId
     content: str
     is_error: bool
 
@@ -110,7 +113,7 @@ class Heartbeat(_RunEvent):
 
 class Succeeded(_RunEvent):
     type: Literal["succeeded"] = "succeeded"
-    text: str
+    text: str = Field(min_length=1)
 
 
 class Failed(_RunEvent):
@@ -140,4 +143,4 @@ class RunRejection(_WireModel):
     """The HTTP body of a run the service refused before admission."""
 
     code: Annotated[RejectionCode, Field(strict=False)]
-    message: str
+    message: str = Field(max_length=MAX_MESSAGE_LENGTH)

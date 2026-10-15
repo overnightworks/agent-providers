@@ -37,7 +37,7 @@ _UNKNOWN_TAG_ERRORS: Final = frozenset({"union_tag_invalid", "union_tag_not_foun
 
 
 class ViolationKind(StrEnum):
-    """Which promise of the protocol an event broke."""
+    """Which promise of the protocol an event, or the frame carrying it, broke."""
 
     UNKNOWN_TYPE = "unknown_type"
     UNSUPPORTED_VERSION = "unsupported_version"
@@ -48,8 +48,15 @@ class ViolationKind(StrEnum):
     EVENT_AFTER_TERMINAL = "event_after_terminal"
     DUPLICATE_TOOL_USE_ID = "duplicate_tool_use_id"
     UNKNOWN_TOOL_USE_ID = "unknown_tool_use_id"
+    DUPLICATE_TOOL_RESULT = "duplicate_tool_result"
     CANCELLED_AFTER_SIDE_EFFECT = "cancelled_after_side_effect"
+    INTERRUPTED_WITHOUT_SIDE_EFFECT = "interrupted_without_side_effect"
     TRUNCATED = "truncated"
+    MALFORMED_FRAME = "malformed_frame"
+    OVERSIZED_FRAME = "oversized_frame"
+    INVALID_JSON = "invalid_json"
+    EVENT_TYPE_MISMATCH = "event_type_mismatch"
+    ID_MISMATCH = "id_mismatch"
 
 
 class StreamViolation(BaseModel):
@@ -93,11 +100,14 @@ def _violation_from(error: ValidationError) -> StreamViolation:
         if any(problem["type"] in _UNKNOWN_TAG_ERRORS for problem in problems)
         else ViolationKind.SCHEMA_MISMATCH
     )
-    detail = "; ".join(
-        f"{'.'.join(str(part) for part in problem['loc'])}: {problem['msg']}"
-        for problem in problems
-    )
+    detail = "; ".join(_located(problem["loc"], problem["msg"]) for problem in problems)
     return StreamViolation(kind=kind, detail=detail)
+
+
+def _located(location: tuple[int | str, ...], message: str) -> str:
+    if not location:
+        return message
+    return f"{'.'.join(str(part) for part in location)}: {message}"
 
 
 class RunStream:
@@ -114,6 +124,7 @@ class RunStream:
         self._next_seq = 0
         self._terminal: TerminalEvent | None = None
         self._tool_effects: dict[str, ToolEffect] = {}
+        self._answered_calls: set[str] = set()
 
     def accept(self, event: RunEvent) -> StreamViolation | None:
         violation = self._broken_rule(event)
@@ -188,10 +199,27 @@ class RunStream:
                 kind=ViolationKind.UNKNOWN_TOOL_USE_ID,
                 detail=f"a result for no call {event.tool_use_id!r}",
             )
+        if isinstance(event, ToolResult) and event.tool_use_id in self._answered_calls:
+            return StreamViolation(
+                kind=ViolationKind.DUPLICATE_TOOL_RESULT,
+                detail=f"a second result for call {event.tool_use_id!r}",
+            )
+        return self._broken_ending_rule(event)
+
+    def _broken_ending_rule(self, event: RunEvent) -> StreamViolation | None:
         if isinstance(event, Cancelled) and self._side_effect_emitted:
             return StreamViolation(
                 kind=ViolationKind.CANCELLED_AFTER_SIDE_EFFECT,
                 detail="cancelled after a side-effecting call; the run must fail as interrupted",
+            )
+        if (
+            isinstance(event, Failed)
+            and event.code is FailureCode.INTERRUPTED
+            and not self._side_effect_emitted
+        ):
+            return StreamViolation(
+                kind=ViolationKind.INTERRUPTED_WITHOUT_SIDE_EFFECT,
+                detail="interrupted without a side-effecting call; the run must end as cancelled",
             )
         return None
 
@@ -200,5 +228,7 @@ class RunStream:
         self._next_seq += 1
         if isinstance(event, ToolCall):
             self._tool_effects[event.tool_use_id] = event.effect
+        if isinstance(event, ToolResult):
+            self._answered_calls.add(event.tool_use_id)
         if isinstance(event, TerminalEvent):
             self._terminal = event

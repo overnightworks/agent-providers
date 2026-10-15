@@ -209,6 +209,16 @@ TOKEN_REJECTIONS = [
         lambda: MINT.workload(client_id=None), MINT.user, FORBIDDEN, id="workload-without-client-id"
     ),
     pytest.param(
+        lambda: MINT.workload(client_id=""),
+        MINT.user,
+        FORBIDDEN,
+        id="workload-with-empty-client-id",
+    ),
+    pytest.param(lambda: MINT.workload(azp=None), MINT.user, FORBIDDEN, id="workload-without-azp"),
+    pytest.param(lambda: MINT.workload(azp=""), MINT.user, FORBIDDEN, id="workload-with-empty-azp"),
+    pytest.param(MINT.workload, lambda: MINT.user(azp=None), FORBIDDEN, id="user-without-azp"),
+    pytest.param(MINT.workload, lambda: MINT.user(azp=""), FORBIDDEN, id="user-with-empty-azp"),
+    pytest.param(
         lambda: MINT.workload(client="unknown-app"),
         lambda: MINT.user(azp="unknown-app"),
         FORBIDDEN,

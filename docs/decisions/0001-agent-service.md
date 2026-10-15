@@ -129,7 +129,7 @@ body rules be fixed before the build.
   | Check | Answer |
   |---|---|
   | The workload token, then the user token: missing, not a bearer, or not verified (signature, issuer, `aud` ∌ `agent-service`, time, an empty `sub`); a user token without `sub` or with a malformed group claim | 401 `unauthorized`, one body, `WWW-Authenticate: Bearer` |
-  | The key set cannot be fetched | 503 `unavailable`, `Retry-After: 30` |
+  | The key set cannot be fetched; it is fetched while the workload token is verified, so this answers before any user-token check | 503 `unavailable`, `Retry-After: 30` |
   | The workload binding above fails (among others: an absent workload `sub`, an absent or empty `azp` or `client_id`); the user's `azp` differs from the workload's; the user's `sub` equals the workload's | 403 `forbidden` |
   | The body, at most 256 KiB enforced before buffering, parsed as strict JSON (no `NaN`, no member twice): its `v` is not 1, or absent | 400 `unsupported_version` |
   | The body is not strict JSON, too large, or not exactly a `RunRequest` | 422 `invalid_request` |

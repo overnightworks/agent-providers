@@ -38,6 +38,12 @@ jobs:
       - name: Build both distributions
         run: uv build --all-packages
 
+      - name: The client wheel carries the repository licence
+        run: |
+          licence="$(mktemp -d "$RUNNER_TEMP/client-licence.XXXXXX")"
+          python3 -I -m zipfile -e dist/overnightworks_agent_client-*-py3-none-any.whl "$licence"
+          cmp LICENSE "$licence"/overnightworks_agent_client-*.dist-info/licenses/LICENSE
+
       - name: The client wheel imports alone, outside the workspace
         run: |
           proof="$(mktemp -d "$RUNNER_TEMP/client-only.XXXXXX")"
@@ -74,14 +80,5 @@ jobs:
           assert agent_providers.tools.ToolDeclaration is agent_client.tools.ToolDeclaration
           print("imported", agent_providers.dispatch.__name__, "from", agent_providers.__file__)
           '
-
-      - name: A typed host keeps importing the tool contract from the core
-        run: |
-          host="$(mktemp -d "$RUNNER_TEMP/typed-host.XXXXXX")"
-          uv venv "$host/venv"
-          uv pip install --python "$host/venv/bin/python" \
-            "$GITHUB_WORKSPACE"/dist/overnightworks_agent_client-*-py3-none-any.whl \
-            "$GITHUB_WORKSPACE"/dist/overnightworks_agent_providers-*-py3-none-any.whl
-          cd "$host"
           printf 'from agent_providers.tools import ToolCatalog, ToolDeclaration\n' > consumer.py
-          uvx pyright@1.1.414 --pythonpath "$host/venv/bin/python" consumer.py
+          uvx pyright@1.1.414 --pythonpath "$proof/venv/bin/python" consumer.py

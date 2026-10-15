@@ -16,7 +16,7 @@ number have no defaults.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from collections.abc import Iterator
 from enum import StrEnum
 from typing import Annotated, Any, Final, Literal, TypeGuard, get_args
 from uuid import UUID
@@ -70,32 +70,31 @@ ToolUseId = Annotated[str, Field(min_length=1)]
 """The one decider of a valid call id, so a call and its result accept the same ids."""
 
 
-@dataclass(frozen=True, slots=True)
-class _LeaveContainer:
-    container_id: int
-
-
 def _refuse_non_json_object(value: dict[Any, Any]) -> dict[str, Any]:
     # The depth limit keeps every accepted input encodable: pydantic's serializer
     # refuses a value nested about 255 levels deep, whatever its size.
     # Only the containers on the current path count as open, so a value shared
-    # by two branches is accepted, as ``json.dumps`` accepts it.
+    # by two branches is accepted, as ``json.dumps`` accepts it. The path holds
+    # each open container's remaining children, so the walk's own bookkeeping
+    # never mixes with the caller's values.
     open_containers: set[int] = set()
-    pending: list[object] = [value]
-    while pending:
-        current = pending.pop()
-        if isinstance(current, _LeaveContainer):
-            open_containers.remove(current.container_id)
-        elif isinstance(current, dict | list):
-            _enter_container(current, open_containers)
-            pending.append(_LeaveContainer(id(current)))
-            pending.extend(current.values() if isinstance(current, dict) else current)
+    path = [_enter_container(value, open_containers)]
+    while path:
+        container_id, children = path[-1]
+        for child in children:
+            if isinstance(child, dict | list):
+                path.append(_enter_container(child, open_containers))
+                break
+            _refuse_non_json_scalar(child)
         else:
-            _refuse_non_json_scalar(current)
+            path.pop()
+            open_containers.remove(container_id)
     return value
 
 
-def _enter_container(container: dict[Any, Any] | list[Any], open_containers: set[int]) -> None:
+def _enter_container(
+    container: dict[Any, Any] | list[Any], open_containers: set[int]
+) -> tuple[int, Iterator[object]]:
     if id(container) in open_containers:
         raise ValueError("a value that contains itself is not JSON")
     if len(open_containers) == MAX_TOOL_INPUT_DEPTH:
@@ -104,6 +103,8 @@ def _enter_container(container: dict[Any, Any] | list[Any], open_containers: set
     if isinstance(container, dict):
         for key in container:
             _refuse_non_json_key(key)
+        return id(container), iter(container.values())
+    return id(container), iter(container)
 
 
 def _refuse_non_json_key(key: object) -> None:

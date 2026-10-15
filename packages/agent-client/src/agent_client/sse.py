@@ -58,7 +58,9 @@ class RunStreamDecoder:
     ``feed`` takes chunks split anywhere and returns the events they
     complete; a violation is always the last item, and it closes the
     decoder. ``close`` ends the stream: an unfinished frame is dropped and a
-    run without its terminal event is reported as truncated. Lines may end in
+    run without its terminal event is reported as truncated; on a decoder a
+    violation already closed it returns nothing, so a consumer may feed every
+    chunk and close at the end of its input. Lines may end in
     LF, CRLF or CR, the stream may open with a byte order mark, and comments
     and ``retry`` fields are ignored.
     """
@@ -66,6 +68,7 @@ class RunStreamDecoder:
     def __init__(self) -> None:
         self._stream = RunStream()
         self._closed = False
+        self._broke_contract = False
         self._first_line = True
         self._line_feed_may_follow = False
         self._unfinished_line = bytearray()
@@ -93,6 +96,8 @@ class RunStreamDecoder:
         return decoded
 
     def close(self) -> list[Decoded]:
+        if self._broke_contract:
+            return []
         self._refuse_if_closed()
         self._closed = True
         violation = self._stream.close()
@@ -132,6 +137,7 @@ class RunStreamDecoder:
         decoded.append(outcome)
         if isinstance(outcome, StreamViolation):
             self._closed = True
+            self._broke_contract = True
 
     def _read_line(self, line: bytes) -> Decoded | None:
         if self._first_line:

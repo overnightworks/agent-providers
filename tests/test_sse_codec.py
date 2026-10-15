@@ -161,6 +161,14 @@ def test_a_broken_frame_is_named_and_nothing_is_decoded_after_it(
     assert violation.kind is kind
     with pytest.raises(DecoderClosed):
         decoder.feed(HEARTBEAT)
+    assert decoder.close() == []
+
+
+def test_a_closed_decoder_refuses_a_second_close() -> None:
+    decoder = RunStreamDecoder()
+    decoder.feed(ENCODED)
+    decoder.close()
+
     with pytest.raises(DecoderClosed):
         decoder.close()
 

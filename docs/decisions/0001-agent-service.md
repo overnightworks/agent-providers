@@ -130,8 +130,9 @@ body rules be fixed before the build.
 
   | Check | Answer |
   |---|---|
-  | The workload token is missing, not a bearer, or not verified (signature, issuer, `aud` ∌ `agent-service`, time, an empty `sub`) | 401 `unauthorized`, one body, `WWW-Authenticate: Bearer` |
+  | The workload token is missing, or not a parseable RS256 JWS with a valid `kid` | 401 `unauthorized`, one body, `WWW-Authenticate: Bearer` |
   | The service holds no current key set and cannot fetch one; this is decided while the workload token is verified | 503 `unavailable`, `Retry-After: 30` |
+  | The workload token fails its signature, issuer, `aud` ∌ `agent-service` or time check, or has an empty `sub`; these are checked only once a current key set is held | 401 `unauthorized`, one body, `WWW-Authenticate: Bearer` |
   | The user token fails as the workload token above; or it has no `sub` or a malformed group claim | 401 `unauthorized`, one body, `WWW-Authenticate: Bearer` |
   | The workload binding above fails (among others: an absent workload `sub`, an absent or empty `azp` or `client_id`); the user's `azp` differs from the workload's; the user's `sub` equals the workload's | 403 `forbidden` |
   | The body, at most 256 KiB enforced before buffering, parsed as strict JSON (no `NaN`, no member twice): its `v` is absent, not an integer, or not 1 | 400 `unsupported_version` |

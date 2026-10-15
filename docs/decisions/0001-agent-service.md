@@ -45,7 +45,7 @@ flowchart LR
     KC -. "issues both tokens" .-> App
     Svc --> CLI
     Svc --> API
-    API --> LLM
+    API -- "LiteLLM alias<br/>(per-app virtual key)" --> LLM
     LLM --> Up
     CLI -- "capability token" --> MCP
     API -- "capability token" --> MCP
@@ -91,9 +91,9 @@ everyone else gets the API route or `not_enabled`. The operator's test accounts
 are members of `/ki-abo`.
 
 **Consequence.** A friend put into `/ki-abo` would use the operator's own
-subscription, which the consumer terms forbid. The operator accepted this
-residual risk; avoiding it is the admin's responsibility. Per-person subscription
-mapping waits for a named caller.
+subscription, which the consumer terms forbid (architectural reading). The
+operator accepted this residual risk; avoiding it is the admin's responsibility.
+Per-person subscription mapping waits for a named caller.
 
 ## H2b Subscription profiles are configuration
 
@@ -132,8 +132,8 @@ a request that names its own tools or MCP endpoint could reach anything.
   checks it on every request, opens a fresh DB session and re-checks ownership.
 - Hardening: redirects are denied, egress is limited to the registered origins,
   Host and Origin are validated, and the service sits on an internal Docker
-  network only, with no tunnel line and no Traefik route. mTLS/SPIFFE is out of
-  scope.
+  network only, with no tunnel line and no Traefik route. The listener stays
+  internal-only as defence in depth. mTLS/SPIFFE is out of scope.
 
 **Consequence.** Tool reach is decided once, server-side, per app; a leaked
 capability is useful only for one run, one app and one allowlist.
@@ -189,9 +189,11 @@ one terminal event: `succeeded`, `failed` (a typed code and a safe message) or
 - A client disconnect cancels the run, which kills and reaps its process. It is
   recorded as `cancelled`, or as `failed: interrupted` if a side-effecting tool
   call had already run.
+- Presentator's speech events (`sentence`, `audio`, `done`) stay in Presentator
+  and are not added to this contract.
 
-**Consequence.** Presentator's speech events (`sentence`, `audio`, `done`) stay
-in Presentator and are not part of this contract.
+**Consequence.** A client always learns how a run ended, either from its
+terminal event or from `GET /runs/{id}`.
 
 ## H7 CLI isolation and admission
 
@@ -215,8 +217,8 @@ own tools.
 
 **Decision.** The invariant covers apps that serve users (containers).
 atelier-2, the operator's own agent tool, keeps its local executors, following
-the ruling that subscription CLIs serve the operator's own agents. A later move
-onto the service is possible but not planned. This is a head default the
+the ruling that subscription CLIs serve only the operator's own agents. A later
+move onto the service is possible but not planned. This is a head default the
 operator may overrule.
 
 **Consequence.** The target names atelier-2 as the one explicit exception.

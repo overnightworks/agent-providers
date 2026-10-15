@@ -677,22 +677,22 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115,<1" },
     { name = "overnightworks-agent-client", editable = "packages/agent-client" },
     { name = "overnightworks-agent-providers", editable = "." },
-    { name = "overnightworks-webauth", extras = ["jwt"], url = "https://github.com/overnightworks/webauth/releases/download/v0.12.0/overnightworks_webauth-0.12.0-py3-none-any.whl" },
+    { name = "overnightworks-webauth", extras = ["jwt"], url = "https://github.com/overnightworks/webauth/releases/download/v0.13.0/overnightworks_webauth-0.13.0-py3-none-any.whl" },
     { name = "pydantic", specifier = ">=2,<3" },
     { name = "uvicorn", specifier = ">=0.30,<1" },
 ]
 
 [[package]]
 name = "overnightworks-webauth"
-version = "0.12.0"
-source = { url = "https://github.com/overnightworks/webauth/releases/download/v0.12.0/overnightworks_webauth-0.12.0-py3-none-any.whl" }
+version = "0.13.0"
+source = { url = "https://github.com/overnightworks/webauth/releases/download/v0.13.0/overnightworks_webauth-0.13.0-py3-none-any.whl" }
 dependencies = [
     { name = "argon2-cffi" },
     { name = "fastapi" },
     { name = "pydantic" },
 ]
 wheels = [
-    { url = "https://github.com/overnightworks/webauth/releases/download/v0.12.0/overnightworks_webauth-0.12.0-py3-none-any.whl", hash = "sha256:773cd3d8aed1ce84c629e1f01f93066bfe0e825db4ab6d6b750805a327633f17" },
+    { url = "https://github.com/overnightworks/webauth/releases/download/v0.13.0/overnightworks_webauth-0.13.0-py3-none-any.whl", hash = "sha256:2b759b24d6bceed8ce04fb4fca3d65c387808d834bfe125bbb6f0a36138229e8" },
 ]
 
 [package.optional-dependencies]

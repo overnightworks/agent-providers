@@ -9,7 +9,7 @@ requires-python = ">=3.12"
 dependencies = [
     "overnightworks-agent-providers==0.2.0",
     "overnightworks-agent-client==0.2.0",
-    "overnightworks-webauth[jwt] @ https://github.com/overnightworks/webauth/releases/download/v0.12.0/overnightworks_webauth-0.12.0-py3-none-any.whl",
+    "overnightworks-webauth[jwt] @ https://github.com/overnightworks/webauth/releases/download/v0.13.0/overnightworks_webauth-0.13.0-py3-none-any.whl",
     "fastapi>=0.115,<1",
     "uvicorn>=0.30,<1",
     "pydantic>=2,<3",

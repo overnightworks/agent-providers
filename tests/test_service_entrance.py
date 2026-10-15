@@ -26,6 +26,7 @@ from service_support import (
     SONGMAKER_CLIENT,
     SONGMAKER_GROUP,
     ScriptedRunner,
+    StepClock,
     TokenMint,
     assert_rejected,
     decoded_events,
@@ -35,7 +36,7 @@ from service_support import (
     served,
     service_config,
 )
-from webauth.jwt_verification import KeySetFetchError
+from webauth.jwt_verification import KEY_SET_REFRESH_COOLDOWN_SECONDS, KeySetFetchError
 
 from agent_client.wire import Failed, FailureCode, RejectionCode
 from agent_providers.events import AssistantTextEvent, FinalEvent
@@ -79,6 +80,14 @@ def test_a_subscription_member_with_both_tokens_runs_on_the_cli_route(service, r
     assert runners.cli.admitted[-1].principal.subject == "user-alice"
 
 
+def test_a_run_request_body_with_a_utf8_byte_order_mark_is_admitted(service):
+    body = b"\xef\xbb\xbf" + json.dumps(run_body()).encode()
+
+    response = post_run(service, run_headers(MINT.workload(), MINT.user()), content=body)
+
+    assert _admitted_events(response) == ["run_started", "assistant_text", "succeeded"]
+
+
 def test_an_app_group_member_runs_on_the_api_route(service, runners):
     response = post_run(
         service, run_headers(MINT.workload(), MINT.user(groups=[SONGMAKER_GROUP], sub="user-bob"))
@@ -110,9 +119,34 @@ def test_a_route_without_a_runner_answers_provider_unavailable():
 @pytest.mark.parametrize(
     ("workload", "user", "code", "status"),
     [
-        pytest.param(True, True, RejectionCode.UNAVAILABLE, 503, id="both-tokens"),
-        pytest.param(False, True, RejectionCode.UNAUTHORIZED, 401, id="no-workload-token"),
-        pytest.param(True, False, RejectionCode.UNAVAILABLE, 503, id="no-user-token"),
+        pytest.param(MINT.workload, MINT.user, RejectionCode.UNAVAILABLE, 503, id="both-tokens"),
+        pytest.param(
+            lambda: None, MINT.user, RejectionCode.UNAUTHORIZED, 401, id="no-workload-token"
+        ),
+        pytest.param(
+            MINT.workload, lambda: None, RejectionCode.UNAVAILABLE, 503, id="no-user-token"
+        ),
+        pytest.param(
+            lambda: "not.a.jwt",
+            MINT.user,
+            RejectionCode.UNAUTHORIZED,
+            401,
+            id="malformed-workload-token",
+        ),
+        pytest.param(
+            lambda: MINT.workload(exp=int(time.time()) - 100, iat=int(time.time()) - 400),
+            MINT.user,
+            RejectionCode.UNAVAILABLE,
+            503,
+            id="expired-workload-token",
+        ),
+        pytest.param(
+            lambda: MINT.workload(aud="account"),
+            MINT.user,
+            RejectionCode.UNAVAILABLE,
+            503,
+            id="workload-token-of-another-audience",
+        ),
     ],
 )
 def test_an_unfetchable_key_set_answers_unavailable_after_the_workload_token_is_checked(
@@ -123,10 +157,42 @@ def test_an_unfetchable_key_set_answers_unavailable_after_the_workload_token_is_
 
     app = create_app(service_config(), fetch_key_set=unreachable_issuer)
     with served(app) as base_url:
-        response = post_run(
-            base_url,
-            run_headers(MINT.workload() if workload else None, MINT.user() if user else None),
-        )
+        response = post_run(base_url, run_headers(workload(), user()))
+
+    assert_rejected(response, code, status)
+
+
+@pytest.mark.parametrize(
+    ("issuer_serves_the_kid", "code", "status"),
+    [
+        pytest.param(False, RejectionCode.UNAVAILABLE, 503, id="refresh-fails"),
+        pytest.param(True, RejectionCode.UNAUTHORIZED, 401, id="refresh-succeeds-without-the-kid"),
+    ],
+)
+def test_a_token_with_an_unknown_kid_answers_by_whether_the_key_set_can_be_refreshed(
+    issuer_serves_the_kid, code, status
+):
+    clock = StepClock()
+    forged = TokenMint(key_id="never-published")
+    fetches = 0
+
+    def issuer_that_fails_after_the_first_fetch(url: str) -> bytes:
+        nonlocal fetches
+        fetches += 1
+        if fetches > 1 and not issuer_serves_the_kid:
+            raise KeySetFetchError("the issuer cannot be reached")
+        return MINT.fetch_key_set(url)
+
+    app = create_app(
+        service_config(),
+        fetch_key_set=issuer_that_fails_after_the_first_fetch,
+        monotonic_clock=clock,
+    )
+    with served(app) as base_url:
+        warm_up = post_run(base_url, run_headers(MINT.workload(), MINT.user()))
+        assert warm_up.status_code != 503, warm_up.text
+        clock.advance(KEY_SET_REFRESH_COOLDOWN_SECONDS)
+        response = post_run(base_url, run_headers(forged.workload(), MINT.user()))
 
     assert_rejected(response, code, status)
 
@@ -316,6 +382,15 @@ BODY_REJECTIONS = [
     pytest.param(b"[1]", RejectionCode.INVALID_REQUEST, 422, id="not-an-object"),
     pytest.param(b'{"v": 1,', RejectionCode.INVALID_REQUEST, 422, id="not-json"),
     pytest.param(_too_large(), RejectionCode.INVALID_REQUEST, 422, id="over-256-kib"),
+    *(
+        pytest.param(
+            json.dumps(run_body()).encode(encoding),
+            RejectionCode.INVALID_REQUEST,
+            422,
+            id=encoding,
+        )
+        for encoding in ("utf-16", "utf-16-le", "utf-32", "utf-32-be")
+    ),
     pytest.param(
         json.dumps(run_body(turn={"system": "x", "messages": []})).encode(),
         RejectionCode.INVALID_REQUEST,

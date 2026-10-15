@@ -74,25 +74,37 @@ def run_body(**overrides: object) -> dict[str, Any]:
     }
 
 
+class StepClock:
+    """A monotonic clock that moves only when a test advances it."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
 class TokenMint:
     """Signs RS256 tokens with a throwaway key and serves that key's set, counting each fetch."""
 
-    KEY_ID: Final = "test-signing-key"
-
-    def __init__(self) -> None:
+    def __init__(self, key_id: str = "test-signing-key") -> None:
+        self.key_id = key_id
         self._key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         self.key_set_fetches = 0
 
     def key_set(self) -> dict[str, Any]:
         public = json.loads(RSAAlgorithm.to_jwk(self._key.public_key()))
-        return {"keys": [{**public, "kid": self.KEY_ID, "use": "sig", "alg": "RS256"}]}
+        return {"keys": [{**public, "kid": self.key_id, "use": "sig", "alg": "RS256"}]}
 
     def fetch_key_set(self, _url: str) -> bytes:
         self.key_set_fetches += 1
         return json.dumps(self.key_set()).encode()
 
     def token(self, claims: Mapping[str, object]) -> str:
-        return jwt.encode(dict(claims), self._key, algorithm="RS256", headers={"kid": self.KEY_ID})
+        return jwt.encode(dict(claims), self._key, algorithm="RS256", headers={"kid": self.key_id})
 
     def workload(self, client: str = SONGMAKER_CLIENT, **overrides: object) -> str:
         now = int(time.time())

@@ -74,3 +74,14 @@ jobs:
           assert agent_providers.tools.ToolDeclaration is agent_client.tools.ToolDeclaration
           print("imported", agent_providers.dispatch.__name__, "from", agent_providers.__file__)
           '
+
+      - name: A typed host keeps importing the tool contract from the core
+        run: |
+          host="$(mktemp -d "$RUNNER_TEMP/typed-host.XXXXXX")"
+          uv venv "$host/venv"
+          uv pip install --python "$host/venv/bin/python" \
+            "$GITHUB_WORKSPACE"/dist/overnightworks_agent_client-*-py3-none-any.whl \
+            "$GITHUB_WORKSPACE"/dist/overnightworks_agent_providers-*-py3-none-any.whl
+          cd "$host"
+          printf 'from agent_providers.tools import ToolCatalog, ToolDeclaration\n' > consumer.py
+          uvx pyright@1.1.414 --pythonpath "$host/venv/bin/python" consumer.py

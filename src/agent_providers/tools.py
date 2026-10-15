@@ -25,7 +25,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from agent_client.tools import ToolDeclaration
+# The redundant alias marks a public re-export, so typed hosts may import it from here.
+from agent_client.tools import ToolDeclaration as ToolDeclaration
 
 _DEFAULT_TAG_NAMESPACE = "songmaker"
 _DEFAULT_PRODUCT_NAME = "Songmaker"

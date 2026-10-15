@@ -110,9 +110,34 @@ def test_a_route_without_a_runner_answers_provider_unavailable():
 @pytest.mark.parametrize(
     ("workload", "user", "code", "status"),
     [
-        pytest.param(True, True, RejectionCode.UNAVAILABLE, 503, id="both-tokens"),
-        pytest.param(False, True, RejectionCode.UNAUTHORIZED, 401, id="no-workload-token"),
-        pytest.param(True, False, RejectionCode.UNAVAILABLE, 503, id="no-user-token"),
+        pytest.param(MINT.workload, MINT.user, RejectionCode.UNAVAILABLE, 503, id="both-tokens"),
+        pytest.param(
+            lambda: None, MINT.user, RejectionCode.UNAUTHORIZED, 401, id="no-workload-token"
+        ),
+        pytest.param(
+            MINT.workload, lambda: None, RejectionCode.UNAVAILABLE, 503, id="no-user-token"
+        ),
+        pytest.param(
+            lambda: "not.a.jwt",
+            MINT.user,
+            RejectionCode.UNAUTHORIZED,
+            401,
+            id="malformed-workload-token",
+        ),
+        pytest.param(
+            lambda: MINT.workload(exp=int(time.time()) - 100, iat=int(time.time()) - 400),
+            MINT.user,
+            RejectionCode.UNAVAILABLE,
+            503,
+            id="expired-workload-token",
+        ),
+        pytest.param(
+            lambda: MINT.workload(aud="account"),
+            MINT.user,
+            RejectionCode.UNAVAILABLE,
+            503,
+            id="workload-token-of-another-audience",
+        ),
     ],
 )
 def test_an_unfetchable_key_set_answers_unavailable_after_the_workload_token_is_checked(
@@ -123,10 +148,36 @@ def test_an_unfetchable_key_set_answers_unavailable_after_the_workload_token_is_
 
     app = create_app(service_config(), fetch_key_set=unreachable_issuer)
     with served(app) as base_url:
-        response = post_run(
-            base_url,
-            run_headers(MINT.workload() if workload else None, MINT.user() if user else None),
-        )
+        response = post_run(base_url, run_headers(workload(), user()))
+
+    assert_rejected(response, code, status)
+
+
+@pytest.mark.parametrize(
+    ("issuer_serves_the_kid", "code", "status"),
+    [
+        pytest.param(False, RejectionCode.UNAVAILABLE, 503, id="refresh-fails"),
+        pytest.param(True, RejectionCode.UNAUTHORIZED, 401, id="refresh-succeeds-without-the-kid"),
+    ],
+)
+def test_a_token_with_an_unknown_kid_answers_by_whether_the_key_set_can_be_refreshed(
+    monkeypatch, issuer_serves_the_kid, code, status
+):
+    monkeypatch.setattr("webauth.jwt_verification.KEY_SET_REFRESH_COOLDOWN_SECONDS", 0)
+    forged = TokenMint(key_id="never-published")
+    fetches = 0
+
+    def issuer_that_fails_after_the_first_fetch(url: str) -> bytes:
+        nonlocal fetches
+        fetches += 1
+        if fetches > 1 and not issuer_serves_the_kid:
+            raise KeySetFetchError("the issuer cannot be reached")
+        return MINT.fetch_key_set(url)
+
+    app = create_app(service_config(), fetch_key_set=issuer_that_fails_after_the_first_fetch)
+    with served(app) as base_url:
+        post_run(base_url, run_headers(MINT.workload(), MINT.user()))
+        response = post_run(base_url, run_headers(forged.workload(), MINT.user()))
 
     assert_rejected(response, code, status)
 

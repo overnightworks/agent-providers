@@ -225,6 +225,13 @@ existing `agent_providers.events` is that contract.
   | `unauthorized` | 401 |
   | `forbidden` | 403 |
   | `invalid_request` | 422 |
+  | `unavailable` | 503 with `Retry-After` |
+  | `not_found` | 404 |
+
+  Amended by A1a0 (head rulings U3 and U4, 15.10.2026): `unavailable` means
+  the service could not fetch the key set it checks tokens against, and a
+  client retries it, unlike `unauthorized`. `not_found` is the one answer for
+  an unknown, an expired and a foreign run alike, so it leaks nothing.
 
 - (c) A `failed` event with any other code does not say separately whether a
   side effect happened. The client sees the `tool_call` events, and after a
@@ -246,6 +253,10 @@ existing `agent_providers.events` is that contract.
   `invalid_json`, and an `event` or `id` that disagrees with the data's
   `type` or `seq` as `event_type_mismatch` or `id_mismatch`. The first
   violation ends the decoding.
+  A `tool_call`'s `input` nests at most `MAX_TOOL_INPUT_DEPTH` (128) objects
+  and arrays deep, so depth never stops a built input from encoding; a
+  deeper one is refused when built, and a decoder names it `schema_mismatch`,
+  or `invalid_json` once it nests past the JSON parser's own limit.
 
 **Consequence.** A client validates a stream against one contract, and a
 second wire owner cannot appear without contradicting this ruling.

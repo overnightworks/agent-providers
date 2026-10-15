@@ -7,9 +7,11 @@ event off the contract named once, with nothing decoded after it.
 
 from __future__ import annotations
 
-from uuid import UUID
+from typing import Any
 
 import pytest
+from pydantic import ValidationError
+from wire_builders import call, heartbeat, result, started, succeeded, text
 
 from agent_client.run_stream import StreamViolation, ViolationKind
 from agent_client.sse import (
@@ -19,45 +21,28 @@ from agent_client.sse import (
     RunStreamDecoder,
     encode_event,
 )
-from agent_client.tools import ToolEffect
 from agent_client.wire import (
     MAX_EVENT_BYTES,
+    MAX_TOOL_INPUT_DEPTH,
     PROTOCOL_VERSION,
     AssistantText,
     Heartbeat,
+    RejectionCode,
     RunEvent,
-    RunStarted,
-    Succeeded,
-    ToolCall,
-    ToolResult,
+    RunRejection,
 )
 
-RUN_ID = UUID("8c2f6c1e-3b5a-4d8e-9f10-2a7b4c6d8e01")
-_RUN = {"v": PROTOCOL_VERSION, "run_id": RUN_ID}
-
-
-def _text(seq: int, text: str) -> AssistantText:
-    return AssistantText(**_RUN, seq=seq, text=text)
-
-
 A_RUN: list[RunEvent] = [
-    RunStarted(**_RUN, seq=0, heartbeat_interval_s=15),
-    _text(1, "Ein erster Vers – über Grün."),
-    ToolCall(
-        **_RUN,
-        seq=2,
-        tool_use_id="call-1",
-        name="write_lyrics",
-        input={"verse": 1},
-        effect=ToolEffect.SIDE_EFFECTING,
-    ),
-    ToolResult(**_RUN, seq=3, tool_use_id="call-1", content="saved\nline two", is_error=False),
-    Heartbeat(**_RUN, seq=4),
-    Succeeded(**_RUN, seq=5, text="Done."),
+    started(),
+    text(1, "Ein erster Vers – über Grün."),
+    call(2, "call-1", name="write_lyrics", tool_input={"verse": 1}),
+    result(3, "call-1", content="saved\nline two"),
+    heartbeat(4),
+    succeeded(5),
 ]
 ENCODED = b"".join(encode_event(event) for event in A_RUN)
 OPENING = encode_event(A_RUN[0])
-HEARTBEAT = encode_event(Heartbeat(**_RUN, seq=1))
+HEARTBEAT = encode_event(heartbeat(1))
 
 
 def _decode(*chunks: bytes) -> list[Decoded]:
@@ -87,6 +72,29 @@ UMLAUT_TEXT_FRAME = (
 def test_an_event_travels_as_one_frame_of_compact_utf8_json() -> None:
     assert encode_event(A_RUN[1]) == UMLAUT_TEXT_FRAME
     assert _decode(OPENING, UMLAUT_TEXT_FRAME)[1] == A_RUN[1]
+
+
+class _HeartbeatWithAnExtraField(Heartbeat):
+    injected: str = "off the v1 contract"
+
+
+@pytest.mark.parametrize(
+    "not_an_event",
+    [
+        pytest.param(None, id="None"),
+        pytest.param(
+            RunRejection(v=PROTOCOL_VERSION, code=RejectionCode.BUSY, message="Busy."),
+            id="a rejection",
+        ),
+        pytest.param(
+            _HeartbeatWithAnExtraField(v=PROTOCOL_VERSION, run_id=A_RUN[0].run_id, seq=1),
+            id="a subclass of an event",
+        ),
+    ],
+)
+def test_encoding_something_other_than_a_run_event_is_a_type_error(not_an_event: object) -> None:
+    with pytest.raises(TypeError):
+        encode_event(not_an_event)
 
 
 @pytest.mark.parametrize("spelled", SPELLINGS.values(), ids=SPELLINGS.keys())
@@ -148,7 +156,7 @@ def test_a_run_decodes_the_same_wherever_its_bytes_split(spelled: bytes) -> None
             id="event off the wire contract",
         ),
         pytest.param(
-            encode_event(Heartbeat(**_RUN, seq=2)),
+            encode_event(heartbeat(2)),
             ViolationKind.SEQUENCE_GAP,
             id="event breaking a stream rule",
         ),
@@ -166,6 +174,62 @@ def test_a_broken_frame_is_named_and_nothing_is_decoded_after_it(
     assert violation.kind is kind
     with pytest.raises(DecoderClosed):
         decoder.feed(HEARTBEAT)
+    assert decoder.close() == []
+    assert decoder.close() == []
+
+
+def _tool_input_nested(depth: int) -> dict[str, Any]:
+    tool_input: dict[str, Any] = {"a": 1}
+    for _ in range(depth - 1):
+        tool_input = {"a": tool_input}
+    return tool_input
+
+
+def test_tool_input_at_the_depth_limit_survives_encoding_and_decoding() -> None:
+    deep_call = call(1, "call-1", tool_input=_tool_input_nested(MAX_TOOL_INPUT_DEPTH))
+
+    opening, decoded = RunStreamDecoder().feed(OPENING + encode_event(deep_call))
+
+    assert opening == A_RUN[0]
+    assert decoded == deep_call
+
+
+def test_tool_input_deeper_than_the_limit_is_not_built() -> None:
+    with pytest.raises(ValidationError):
+        call(1, "call-1", tool_input=_tool_input_nested(MAX_TOOL_INPUT_DEPTH + 1))
+
+
+@pytest.mark.parametrize(
+    ("depth", "kind"),
+    [
+        pytest.param(MAX_TOOL_INPUT_DEPTH + 1, ViolationKind.SCHEMA_MISMATCH, id="past the limit"),
+        pytest.param(100_000, ViolationKind.INVALID_JSON, id="past the JSON parser's own limit"),
+    ],
+)
+def test_a_frame_whose_tool_input_nests_too_deep_is_named(depth: int, kind: ViolationKind) -> None:
+    shallow_call = encode_event(call(1, "call-1", tool_input={"a": 1}))
+    deep_frame = shallow_call.replace(b'{"a":1}', b'{"a":' * depth + b"1" + b"}" * depth)
+    assert len(deep_frame) < MAX_EVENT_BYTES
+
+    opening, violation = RunStreamDecoder().feed(OPENING + deep_frame)
+
+    assert opening == A_RUN[0]
+    assert isinstance(violation, StreamViolation)
+    assert violation.kind is kind
+
+
+@pytest.mark.parametrize(
+    "stream",
+    [
+        pytest.param(ENCODED, id="a complete run"),
+        pytest.param(OPENING, id="a run cut before its terminal event"),
+    ],
+)
+def test_a_closed_decoder_refuses_a_second_close(stream: bytes) -> None:
+    decoder = RunStreamDecoder()
+    decoder.feed(stream)
+    decoder.close()
+
     with pytest.raises(DecoderClosed):
         decoder.close()
 
@@ -186,8 +250,8 @@ def test_a_stream_cut_before_its_terminal_event_is_truncated(cut: int) -> None:
 
 
 def _text_of_frame_size(size: int) -> AssistantText:
-    overhead = len(encode_event(_text(1, "x"))) - 1
-    return _text(1, "x" * (size - overhead))
+    overhead = len(encode_event(text(1, "x"))) - 1
+    return text(1, "x" * (size - overhead))
 
 
 def test_a_frame_at_the_limit_travels_both_ways() -> None:

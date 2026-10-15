@@ -8,27 +8,35 @@ a cut-short run ends.
 from __future__ import annotations
 
 import json
-from uuid import UUID
+from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
+from wire_builders import (
+    OTHER_RUN_ID,
+    RUN_ID,
+    call,
+    cancelled,
+    heartbeat,
+    interrupted,
+    result,
+    started,
+    succeeded,
+    wire,
+)
 
 from agent_client.run_stream import RunStream, StreamViolation, ViolationKind, parse_event
 from agent_client.tools import ToolDeclaration, ToolEffect
 from agent_client.wire import (
     MAX_MESSAGE_LENGTH,
     PROTOCOL_VERSION,
-    Cancelled,
-    Failed,
     FailureCode,
-    Heartbeat,
     RejectionCode,
     RunEvent,
     RunRejection,
-    RunStarted,
-    Succeeded,
-    ToolCall,
-    ToolResult,
+    RunRequest,
+    TurnRole,
 )
 from agent_providers.text_tool_protocol import render_tool_catalog
 from agent_providers.tools import ToolCatalog, anthropic_tool_schemas, openai_tool_schemas
@@ -64,18 +72,10 @@ def test_the_effect_class_never_reaches_a_model(project) -> None:
         assert leak not in seen_by_the_model
 
 
-RUN_ID = UUID("8c2f6c1e-3b5a-4d8e-9f10-2a7b4c6d8e01")
-OTHER_RUN_ID = UUID("0d5e7f90-1a2b-4c3d-8e4f-5a6b7c8d9e02")
-
-
-def _wire(type_: str, seq: int, **payload: object) -> dict[str, object]:
-    return {"v": PROTOCOL_VERSION, "run_id": str(RUN_ID), "seq": seq, "type": type_, **payload}
-
-
 WIRE_VARIANTS = {
-    "run_started": _wire("run_started", 0, heartbeat_interval_s=15),
-    "assistant_text": _wire("assistant_text", 1, text="A first verse."),
-    "tool_call": _wire(
+    "run_started": wire("run_started", 0, heartbeat_interval_s=15),
+    "assistant_text": wire("assistant_text", 1, text="A first verse."),
+    "tool_call": wire(
         "tool_call",
         2,
         tool_use_id="call-1",
@@ -83,11 +83,11 @@ WIRE_VARIANTS = {
         input={"verse": 1},
         effect="side_effecting",
     ),
-    "tool_result": _wire("tool_result", 3, tool_use_id="call-1", content="saved", is_error=False),
-    "heartbeat": _wire("heartbeat", 4),
-    "succeeded": _wire("succeeded", 5, text="Done."),
-    "failed": _wire("failed", 5, code="provider_error", message="The provider refused."),
-    "cancelled": _wire("cancelled", 5),
+    "tool_result": wire("tool_result", 3, tool_use_id="call-1", content="saved", is_error=False),
+    "heartbeat": wire("heartbeat", 4),
+    "succeeded": wire("succeeded", 5, text="Done."),
+    "failed": wire("failed", 5, code="provider_error", message="The provider refused."),
+    "cancelled": wire("cancelled", 5),
 }
 
 
@@ -105,34 +105,34 @@ def test_every_variant_round_trips_through_its_json(raw: dict[str, object]) -> N
     ("raw", "kind"),
     [
         pytest.param(
-            _wire("thinking", 1, text="hm"), ViolationKind.UNKNOWN_TYPE, id="unknown type"
+            wire("thinking", 1, text="hm"), ViolationKind.UNKNOWN_TYPE, id="unknown type"
         ),
         pytest.param(
-            {**_wire("heartbeat", 1), "v": 2}, ViolationKind.UNSUPPORTED_VERSION, id="newer version"
+            {**wire("heartbeat", 1), "v": 2}, ViolationKind.UNSUPPORTED_VERSION, id="newer version"
         ),
         pytest.param(
-            {**_wire("assistant_text", 1, text="hi", tone="warm"), "v": 2},
+            {**wire("assistant_text", 1, text="hi", tone="warm"), "v": 2},
             ViolationKind.UNSUPPORTED_VERSION,
             id="newer version with a field this client does not know",
         ),
         pytest.param(
-            {**_wire("heartbeat", 1), "v": True},
+            {**wire("heartbeat", 1), "v": True},
             ViolationKind.UNSUPPORTED_VERSION,
             id="version true",
         ),
         pytest.param(
-            {**_wire("heartbeat", 1), "v": 1.0},
+            {**wire("heartbeat", 1), "v": 1.0},
             ViolationKind.UNSUPPORTED_VERSION,
             id="version as a float",
         ),
         pytest.param(
-            _wire("assistant_text", 1, text="hi", tone="warm"),
+            wire("assistant_text", 1, text="hi", tone="warm"),
             ViolationKind.SCHEMA_MISMATCH,
             id="extra field",
         ),
-        pytest.param(_wire("heartbeat", "1"), ViolationKind.SCHEMA_MISMATCH, id="seq as string"),
+        pytest.param(wire("heartbeat", "1"), ViolationKind.SCHEMA_MISMATCH, id="seq as string"),
         pytest.param(
-            _wire("run_started", 3, heartbeat_interval_s=15),
+            wire("run_started", 3, heartbeat_interval_s=15),
             ViolationKind.SCHEMA_MISMATCH,
             id="run_started after seq 0",
         ),
@@ -147,17 +147,17 @@ def test_every_variant_round_trips_through_its_json(raw: dict[str, object]) -> N
             id="run_started without seq",
         ),
         pytest.param(
-            _wire("run_started", False, heartbeat_interval_s=15),
+            wire("run_started", False, heartbeat_interval_s=15),
             ViolationKind.SCHEMA_MISMATCH,
             id="run_started with seq false",
         ),
         pytest.param(
-            _wire("failed", 5, code="crashed", message="x"),
+            wire("failed", 5, code="crashed", message="x"),
             ViolationKind.SCHEMA_MISMATCH,
             id="failure code outside the closed set",
         ),
         pytest.param(
-            _wire("failed", 5, code="internal_error", message="x" * (MAX_MESSAGE_LENGTH + 1)),
+            wire("failed", 5, code="internal_error", message="x" * (MAX_MESSAGE_LENGTH + 1)),
             ViolationKind.SCHEMA_MISMATCH,
             id="message too long",
         ),
@@ -188,21 +188,76 @@ def test_an_event_off_the_contract_names_its_violation(
 
 
 def test_an_unknown_type_is_named_without_an_empty_location() -> None:
-    violation = parse_event(_wire("thinking", 1, text="hm"))
+    violation = parse_event(wire("thinking", 1, text="hm"))
 
     assert isinstance(violation, StreamViolation)
     assert "'thinking'" in violation.detail
     assert not violation.detail.startswith(":")
 
 
+def _containing_itself(container: dict[str, Any] | list[Any]) -> object:
+    if isinstance(container, dict):
+        container["self"] = container
+    else:
+        container.append(container)
+    return container
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(float("nan"), id="NaN"),
+        pytest.param(float("inf"), id="+Inf"),
+        pytest.param(float("-inf"), id="-Inf"),
+        pytest.param({"chorus"}, id="a set"),
+        pytest.param(datetime(2026, 10, 15, tzinfo=UTC), id="a datetime"),
+        pytest.param("\ud800", id="a lone surrogate"),
+        pytest.param({"\ud800": "x"}, id="a lone surrogate in a key"),
+        pytest.param({1: "x"}, id="a non-string key in a nested object"),
+        pytest.param([{"bar": {None: "x"}}], id="a non-string key nested in a list"),
+        pytest.param([{"bar": float("nan")}], id="NaN nested in a list"),
+        pytest.param(_containing_itself({}), id="a dict that contains itself"),
+        pytest.param(_containing_itself([]), id="a list that contains itself"),
+    ],
+)
+def test_tool_input_that_is_not_json_is_refused(value: object) -> None:
+    with pytest.raises(ValidationError):
+        call(1, "call-1", tool_input={"value": value})
+
+
+def test_nested_json_tool_input_is_accepted_unchanged() -> None:
+    nested = {
+        "verse": 1,
+        "tempo": 92.5,
+        "draft": True,
+        "note": None,
+        "lines": ["Über Grün", {"rhyme": ["a", "b"]}],
+    }
+
+    tool_call = call(1, "call-1", tool_input=nested)
+
+    assert json.loads(tool_call.model_dump_json())["input"] == nested
+
+
+def test_a_value_shared_by_two_branches_of_tool_input_is_accepted() -> None:
+    chorus = {"lines": ["la", "la"]}
+
+    tool_call = call(1, "call-1", tool_input={"first": chorus, "again": [chorus]})
+
+    assert json.loads(tool_call.model_dump_json())["input"]["again"] == [chorus]
+
+
 REJECTION = {"v": PROTOCOL_VERSION, "code": "busy", "message": "Another run is active."}
 
 
-def test_a_rejection_body_round_trips_through_its_json() -> None:
-    rejection = RunRejection.model_validate_json(json.dumps(REJECTION))
+@pytest.mark.parametrize("code", RejectionCode)
+def test_a_rejection_body_round_trips_through_its_json(code: RejectionCode) -> None:
+    body = {**REJECTION, "code": code.value}
 
-    assert rejection.code is RejectionCode.BUSY
-    assert json.loads(rejection.model_dump_json()) == REJECTION
+    rejection = RunRejection.model_validate_json(json.dumps(body))
+
+    assert rejection.code is code
+    assert json.loads(rejection.model_dump_json()) == body
 
 
 @pytest.mark.parametrize(
@@ -221,6 +276,48 @@ def test_a_rejection_body_off_the_contract_is_refused(body: dict[str, object]) -
         RunRejection.model_validate_json(json.dumps(body))
 
 
+REQUEST = {
+    "v": PROTOCOL_VERSION,
+    "purpose": "cowriter",
+    "turn": {
+        "system": "You are a co-writer.",
+        "messages": [
+            {"role": "user", "text": "Write a first verse."},
+            {"role": "assistant", "text": "Ein erster Vers."},
+            {"role": "user", "text": "Now a chorus."},
+        ],
+    },
+}
+
+
+def test_a_run_request_round_trips_through_its_json() -> None:
+    request = RunRequest.model_validate_json(json.dumps(REQUEST))
+
+    assert request.turn.messages[1].role is TurnRole.ASSISTANT
+    assert json.loads(request.model_dump_json()) == REQUEST
+
+
+@pytest.mark.parametrize(
+    "field", ["provider", "model", "route", "user_id", "mcp_url", "mcp_token", "tools"]
+)
+def test_a_run_request_naming_what_the_service_decides_is_refused(field: str) -> None:
+    with pytest.raises(ValidationError):
+        RunRequest.model_validate_json(json.dumps({**REQUEST, field: "chosen by the client"}))
+
+
+@pytest.mark.parametrize(
+    "turn",
+    [
+        {"system": "\ud800", "messages": [{"role": "user", "text": "a"}]},
+        {"system": "s", "messages": [{"role": "user", "text": "\udfff"}]},
+    ],
+    ids=["in the system prompt", "in a message"],
+)
+def test_a_run_request_with_a_lone_surrogate_in_its_turn_is_refused(turn: dict[str, Any]) -> None:
+    with pytest.raises(ValidationError):
+        RunRequest.model_validate({**REQUEST, "turn": turn})
+
+
 _SHORT_DETAIL_LENGTH = 80
 
 
@@ -228,10 +325,10 @@ _SHORT_DETAIL_LENGTH = 80
     ("raw", "named_as"),
     [
         pytest.param(
-            {**_wire("heartbeat", 1), "v": "9" * 2000}, "protocol version '9999", id="oversized"
+            {**wire("heartbeat", 1), "v": "9" * 2000}, "protocol version '9999", id="oversized"
         ),
         pytest.param(
-            {key: value for key, value in _wire("heartbeat", 1).items() if key != "v"},
+            {key: value for key, value in wire("heartbeat", 1).items() if key != "v"},
             "no protocol version",
             id="absent",
         ),
@@ -248,55 +345,6 @@ def test_an_unsupported_version_is_named_in_a_short_detail(
     assert len(violation.detail) < _SHORT_DETAIL_LENGTH
 
 
-def _started() -> RunStarted:
-    return RunStarted(v=PROTOCOL_VERSION, run_id=RUN_ID, seq=0, heartbeat_interval_s=15)
-
-
-def _call(seq: int, tool_use_id: str, effect: ToolEffect = ToolEffect.SIDE_EFFECTING) -> ToolCall:
-    return ToolCall(
-        v=PROTOCOL_VERSION,
-        run_id=RUN_ID,
-        seq=seq,
-        tool_use_id=tool_use_id,
-        name="tool",
-        input={},
-        effect=effect,
-    )
-
-
-def _result(seq: int, tool_use_id: str) -> ToolResult:
-    return ToolResult(
-        v=PROTOCOL_VERSION,
-        run_id=RUN_ID,
-        seq=seq,
-        tool_use_id=tool_use_id,
-        content="ok",
-        is_error=False,
-    )
-
-
-def _heartbeat(seq: int, run_id: UUID = RUN_ID) -> Heartbeat:
-    return Heartbeat(v=PROTOCOL_VERSION, run_id=run_id, seq=seq)
-
-
-def _succeeded(seq: int) -> Succeeded:
-    return Succeeded(v=PROTOCOL_VERSION, run_id=RUN_ID, seq=seq, text="Done.")
-
-
-def _cancelled(seq: int) -> Cancelled:
-    return Cancelled(v=PROTOCOL_VERSION, run_id=RUN_ID, seq=seq)
-
-
-def _interrupted(seq: int) -> Failed:
-    return Failed(
-        v=PROTOCOL_VERSION,
-        run_id=RUN_ID,
-        seq=seq,
-        code=FailureCode.INTERRUPTED,
-        message="The run was cut short.",
-    )
-
-
 def _accept_all(stream: RunStream, events: list[RunEvent]) -> list[ViolationKind | None]:
     return [_kind(stream.accept(event)) for event in events]
 
@@ -308,12 +356,12 @@ def _kind(violation: StreamViolation | None) -> ViolationKind | None:
 def test_a_well_formed_run_breaks_no_rule() -> None:
     stream = RunStream()
     events = [
-        _started(),
-        _heartbeat(1),
-        _call(2, "call-1", ToolEffect.READ_ONLY),
-        _result(3, "call-1"),
-        _call(4, "call-2"),
-        _succeeded(5),
+        started(),
+        heartbeat(1),
+        call(2, "call-1", ToolEffect.READ_ONLY),
+        result(3, "call-1"),
+        call(4, "call-2"),
+        succeeded(5),
     ]
 
     assert _accept_all(stream, events) == [None] * len(events)
@@ -323,51 +371,51 @@ def test_a_well_formed_run_breaks_no_rule() -> None:
 @pytest.mark.parametrize(
     ("events", "kind"),
     [
-        pytest.param([_heartbeat(0)], ViolationKind.MISSING_RUN_STARTED, id="missing run_started"),
+        pytest.param([heartbeat(0)], ViolationKind.MISSING_RUN_STARTED, id="missing run_started"),
         pytest.param(
-            [_started(), _heartbeat(1, run_id=OTHER_RUN_ID)],
+            [started(), heartbeat(1, run_id=OTHER_RUN_ID)],
             ViolationKind.RUN_ID_CHANGED,
             id="run id changed",
         ),
-        pytest.param([_started(), _heartbeat(2)], ViolationKind.SEQUENCE_GAP, id="seq skipped"),
+        pytest.param([started(), heartbeat(2)], ViolationKind.SEQUENCE_GAP, id="seq skipped"),
         pytest.param(
-            [_started(), _heartbeat(1), _heartbeat(1)],
+            [started(), heartbeat(1), heartbeat(1)],
             ViolationKind.SEQUENCE_GAP,
             id="seq repeated",
         ),
-        pytest.param([_started(), _started()], ViolationKind.SEQUENCE_GAP, id="second run_started"),
+        pytest.param([started(), started()], ViolationKind.SEQUENCE_GAP, id="second run_started"),
         pytest.param(
-            [_started(), _succeeded(1), _heartbeat(2)],
+            [started(), succeeded(1), heartbeat(2)],
             ViolationKind.EVENT_AFTER_TERMINAL,
             id="event after terminal",
         ),
         pytest.param(
-            [_started(), _succeeded(1), _cancelled(2)],
+            [started(), succeeded(1), cancelled(2)],
             ViolationKind.EVENT_AFTER_TERMINAL,
             id="second terminal",
         ),
         pytest.param(
-            [_started(), _call(1, "call-1", ToolEffect.READ_ONLY), _call(2, "call-1")],
+            [started(), call(1, "call-1", ToolEffect.READ_ONLY), call(2, "call-1")],
             ViolationKind.DUPLICATE_TOOL_USE_ID,
             id="duplicate tool_use_id",
         ),
         pytest.param(
-            [_started(), _result(1, "call-1")],
+            [started(), result(1, "call-1")],
             ViolationKind.UNKNOWN_TOOL_USE_ID,
             id="result without a call",
         ),
         pytest.param(
-            [_started(), _call(1, "call-1"), _cancelled(2)],
+            [started(), call(1, "call-1"), cancelled(2)],
             ViolationKind.CANCELLED_AFTER_SIDE_EFFECT,
             id="cancelled after a side-effecting call",
         ),
         pytest.param(
-            [_started(), _call(1, "call-1"), _result(2, "call-1"), _result(3, "call-1")],
+            [started(), call(1, "call-1"), result(2, "call-1"), result(3, "call-1")],
             ViolationKind.DUPLICATE_TOOL_RESULT,
             id="second result for one call",
         ),
         pytest.param(
-            [_started(), _call(1, "call-1", ToolEffect.READ_ONLY), _interrupted(2)],
+            [started(), call(1, "call-1", ToolEffect.READ_ONLY), interrupted(2)],
             ViolationKind.INTERRUPTED_WITHOUT_SIDE_EFFECT,
             id="interrupted without a side-effecting call",
         ),
@@ -385,7 +433,7 @@ def test_the_event_that_breaks_a_stream_rule_names_it(
 
 def test_a_stream_that_ends_without_a_terminal_is_truncated() -> None:
     stream = RunStream()
-    _accept_all(stream, [_started(), _call(1, "call-1")])
+    _accept_all(stream, [started(), call(1, "call-1")])
 
     assert _kind(stream.close()) is ViolationKind.TRUNCATED
 
@@ -410,9 +458,9 @@ def test_a_cut_short_run_ends_by_the_effect_of_its_calls(
     calls: list[ToolEffect], expected: dict[str, str]
 ) -> None:
     stream = RunStream()
-    stream.accept(_started())
+    stream.accept(started())
     for seq, effect in enumerate(calls, start=1):
-        stream.accept(_call(seq, f"call-{seq}", effect))
+        stream.accept(call(seq, f"call-{seq}", effect))
 
     terminal = stream.cancellation_terminal()
 
@@ -425,7 +473,7 @@ def test_a_cut_short_run_ends_by_the_effect_of_its_calls(
     "events",
     [
         pytest.param([], id="a run that never started"),
-        pytest.param([_started(), _succeeded(1)], id="a run that already ended"),
+        pytest.param([started(), succeeded(1)], id="a run that already ended"),
     ],
 )
 def test_only_a_running_run_can_be_cut_short(events: list[RunEvent]) -> None:

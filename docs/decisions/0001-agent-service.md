@@ -124,14 +124,17 @@ body rules be fixed before the build.
   `workload_client` registered for two apps stops startup.
   One process-scoped webauth `JwtVerifier` holds the key-set cache, refresh
   lock and cooldown, and runs off the event loop.
-- **The order of checks.** The first failure answers:
+- **The order of checks.** The first failure answers. Verification of the
+  workload token, then of the user token, precedes every binding check, so
+  each token's 401 or 503 answers before any 403:
 
   | Check | Answer |
   |---|---|
-  | The workload token, then the user token: missing, not a bearer, or not verified (signature, issuer, `aud` ∌ `agent-service`, time, an empty `sub`); a user token without `sub` or with a malformed group claim | 401 `unauthorized`, one body, `WWW-Authenticate: Bearer` |
-  | The key set cannot be fetched; it is fetched while the workload token is verified, so this answers before any user-token check | 503 `unavailable`, `Retry-After: 30` |
+  | The workload token is missing, not a bearer, or not verified (signature, issuer, `aud` ∌ `agent-service`, time, an empty `sub`) | 401 `unauthorized`, one body, `WWW-Authenticate: Bearer` |
+  | The service holds no current key set and cannot fetch one; this is decided while the workload token is verified | 503 `unavailable`, `Retry-After: 30` |
+  | The user token fails as the workload token above; or it has no `sub` or a malformed group claim | 401 `unauthorized`, one body, `WWW-Authenticate: Bearer` |
   | The workload binding above fails (among others: an absent workload `sub`, an absent or empty `azp` or `client_id`); the user's `azp` differs from the workload's; the user's `sub` equals the workload's | 403 `forbidden` |
-  | The body, at most 256 KiB enforced before buffering, parsed as strict JSON (no `NaN`, no member twice): its `v` is not 1, or absent | 400 `unsupported_version` |
+  | The body, at most 256 KiB enforced before buffering, parsed as strict JSON (no `NaN`, no member twice): its `v` is absent, not an integer, or not 1 | 400 `unsupported_version` |
   | The body is not strict JSON, too large, or not exactly a `RunRequest` | 422 `invalid_request` |
   | The purpose is not in the app's list | 403 `forbidden` |
   | H5 routing answers `not_enabled`; no run starts | 403 `not_enabled` |
@@ -139,6 +142,11 @@ body rules be fixed before the build.
 
   Every rejection is a `RunRejection` with `Cache-Control: no-store`, and no
   answer or log line carries token text.
+  A token whose `kid` is unknown while the key set cannot be refreshed
+  answers 401: webauth v0.12.0 cannot tell a forged `kid` from one it could
+  not fetch. This is deferred to overnightworks/webauth#67; once the service
+  pins the webauth release that answers `KEY_SET_UNAVAILABLE` there (pin bump:
+  agent-providers#27 finding 13), it answers 503.
 - **The policy.** The service reads one TOML file into frozen models that
   forbid unknown fields; a refused file stops startup naming the field.
   `[identity]` names issuer, key-set URL (https), audience, subscription group,

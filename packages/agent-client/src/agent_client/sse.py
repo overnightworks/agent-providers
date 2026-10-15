@@ -67,8 +67,8 @@ class RunStreamDecoder:
     decoder. ``close`` ends the stream: an unfinished frame is dropped and a
     run without its terminal event is reported as truncated; after ``feed``
     returned a violation it returns nothing, so a consumer may feed every
-    chunk and close at the end of its input. A second ``close`` raises
-    ``DecoderClosed``. Lines may end in
+    chunk and close at the end of its input. A second ``close`` of a stream
+    that ended without a violation raises ``DecoderClosed``. Lines may end in
     LF, CRLF or CR, the stream may open with a byte order mark, and comments
     and ``retry`` fields are ignored.
     """

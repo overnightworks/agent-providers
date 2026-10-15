@@ -33,11 +33,12 @@ flowchart LR
     App["App<br/>(webauth OIDC session, agent-client)"]
     KC["Keycloak<br/>groups /ki-abo, /apps/&lt;app&gt;"]
     subgraph internal["Internal network only"]
-        Svc["Agent service<br/>verify user + app, purpose table, route"]
+        Svc["Agent service<br/>verify user + app, policy (purpose table, /ki-abo, owner binding), route"]
         CLI["CLI route<br/>isolated claude -p, one profile"]
         API["API route<br/>service tool loop"]
     end
     LLM["LiteLLM (edge)<br/>upstream keys, budgets, aliases"]
+    Up["Anthropic API (DPA), local models"]
     MCP["App's MCP endpoint<br/>(optional per app)"]
 
     App -- "purpose + turn data<br/>user token + workload token" --> Svc
@@ -45,6 +46,7 @@ flowchart LR
     Svc --> CLI
     Svc --> API
     API --> LLM
+    LLM --> Up
     CLI -- "capability token" --> MCP
     API -- "capability token" --> MCP
     Svc -- "SSE events, GET /runs/{id}" --> App

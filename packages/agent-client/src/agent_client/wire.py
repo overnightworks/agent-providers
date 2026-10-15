@@ -8,7 +8,8 @@ admission. A new variant or a new field is a new ``PROTOCOL_VERSION``.
 
 Validation is strict, so the wire's JSON types are the contract: a sequence
 number sent as ``"3"`` is a mismatch, not a coercion. Only the run id and the
-closed codes are read from their JSON strings.
+closed codes are read from their JSON strings. The envelope has no defaults:
+an event without its version or sequence number is not an event.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from enum import StrEnum
 from typing import Annotated, Any, Final, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 from agent_client.tools import ToolEffect
 
@@ -48,10 +49,22 @@ class RejectionCode(StrEnum):
     INVALID_REQUEST = "invalid_request"
 
 
+def _json_integer(value: object) -> object:
+    # A Literal ignores strict mode and matches by equality, so without this
+    # JSON ``true`` and ``1.0`` would pass as 1 and ``false`` as 0.
+    if type(value) is not int:
+        raise ValueError("must be a JSON integer")
+    return value
+
+
+ProtocolVersion = Annotated[Literal[1], BeforeValidator(_json_integer)]
+"""The one decider of whether a ``v`` is the version this package speaks."""
+
+
 class _WireModel(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
-    v: Literal[1] = PROTOCOL_VERSION
+    v: ProtocolVersion
 
 
 class _RunEvent(_WireModel):
@@ -63,7 +76,7 @@ class RunStarted(_RunEvent):
     """The first event of every run, naming the heartbeat cadence."""
 
     type: Literal["run_started"] = "run_started"
-    seq: Literal[0] = 0
+    seq: Annotated[Literal[0], BeforeValidator(_json_integer)] = 0
     heartbeat_interval_s: int = Field(ge=1, le=300)
 
 

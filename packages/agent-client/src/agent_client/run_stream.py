@@ -20,6 +20,7 @@ from agent_client.wire import (
     Cancelled,
     Failed,
     FailureCode,
+    ProtocolVersion,
     RunEvent,
     RunStarted,
     TerminalEvent,
@@ -30,6 +31,7 @@ from agent_client.wire import (
 INTERRUPTED_MESSAGE: Final = "The run was cut short after a side-effecting tool call."
 
 _RUN_EVENT: Final[TypeAdapter[RunEvent]] = TypeAdapter(RunEvent)
+_PROTOCOL_VERSION: Final[TypeAdapter[ProtocolVersion]] = TypeAdapter(ProtocolVersion)
 _UNKNOWN_TAG_ERRORS: Final = frozenset({"union_tag_invalid", "union_tag_not_found"})
 
 
@@ -63,8 +65,9 @@ def parse_event(raw: dict[str, Any]) -> RunEvent | StreamViolation:
     version the client does not speak, not as a malformed one.
     """
     version = raw.get("v")
-    # JSON ``true`` arrives as Python ``True``, which equals 1.
-    if isinstance(version, bool) or version != PROTOCOL_VERSION:
+    try:
+        _PROTOCOL_VERSION.validate_python(version)
+    except ValidationError:
         return StreamViolation(
             kind=ViolationKind.UNSUPPORTED_VERSION,
             detail=f"protocol version {version!r}, this client speaks {PROTOCOL_VERSION}",
@@ -131,12 +134,13 @@ class RunStream:
             raise RuntimeError(f"the run already ended as {self._terminal.type}")
         if self._side_effect_emitted:
             return Failed(
+                v=PROTOCOL_VERSION,
                 run_id=self._run_id,
                 seq=self._next_seq,
                 code=FailureCode.INTERRUPTED,
                 message=INTERRUPTED_MESSAGE,
             )
-        return Cancelled(run_id=self._run_id, seq=self._next_seq)
+        return Cancelled(v=PROTOCOL_VERSION, run_id=self._run_id, seq=self._next_seq)
 
     @property
     def _side_effect_emitted(self) -> bool:

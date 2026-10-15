@@ -11,6 +11,7 @@ import json
 from uuid import UUID
 
 import pytest
+from pydantic import ValidationError
 
 from agent_client.run_stream import RunStream, StreamViolation, ViolationKind, parse_event
 from agent_client.tools import ToolDeclaration, ToolEffect
@@ -113,6 +114,11 @@ def test_every_variant_round_trips_through_its_json(raw: dict[str, object]) -> N
             id="version true",
         ),
         pytest.param(
+            {**_wire("heartbeat", 1), "v": 1.0},
+            ViolationKind.UNSUPPORTED_VERSION,
+            id="version as a float",
+        ),
+        pytest.param(
             _wire("assistant_text", 1, text="hi", tone="warm"),
             ViolationKind.SCHEMA_MISMATCH,
             id="extra field",
@@ -122,6 +128,11 @@ def test_every_variant_round_trips_through_its_json(raw: dict[str, object]) -> N
             _wire("run_started", 3, heartbeat_interval_s=15),
             ViolationKind.SCHEMA_MISMATCH,
             id="run_started after seq 0",
+        ),
+        pytest.param(
+            _wire("run_started", False, heartbeat_interval_s=15),
+            ViolationKind.SCHEMA_MISMATCH,
+            id="run_started with seq false",
         ),
         pytest.param(
             _wire("failed", 5, code="crashed", message="x"),
@@ -144,39 +155,65 @@ def test_an_event_off_the_contract_names_its_violation(
     assert violation.kind is kind
 
 
-def test_a_rejection_body_round_trips_through_its_json() -> None:
-    raw = {"v": PROTOCOL_VERSION, "code": "busy", "message": "Another run is active."}
+REJECTION = {"v": PROTOCOL_VERSION, "code": "busy", "message": "Another run is active."}
 
-    rejection = RunRejection.model_validate_json(json.dumps(raw))
+
+def test_a_rejection_body_round_trips_through_its_json() -> None:
+    rejection = RunRejection.model_validate_json(json.dumps(REJECTION))
 
     assert rejection.code is RejectionCode.BUSY
-    assert json.loads(rejection.model_dump_json()) == raw
+    assert json.loads(rejection.model_dump_json()) == REJECTION
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param({**REJECTION, "v": True}, id="version true"),
+        pytest.param({**REJECTION, "v": 1.0}, id="version as a float"),
+        pytest.param({"code": "busy", "message": "Another run is active."}, id="no version"),
+    ],
+)
+def test_a_rejection_body_off_the_contract_is_refused(body: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        RunRejection.model_validate_json(json.dumps(body))
 
 
 def _started() -> RunStarted:
-    return RunStarted(run_id=RUN_ID, heartbeat_interval_s=15)
+    return RunStarted(v=PROTOCOL_VERSION, run_id=RUN_ID, heartbeat_interval_s=15)
 
 
 def _call(seq: int, tool_use_id: str, effect: ToolEffect = ToolEffect.SIDE_EFFECTING) -> ToolCall:
     return ToolCall(
-        run_id=RUN_ID, seq=seq, tool_use_id=tool_use_id, name="tool", input={}, effect=effect
+        v=PROTOCOL_VERSION,
+        run_id=RUN_ID,
+        seq=seq,         tool_use_id=tool_use_id,
+        name="tool",
+        input={},
+        effect=effect,
     )
 
 
 def _result(seq: int, tool_use_id: str) -> ToolResult:
-    return ToolResult(run_id=RUN_ID, seq=seq, tool_use_id=tool_use_id, content="ok", is_error=False)
+    return ToolResult(
+        v=PROTOCOL_VERSION,
+        run_id=RUN_ID,
+        seq=seq,
+        tool_use_id=tool_use_id,
+        content="ok",
+        is_error=False,
+    )
 
 
 def _heartbeat(seq: int, run_id: UUID = RUN_ID) -> Heartbeat:
-    return Heartbeat(run_id=run_id, seq=seq)
+    return Heartbeat(v=PROTOCOL_VERSION, run_id=run_id, seq=seq)
 
 
 def _succeeded(seq: int) -> Succeeded:
-    return Succeeded(run_id=RUN_ID, seq=seq, text="Done.")
+    return Succeeded(v=PROTOCOL_VERSION, run_id=RUN_ID, seq=seq, text="Done.")
 
 
 def _cancelled(seq: int) -> Cancelled:
-    return Cancelled(run_id=RUN_ID, seq=seq)
+    return Cancelled(v=PROTOCOL_VERSION, run_id=RUN_ID, seq=seq)
 
 
 def _accept_all(stream: RunStream, events: list[RunEvent]) -> list[ViolationKind | None]:

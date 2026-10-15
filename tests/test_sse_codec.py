@@ -22,6 +22,7 @@ from agent_client.wire import (
     MAX_EVENT_BYTES,
     PROTOCOL_VERSION,
     AssistantText,
+    Heartbeat,
     RejectionCode,
     RunEvent,
     RunRejection,
@@ -69,6 +70,10 @@ def test_an_event_travels_as_one_frame_of_compact_utf8_json() -> None:
     assert _decode(OPENING, UMLAUT_TEXT_FRAME)[1] == A_RUN[1]
 
 
+class _HeartbeatWithAnExtraField(Heartbeat):
+    injected: str = "off the v1 contract"
+
+
 @pytest.mark.parametrize(
     "not_an_event",
     [
@@ -76,6 +81,10 @@ def test_an_event_travels_as_one_frame_of_compact_utf8_json() -> None:
         pytest.param(
             RunRejection(v=PROTOCOL_VERSION, code=RejectionCode.BUSY, message="Busy."),
             id="a rejection",
+        ),
+        pytest.param(
+            _HeartbeatWithAnExtraField(v=PROTOCOL_VERSION, run_id=A_RUN[0].run_id, seq=1),
+            id="a subclass of an event",
         ),
     ],
 )

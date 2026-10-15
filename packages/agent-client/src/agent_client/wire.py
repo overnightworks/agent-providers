@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import math
 from enum import StrEnum
-from typing import Annotated, Any, Final, Literal, TypeGuard
+from typing import Annotated, Any, Final, Literal, TypeGuard, get_args
 from uuid import UUID
 
 from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field
@@ -191,9 +191,13 @@ _RunEventVariant = (
 
 RunEvent = Annotated[_RunEventVariant, Field(discriminator="type")]
 
+_RUN_EVENT_TYPES: Final = frozenset(get_args(_RunEventVariant))
+
 
 def is_run_event(value: object) -> TypeGuard[RunEvent]:
-    return isinstance(value, _RunEventVariant)
+    # The exact type, not isinstance: a subclass may add fields the closed
+    # v1 union does not carry.
+    return type(value) in _RUN_EVENT_TYPES
 
 
 class RunRejection(_WireModel):

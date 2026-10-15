@@ -71,8 +71,8 @@ ToolUseId = Annotated[str, Field(min_length=1)]
 
 
 def _refuse_non_json_object(value: dict[Any, Any]) -> dict[str, Any]:
-    # The depth limit keeps every accepted input encodable: pydantic's serializer
-    # refuses a value nested about 255 levels deep, whatever its size.
+    # The depth limit means depth never stops a built input from encoding:
+    # pydantic's serializer refuses a value nested about 255 levels deep.
     # Only the containers on the current path count as open, so a value shared
     # by two branches is accepted, as ``json.dumps`` accepts it. The path holds
     # each open container's remaining children, so the walk's own bookkeeping

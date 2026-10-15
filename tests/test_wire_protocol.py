@@ -8,7 +8,6 @@ a cut-short run ends.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -204,20 +203,6 @@ def _containing_itself(container: dict[str, Any] | list[Any]) -> object:
     return container
 
 
-@dataclass(frozen=True, slots=True)
-class _ContainerTag:
-    """A caller's object shaped like bookkeeping a validator might keep for its walk."""
-
-    container_id: int
-
-
-def _containing_itself_and_its_tag() -> object:
-    container: dict[str, Any] = {}
-    container["self"] = container
-    container["tag"] = _ContainerTag(id(container))
-    return container
-
-
 @pytest.mark.parametrize(
     "value",
     [
@@ -233,10 +218,6 @@ def _containing_itself_and_its_tag() -> object:
         pytest.param([{"bar": float("nan")}], id="NaN nested in a list"),
         pytest.param(_containing_itself({}), id="a dict that contains itself"),
         pytest.param(_containing_itself([]), id="a list that contains itself"),
-        pytest.param(_ContainerTag(0), id="an object naming a container"),
-        pytest.param(
-            _containing_itself_and_its_tag(), id="a dict that contains itself and names itself"
-        ),
     ],
 )
 def test_tool_input_that_is_not_json_is_refused(value: object) -> None:

@@ -175,6 +175,7 @@ def test_a_broken_frame_is_named_and_nothing_is_decoded_after_it(
     with pytest.raises(DecoderClosed):
         decoder.feed(HEARTBEAT)
     assert decoder.close() == []
+    assert decoder.close() == []
 
 
 def _tool_input_nested(depth: int) -> dict[str, Any]:

@@ -106,14 +106,14 @@ class TokenMint:
         }
         return self.token(_merged(claims, overrides))
 
-    def user(self, groups: Sequence[str] = (SUBSCRIPTION_GROUP,), **overrides: object) -> str:
+    def user(self, groups: object = (SUBSCRIPTION_GROUP,), **overrides: object) -> str:
         now = int(time.time())
         claims = {
             "iss": TEST_ISSUER,
             "aud": ["agent-service", "account"],
             "sub": "user-alice",
             "azp": SONGMAKER_CLIENT,
-            "groups": list(groups),
+            "groups": groups,
             "realm_access": {"roles": ["default-roles-agent-test"]},
             "iat": now,
             "exp": now + 300,

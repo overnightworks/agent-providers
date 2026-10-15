@@ -88,14 +88,15 @@ class CallerCheck:
     async def _checked_caller(self, workload_token: str | None, user_token: str | None) -> Caller:
         workload = await self._verified(workload_token)
         user = await self._verified(user_token)
-        subject = _non_empty_text(user.claims, "sub", refusal=RejectionCode.UNAUTHORIZED)
+        if user.subject is None:
+            raise _Refused(RejectionCode.UNAUTHORIZED)
         groups = self._groups(user.claims)
         app = self._workload_app(workload)
         if user.claims.get("azp") != workload.claims["azp"]:
             raise _Refused(RejectionCode.FORBIDDEN)
-        if subject == workload.claims["sub"]:
+        if user.subject == workload.subject:
             raise _Refused(RejectionCode.FORBIDDEN)
-        return Caller(app=app, principal=Principal(user.issuer, subject), groups=groups)
+        return Caller(app=app, principal=Principal(user.issuer, user.subject), groups=groups)
 
     async def _verified(self, token: str | None) -> VerifiedClaims:
         if token is None:
@@ -116,8 +117,9 @@ class CallerCheck:
 
     def _workload_app(self, workload: VerifiedClaims) -> str:
         claims = workload.claims
-        _non_empty_text(claims, "sub", refusal=RejectionCode.FORBIDDEN)
-        client = _non_empty_text(claims, "azp", refusal=RejectionCode.FORBIDDEN)
+        client = claims.get("azp")
+        if workload.subject is None or not isinstance(client, str) or not client:
+            raise _Refused(RejectionCode.FORBIDDEN)
         if claims.get("client_id") != client:
             raise _Refused(RejectionCode.FORBIDDEN)
         if WORKLOAD_ROLE not in _realm_roles(claims):
@@ -134,13 +136,6 @@ def _rejection_code(rejected: Rejected) -> RejectionCode:
     if rejected.reason is RejectionReason.KEY_SET_UNAVAILABLE:
         return RejectionCode.UNAVAILABLE
     return RejectionCode.UNAUTHORIZED
-
-
-def _non_empty_text(claims: Mapping[str, object], name: str, *, refusal: RejectionCode) -> str:
-    value = claims.get(name)
-    if not isinstance(value, str) or not value:
-        raise _Refused(refusal)
-    return value
 
 
 def _realm_roles(claims: Mapping[str, object]) -> frozenset[str]:

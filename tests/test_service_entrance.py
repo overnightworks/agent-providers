@@ -128,6 +128,16 @@ def test_an_unfetchable_key_set_answers_unavailable_after_the_workload_token_is_
     assert_rejected(response, code, status)
 
 
+def test_one_key_set_fetch_serves_every_request_of_the_process():
+    mint = TokenMint()
+    app = create_app(service_config(), fetch_key_set=mint.fetch_key_set)
+    with served(app) as base_url:
+        for _ in range(3):
+            post_run(base_url, run_headers(mint.workload(), mint.user()))
+
+    assert mint.key_set_fetches == 1
+
+
 TokenFor = Callable[[], str | None]
 
 

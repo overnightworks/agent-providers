@@ -75,18 +75,20 @@ def run_body(**overrides: object) -> dict[str, Any]:
 
 
 class TokenMint:
-    """Signs RS256 tokens with a throwaway key and serves that key's set."""
+    """Signs RS256 tokens with a throwaway key and serves that key's set, counting each fetch."""
 
     KEY_ID: Final = "test-signing-key"
 
     def __init__(self) -> None:
         self._key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        self.key_set_fetches = 0
 
     def key_set(self) -> dict[str, Any]:
         public = json.loads(RSAAlgorithm.to_jwk(self._key.public_key()))
         return {"keys": [{**public, "kid": self.KEY_ID, "use": "sig", "alg": "RS256"}]}
 
     def fetch_key_set(self, _url: str) -> bytes:
+        self.key_set_fetches += 1
         return json.dumps(self.key_set()).encode()
 
     def token(self, claims: Mapping[str, object]) -> str:

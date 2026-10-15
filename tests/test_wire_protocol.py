@@ -33,6 +33,8 @@ from agent_client.wire import (
     RejectionCode,
     RunEvent,
     RunRejection,
+    RunRequest,
+    TurnRole,
 )
 from agent_providers.text_tool_protocol import render_tool_catalog
 from agent_providers.tools import ToolCatalog, anthropic_tool_schemas, openai_tool_schemas
@@ -194,11 +196,14 @@ def test_an_unknown_type_is_named_without_an_empty_location() -> None:
 REJECTION = {"v": PROTOCOL_VERSION, "code": "busy", "message": "Another run is active."}
 
 
-def test_a_rejection_body_round_trips_through_its_json() -> None:
-    rejection = RunRejection.model_validate_json(json.dumps(REJECTION))
+@pytest.mark.parametrize("code", RejectionCode)
+def test_a_rejection_body_round_trips_through_its_json(code: RejectionCode) -> None:
+    body = {**REJECTION, "code": code.value}
 
-    assert rejection.code is RejectionCode.BUSY
-    assert json.loads(rejection.model_dump_json()) == REJECTION
+    rejection = RunRejection.model_validate_json(json.dumps(body))
+
+    assert rejection.code is code
+    assert json.loads(rejection.model_dump_json()) == body
 
 
 @pytest.mark.parametrize(
@@ -215,6 +220,35 @@ def test_a_rejection_body_round_trips_through_its_json() -> None:
 def test_a_rejection_body_off_the_contract_is_refused(body: dict[str, object]) -> None:
     with pytest.raises(ValidationError):
         RunRejection.model_validate_json(json.dumps(body))
+
+
+REQUEST = {
+    "v": PROTOCOL_VERSION,
+    "purpose": "cowriter",
+    "turn": {
+        "system": "You are a co-writer.",
+        "messages": [
+            {"role": "user", "text": "Write a first verse."},
+            {"role": "assistant", "text": "Ein erster Vers."},
+            {"role": "user", "text": "Now a chorus."},
+        ],
+    },
+}
+
+
+def test_a_run_request_round_trips_through_its_json() -> None:
+    request = RunRequest.model_validate_json(json.dumps(REQUEST))
+
+    assert request.turn.messages[1].role is TurnRole.ASSISTANT
+    assert json.loads(request.model_dump_json()) == REQUEST
+
+
+@pytest.mark.parametrize(
+    "field", ["provider", "model", "route", "user_id", "mcp_url", "mcp_token", "tools"]
+)
+def test_a_run_request_naming_what_the_service_decides_is_refused(field: str) -> None:
+    with pytest.raises(ValidationError):
+        RunRequest.model_validate_json(json.dumps({**REQUEST, field: "chosen by the client"}))
 
 
 _SHORT_DETAIL_LENGTH = 80

@@ -1,14 +1,16 @@
 """The streamed run contract between the agent service and its clients.
 
-This module is the one owner of what travels on a run's event stream
-(decision record 0001, H6): a closed union discriminated on ``type``, every
-event carrying the protocol version, the run id and its sequence number, and
-the typed body the service answers with when it refuses a run before
-admission. A new variant or a new field is a new ``PROTOCOL_VERSION``.
+This module is the one owner of what travels between a client and the
+service (decision record 0001, H6): the request that starts a run, the run's
+event stream as a closed union discriminated on ``type`` with every event
+carrying the protocol version, the run id and its sequence number, and the
+typed body the service answers with when it refuses a run before admission.
+A new variant or a new field is a new
+``PROTOCOL_VERSION``.
 
 Validation is strict, so the wire's JSON types are the contract: a sequence
 number sent as ``"3"`` is a mismatch, not a coercion. Only the run id and the
-closed codes are read from their JSON strings. The version and sequence
+closed codes and roles are read from their JSON strings. The version and sequence
 number have no defaults.
 """
 
@@ -47,6 +49,8 @@ class RejectionCode(StrEnum):
     UNAUTHORIZED = "unauthorized"
     FORBIDDEN = "forbidden"
     INVALID_REQUEST = "invalid_request"
+    UNAVAILABLE = "unavailable"
+    NOT_FOUND = "not_found"
 
 
 def _json_integer(value: object) -> object:
@@ -64,9 +68,11 @@ ToolUseId = Annotated[str, Field(min_length=1)]
 """The one decider of a valid call id, so a call and its result accept the same ids."""
 
 
-class _WireModel(BaseModel):
+class _StrictModel(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
+
+class _WireModel(_StrictModel):
     v: ProtocolVersion
 
 
@@ -144,3 +150,31 @@ class RunRejection(_WireModel):
 
     code: Annotated[RejectionCode, Field(strict=False)]
     message: str = Field(max_length=MAX_MESSAGE_LENGTH)
+
+
+class TurnRole(StrEnum):
+    USER = "user"
+    ASSISTANT = "assistant"
+
+
+class TurnMessage(_StrictModel):
+    role: Annotated[TurnRole, Field(strict=False)]
+    text: str
+
+
+class Turn(_StrictModel):
+    """The conversation a run answers: the system prompt and the messages so far.
+
+    It names no provider, model, route, user or MCP endpoint: the service
+    decides those from the run's ``purpose`` and the caller's identity.
+    """
+
+    system: str
+    messages: list[TurnMessage] = Field(min_length=1)
+
+
+class RunRequest(_WireModel):
+    """The HTTP body a client sends to start a run."""
+
+    purpose: str = Field(min_length=1)
+    turn: Turn

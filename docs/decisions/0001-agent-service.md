@@ -225,6 +225,13 @@ existing `agent_providers.events` is that contract.
   | `unauthorized` | 401 |
   | `forbidden` | 403 |
   | `invalid_request` | 422 |
+  | `unavailable` | 503 with `Retry-After` |
+  | `not_found` | 404 |
+
+  Amended by A1a0 (head rulings U3 and U4, 15.10.2026): `unavailable` means
+  the service could not fetch the key set it checks tokens against, and a
+  client retries it, unlike `unauthorized`. `not_found` is the one answer for
+  an unknown, an expired and a foreign run alike, so it leaks nothing.
 
 - (c) A `failed` event with any other code does not say separately whether a
   side effect happened. The client sees the `tool_call` events, and after a

@@ -7,9 +7,8 @@ event off the contract named once, with nothing decoded after it.
 
 from __future__ import annotations
 
-from uuid import UUID
-
 import pytest
+from wire_builders import call, heartbeat, result, started, succeeded, text
 
 from agent_client.run_stream import StreamViolation, ViolationKind
 from agent_client.sse import (
@@ -19,45 +18,19 @@ from agent_client.sse import (
     RunStreamDecoder,
     encode_event,
 )
-from agent_client.tools import ToolEffect
-from agent_client.wire import (
-    MAX_EVENT_BYTES,
-    PROTOCOL_VERSION,
-    AssistantText,
-    Heartbeat,
-    RunEvent,
-    RunStarted,
-    Succeeded,
-    ToolCall,
-    ToolResult,
-)
-
-RUN_ID = UUID("8c2f6c1e-3b5a-4d8e-9f10-2a7b4c6d8e01")
-_RUN = {"v": PROTOCOL_VERSION, "run_id": RUN_ID}
-
-
-def _text(seq: int, text: str) -> AssistantText:
-    return AssistantText(**_RUN, seq=seq, text=text)
-
+from agent_client.wire import MAX_EVENT_BYTES, AssistantText, RunEvent
 
 A_RUN: list[RunEvent] = [
-    RunStarted(**_RUN, seq=0, heartbeat_interval_s=15),
-    _text(1, "Ein erster Vers – über Grün."),
-    ToolCall(
-        **_RUN,
-        seq=2,
-        tool_use_id="call-1",
-        name="write_lyrics",
-        input={"verse": 1},
-        effect=ToolEffect.SIDE_EFFECTING,
-    ),
-    ToolResult(**_RUN, seq=3, tool_use_id="call-1", content="saved\nline two", is_error=False),
-    Heartbeat(**_RUN, seq=4),
-    Succeeded(**_RUN, seq=5, text="Done."),
+    started(),
+    text(1, "Ein erster Vers – über Grün."),
+    call(2, "call-1", name="write_lyrics", tool_input={"verse": 1}),
+    result(3, "call-1", content="saved\nline two"),
+    heartbeat(4),
+    succeeded(5),
 ]
 ENCODED = b"".join(encode_event(event) for event in A_RUN)
 OPENING = encode_event(A_RUN[0])
-HEARTBEAT = encode_event(Heartbeat(**_RUN, seq=1))
+HEARTBEAT = encode_event(heartbeat(1))
 
 
 def _decode(*chunks: bytes) -> list[Decoded]:
@@ -148,7 +121,7 @@ def test_a_run_decodes_the_same_wherever_its_bytes_split(spelled: bytes) -> None
             id="event off the wire contract",
         ),
         pytest.param(
-            encode_event(Heartbeat(**_RUN, seq=2)),
+            encode_event(heartbeat(2)),
             ViolationKind.SEQUENCE_GAP,
             id="event breaking a stream rule",
         ),
@@ -186,8 +159,8 @@ def test_a_stream_cut_before_its_terminal_event_is_truncated(cut: int) -> None:
 
 
 def _text_of_frame_size(size: int) -> AssistantText:
-    overhead = len(encode_event(_text(1, "x"))) - 1
-    return _text(1, "x" * (size - overhead))
+    overhead = len(encode_event(text(1, "x"))) - 1
+    return text(1, "x" * (size - overhead))
 
 
 def test_a_frame_at_the_limit_travels_both_ways() -> None:

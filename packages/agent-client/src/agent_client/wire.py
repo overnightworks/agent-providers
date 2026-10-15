@@ -8,8 +8,8 @@ admission. A new variant or a new field is a new ``PROTOCOL_VERSION``.
 
 Validation is strict, so the wire's JSON types are the contract: a sequence
 number sent as ``"3"`` is a mismatch, not a coercion. Only the run id and the
-closed codes are read from their JSON strings. The envelope has no defaults:
-an event without its version or sequence number is not an event.
+closed codes are read from their JSON strings. The version and sequence
+number have no defaults.
 """
 
 from __future__ import annotations

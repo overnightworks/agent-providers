@@ -194,14 +194,31 @@ def test_a_rejection_body_off_the_contract_is_refused(body: dict[str, object]) -
         RunRejection.model_validate_json(json.dumps(body))
 
 
-def test_an_unsupported_version_is_named_without_echoing_it_whole() -> None:
-    oversized_version = "9" * 2000
+_SHORT_DETAIL_LENGTH = 80
 
-    violation = parse_event({**_wire("heartbeat", 1), "v": oversized_version})
+
+@pytest.mark.parametrize(
+    ("raw", "named_as"),
+    [
+        pytest.param(
+            {**_wire("heartbeat", 1), "v": "9" * 2000}, "protocol version '9999", id="oversized"
+        ),
+        pytest.param(
+            {key: value for key, value in _wire("heartbeat", 1).items() if key != "v"},
+            "no protocol version",
+            id="absent",
+        ),
+    ],
+)
+def test_an_unsupported_version_is_named_in_a_short_detail(
+    raw: dict[str, object], named_as: str
+) -> None:
+    violation = parse_event(raw)
 
     assert isinstance(violation, StreamViolation)
     assert violation.kind is ViolationKind.UNSUPPORTED_VERSION
-    assert oversized_version not in violation.detail
+    assert violation.detail.startswith(named_as)
+    assert len(violation.detail) < _SHORT_DETAIL_LENGTH
 
 
 def _started() -> RunStarted:

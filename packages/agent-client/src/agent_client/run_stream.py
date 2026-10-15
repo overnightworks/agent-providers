@@ -71,15 +71,19 @@ def parse_event(raw: dict[str, Any]) -> RunEvent | StreamViolation:
     except ValidationError:
         return StreamViolation(
             kind=ViolationKind.UNSUPPORTED_VERSION,
-            detail=(
-                f"protocol version {repr(version)[:_SHOWN_VERSION_LENGTH]}, "
-                f"this client speaks {PROTOCOL_VERSION}"
-            ),
+            detail=f"{_shown_version(raw)}, this client speaks {PROTOCOL_VERSION}",
         )
     try:
         return _RUN_EVENT.validate_python(raw)
     except ValidationError as error:
         return _violation_from(error)
+
+
+def _shown_version(raw: dict[str, Any]) -> str:
+    """Name an untrusted version briefly enough to log."""
+    if "v" not in raw:
+        return "no protocol version"
+    return f"protocol version {repr(raw['v'])[:_SHOWN_VERSION_LENGTH]}"
 
 
 def _violation_from(error: ValidationError) -> StreamViolation:

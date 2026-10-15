@@ -101,8 +101,10 @@ class Succeeded(_RunEvent):
 
 
 class Failed(_RunEvent):
-    """A run that ended without success; ``message`` is written by the service,
-    never a provider's raw output."""
+    """A run that ended without success.
+
+    ``message`` is written by the service, never a provider's raw output.
+    """
 
     type: Literal["failed"] = "failed"
     code: Annotated[FailureCode, Field(strict=False)]

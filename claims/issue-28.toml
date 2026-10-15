@@ -1,0 +1,8 @@
+claim_id = "249a07f296d849b8adac783c24522b26"
+agent = "Claude fe12493e-3d52-442e-b01b-4ee4336de2f0"
+role = "builder"
+base = "84946eba11cf73187893ac8756dcd78d214f9da3"
+branch = "claude/issue-28-a1a0-wire-request"
+scope = ["docs/decisions/0001-agent-service.md", "packages/agent-client/src/agent_client", "tests/test_sse_codec.py", "tests/test_wire_protocol.py", "tests/wire_builders.py"]
+opened_commit = "8a3a63dea09c83083b255dc9f07574bc691d4433"
+whole_reason = "The request model and the three wire hardenings the service needs land as one client contract step."

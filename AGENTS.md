@@ -38,6 +38,9 @@ owner needs.
   contract `ToolDeclaration` in `agent_client.tools`. The core builds on it and
   re-exports the identical class from `agent_providers.tools`; the client never
   imports the core.
+- The agent service's wire has one owner, `agent_client.wire`, with its stream
+  rules in `agent_client.run_stream`. `agent_providers.events` is the core's
+  in-process turn event and never a second wire.
 - `.importlinter` forbids `songmaker_cli` and `webauth` in both packages and
   layers `agent_providers` above `agent_client`; `lint-imports` proves it in
   CI.

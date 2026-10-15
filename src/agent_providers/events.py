@@ -1,9 +1,11 @@
-"""The event family a provider turn streams to its caller.
+"""The event family a provider turn streams to its in-process caller.
 
 Every transport — Claude's CLI/MCP stream, the OpenAI-compatible HTTP
-adapters, the tool loop — yields these types, and the host application
-serialises them straight onto the wire, so their field names and defaults
-are a public contract rather than an internal shape.
+adapters, the tool loop — yields these types. They are the core's own turn
+events, not the agent service's wire: the streamed run contract has one owner,
+``agent_client.wire``, onto which the agent service maps a turn's events
+(slice A1a). Hosts that call the core directly still consume these types, so
+their field names and defaults stay a public contract.
 
 Self-contained by design: pydantic only, no application import, so the
 package can be released on its own (issue #825).
@@ -22,7 +24,7 @@ class StreamEvent(BaseModel):
     ``correlation_id`` is the host's own handle for the turn that produced
     the event — a job id, a request id — carried so the host can log and
     group events without threading a second value beside them. It is
-    excluded from serialization: the wire payload is the same with it as
+    excluded from serialization: the serialised event is the same with it as
     without it.
     """
 

@@ -11,7 +11,8 @@ in lockstep from one tag:
 - `overnightworks-agent-providers`, import package `agent_providers` — the
   provider core, at the root.
 - `overnightworks-agent-client`, import package `agent_client` — the light
-  client (pydantic only) that owns the tool contract `ToolDeclaration`.
+  client (pydantic only) that owns the tool contract `ToolDeclaration` and
+  the agent service's streamed run contract (`agent_client.wire`).
 
 **Python**: 3.12+ | **Package manager**: uv | **Core**: `src/agent_providers/` |
 **Client**: `packages/agent-client/` | **Suite**: `tests/`

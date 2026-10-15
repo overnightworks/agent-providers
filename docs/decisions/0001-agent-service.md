@@ -195,6 +195,47 @@ one terminal event: `succeeded`, `failed` (a typed code and a safe message) or
 **Consequence.** A client always learns how a run ended, either from its
 terminal event or from `GET /runs/{id}`.
 
+### A0b wire ruling (head, 15.10.2026)
+
+**Context.** A0b had to enumerate the contract and settle whether the core's
+existing `agent_providers.events` is that contract.
+
+**Decision.**
+
+- `agent_client.wire` is the one owner of the wire, and
+  `agent_client.run_stream` owns its stream rules. Every event carries
+  `v` (protocol version 1), `run_id` and `seq`; the union is closed and
+  discriminated on `type`. A new variant or field is a new protocol version.
+- Core events are wrapped, not replaced: `agent_providers.events.StreamEvent`
+  stays the core's in-process provider-turn type, which hosts on v0.1.2 still
+  consume. The mapper from it to the run events lands in A1a with its caller.
+- (a) An explicit cancel follows the same interrupted rule as a disconnect.
+  Whether a cut-short run ends as `cancelled` or `failed: interrupted` is
+  decided by the effect class of its emitted tool calls (H9): one
+  side-effecting call, counted from its emission, makes it `interrupted`.
+- (b) `not_enabled` and `busy` are HTTP rejections before admission, never
+  stream events. The rejection body is typed (`RunRejection`), and its codes
+  map to these statuses:
+
+  | Code | HTTP status |
+  |---|---|
+  | `not_enabled` | 403 |
+  | `busy` | 429 with `Retry-After` |
+  | `unsupported_version` | 400 |
+  | `unauthorized` | 401 |
+  | `forbidden` | 403 |
+  | `invalid_request` | 422 |
+
+- (c) A `failed` event with any other code does not say separately whether a
+  side effect happened. The client sees the `tool_call` events, and after a
+  lost stream it asks `GET /runs/{id}`.
+- (d) The heartbeat is a typed event and counts in `seq` like every other
+  event.
+
+**Consequence.** A client validates a stream against one contract, and a
+second wire owner cannot appear without contradicting this ruling. The SSE
+framing and decoder follow in A0b2 on top of this union.
+
 ## H7 CLI isolation and admission
 
 **Context.** The CLI route runs a powerful agent under the operator's login.
@@ -232,7 +273,9 @@ tool contract needs one owner both can import.
 with three packages:
 
 - `agent-client`, which is light: the wire union (H6), the tool contract
-  `ToolDeclaration` (name, description, JSON-schema input) as its shared owner,
+  `ToolDeclaration` (name, description, JSON-schema input, and the effect class
+  `read_only` or `side_effecting`, which defaults to side-effecting and never
+  reaches a model) as its shared owner,
   the HTTP/SSE client, and the MCP server helper;
 - the provider core `agent_providers`, whose `ToolCatalog` builds on
   `ToolDeclaration` from `agent-client`;
@@ -302,9 +345,12 @@ fit are refused.
 
 **Decision.** Presentator's copresenter is operator-only or offline, a gate in
 overnightworks/agent-presentator#197. Songmaker's AI paths (co-writer, judge,
-cover) use the subscription only for the operator's own use; the operator ruled
-that he is currently the only user. Whether friends' Songmaker accounts need an
-interim AI gate is the operator's question.
+cover) use the subscription only for the operator's own use. The operator ruled
+on 15.10.2026:
+
+- Songmaker gets no interim AI gate.
+- Songmaker gets no friend accounts until A1s and A2c have landed.
+- After that, the operator keeps only his own accounts in `/ki-abo`.
 
 **Consequence.** No document claims the subscription has left the containers
 until every mount is gone.

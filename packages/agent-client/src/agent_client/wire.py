@@ -16,6 +16,7 @@ number have no defaults.
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Annotated, Any, Final, Literal, TypeGuard, get_args
 from uuid import UUID
@@ -68,21 +69,38 @@ ToolUseId = Annotated[str, Field(min_length=1)]
 """The one decider of a valid call id, so a call and its result accept the same ids."""
 
 
+@dataclass(frozen=True, slots=True)
+class _LeaveContainer:
+    container_id: int
+
+
 def _refuse_non_json_object(value: dict[Any, Any]) -> dict[str, Any]:
     # An explicit stack, not recursion: a frame within the size limit can nest
     # deeper than Python's recursion limit, and that depth is still valid JSON.
+    # Only the containers on the current path count as open, so a value shared
+    # by two branches is accepted, as ``json.dumps`` accepts it.
+    open_containers: set[int] = set()
     pending: list[object] = [value]
     while pending:
         current = pending.pop()
-        if isinstance(current, dict):
-            for key in current:
-                _refuse_non_json_key(key)
-            pending.extend(current.values())
-        elif isinstance(current, list):
-            pending.extend(current)
+        if isinstance(current, _LeaveContainer):
+            open_containers.remove(current.container_id)
+        elif isinstance(current, dict | list):
+            _enter_container(current, open_containers)
+            pending.append(_LeaveContainer(id(current)))
+            pending.extend(current.values() if isinstance(current, dict) else current)
         else:
             _refuse_non_json_scalar(current)
     return value
+
+
+def _enter_container(container: dict[Any, Any] | list[Any], open_containers: set[int]) -> None:
+    if id(container) in open_containers:
+        raise ValueError("a value that contains itself is not JSON")
+    open_containers.add(id(container))
+    if isinstance(container, dict):
+        for key in container:
+            _refuse_non_json_key(key)
 
 
 def _refuse_non_json_key(key: object) -> None:

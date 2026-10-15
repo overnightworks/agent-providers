@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -194,6 +195,14 @@ def test_an_unknown_type_is_named_without_an_empty_location() -> None:
     assert not violation.detail.startswith(":")
 
 
+def _containing_itself(container: dict[str, Any] | list[Any]) -> object:
+    if isinstance(container, dict):
+        container["self"] = container
+    else:
+        container.append(container)
+    return container
+
+
 @pytest.mark.parametrize(
     "value",
     [
@@ -207,6 +216,8 @@ def test_an_unknown_type_is_named_without_an_empty_location() -> None:
         pytest.param({1: "x"}, id="a non-string key in a nested object"),
         pytest.param([{"bar": {None: "x"}}], id="a non-string key nested in a list"),
         pytest.param([{"bar": float("nan")}], id="NaN nested in a list"),
+        pytest.param(_containing_itself({}), id="a dict that contains itself"),
+        pytest.param(_containing_itself([]), id="a list that contains itself"),
     ],
 )
 def test_tool_input_that_is_not_json_is_refused(value: object) -> None:
@@ -226,6 +237,14 @@ def test_nested_json_tool_input_is_accepted_unchanged() -> None:
     tool_call = call(1, "call-1", tool_input=nested)
 
     assert json.loads(tool_call.model_dump_json())["input"] == nested
+
+
+def test_a_value_shared_by_two_branches_of_tool_input_is_accepted() -> None:
+    chorus = {"lines": ["la", "la"]}
+
+    tool_call = call(1, "call-1", tool_input={"first": chorus, "again": [chorus]})
+
+    assert json.loads(tool_call.model_dump_json())["input"]["again"] == [chorus]
 
 
 REJECTION = {"v": PROTOCOL_VERSION, "code": "busy", "message": "Another run is active."}

@@ -212,7 +212,8 @@ def _call(seq: int, tool_use_id: str, effect: ToolEffect = ToolEffect.SIDE_EFFEC
     return ToolCall(
         v=PROTOCOL_VERSION,
         run_id=RUN_ID,
-        seq=seq,         tool_use_id=tool_use_id,
+        seq=seq,
+        tool_use_id=tool_use_id,
         name="tool",
         input={},
         effect=effect,

@@ -21,7 +21,7 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv sync --extra dev --extra image
+        run: uv sync --all-packages --extra dev --extra image
 
       - name: Lockfile is current
         run: uv lock --check
@@ -35,7 +35,7 @@ jobs:
       - name: Tests
         run: uv run pytest tests -q
 
-      - name: Build both distributions
+      - name: Build the three distributions
         run: uv build --all-packages
 
       - name: The client wheel carries the repository licence
@@ -83,6 +83,23 @@ jobs:
           printf 'from agent_providers.tools import ToolCatalog, ToolDeclaration\n' > consumer.py
           uvx pyright@1.1.414 --pythonpath "$proof/venv/bin/python" consumer.py
 
+      - name: The three wheels install together and the service refuses a bad config
+        run: |
+          proof="$(mktemp -d "$RUNNER_TEMP/three-wheels.XXXXXX")"
+          uv venv "$proof/venv"
+          uv pip install --python "$proof/venv/bin/python" \
+            "$GITHUB_WORKSPACE"/dist/overnightworks_agent_client-*-py3-none-any.whl \
+            "$GITHUB_WORKSPACE"/dist/overnightworks_agent_providers-*-py3-none-any.whl \
+            "$GITHUB_WORKSPACE"/dist/overnightworks_agent_service-*-py3-none-any.whl
+          cd "$proof"
+          "$proof/venv/bin/python" -I -c 'import agent_service.app; print("imported", agent_service.app.__name__)'
+          printf '[identity]\nissuer = "https://issuer.test"\n' > bad.toml
+          status=0
+          "$proof/venv/bin/agent-service" --config bad.toml 2> refused.txt || status=$?
+          cat refused.txt
+          test "$status" -eq 2
+          grep -q 'identity.jwks_url' refused.txt
+
   keycloak-token-shapes:
     name: keycloak-token-shapes
     runs-on: ubuntu-latest
@@ -124,6 +141,12 @@ jobs:
         run: >-
           "$RUNNER_TEMP/venv/bin/python" -m pytest --noconftest -p no:cacheprovider
           tests/test_keycloak_token_shapes.py -m keycloak -q -rP
+
+      - name: Install the workspace for the service's end-to-end proof
+        run: uv sync --locked --all-packages --extra dev
+
+      - name: The service admits real Keycloak tokens end to end
+        run: uv run --no-sync pytest tests/test_service_keycloak.py -m keycloak -q -rP
 
       - name: Keycloak log on failure
         if: failure()

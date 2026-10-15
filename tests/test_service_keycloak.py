@@ -1,0 +1,196 @@
+"""The service end to end with tokens a real Keycloak 26.8.1 issued.
+
+The ``keycloak-token-shapes`` CI job serves the test realm of
+``tests/keycloak/realm.json``; this suite asks it for real client-credentials
+workload tokens and real user tokens, serves the service with uvicorn on a
+loopback socket, streams ``POST /runs`` with httpx, and checks every stream
+against frozen raw SSE frames and through ``RunStreamDecoder``. The negative
+cases Keycloak cannot issue are proven with minted tokens in
+``test_service_entrance.py``.
+
+Runs only where ``KEYCLOAK_URL`` names that Keycloak.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+
+import pytest
+from service_support import (
+    PRESENTATOR_CLIENT,
+    SONGMAKER_CLIENT,
+    ScriptedRunner,
+    assert_rejected,
+    decoded_events,
+    post_run,
+    run_body,
+    run_headers,
+    served,
+    service_config,
+    with_placeholder_run_id,
+)
+from test_keycloak_token_shapes import (
+    CLIENT_SECRETS,
+    KEYCLOAK_URL,
+    USER_LOGIN_CLIENT,
+    USER_PASSWORDS,
+    _access_token,
+    _fetch_key_set_from_test_keycloak,
+    _realm_url,
+)
+
+from agent_client.wire import RejectionCode
+from agent_providers.events import AssistantTextEvent, FinalEvent
+from agent_service.app import create_app
+from agent_service.routing import Api, Cli
+from agent_service.runners import Runners
+
+pytestmark = [
+    pytest.mark.keycloak,
+    pytest.mark.skipif(KEYCLOAK_URL is None, reason="KEYCLOAK_URL names no test Keycloak"),
+]
+
+CLI_SCRIPT = (AssistantTextEvent(text="Hello from the CLI."), FinalEvent(text="CLI done."))
+API_SCRIPT = (AssistantTextEvent(text="Hello from the API."), FinalEvent(text="API done."))
+
+RUN = "00000000-0000-4000-8000-000000000000"
+
+
+def _frozen_frames(route: str) -> bytes:
+    return (
+        "id: 0\nevent: run_started\n"
+        f'data: {{"v":1,"run_id":"{RUN}","seq":0,"type":"run_started",'
+        '"heartbeat_interval_s":15}\n\n'
+        "id: 1\nevent: assistant_text\n"
+        f'data: {{"v":1,"run_id":"{RUN}","seq":1,"type":"assistant_text",'
+        f'"text":"Hello from the {route}."}}\n\n'
+        "id: 2\nevent: succeeded\n"
+        f'data: {{"v":1,"run_id":"{RUN}","seq":2,"type":"succeeded","text":"{route} done."}}\n\n'
+    ).encode()
+
+
+def _workload_token(client: str) -> str:
+    return _access_token(
+        {
+            "grant_type": "client_credentials",
+            "client_id": client,
+            "client_secret": CLIENT_SECRETS[client],
+        }
+    )
+
+
+def _user_token(user: str) -> str:
+    return _access_token(
+        {
+            "grant_type": "password",
+            "client_id": USER_LOGIN_CLIENT,
+            "client_secret": CLIENT_SECRETS[USER_LOGIN_CLIENT],
+            "username": user,
+            "password": USER_PASSWORDS[user],
+        }
+    )
+
+
+@pytest.fixture(scope="module")
+def runners() -> Runners:
+    return Runners(cli=ScriptedRunner(CLI_SCRIPT), api=ScriptedRunner(API_SCRIPT))
+
+
+@pytest.fixture(scope="module")
+def service(runners) -> Iterator[str]:
+    app = create_app(
+        service_config(issuer=_realm_url()),
+        runners=runners,
+        fetch_key_set=_fetch_key_set_from_test_keycloak,
+    )
+    with served(app) as base_url:
+        yield base_url
+
+
+@pytest.mark.parametrize(
+    ("user", "route", "expected_route"),
+    [("alice", "CLI", Cli("claude-main")), ("bob", "API", Api("cowriter"))],
+)
+def test_a_real_user_and_workload_token_stream_the_scripted_run(
+    service, runners, user, route, expected_route
+):
+    response = post_run(service, run_headers(_songmaker_workload(), _user_token(user)))
+
+    assert response.status_code == 200, response.text
+    assert with_placeholder_run_id(response.content) == _frozen_frames(route)
+    assert [event.type for event in decoded_events(response.content)] == [
+        "run_started",
+        "assistant_text",
+        "succeeded",
+    ]
+    runner = runners.cli if expected_route == Cli("claude-main") else runners.api
+    assert runner.admitted[-1].route == expected_route
+
+
+def test_a_user_in_no_group_is_not_enabled(service):
+    response = post_run(service, run_headers(_songmaker_workload(), _user_token("carol")))
+
+    assert_rejected(response, RejectionCode.NOT_ENABLED, 403)
+
+
+def test_a_real_user_token_sent_as_the_workload_token_is_forbidden(service):
+    alice = _user_token("alice")
+
+    assert_rejected(post_run(service, run_headers(alice, alice)), RejectionCode.FORBIDDEN, 403)
+
+
+def test_another_apps_workload_cannot_act_for_a_user_of_this_app(service):
+    response = post_run(
+        service, run_headers(_workload_token(PRESENTATOR_CLIENT), _user_token("alice"))
+    )
+
+    assert_rejected(response, RejectionCode.FORBIDDEN, 403)
+
+
+def _tampered(token: str) -> str:
+    header, payload, signature = token.split(".")
+    return ".".join((header, payload, ("A" if signature[0] != "A" else "B") + signature[1:]))
+
+
+def _songmaker_workload() -> str:
+    return _workload_token(SONGMAKER_CLIENT)
+
+
+@pytest.mark.parametrize(
+    ("workload_token", "body", "code", "status"),
+    [
+        pytest.param(lambda: None, run_body(), RejectionCode.UNAUTHORIZED, 401, id="no-workload"),
+        pytest.param(
+            lambda: _tampered(_songmaker_workload()),
+            run_body(),
+            RejectionCode.UNAUTHORIZED,
+            401,
+            id="bad-signature",
+        ),
+        pytest.param(
+            _songmaker_workload,
+            run_body(v=2),
+            RejectionCode.UNSUPPORTED_VERSION,
+            400,
+            id="unsupported-version",
+        ),
+        pytest.param(
+            _songmaker_workload,
+            run_body(model="opus"),
+            RejectionCode.INVALID_REQUEST,
+            422,
+            id="names-a-model",
+        ),
+        pytest.param(
+            _songmaker_workload,
+            run_body(purpose="presentator.copresenter"),
+            RejectionCode.FORBIDDEN,
+            403,
+            id="another-apps-purpose",
+        ),
+    ],
+)
+def test_the_rejection_table_holds_for_real_tokens(service, workload_token, body, code, status):
+    response = post_run(service, run_headers(workload_token(), _user_token("alice")), body)
+
+    assert_rejected(response, code, status)

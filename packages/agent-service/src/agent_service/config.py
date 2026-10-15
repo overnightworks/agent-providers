@@ -12,7 +12,6 @@ from enum import StrEnum
 from functools import cached_property
 from pathlib import Path
 from typing import Annotated, Self
-from urllib.parse import urlsplit
 
 from pydantic import (
     AfterValidator,
@@ -22,25 +21,21 @@ from pydantic import (
     ValidationError,
     model_validator,
 )
+from webauth.https_client import is_https_url
 
 from agent_client.tools import ToolEffect
 
 NonEmptyText = Annotated[str, Field(min_length=1)]
 
 
-def _https_url_naming_a_host(url: str) -> str:
-    """The key-set URL webauth's verifier accepts, so a bad one stops startup as a field error."""
-    try:
-        parts = urlsplit(url)
-        _ = parts.port
-    except ValueError as error:
-        raise ValueError("must be a URL with a valid port, if any") from error
-    if parts.scheme != "https" or not parts.hostname or "@" in parts.netloc:
+def _https_url_the_verifier_accepts(url: str) -> str:
+    """Stops startup as a field error on the key-set URL webauth's verifier would refuse."""
+    if not is_https_url(url):
         raise ValueError("must be an https URL naming a host and no credentials")
     return url
 
 
-HttpsUrl = Annotated[str, AfterValidator(_https_url_naming_a_host)]
+HttpsUrl = Annotated[str, AfterValidator(_https_url_the_verifier_accepts)]
 
 
 class ConfigError(ValueError):

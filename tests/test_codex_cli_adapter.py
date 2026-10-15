@@ -52,8 +52,10 @@ A_COVER_POLICY = ImagePolicy(
 def _transport() -> codex_transport.CodexCliToolTransport:
     """Build the transport under test with songmaker's own tool catalog."""
     return codex_transport.CodexCliToolTransport(
-        model="codex-test", catalog=COWRITER_TOOL_CATALOG,
+        model="codex-test",
+        catalog=COWRITER_TOOL_CATALOG,
     )
+
 
 _REDACTED_CODEX_LOGIN = {
     "auth_mode": "chatgpt",
@@ -71,7 +73,8 @@ _FIXTURES = Path(__file__).parent / "fixtures"
 
 @pytest.mark.parametrize("missing", ("cli", "code_mode_host", "resources"))
 def test_cover_image_capability_requires_every_codex_mount(
-    tmp_path: Path, missing: str,
+    tmp_path: Path,
+    missing: str,
 ) -> None:
     cli = tmp_path / "codex"
     code_mode_host = tmp_path / "codex-code-mode-host"
@@ -99,7 +102,8 @@ def test_cover_image_capability_requires_every_codex_mount(
 
 
 def test_cover_image_capability_requires_the_installed_image_encoder(
-    tmp_path: Path, monkeypatch,
+    tmp_path: Path,
+    monkeypatch,
 ) -> None:
     cli = tmp_path / "codex"
     code_mode_host = tmp_path / "codex-code-mode-host"
@@ -132,7 +136,9 @@ def test_a_deployment_without_the_image_encoder_refuses_before_it_spawns(
 
     with pytest.raises(codex_image.CodexImageEncoderUnavailableError):
         codex_image.generate_codex_cover_image(
-            "prompt", policy=A_COVER_POLICY, deadline=10_000_000,
+            "prompt",
+            policy=A_COVER_POLICY,
+            deadline=10_000_000,
         )
 
     assert spawns == []
@@ -149,7 +155,11 @@ def codex_login_mirror(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def _outcome(
-    *, returncode: int = 0, complete: bool = True, stdout: str = "", stderr: str = "",
+    *,
+    returncode: int = 0,
+    complete: bool = True,
+    stdout: str = "",
+    stderr: str = "",
     reason: CliRunReason = CliRunReason.COMPLETE,
 ) -> CliRunOutcome:
     return CliRunOutcome(
@@ -193,8 +203,13 @@ def _png_bytes() -> bytes:
 
 
 def _image_event_stream(codex_home: Path) -> str:
-    return (_FIXTURES / "codex-imagegen-real-stream.jsonl").read_text().replace(
-        "{CODEX_HOME}", str(codex_home.resolve()),
+    return (
+        (_FIXTURES / "codex-imagegen-real-stream.jsonl")
+        .read_text()
+        .replace(
+            "{CODEX_HOME}",
+            str(codex_home.resolve()),
+        )
     )
 
 
@@ -237,26 +252,47 @@ def test_codex_tool_command_pins_read_only_isolation_for_start_and_resume() -> N
         "--skip-git-repo-check",
         "--ignore-user-config",
         "--ignore-rules",
-        "-c", "approval_policy=\"never\"",
-        "-c", "mcp_servers={}",
-        "-c", "features.shell_tool=false",
-        "-c", "features.unified_exec=false",
-        "-c", "features.browser_use=false",
-        "-c", "features.computer_use=false",
-        "-c", "features.multi_agent=false",
-        "-c", "features.image_generation=false",
-        "-c", "features.plugins=false",
-        "-c", "features.hooks=false",
-        "-c", 'web_search="disabled"',
-        "-c", "features.code_mode_host=false",
-        "-c", "features.code_mode=false",
-        "-c", "features.code_mode_only=false",
-        "-c", 'sandbox_mode="read-only"',
-        "--model", model,
+        "-c",
+        'approval_policy="never"',
+        "-c",
+        "mcp_servers={}",
+        "-c",
+        "features.shell_tool=false",
+        "-c",
+        "features.unified_exec=false",
+        "-c",
+        "features.browser_use=false",
+        "-c",
+        "features.computer_use=false",
+        "-c",
+        "features.multi_agent=false",
+        "-c",
+        "features.image_generation=false",
+        "-c",
+        "features.plugins=false",
+        "-c",
+        "features.hooks=false",
+        "-c",
+        'web_search="disabled"',
+        "-c",
+        "features.code_mode_host=false",
+        "-c",
+        "features.code_mode=false",
+        "-c",
+        "features.code_mode_only=false",
+        "-c",
+        'sandbox_mode="read-only"',
+        "--model",
+        model,
     )
 
     assert codex_transport._build_codex_tool_command(model) == (
-        "codex", "exec", "--sandbox", "read-only", *common, "-",
+        "codex",
+        "exec",
+        "--sandbox",
+        "read-only",
+        *common,
+        "-",
     )
     assert codex_transport._build_codex_tool_command(
         model,
@@ -270,18 +306,20 @@ def test_codex_tool_transport_uses_an_empty_private_work_directory_on_resume(mon
     prompts: list[bytes] = []
     scrubbed_calls = 0
     thread_id = "52700000-0000-4000-8000-000000000000"
-    rounds = iter([
+    rounds = iter(
         [
-            json.dumps({"type": "thread.started", "thread_id": thread_id}).encode() + b"\n",
-            b'{"type":"item.completed","item":{"type":"agent_message","text":"<songmaker_tool_call>\\n{\\"name\\":\\"list_songs\\",\\"arguments\\":{}}\\n</songmaker_tool_call>"}}\n',
-            b'{"type":"turn.completed","usage":{}}\n',
-        ],
-        [
-            json.dumps({"type": "thread.started", "thread_id": thread_id}).encode() + b"\n",
-            b'{"type":"item.completed","item":{"type":"agent_message","text":"done"}}\n',
-            b'{"type":"turn.completed","usage":{}}\n',
-        ],
-    ])
+            [
+                json.dumps({"type": "thread.started", "thread_id": thread_id}).encode() + b"\n",
+                b'{"type":"item.completed","item":{"type":"agent_message","text":"<songmaker_tool_call>\\n{\\"name\\":\\"list_songs\\",\\"arguments\\":{}}\\n</songmaker_tool_call>"}}\n',
+                b'{"type":"turn.completed","usage":{}}\n',
+            ],
+            [
+                json.dumps({"type": "thread.started", "thread_id": thread_id}).encode() + b"\n",
+                b'{"type":"item.completed","item":{"type":"agent_message","text":"done"}}\n',
+                b'{"type":"turn.completed","usage":{}}\n',
+            ],
+        ]
+    )
 
     def run_cli_bounded(command, **kwargs):
         calls.append((command, kwargs))
@@ -309,10 +347,14 @@ def test_codex_tool_transport_uses_an_empty_private_work_directory_on_resume(mon
     monkeypatch.setattr(codex_protocol, "run_cli_bounded", run_cli_bounded)
     monkeypatch.setattr(codex_transport, "scrubbed_env", scrubbed_environment)
     transport = _transport()
-    events = asyncio.run(_collect_tool_events(_codex_tool_events(
-        transport,
-        lambda _name, _arguments: ToolOutcome('{"songs":[]}', False),
-    )))
+    events = asyncio.run(
+        _collect_tool_events(
+            _codex_tool_events(
+                transport,
+                lambda _name, _arguments: ToolOutcome('{"songs":[]}', False),
+            )
+        )
+    )
 
     assert isinstance(events[0], ToolCallEvent)
     assert events[-1] == FinalEvent(text="done")
@@ -330,8 +372,7 @@ def test_codex_tool_transport_uses_an_empty_private_work_directory_on_resume(mon
         assert kwargs["deadline"] == first_kwargs["deadline"]
         assert kwargs["extra_env"]["CODEX_HOME"].endswith("/codex-home")
         assert kwargs["extra_env"]["PATH"] == "/test/bin"
-        for config in (*codex_transport._CODEX_TOOL_ISOLATION_CONFIGS,
-                       'sandbox_mode="read-only"'):
+        for config in (*codex_transport._CODEX_TOOL_ISOLATION_CONFIGS, 'sandbox_mode="read-only"'):
             assert config in command
     assert prompts == [
         b"system\n\nUser: hello",
@@ -353,19 +394,29 @@ def test_codex_tool_transport_rejects_non_uuid_thread_ids(thread_id: str) -> Non
 
 def test_codex_tool_transport_rejects_a_multi_result_batch_without_a_resume(monkeypatch) -> None:
     calls: list = []
-    monkeypatch.setattr(codex_protocol, "run_cli_bounded", _runner([
-        b'{"type":"thread.started","thread_id":"52700000-0000-4000-8000-000000000000"}\n',
-        b'{"type":"item.completed","item":{"type":"agent_message","text":"done"}}\n',
-        b'{"type":"turn.completed","usage":{}}\n',
-    ], _outcome(), calls))
+    monkeypatch.setattr(
+        codex_protocol,
+        "run_cli_bounded",
+        _runner(
+            [
+                b'{"type":"thread.started","thread_id":"52700000-0000-4000-8000-000000000000"}\n',
+                b'{"type":"item.completed","item":{"type":"agent_message","text":"done"}}\n',
+                b'{"type":"turn.completed","usage":{}}\n',
+            ],
+            _outcome(),
+            calls,
+        ),
+    )
     transport = _transport()
 
     async def reject_batch() -> None:
         assert [item async for item in transport.stream(InitialTurn("system", []))]
-        batch = ToolResultBatch((
-            ToolResult("one", "1", False),
-            ToolResult("two", "2", False),
-        ))
+        batch = ToolResultBatch(
+            (
+                ToolResult("one", "1", False),
+                ToolResult("two", "2", False),
+            )
+        )
         with pytest.raises(ProviderUnavailableError) as raised:
             async for _ in transport.stream(batch):
                 pass
@@ -376,12 +427,16 @@ def test_codex_tool_transport_rejects_a_multi_result_batch_without_a_resume(monk
     assert len(calls) == 1
 
 
-@pytest.mark.parametrize("fixture_name", (
-    "codex-tool-code-mode-host-disabled.jsonl",
-    "codex-tool-code-mode-host-disabled-without-remediation.jsonl",
-))
+@pytest.mark.parametrize(
+    "fixture_name",
+    (
+        "codex-tool-code-mode-host-disabled.jsonl",
+        "codex-tool-code-mode-host-disabled-without-remediation.jsonl",
+    ),
+)
 def test_codex_tool_transport_ignores_its_code_mode_host_isolation_notice(
-    monkeypatch, caplog,
+    monkeypatch,
+    caplog,
     fixture_name: str,
 ) -> None:
     calls: list = []
@@ -397,10 +452,14 @@ def test_codex_tool_transport_ignores_its_code_mode_host_isolation_notice(
     caplog.set_level("INFO", logger="agent_providers.codex.transport")
     transport = _transport()
 
-    events = asyncio.run(_collect_tool_events(_codex_tool_events(
-        transport,
-        lambda _name, _arguments: ToolOutcome("unreachable", False),
-    )))
+    events = asyncio.run(
+        _collect_tool_events(
+            _codex_tool_events(
+                transport,
+                lambda _name, _arguments: ToolOutcome("unreachable", False),
+            )
+        )
+    )
 
     assert events == [
         AssistantTextEvent(text="The open song is Midnight Drive."),
@@ -449,9 +508,15 @@ def test_codex_tool_transport_aborts_native_tools_before_the_loop_executes(
 
     def run_cli_bounded(_command, **kwargs):
         channel = kwargs["stdout_line_channel"]
-        assert channel._send(json.dumps({
-            "type": "item.started", "item": {"type": item_type},
-        }).encode() + b"\n")
+        assert channel._send(
+            json.dumps(
+                {
+                    "type": "item.started",
+                    "item": {"type": item_type},
+                }
+            ).encode()
+            + b"\n"
+        )
         while not channel.abort_requested():
             time.sleep(0.001)
         aborted.set()
@@ -501,9 +566,16 @@ def test_codex_tool_transport_cleans_its_home_and_does_not_log_protocol_text(
         (home / "sessions" / "private.jsonl").write_text(protocol)
         for line in (
             b'{"type":"thread.started","thread_id":"52700000-0000-4000-8000-000000000000"}\n',
-            json.dumps({"type": "item.completed", "item": {
-                "type": "agent_message", "text": protocol,
-            }}).encode() + b"\n",
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "agent_message",
+                        "text": protocol,
+                    },
+                }
+            ).encode()
+            + b"\n",
             b'{"type":"turn.completed","usage":{}}\n',
         ):
             assert kwargs["stdout_line_channel"]._send(line)
@@ -568,6 +640,7 @@ def test_deadline_before_spawn_keeps_the_codex_slot_until_late_reap(monkeypatch)
 
 def _generated_png_runner() -> object:
     """A Codex run that leaves exactly one generated PNG in its private home."""
+
     def run_cli_bounded(_command, **kwargs):
         codex_home = Path(kwargs["extra_env"]["CODEX_HOME"])
         artifact = codex_home / "generated_images" / "thread" / "cover.png"
@@ -601,7 +674,9 @@ def test_codex_cover_image_accepts_the_recorded_imagegen_stream(monkeypatch) -> 
     monkeypatch.setattr(codex_protocol, "run_cli_bounded", _generated_png_runner())
 
     assert codex_image.generate_codex_cover_image(
-        "prompt", policy=A_COVER_POLICY, deadline=10_000_000,
+        "prompt",
+        policy=A_COVER_POLICY,
+        deadline=10_000_000,
     ).startswith(b"\x89PNG")
 
 
@@ -627,13 +702,16 @@ def test_a_generated_image_is_returned_in_the_shape_the_host_asked_for(monkeypat
     ids=("more-pixels-than-the-host-allows", "more-bytes-than-the-host-allows"),
 )
 def test_a_generated_image_outside_the_hosts_bounds_is_refused(
-    monkeypatch, policy: ImagePolicy,
+    monkeypatch,
+    policy: ImagePolicy,
 ) -> None:
     monkeypatch.setattr(codex_protocol, "run_cli_bounded", _generated_png_runner())
 
     with pytest.raises(codex_image.CodexImageArtifactError):
         codex_image.generate_codex_cover_image(
-            "prompt", policy=policy, deadline=10_000_000,
+            "prompt",
+            policy=policy,
+            deadline=10_000_000,
         )
 
 
@@ -660,8 +738,7 @@ def test_a_generated_image_outside_the_hosts_bounds_is_refused(
             _outcome(
                 returncode=1,
                 stdout=(
-                    '{"type":"turn.failed",'
-                    '"error":{"message":"401 Unauthorized: token expired"}}\n'
+                    '{"type":"turn.failed","error":{"message":"401 Unauthorized: token expired"}}\n'
                 ),
             ),
             codex_image.CodexImageLoginError,

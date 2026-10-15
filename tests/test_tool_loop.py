@@ -39,7 +39,8 @@ class _FakeTransport:
         self.closed = False
 
     async def stream(
-        self, message: InitialTurn | ToolResultBatch,
+        self,
+        message: InitialTurn | ToolResultBatch,
     ) -> AsyncIterator[TransportResponse]:
         self.messages.append(message)
         for response in self._responses.pop(0):
@@ -70,23 +71,29 @@ async def _events(
 
 
 def test_passes_the_complete_tool_result_batch_to_the_transport() -> None:
-    first = ToolCallBatch((
-        ToolCall("call-1", "first", {"position": 1}),
-        ToolCall("call-2", "second", {"position": 2}),
-    ))
+    first = ToolCallBatch(
+        (
+            ToolCall("call-1", "first", {"position": 1}),
+            ToolCall("call-2", "second", {"position": 2}),
+        )
+    )
     transport = _FakeTransport([[TextDelta("draft "), first], [FinalText("done")]])
 
-    events = asyncio.run(_events(
-        transport,
-        lambda name, arguments: ToolOutcome(f"{name}:{arguments['position']}", False),
-    ))
+    events = asyncio.run(
+        _events(
+            transport,
+            lambda name, arguments: ToolOutcome(f"{name}:{arguments['position']}", False),
+        )
+    )
 
     assert transport.messages == [
         InitialTurn("system", [{"role": "user", "content": "hello"}]),
-        ToolResultBatch((
-            tool_loop.ToolResult("call-1", "first:1", False),
-            tool_loop.ToolResult("call-2", "second:2", False),
-        )),
+        ToolResultBatch(
+            (
+                tool_loop.ToolResult("call-1", "first:1", False),
+                tool_loop.ToolResult("call-2", "second:2", False),
+            )
+        ),
     ]
     assert events == [
         AssistantTextEvent(text="draft "),
@@ -117,9 +124,13 @@ def test_allows_eight_tool_rounds_then_one_final_response() -> None:
 
 def test_rejects_a_ninth_tool_round_without_executing_it(monkeypatch) -> None:
     monkeypatch.setattr(tool_loop, "COWRITER_MAX_TOOL_ROUNDS", 0)
-    transport = _FakeTransport([[
-        ToolCallBatch((ToolCall("call-9", "read", {}),)),
-    ]])
+    transport = _FakeTransport(
+        [
+            [
+                ToolCallBatch((ToolCall("call-9", "read", {}),)),
+            ]
+        ]
+    )
     executed = False
 
     def executor(_name: str, _arguments: dict[str, Any]) -> ToolOutcome:
@@ -136,10 +147,12 @@ def test_rejects_a_ninth_tool_round_without_executing_it(monkeypatch) -> None:
 
 
 def test_executor_failure_returns_a_named_error_to_the_model(caplog) -> None:
-    transport = _FakeTransport([
-        [ToolCallBatch((ToolCall("call-1", "write", {"lyrics": "secret"}),))],
-        [FinalText()],
-    ])
+    transport = _FakeTransport(
+        [
+            [ToolCallBatch((ToolCall("call-1", "write", {"lyrics": "secret"}),))],
+            [FinalText()],
+        ]
+    )
 
     def executor(_name: str, _arguments: dict[str, Any]) -> ToolOutcome:
         raise RuntimeError("secret")
@@ -149,28 +162,29 @@ def test_executor_failure_returns_a_named_error_to_the_model(caplog) -> None:
 
     assert "RuntimeError" in caplog.text
     assert "secret" not in caplog.text
-    assert [
-        record.levelname
-        for record in caplog.records
-        if "raised" in record.getMessage()
-    ] == ["ERROR"]
+    assert [record.levelname for record in caplog.records if "raised" in record.getMessage()] == [
+        "ERROR"
+    ]
 
     assert events == [
         ToolCallEvent(tool_use_id="call-1", name="write", input={"lyrics": "secret"}),
         ToolResultEvent(
-            tool_use_id="call-1", content="Co-Writer tool failed.", is_error=True,
+            tool_use_id="call-1",
+            content="Co-Writer tool failed.",
+            is_error=True,
         ),
         FinalEvent(text=""),
     ]
-    assert transport.messages[1] == ToolResultBatch((
-        tool_loop.ToolResult("call-1", "Co-Writer tool failed.", True),
-    ))
+    assert transport.messages[1] == ToolResultBatch(
+        (tool_loop.ToolResult("call-1", "Co-Writer tool failed.", True),)
+    )
 
 
 def test_aclose_stops_the_active_transport_without_a_follow_up_round() -> None:
     class BlockingTransport(_FakeTransport):
         async def stream(
-            self, message: InitialTurn | ToolResultBatch,
+            self,
+            message: InitialTurn | ToolResultBatch,
         ) -> AsyncIterator[TransportResponse]:
             self.messages.append(message)
             yield TextDelta("partial")
@@ -201,13 +215,25 @@ def test_logs_never_include_tool_input_or_result(caplog) -> None:
     lyrics = "private lyrics"
     song_id = "song-private"
     call_json = '{"lyrics":"private lyrics","song_id":"song-private"}'
-    transport = _FakeTransport([
-        [ToolCallBatch((ToolCall("safe-call", "update_song_lyrics", {
-            "lyrics": lyrics,
-            "song_id": song_id,
-        }),))],
-        [FinalText()],
-    ])
+    transport = _FakeTransport(
+        [
+            [
+                ToolCallBatch(
+                    (
+                        ToolCall(
+                            "safe-call",
+                            "update_song_lyrics",
+                            {
+                                "lyrics": lyrics,
+                                "song_id": song_id,
+                            },
+                        ),
+                    )
+                )
+            ],
+            [FinalText()],
+        ]
+    )
     caplog.set_level("INFO", logger="agent_providers.tool_loop")
 
     asyncio.run(
@@ -222,26 +248,32 @@ def test_logs_never_include_tool_input_or_result(caplog) -> None:
 
 
 def test_every_event_of_a_turn_carries_the_hosts_correlation_id() -> None:
-    transport = _FakeTransport([
-        [TextDelta("draft "), ToolCallBatch((ToolCall("call-1", "read", {}),))],
-        [FinalText("done")],
-    ])
+    transport = _FakeTransport(
+        [
+            [TextDelta("draft "), ToolCallBatch((ToolCall("call-1", "read", {}),))],
+            [FinalText("done")],
+        ]
+    )
 
-    events = asyncio.run(_events(
-        transport,
-        lambda _name, _arguments: ToolOutcome("ok", False),
-        correlation_id=A_CORRELATION_ID,
-    ))
+    events = asyncio.run(
+        _events(
+            transport,
+            lambda _name, _arguments: ToolOutcome("ok", False),
+            correlation_id=A_CORRELATION_ID,
+        )
+    )
 
     assert [event.correlation_id for event in events] == [A_CORRELATION_ID] * len(events)
 
 
 def test_the_host_names_the_sentence_a_crashed_tool_reports() -> None:
     """The failure text belongs to the host's error vocabulary, not to this loop."""
-    transport = _FakeTransport([
-        [ToolCallBatch((ToolCall("call-1", "write", {}),))],
-        [FinalText()],
-    ])
+    transport = _FakeTransport(
+        [
+            [ToolCallBatch((ToolCall("call-1", "write", {}),))],
+            [FinalText()],
+        ]
+    )
     host_message = "This workshop could not run that tool."
 
     def executor(_name: str, _arguments: dict[str, Any]) -> ToolOutcome:
@@ -264,5 +296,7 @@ def test_the_host_names_the_sentence_a_crashed_tool_reports() -> None:
     events = asyncio.run(turn())
 
     assert events[1] == ToolResultEvent(
-        tool_use_id="call-1", content=host_message, is_error=True,
+        tool_use_id="call-1",
+        content=host_message,
+        is_error=True,
     )

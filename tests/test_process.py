@@ -77,10 +77,12 @@ def _a_shell_pretending_to_be_a_cli():
 
 
 def test_claude_reports_the_account_its_json_status_names() -> None:
-    payload = json.dumps({
-        CLAUDE_CLI_LOGGED_IN_FIELD: True,
-        CLAUDE_CLI_AUTH_METHOD_FIELD: "claude.ai",
-    })
+    payload = json.dumps(
+        {
+            CLAUDE_CLI_LOGGED_IN_FIELD: True,
+            CLAUDE_CLI_AUTH_METHOD_FIELD: "claude.ai",
+        }
+    )
     with _a_claude_cli_that_says(payload):
         login = claude_cli_login("/mounted/claude")
 
@@ -146,17 +148,23 @@ def test_grok_that_cannot_be_asked_counts_as_logged_out() -> None:
 
 
 def test_grok_answering_in_words_we_do_not_know_raises() -> None:
-    with _a_cli_that_says("Session ready.\n"), pytest.raises(
-        AgentCliUnavailableError,
-        match="login status",
+    with (
+        _a_cli_that_says("Session ready.\n"),
+        pytest.raises(
+            AgentCliUnavailableError,
+            match="login status",
+        ),
     ):
         grok_cli_status()
 
 
 def test_grok_that_is_signed_in_but_lists_nothing_raises() -> None:
-    with _a_cli_that_says("You are logged in with grok.com.\n"), pytest.raises(
-        AgentCliUnavailableError,
-        match="model name",
+    with (
+        _a_cli_that_says("You are logged in with grok.com.\n"),
+        pytest.raises(
+            AgentCliUnavailableError,
+            match="model name",
+        ),
     ):
         grok_cli_status()
 
@@ -212,9 +220,12 @@ def test_codex_model_catalog_without_a_binary_raises(monkeypatch) -> None:
 
 
 def test_codex_answering_in_words_we_do_not_know_raises() -> None:
-    with _a_cli_that_says("auth: unknown"), pytest.raises(
-        AgentCliUnavailableError,
-        match="login status",
+    with (
+        _a_cli_that_says("auth: unknown"),
+        pytest.raises(
+            AgentCliUnavailableError,
+            match="login status",
+        ),
     ):
         codex_cli_login()
 
@@ -561,14 +572,17 @@ def test_bounded_runner_returns_on_a_stalled_spawn_and_reaps_its_late_process() 
         patch("agent_providers.process._reap_process_group", side_effect=capture_reap),
     ):
         deadline = time.monotonic() + 0.05
-        assert run_cli_bounded(
-            ("/bin/sh", "-c", "while :; do :; done"),
-            stdin_payload=None,
-            read="all",
-            deadline=deadline,
-            on_spawned=spawned_process_ids.append,
-            on_reaped=record_reaped,
-        ).reason is CliRunReason.DEADLINE_BEFORE_SPAWN
+        assert (
+            run_cli_bounded(
+                ("/bin/sh", "-c", "while :; do :; done"),
+                stdin_payload=None,
+                read="all",
+                deadline=deadline,
+                on_spawned=spawned_process_ids.append,
+                on_reaped=record_reaped,
+            ).reason
+            is CliRunReason.DEADLINE_BEFORE_SPAWN
+        )
         release_spawn.set()
         assert spawned.wait(timeout=1)
         assert reaped.wait(timeout=1)
@@ -815,7 +829,8 @@ def test_bounded_runner_marks_an_unconfirmed_sigkill_as_a_zombie(monkeypatch) ->
 
 
 def test_run_cli_logs_a_sigkill_survivor_without_starting_a_background_reaper(
-    monkeypatch, caplog,
+    monkeypatch,
+    caplog,
 ) -> None:
     reaper_may_finish = threading.Event()
     threads_before = {thread.ident for thread in threading.enumerate()}
@@ -842,7 +857,8 @@ def test_run_cli_logs_a_sigkill_survivor_without_starting_a_background_reaper(
 
 
 def test_background_reap_notifies_when_process_group_check_fails(
-    monkeypatch, caplog,
+    monkeypatch,
+    caplog,
 ) -> None:
     child = subprocess.Popen(
         ("/bin/sh", "-c", "printf ready"),
@@ -866,8 +882,7 @@ def test_background_reap_notifies_when_process_group_check_fails(
 
     assert callbacks == [(child.pid, True)]
     assert any(
-        "background reap of agent CLI process group" in record.message
-        for record in caplog.records
+        "background reap of agent CLI process group" in record.message for record in caplog.records
     )
 
 
@@ -1153,13 +1168,15 @@ def test_bounded_runner_reaps_after_a_line_consumer_requests_cancellation() -> N
     outcomes = []
 
     runner = threading.Thread(
-        target=lambda: outcomes.append(run_cli_bounded(
-            ("/bin/sh", "-c", "printf 'first\\n'; exec sleep 10"),
-            stdin_payload=None,
-            read="all",
-            deadline=time.monotonic() + 1,
-            stdout_line_channel=channel,
-        )),
+        target=lambda: outcomes.append(
+            run_cli_bounded(
+                ("/bin/sh", "-c", "printf 'first\\n'; exec sleep 10"),
+                stdin_payload=None,
+                read="all",
+                deadline=time.monotonic() + 1,
+                stdout_line_channel=channel,
+            )
+        ),
     )
     runner.start()
 
@@ -1184,7 +1201,7 @@ def test_bounded_runner_uses_and_removes_a_private_prompt_file() -> None:
 
     with patch("agent_providers.process.subprocess.Popen", side_effect=capture_process):
         outcome = run_cli_bounded(
-            ("/bin/sh", "-c", "cat \"$1\"", "unused", "placeholder"),
+            ("/bin/sh", "-c", 'cat "$1"', "unused", "placeholder"),
             stdin_payload=None,
             read="all",
             deadline=time.monotonic() + 1,
@@ -1385,7 +1402,10 @@ def test_cancelling_a_line_channel_discards_unread_output() -> None:
     ],
 )
 def test_credential_probe_names_malformed_mounted_credentials(
-    tmp_path, checker: str, payload: str, detail: str,
+    tmp_path,
+    checker: str,
+    payload: str,
+    detail: str,
 ) -> None:
     credential_file = tmp_path / f"{checker}.json"
     credential_file.write_text(payload)

@@ -51,7 +51,8 @@ def test_parses_a_call_whose_closing_tag_follows_the_json_on_the_same_line():
     )
 
     assert parse_text_tool_response(COWRITER_TOOL_CATALOG, response) == TextToolCall(
-        "get_song", {"song_id": "song-1"},
+        "get_song",
+        {"song_id": "song-1"},
     )
 
 
@@ -61,15 +62,15 @@ def test_parses_a_call_whose_closing_tag_follows_the_json_on_the_same_line():
         (
             [
                 " \n<songmaker_to",
-                "ol_call>\n{\"name\":\"get_song\",",
-                "\"arguments\":{\"song_id\":\"song-1\"}}\n</songmaker_tool_call>",
+                'ol_call>\n{"name":"get_song",',
+                '"arguments":{"song_id":"song-1"}}\n</songmaker_tool_call>',
             ],
             TextToolCall("get_song", {"song_id": "song-1"}),
         ),
         (
             [
                 "<songmaker_tool_call>\r",
-                "\n{\"name\":\"list_songs\",\"arguments\":{}}\r\n",
+                '\n{"name":"list_songs","arguments":{}}\r\n',
                 "</songmaker_tool_call>",
             ],
             TextToolCall("list_songs", {}),
@@ -100,8 +101,8 @@ def test_stream_parser_executes_a_line_delimited_call_after_streamed_prose():
     parser = TextToolStreamParser(COWRITER_TOOL_CATALOG)
 
     assert parser.feed("I'll look that up.\n<songmaker_to") == "I'll look that up.\n"
-    assert parser.feed("ol_call>\n{\"name\":\"get_song\",") == ""
-    assert parser.feed("\"arguments\":{\"song_id\":\"song-1\"}}\n</songmaker_tool_call>") == ""
+    assert parser.feed('ol_call>\n{"name":"get_song",') == ""
+    assert parser.feed('"arguments":{"song_id":"song-1"}}\n</songmaker_tool_call>') == ""
 
     assert parser.finish() == TextToolCall("get_song", {"song_id": "song-1"})
 
@@ -123,10 +124,12 @@ def test_stream_parser_executes_an_unfenced_call_after_a_fenced_example():
     example = "```json\n" + _call('{"name":"list_songs","arguments":{}}') + "\n```\n"
 
     assert parser.feed(example + "<songmaker_tool") == example
-    assert parser.feed(
-        '_call>\n{"name":"get_song","arguments":{"song_id":"song-1"}}\n'
-        "</songmaker_tool_call>"
-    ) == ""
+    assert (
+        parser.feed(
+            '_call>\n{"name":"get_song","arguments":{"song_id":"song-1"}}\n</songmaker_tool_call>'
+        )
+        == ""
+    )
     assert parser.finish() == TextToolCall("get_song", {"song_id": "song-1"})
 
 
@@ -143,13 +146,7 @@ def test_nonleading_or_fenced_call_syntax_is_ordinary_final_text(response):
 
 def test_stream_parser_executes_a_lyrics_call_followed_by_a_trailing_remark():
     parser = TextToolStreamParser(COWRITER_TOOL_CATALOG)
-    lyrics = (
-        "Verse one, line one\n"
-        "Verse one, line two\n"
-        "\n"
-        "Chorus, the hook line\n"
-        "Chorus, again"
-    )
+    lyrics = "Verse one, line one\nVerse one, line two\n\nChorus, the hook line\nChorus, again"
     payload = json.dumps(
         {"name": "update_song_lyrics", "arguments": {"song_id": "song-1", "lyrics": lyrics}},
     )
@@ -166,7 +163,8 @@ def test_stream_parser_executes_a_lyrics_call_followed_by_a_trailing_remark():
         parser.feed(chunk)
 
     assert parser.finish() == TextToolCall(
-        "update_song_lyrics", {"song_id": "song-1", "lyrics": lyrics},
+        "update_song_lyrics",
+        {"song_id": "song-1", "lyrics": lyrics},
     )
 
 
@@ -233,7 +231,8 @@ def test_stream_parser_parses_a_lyrics_call_that_mentions_the_close_tag_text():
     parser.feed("<songmaker_tool_call>\n" + payload + "\n</songmaker_tool_call>")
 
     assert parser.finish() == TextToolCall(
-        "update_song_lyrics", {"song_id": "song-1", "lyrics": lyrics},
+        "update_song_lyrics",
+        {"song_id": "song-1", "lyrics": lyrics},
     )
 
 
@@ -255,7 +254,8 @@ def test_stream_parser_parses_a_lyrics_mention_of_the_close_tag_with_a_same_line
     parser.feed("<songmaker_tool_call>\n" + payload + "</songmaker_tool_call>")
 
     assert parser.finish() == TextToolCall(
-        "update_song_lyrics", {"song_id": "song-1", "lyrics": lyrics},
+        "update_song_lyrics",
+        {"song_id": "song-1", "lyrics": lyrics},
     )
 
 
@@ -275,15 +275,16 @@ def test_stream_parser_forwards_ordinary_text_and_keeps_only_whitespace_until_fi
 @pytest.mark.parametrize(
     "response",
     [
-        _call('{"name":"list_songs","arguments":{}}</songmaker_tool_call>\n'
-              '<songmaker_tool_call>\n{"name":"list_songs","arguments":{}}'),
+        _call(
+            '{"name":"list_songs","arguments":{}}</songmaker_tool_call>\n'
+            '<songmaker_tool_call>\n{"name":"list_songs","arguments":{}}'
+        ),
         "<songmaker_tool_call>\nHere is the call: "
         '{"name":"list_songs","arguments":{}}\n</songmaker_tool_call>',
-        "<songmaker_tool_call>\n{\"name\":\"list_songs\",\"arguments\":{}",
+        '<songmaker_tool_call>\n{"name":"list_songs","arguments":{}',
         _call("not json"),
         _call("[]"),
-        "<songmaker_tool_call>\n"
-        '{"name":"list_songs","arguments":{}}</songmaker_tool_call>\nDone!',
+        '<songmaker_tool_call>\n{"name":"list_songs","arguments":{}}</songmaker_tool_call>\nDone!',
         "<songmaker_tool_call>\n"
         '{"name":"list_songs","arguments":{}}</songmaker_tool_call>\n'
         '<songmaker_tool_call>\n{"name":"list_songs","arguments":{}}\n</songmaker_tool_call>',
@@ -322,8 +323,7 @@ def test_unknown_tool_is_a_named_protocol_error_before_execution(name):
 
 def test_tool_results_are_json_data_in_the_result_tags():
     assert render_tool_result(COWRITER_TOOL_CATALOG, {"song_id": "song-1", "updated": True}) == (
-        '<songmaker_tool_result>\n{"song_id":"song-1","updated":true}\n'
-        "</songmaker_tool_result>"
+        '<songmaker_tool_result>\n{"song_id":"song-1","updated":true}\n</songmaker_tool_result>'
     )
 
 
@@ -382,7 +382,8 @@ def test_a_host_brands_the_prompt_and_the_markers_it_is_parsed_with():
     assert "<atelier_tool_call>" in prompt
     assert "songmaker" not in prompt
     assert parse_text_tool_response(A_BRANDED_CATALOG, call) == TextToolCall(
-        "open_slide", {"slide_id": "slide-1"},
+        "open_slide",
+        {"slide_id": "slide-1"},
     )
     assert render_tool_result(A_BRANDED_CATALOG, {"ok": True}) == (
         '<atelier_tool_result>\n{"ok":true}\n</atelier_tool_result>'

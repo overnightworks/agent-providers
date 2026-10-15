@@ -13,7 +13,7 @@ Two distributions ship from this repository, released together from one tag:
   provider core.
 - `overnightworks-agent-client`, import package `agent_client` — the light
   client an app installs; it depends on `pydantic` only and owns the tool
-  contract `ToolDeclaration`.
+  contract `ToolDeclaration` and the agent service's streamed run contract.
 
 ## What it owns, and what it leaves to the host
 
@@ -24,9 +24,11 @@ It owns the machinery that is the same in every deployment:
 | `agent_providers.config` | The deployment facts every module reads, installed once per process via `configure()` |
 | `agent_providers.catalog` | Live provider/route readiness probes and model listings (`probe_provider_route`, `list_provider_models`) |
 | `agent_providers.dispatch` | Routing one turn to a provider and route, and the cover-image capability |
-| `agent_providers.events` | The `StreamEvent` union a turn emits (assistant text, tool call, tool result, final) |
+| `agent_providers.events` | The `StreamEvent` union a turn emits in-process (assistant text, tool call, tool result, final); not the service wire |
 | `agent_providers.tool_loop` | The provider-agnostic tool loop driving a `ToolExecutor` over a `ToolTransport` |
-| `agent_client.tools` | `ToolDeclaration`: one tool's name, description and JSON-schema arguments |
+| `agent_client.tools` | `ToolDeclaration`: one tool's name, description, JSON-schema arguments and `ToolEffect` |
+| `agent_client.wire` | The one owner of the agent service's wire: the versioned run-event union and the `RunRejection` body |
+| `agent_client.run_stream` | `parse_event` and `RunStream`: the rules a run's event stream keeps, and how a cut-short run ends |
 | `agent_providers.tools` | The `ToolCatalog` and its Anthropic/OpenAI schema projections; re-exports the identical `ToolDeclaration` |
 | `agent_providers.process` | `run_cli_bounded`: the one bounded subprocess layer (start, stdin, first line, deadline, process-group cleanup) |
 | `agent_providers.images` | The `ImagePolicy` an image turn is held to |
@@ -95,8 +97,9 @@ The other host obligations arrive as arguments where they are needed:
   launched and which tools it exposes.
 - `ImagePolicy` (`agent_providers.images`) — the constraints an image turn is
   held to.
-- The `StreamEvent` union (`agent_providers.events`) — what a turn emits, which
-  the host consumes.
+- The `StreamEvent` union (`agent_providers.events`) — what a turn emits
+  in-process, which a host calling the core consumes. The agent service's wire
+  is `agent_client.wire`, not this union.
 
 ## Sandbox
 

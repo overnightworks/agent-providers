@@ -1,12 +1,11 @@
-"""The streamed run contract between the agent service and its clients.
+"""The run contract between the agent service and its clients.
 
 This module is the one owner of what travels between a client and the
 service (decision record 0001, H6): the request that starts a run, the run's
 event stream as a closed union discriminated on ``type`` with every event
 carrying the protocol version, the run id and its sequence number, and the
 typed body the service answers with when it refuses a run before admission.
-A new variant or a new field is a new
-``PROTOCOL_VERSION``.
+A new variant or a new field is a new ``PROTOCOL_VERSION``.
 
 Validation is strict, so the wire's JSON types are the contract: a sequence
 number sent as ``"3"`` is a mismatch, not a coercion. Only the run id and the
@@ -16,11 +15,12 @@ number have no defaults.
 
 from __future__ import annotations
 
+import math
 from enum import StrEnum
 from typing import Annotated, Any, Final, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field
 
 from agent_client.tools import ToolEffect
 
@@ -68,6 +68,43 @@ ToolUseId = Annotated[str, Field(min_length=1)]
 """The one decider of a valid call id, so a call and its result accept the same ids."""
 
 
+def _refuse_non_json(value: object) -> None:
+    if value is None or isinstance(value, bool | int):
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(f"{value} is not a JSON number")
+    elif isinstance(value, str):
+        _refuse_lone_surrogates(value)
+    elif isinstance(value, list):
+        for item in value:
+            _refuse_non_json(item)
+    elif isinstance(value, dict):
+        _refuse_non_json_object(value)
+    else:
+        raise ValueError(f"a {type(value).__name__} is not a JSON value")
+
+
+def _refuse_lone_surrogates(text: str) -> None:
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise ValueError("a string with a lone surrogate is not valid Unicode") from error
+
+
+def _refuse_non_json_object(value: dict[Any, Any]) -> dict[str, Any]:
+    for key, item in value.items():
+        if not isinstance(key, str):
+            raise ValueError(f"a {type(key).__name__} key is not a JSON object key")
+        _refuse_lone_surrogates(key)
+        _refuse_non_json(item)
+    return value
+
+
+JsonObject = Annotated[dict[str, Any], AfterValidator(_refuse_non_json_object)]
+"""The one decider of a JSON object on the wire: one that survives a round trip unchanged."""
+
+
 class _StrictModel(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
@@ -100,7 +137,7 @@ class ToolCall(_RunEvent):
     type: Literal["tool_call"] = "tool_call"
     tool_use_id: ToolUseId
     name: str
-    input: dict[str, Any]
+    input: JsonObject
     effect: Annotated[ToolEffect, Field(strict=False)]
 
 

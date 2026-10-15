@@ -8,6 +8,7 @@ a cut-short run ends.
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 
 import pytest
 from pydantic import ValidationError
@@ -191,6 +192,38 @@ def test_an_unknown_type_is_named_without_an_empty_location() -> None:
     assert isinstance(violation, StreamViolation)
     assert "'thinking'" in violation.detail
     assert not violation.detail.startswith(":")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(float("nan"), id="NaN"),
+        pytest.param(float("inf"), id="+Inf"),
+        pytest.param(float("-inf"), id="-Inf"),
+        pytest.param({"chorus"}, id="a set"),
+        pytest.param(datetime(2026, 10, 15, tzinfo=UTC), id="a datetime"),
+        pytest.param("\ud800", id="a lone surrogate"),
+        pytest.param({"\ud800": "x"}, id="a lone surrogate in a key"),
+        pytest.param([{"bar": float("nan")}], id="NaN nested in a list"),
+    ],
+)
+def test_tool_input_that_is_not_json_is_refused(value: object) -> None:
+    with pytest.raises(ValidationError):
+        call(1, "call-1", tool_input={"value": value})
+
+
+def test_nested_json_tool_input_is_accepted_unchanged() -> None:
+    nested = {
+        "verse": 1,
+        "tempo": 92.5,
+        "draft": True,
+        "note": None,
+        "lines": ["Über Grün", {"rhyme": ["a", "b"]}],
+    }
+
+    tool_call = call(1, "call-1", tool_input=nested)
+
+    assert json.loads(tool_call.model_dump_json())["input"] == nested
 
 
 REJECTION = {"v": PROTOCOL_VERSION, "code": "busy", "message": "Another run is active."}

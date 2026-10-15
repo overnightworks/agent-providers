@@ -204,6 +204,8 @@ def test_an_unknown_type_is_named_without_an_empty_location() -> None:
         pytest.param(datetime(2026, 10, 15, tzinfo=UTC), id="a datetime"),
         pytest.param("\ud800", id="a lone surrogate"),
         pytest.param({"\ud800": "x"}, id="a lone surrogate in a key"),
+        pytest.param({1: "x"}, id="a non-string key in a nested object"),
+        pytest.param([{"bar": {None: "x"}}], id="a non-string key nested in a list"),
         pytest.param([{"bar": float("nan")}], id="NaN nested in a list"),
     ],
 )

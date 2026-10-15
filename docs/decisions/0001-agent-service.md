@@ -1,0 +1,354 @@
+# 0001 — One central agent service
+
+- **Date:** 15.10.2026
+- **Decided by:** the operator's rulings of 15.10.2026 and the head rulings H1–H12
+  that answered the independent architecture review (Codex, three rounds).
+- **Harvested from:** [#18](https://github.com/overnightworks/agent-providers/issues/18).
+
+This record states decisions and their reasons. It describes where the system is
+going, not what exists; each slice below makes its part true when it lands.
+
+## Mental model
+
+Apps stop talking to language models themselves. An app sends a **purpose** (a
+closed value such as `songmaker.cowriter`), the turn data, and two tokens — the
+end user's and its own. One agent service decides who is asking, whether they may
+use the operator's subscription, and which route serves the purpose. The app
+never names a provider, a model, a route or a user id, and never holds an LLM or
+subscription credential.
+
+There are exactly two routes:
+
+- the **CLI route** runs an isolated `claude -p` under a configured subscription
+  profile, for members of the Keycloak group `/ki-abo` only;
+- the **API route** goes through LiteLLM, which alone maps aliases to upstream
+  models and keys.
+
+Tools stay with the app. When an app has tools, the service reaches them through
+the app's one registered MCP endpoint with a short-lived capability bound to the
+run.
+
+```mermaid
+flowchart LR
+    App["App<br/>(webauth OIDC session, agent-client)"]
+    KC["Keycloak<br/>groups /ki-abo, /apps/&lt;app&gt;"]
+    subgraph internal["Internal network only"]
+        Svc["Agent service<br/>verify user + app, purpose table, route"]
+        CLI["CLI route<br/>isolated claude -p, one profile"]
+        API["API route<br/>service tool loop"]
+    end
+    LLM["LiteLLM (edge)<br/>upstream keys, budgets, aliases"]
+    MCP["App's MCP endpoint<br/>(optional per app)"]
+
+    App -- "purpose + turn data<br/>user token + workload token" --> Svc
+    KC -. "issues both tokens" .-> App
+    Svc --> CLI
+    Svc --> API
+    API --> LLM
+    CLI -- "capability token" --> MCP
+    API -- "capability token" --> MCP
+    Svc -- "SSE events, GET /runs/{id}" --> App
+```
+
+atelier-2 is the explicit exception: it is the operator's own agent tool and
+keeps its local executors (see H8).
+
+## Operator rulings
+
+- There is one central LLM gateway.
+- The personal subscription is for the operator's own use only. Friends never go
+  through it.
+- There is one simple place to switch.
+- No app container holds a subscription login.
+- Who may use a subscription is configured in Keycloak, the one admin place.
+- Subscription CLIs serve only the operator's own agents. Local API-key tools may
+  use the gateway too.
+
+## H1 Identity
+
+**Context.** A configured-username fallback or a caller-supplied `user_id` lets
+any app claim to be anyone.
+
+**Decision.** The app forwards the end user's Keycloak access token, whose
+audience includes `agent-service` and whose `azp` is the app's client. The
+service checks signature, issuer, audience, expiry, `azp` and the full-path group
+claim. The principal is `(iss, sub)`. The RS256 verifier comes from webauth W1
+(overnightworks/webauth#51).
+
+**Consequence.** There is one verifier owner and no copy of it here; no request
+can name its own user.
+
+## H2 Whose subscription
+
+**Context.** The operator wants the subscription settled "an einer zentralen
+Stelle", without per-person mapping.
+
+**Decision.** The Keycloak group `/ki-abo` alone decides who may use the
+subscription route. Its members use the installation's subscription profiles;
+everyone else gets the API route or `not_enabled`. The operator's test accounts
+are members of `/ki-abo`.
+
+**Consequence.** A friend put into `/ki-abo` would use the operator's own
+subscription, which the consumer terms forbid. The operator accepted this
+residual risk; avoiding it is the admin's responsibility. Per-person subscription
+mapping waits for a named caller.
+
+## H2b Subscription profiles are configuration
+
+**Context.** The operator holds several subscriptions and wants them adjustable.
+
+**Decision.** A profile is one subscription login, with a name, a provider
+(`claude`, `codex`, `grok`), whether background purposes may use it (H12), and
+the place its login lives under the secrets owner. There is one profile per
+provider. The profile list is service configuration, kept as code in edge; the
+login files live in `~/.secrets`, never in a repository.
+
+**Consequence.** Nothing in the code is tied to the operator; another
+installation lists its own profiles.
+
+## H3 App identity and tools
+
+**Context.** A user token alone does not prove which app sends the request, and
+a request that names its own tools or MCP endpoint could reach anything.
+
+**Decision.**
+
+- Every request carries the forwarded user access token and a short-lived
+  Keycloak client-credentials token of the app's own workload client. The
+  service checks both; the workload client id must equal the user token's `azp`.
+- "Apps hold no keys" means no LLM or subscription credential. The workload
+  client secret is an ordinary app credential under the secrets owner.
+- A static, server-side app registry maps each workload client to its allowed
+  purposes, one fixed MCP origin and a tool allowlist. The request carries no
+  MCP URL, MCP token, route, provider, model or user id; the one exception is the
+  job ticket of H12.
+- The capability is per run, not per call. When the service admits a run it
+  mints one short-lived capability bound to the audience (the app's MCP origin),
+  the app, the principal, the run id, the purpose, the tool allowlist, and an
+  expiry equal to the run's maximum duration. The CLI gets it in its per-run MCP
+  config header; the API-route tool loop sends the same one. The app's MCP server
+  checks it on every request, opens a fresh DB session and re-checks ownership.
+- Hardening: redirects are denied, egress is limited to the registered origins,
+  Host and Origin are validated, and the service sits on an internal Docker
+  network only, with no tunnel line and no Traefik route. mTLS/SPIFFE is out of
+  scope.
+
+**Consequence.** Tool reach is decided once, server-side, per app; a leaked
+capability is useful only for one run, one app and one allowlist.
+
+## H4 MCP is optional per app
+
+**Context.** Not every app has tools.
+
+**Decision.** Songmaker's co-writer gets a Streamable HTTP MCP endpoint built
+from its existing handlers. Presentator needs none. There is no dynamic
+discovery and no arbitrary endpoint.
+
+**Consequence.** An app without tools needs no MCP server at all.
+
+## H5 The one switch, principal-aware
+
+**Context.** Provider, model and route choices were scattered across app
+settings; the operator wants one place to switch.
+
+**Decision.** An app sends only a closed purpose value. Each entry in the
+service's one purpose table may hold an optional CLI provider or named profile,
+and an optional LiteLLM alias. Routing order:
+
+1. If a CLI entry exists, a profile for that provider exists, and the principal
+   is in `/ki-abo` → CLI with that profile.
+2. Otherwise, if an API alias exists and the user token carries the app's group
+   (`/apps/<app>`) → API via LiteLLM.
+3. Otherwise → `not_enabled`.
+
+LiteLLM alone maps aliases to upstream models and keys.
+
+**Consequence.** The app-local provider/model/route settings for a moved purpose
+are removed from settings, API and UI.
+
+## H6 Wire contract
+
+**Context.** A streamed run must end unambiguously, and a broken stream must not
+leave the client guessing whether side effects happened.
+
+**Decision.** A versioned, discriminated SSE union. Every event carries a
+protocol version, a run id and a monotonic sequence. Every run ends with exactly
+one terminal event: `succeeded`, `failed` (a typed code and a safe message) or
+`cancelled`.
+
+- A heartbeat runs while idle, and an idle timeout applies.
+- Limits for bytes, time and tool calls are enforced.
+- Cancellation is explicit; nothing is retried automatically once dispatched.
+- A disconnect after a side-effecting tool call is reported as `failed` with code
+  `interrupted`, never as success.
+- Run status is queryable: `GET /runs/{id}`, authorised by the same two tokens,
+  returns the run's terminal state. Run records live in memory for one hour;
+  there is no database.
+- A client disconnect cancels the run, which kills and reaps its process. It is
+  recorded as `cancelled`, or as `failed: interrupted` if a side-effecting tool
+  call had already run.
+
+**Consequence.** Presentator's speech events (`sentence`, `audio`, `done`) stay
+in Presentator and are not part of this contract.
+
+## H7 CLI isolation and admission
+
+**Context.** The CLI route runs a powerful agent under the operator's login.
+
+**Decision.** Each run gets a pinned, tested Claude Code version, an
+unprivileged user, an empty private working directory, a strict per-run MCP
+config with an exact tool allowlist, restricted built-in tools, no session
+persistence, a finite max-turns, and a process-group kill and reap on cancel or
+timeout. Tokens never appear in argv, events or logs. Admission allows one
+active subscription run; a second request gets `429 Retry-After`. There is no
+queue.
+
+**Consequence.** Subscription runs are strictly serial, and a busy service says
+so instead of waiting.
+
+## H8 atelier-2
+
+**Context.** The "one location" invariant could be read to cover the operator's
+own tools.
+
+**Decision.** The invariant covers apps that serve users (containers).
+atelier-2, the operator's own agent tool, keeps its local executors, following
+the ruling that subscription CLIs serve the operator's own agents. A later move
+onto the service is possible but not planned. This is a head default the
+operator may overrule.
+
+**Consequence.** The target names atelier-2 as the one explicit exception.
+
+## H9 Package boundary and tool contract
+
+**Context.** Apps need a light client; the service needs the provider core; the
+tool contract needs one owner both can import.
+
+**Decision.** This repository stays the one owner and becomes a uv workspace
+with three packages:
+
+- `agent-client`, which is light: the wire union (H6), the tool contract
+  `ToolDeclaration` (name, description, JSON-schema input) as its shared owner,
+  the HTTP/SSE client, and the MCP server helper;
+- the provider core `agent_providers`, whose `ToolCatalog` builds on
+  `ToolDeclaration` from `agent-client`;
+- `agent-service`.
+
+Import contracts: client → stdlib, pydantic, HTTP and the MCP SDK only (pydantic
+added by the A0a amendment below); core → client; service → core and client;
+nothing imports the service. AGENTS.md will name both the library and the
+service; deployment stays in edge (A1d).
+
+**Consequence.** The repository changes from "a library, not a service" to the
+home of both. The change takes effect with A0a and A1a, not with this record.
+
+### A0a packaging ruling (head, 15.10.2026)
+
+**Context.** A0a's plan had to settle how two distributions ship from one
+repository without PyPI.
+
+**Decision.**
+
+- The repository becomes a uv workspace. The core distribution
+  `overnightworks-agent-providers` stays at the root. A new member
+  `packages/agent-client/` holds the distribution `overnightworks-agent-client`
+  with import package `agent_client`. A1a later adds `packages/agent-service/`.
+- Core pins the client exactly (`==X.Y.Z`) through `{ workspace = true }`, and
+  the two are released in lockstep. One tag `vX.Y.Z` publishes exactly the two
+  wheels. A test pins all version literals as equal, because uv ignores the pin
+  inside a workspace.
+- `ToolDeclaration` moves unchanged to `agent_client.tools`;
+  `agent_providers.tools` re-exports the identical class.
+- H9 is amended: the client depends on the stdlib, pydantic, HTTP and the MCP
+  SDK. A0a adds pydantic only; httpx and mcp arrive with the slices that use
+  them.
+- Each consumer that moves to ≥0.2.0 lists both wheel URLs with sha256.
+- The import name `agent_client` may collide with an unrelated PyPI
+  `agent-client`; this is accepted because consumers install only pinned URLs.
+
+**Consequence.** No consumer changes its imports. A consumer that listed only
+the core wheel would make the resolver ask PyPI, where the names are
+unregistered — a dependency-confusion surface — so both URLs are required.
+
+## H10 Gateway proof
+
+**Context.** LiteLLM holds the upstream keys and could leak prompts.
+
+**Decision.** Postgres-backed virtual keys per app; the master key is never used
+for inference. Budget reservation, plus provider-side spending caps. Content
+callbacks, prompt and error persistence and debug logging are off, proven by a
+unique canary that is absent from the DB, stdout and callbacks.
+
+**Consequence.** The gateway is accepted only with that canary proof (A2a).
+
+## H10b Budget overrun
+
+**Context.** A budget checked after the fact can be overrun by requests in
+flight.
+
+**Decision.** Fail-closed worst-case reservation: a request is admitted only if
+its maximum cost still fits the budget. Provider-side caps sit behind it.
+
+**Consequence.** No in-flight overrun is possible; some requests that would have
+fit are refused.
+
+## H11 Interim, until the migrations land
+
+**Context.** Until the apps move, subscription logins remain in containers.
+
+**Decision.** Presentator's copresenter is operator-only or offline, a gate in
+overnightworks/agent-presentator#197. Songmaker's AI paths (co-writer, judge,
+cover) use the subscription only for the operator's own use; the operator ruled
+that he is currently the only user. Whether friends' Songmaker accounts need an
+interim AI gate is the operator's question.
+
+**Consequence.** No document claims the subscription has left the containers
+until every mount is gone.
+
+## H12 Background work (job tickets)
+
+**Context.** Background jobs (Songmaker judge, cover) have no live user token,
+and an app must never assert a principal on its own.
+
+**Decision.** When a user starts such a job in a live request (two tokens, H3),
+the app asks the service for a job ticket. The service signs it and binds it to
+the workload client, the principal, the `/ki-abo` membership read from the
+verified user token, the background purpose, the app's job id, and an expiry of
+at most 24 hours. The background run later presents the workload token plus the
+ticket. A CLI profile serves tickets only if it is marked `background: true`.
+The ticket's token format, keys and rotation are settled in A1a's plan together
+with the capability token (H3); one service-owned signing key covers both.
+
+**Consequence.** Background runs carry the same verified identity as the live
+request that started them, for at most a day.
+
+## Slice order
+
+Each slice becomes its own work item when it is dispatched; its plan review
+settles the open points named here.
+
+| Slice | Repo | Done when | Open points its plan settles | Depends on |
+|---|---|---|---|---|
+| A0a Packages and tool contract | agent-providers | A light `agent-client` distribution is published next to the core distribution from the same repo and release. `ToolDeclaration` has one owner in `agent-client`, and core's `ToolCatalog` uses it. The H9 import gates run in CI. Existing hosts (songmaker, presentator, atelier-2), pinned to their tags, are unchanged. | Settled by the A0a packaging ruling above | none |
+| A0b Wire protocol | agent-providers | The protocol is fully enumerated: every non-terminal and terminal variant with its payload, protocol version and rejection of unknown versions, sequence rules, SSE framing, and an SSE codec/state machine that validates a stream. The run id is delivered before any fallible body. A tool's effect class (read-only or side-effecting) is part of `ToolDeclaration`, and `failed: interrupted` is defined by it. The existing `agent_providers.events` is either the core's internal event type or replaced, never a second wire owner. | Replace or wrap the existing events | A0a |
+| A1a Service skeleton | agent-providers | Against a test issuer and a fake runner: both tokens are checked, with `azp` equal to the workload client. The H5 routing covers `/ki-abo`, API-eligible, `not_enabled` and job tickets (H12). Every forbidden field is rejected. `GET /runs/{id}` requires the run's exact workload client and principal. Capability and ticket tokens have a ruled format, key source and rotation. The service package and entry point exist. | Token format and keys; restart behaviour of run status (documented or minimal persistence) | A0b, webauth#51 |
+| A1b CLI runner | agent-providers | H7 isolation, and only the selected profile's login is visible to its run. One admission slot is taken, and a second run gets 429. Cancel and disconnect kill and reap the process group. The per-run MCP config carries the capability, and no token appears in argv or logs. | — | A1a |
+| A1m MCP helper | agent-providers | The `agent-client` Streamable HTTP MCP server helper verifies the capability (format from A1a), denies redirects, validates Host/Origin, and refuses a bad audience, an expired capability, a wrong run or a tool off the allowlist. | — | A0b, A1a |
+| A1d Deployment | edge | A tagged service image is built from the agent-providers release. It runs in edge compose on an internal network with egress limited to the registered origins and LiteLLM. The profile config is code, each profile's login sits in its own volume from `~/.secrets`, and Keycloak has the `agent-service` audience plus the workload clients. A live smoke test with the operator's account reaches a terminal event. | — | A1b, A1m, edge#12 live |
+| A1s Songmaker co-writer moves | songmaker | The co-writer runs through the service with the operator's real login, and its tools work over MCP with ownership checks. The in-process co-writer route is removed, along with the local provider/model/route choice. | — | A1d, Songmaker on Keycloak (K12) |
+| A1r1 Judge moves | songmaker | The judge runs with job tickets (H12). | — | A1s |
+| A1r2 Probes | songmaker | Decided at its pull: move or retire. | move/retire | A1s |
+| A1r3 Cover image | songmaker, agent-providers | The service gains a Codex image route (the first non-Claude provider), and covers run through it. | — | A1s |
+| A1r4 Credential mounts removed | songmaker | No Songmaker container mounts a subscription credential (checked in CI). | — | A1r1–A1r3 |
+| A2a Gateway | edge | LiteLLM is up with H10 and H10b proven, including the canary. | — | edge#12 live |
+| A2b API route | agent-providers | The service's API route and tool loop serve API-eligible principals. | — | A1a, A2a |
+| A2c "KI noch nicht freigeschaltet" | songmaker | A `not_enabled` result renders the message, and a UI test pins it. | — | A2b, A1s |
+| A3 Presentator copresenter moves | agent-presentator | The copresenter goes through the service, and the H11 gate is lifted. | — | A2b, K13 |
+
+## Out of scope at this size
+
+- arbitrary MCP endpoints and dynamic discovery;
+- per-user LiteLLM keys;
+- a generic policy engine;
+- queues and high availability;
+- any provider beyond Claude before A1r3.

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import math
 from enum import StrEnum
-from typing import Annotated, Any, Final, Literal
+from typing import Annotated, Any, Final, Literal, TypeGuard
 from uuid import UUID
 
 from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field
@@ -176,10 +176,15 @@ class Cancelled(_RunEvent):
 
 TerminalEvent = Succeeded | Failed | Cancelled
 
-RunEvent = Annotated[
-    RunStarted | AssistantText | ToolCall | ToolResult | Heartbeat | Succeeded | Failed | Cancelled,
-    Field(discriminator="type"),
-]
+_RunEventVariant = (
+    RunStarted | AssistantText | ToolCall | ToolResult | Heartbeat | Succeeded | Failed | Cancelled
+)
+
+RunEvent = Annotated[_RunEventVariant, Field(discriminator="type")]
+
+
+def is_run_event(value: object) -> TypeGuard[RunEvent]:
+    return isinstance(value, _RunEventVariant)
 
 
 class RunRejection(_WireModel):

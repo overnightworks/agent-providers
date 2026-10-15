@@ -19,7 +19,7 @@ import re
 from typing import Any, Final
 
 from agent_client.run_stream import RunStream, StreamViolation, ViolationKind, parse_event
-from agent_client.wire import MAX_EVENT_BYTES, RunEvent
+from agent_client.wire import MAX_EVENT_BYTES, RunEvent, is_run_event
 
 _BYTE_ORDER_MARK: Final = b"\xef\xbb\xbf"
 _LINE_END: Final = re.compile(rb"[\r\n]")
@@ -42,6 +42,8 @@ class DecoderClosed(RuntimeError):
 
 def encode_event(event: RunEvent) -> bytes:
     """Write one event as one UTF-8 frame with LF line ends."""
+    if not is_run_event(event):
+        raise TypeError(f"encode_event takes a run event, not a {type(event).__name__}")
     frame = f"id: {event.seq}\nevent: {event.type}\ndata: {event.model_dump_json()}\n\n".encode()
     if len(frame) > MAX_EVENT_BYTES:
         raise EventTooLarge(

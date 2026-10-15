@@ -18,7 +18,14 @@ from agent_client.sse import (
     RunStreamDecoder,
     encode_event,
 )
-from agent_client.wire import MAX_EVENT_BYTES, AssistantText, RunEvent
+from agent_client.wire import (
+    MAX_EVENT_BYTES,
+    PROTOCOL_VERSION,
+    AssistantText,
+    RejectionCode,
+    RunEvent,
+    RunRejection,
+)
 
 A_RUN: list[RunEvent] = [
     started(),
@@ -60,6 +67,21 @@ UMLAUT_TEXT_FRAME = (
 def test_an_event_travels_as_one_frame_of_compact_utf8_json() -> None:
     assert encode_event(A_RUN[1]) == UMLAUT_TEXT_FRAME
     assert _decode(OPENING, UMLAUT_TEXT_FRAME)[1] == A_RUN[1]
+
+
+@pytest.mark.parametrize(
+    "not_an_event",
+    [
+        pytest.param(None, id="None"),
+        pytest.param(
+            RunRejection(v=PROTOCOL_VERSION, code=RejectionCode.BUSY, message="Busy."),
+            id="a rejection",
+        ),
+    ],
+)
+def test_encoding_something_other_than_a_run_event_is_a_type_error(not_an_event: object) -> None:
+    with pytest.raises(TypeError):
+        encode_event(not_an_event)
 
 
 @pytest.mark.parametrize("spelled", SPELLINGS.values(), ids=SPELLINGS.keys())

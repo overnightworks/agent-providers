@@ -27,10 +27,11 @@ dev = [
 Repository = "https://github.com/overnightworks/agent-providers"
 
 [tool.uv.workspace]
-members = ["packages/agent-client"]
+members = ["packages/agent-client", "packages/agent-service"]
 
 [tool.uv.sources]
 overnightworks-agent-client = { workspace = true }
+overnightworks-agent-providers = { workspace = true }
 
 [build-system]
 requires = ["setuptools>=68.0", "wheel"]
@@ -45,7 +46,7 @@ agent_providers = ["py.typed"]
 
 [tool.ruff]
 target-version = "py312"
-src = ["src", "packages/agent-client/src"]
+src = ["src", "packages/agent-client/src", "packages/agent-service/src"]
 line-length = 100
 
 [tool.ruff.lint]

@@ -1,12 +1,15 @@
 # The provider core and the agent client are independent of their former host
 # and of the sibling auth library: everything host-specific reaches them through
-# the ports a host supplies. The core builds on the client and never the other
-# way round, so the client stays installable without the provider machinery.
+# the ports a host supplies. The agent service builds on both and nothing builds
+# on it; the core builds on the client and never the other way round, so the
+# client stays installable without the provider machinery. Only the service
+# verifies tokens, so only the service may import webauth.
 # CI runs `lint-imports` over the real import graph, so an indirect chain is
 # caught as well as a direct import.
 [importlinter]
 include_external_packages = True
 root_packages =
+    agent_service
     agent_providers
     agent_client
 
@@ -20,9 +23,18 @@ forbidden_modules =
     songmaker_cli
     webauth
 
-[importlinter:contract:agent-providers-builds-on-agent-client]
-name = agent_providers builds on agent_client, never the reverse
+[importlinter:contract:agent-service-reaches-back-into-no-host]
+name = agent_service reaches back into no host
+type = forbidden
+source_modules =
+    agent_service
+forbidden_modules =
+    songmaker_cli
+
+[importlinter:contract:agent-service-builds-on-core-builds-on-client]
+name = agent_service builds on agent_providers, which builds on agent_client, never the reverse
 type = layers
 layers =
+    agent_service
     agent_providers
     agent_client

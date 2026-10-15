@@ -131,7 +131,7 @@ body rules be fixed before the build.
   | Check | Answer |
   |---|---|
   | The workload token is missing, or not a parseable RS256 JWS with a valid `kid` | 401 `unauthorized`, one body, `WWW-Authenticate: Bearer` |
-  | The service holds no current key set and cannot fetch one; this is decided while the workload token is verified | 503 `unavailable`, `Retry-After: 30` |
+  | The service holds no current key set and cannot fetch one; this is decided when a token is verified (in practice the workload token, verified first) | 503 `unavailable`, `Retry-After: 30` |
   | The workload token fails its signature, issuer, `aud` ∌ `agent-service` or time check, or has an empty `sub`; these are checked only once a current key set is held | 401 `unauthorized`, one body, `WWW-Authenticate: Bearer` |
   | The user token is missing or not `Authorization: Bearer <token>`, or fails verification as the workload token above; or it has no `sub` or a malformed group claim | 401 `unauthorized`, one body, `WWW-Authenticate: Bearer` |
   | The workload binding above fails (among others: an absent workload `sub`, an absent or empty `azp` or `client_id`); the user's `azp` differs from the workload's; the user's `sub` equals the workload's | 403 `forbidden` |
@@ -143,8 +143,9 @@ body rules be fixed before the build.
 
   Every rejection is a `RunRejection` with `Cache-Control: no-store`, and no
   answer or log line carries token text.
-  A token whose `kid` is unknown while the key set cannot be refreshed
-  answers 401: webauth v0.12.0 cannot tell a forged `kid` from one it could
+  A token whose `kid` is missing from a still-current key set that cannot be
+  refreshed answers 401 (with no current key set the 503 row answers, whatever
+  the `kid`): webauth v0.12.0 cannot tell a forged `kid` from one it could
   not fetch. This is deferred to overnightworks/webauth#67; once the service
   pins the webauth release that answers `KEY_SET_UNAVAILABLE` there (pin bump:
   agent-providers#27 finding 13), it answers 503.

@@ -136,19 +136,18 @@ body rules be fixed before the build.
   | The user token is missing or not `Authorization: Bearer <token>`, or fails verification as the workload token above; or it has no `sub` or a malformed group claim | 401 `unauthorized`, one body, `WWW-Authenticate: Bearer` |
   | The workload binding above fails (among others: an absent workload `sub`, an absent or empty `azp` or `client_id`); the user's `azp` differs from the workload's; the user's `sub` equals the workload's | 403 `forbidden` |
   | The body, at most 256 KiB enforced before buffering, parsed as strict JSON (no `NaN`, no member twice): its `v` is absent, not an integer, or not 1 | 400 `unsupported_version` |
-  | The body is not strict JSON, too large, or not exactly a `RunRequest` | 422 `invalid_request` |
+  | The body is not strict JSON or not UTF-8 (UTF-16 and UTF-32, with or without a BOM, are refused), too large, or not exactly a `RunRequest` | 422 `invalid_request` |
   | The purpose is not in the app's list | 403 `forbidden` |
   | H5 routing answers `not_enabled`; no run starts | 403 `not_enabled` |
   | Admitted | 200 `text/event-stream` |
 
   Every rejection is a `RunRejection` with `Cache-Control: no-store`, and no
   answer or log line carries token text.
-  A token whose `kid` is missing from a still-current key set that cannot be
-  refreshed answers 401 (with no current key set the 503 row answers, whatever
-  the `kid`): webauth v0.12.0 cannot tell a forged `kid` from one it could
-  not fetch. This is deferred to overnightworks/webauth#67; once the service
-  pins the webauth release that answers `KEY_SET_UNAVAILABLE` there (pin bump:
-  agent-providers#27 finding 13), it answers 503.
+  A token whose `kid` is missing from a still-current key set answers 503
+  `unavailable` when the key set cannot be refreshed (webauth v0.13.0 reports
+  `KEY_SET_UNAVAILABLE`: the `kid` may be a rotated key it could not fetch),
+  and 401 when a successful refresh lacks the `kid`. With no current key set
+  the 503 row answers, whatever the `kid`.
 - **The policy.** The service reads one TOML file into frozen models that
   forbid unknown fields; a refused file stops startup naming the field.
   `[identity]` names issuer, key-set URL (https), audience, subscription group,

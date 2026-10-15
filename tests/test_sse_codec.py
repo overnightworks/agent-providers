@@ -7,7 +7,6 @@ event off the contract named once, with nothing decoded after it.
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import pytest
@@ -194,19 +193,28 @@ def test_tool_input_at_the_depth_limit_survives_encoding_and_decoding() -> None:
     assert decoded == deep_call
 
 
-def test_tool_input_deeper_than_the_limit_is_neither_built_nor_decoded() -> None:
-    too_deep = _tool_input_nested(MAX_TOOL_INPUT_DEPTH + 1)
-    compact_too_deep = json.dumps(too_deep, separators=(",", ":")).encode()
-    shallow_call = encode_event(call(1, "call-1", tool_input={"a": 1}))
-    deep_frame = shallow_call.replace(b'{"a":1}', compact_too_deep)
-
+def test_tool_input_deeper_than_the_limit_is_not_built() -> None:
     with pytest.raises(ValidationError):
-        call(1, "call-1", tool_input=too_deep)
+        call(1, "call-1", tool_input=_tool_input_nested(MAX_TOOL_INPUT_DEPTH + 1))
+
+
+@pytest.mark.parametrize(
+    ("depth", "kind"),
+    [
+        pytest.param(MAX_TOOL_INPUT_DEPTH + 1, ViolationKind.SCHEMA_MISMATCH, id="past the limit"),
+        pytest.param(100_000, ViolationKind.INVALID_JSON, id="past the JSON parser's own limit"),
+    ],
+)
+def test_a_frame_whose_tool_input_nests_too_deep_is_named(depth: int, kind: ViolationKind) -> None:
+    shallow_call = encode_event(call(1, "call-1", tool_input={"a": 1}))
+    deep_frame = shallow_call.replace(b'{"a":1}', b'{"a":' * depth + b"1" + b"}" * depth)
+    assert len(deep_frame) < MAX_EVENT_BYTES
+
     opening, violation = RunStreamDecoder().feed(OPENING + deep_frame)
 
     assert opening == A_RUN[0]
     assert isinstance(violation, StreamViolation)
-    assert violation.kind is ViolationKind.SCHEMA_MISMATCH
+    assert violation.kind is kind
 
 
 def test_a_closed_decoder_refuses_a_second_close() -> None:

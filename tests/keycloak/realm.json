@@ -1,0 +1,258 @@
+{
+  "realm": "agent-test",
+  "enabled": true,
+  "accessTokenLifespan": 300,
+  "roles": {
+    "realm": [
+      {
+        "name": "agent-workload",
+        "description": "Service-account-only marker of an app workload calling the agent service."
+      }
+    ]
+  },
+  "groups": [
+    {
+      "name": "ki-abo"
+    },
+    {
+      "name": "apps",
+      "subGroups": [
+        {
+          "name": "songmaker"
+        },
+        {
+          "name": "presentator"
+        }
+      ]
+    }
+  ],
+  "clientScopes": [
+    {
+      "name": "basic",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "sub",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-sub-mapper",
+          "config": {
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "name": "roles",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "realm roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "config": {
+            "claim.name": "realm_access.roles",
+            "multivalued": "true",
+            "jsonType.label": "String",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "name": "service_account",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "client id",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usersessionmodel-note-mapper",
+          "config": {
+            "user.session.note": "client_id",
+            "claim.name": "client_id",
+            "jsonType.label": "String",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "name": "groups",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true"
+      },
+      "protocolMappers": [
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "config": {
+            "claim.name": "groups",
+            "full.path": "true",
+            "access.token.claim": "true",
+            "id.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "name": "agent-service-audience",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "agent-service-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "agent-service",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        }
+      ]
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "songmaker-test",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "songmaker-test-secret",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": true,
+      "redirectUris": [
+        "http://localhost/*"
+      ],
+      "defaultClientScopes": [
+        "basic",
+        "roles",
+        "service_account",
+        "groups",
+        "agent-service-audience"
+      ],
+      "optionalClientScopes": []
+    },
+    {
+      "clientId": "presentator-test",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "presentator-test-secret",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": true,
+      "redirectUris": [
+        "http://localhost/*"
+      ],
+      "defaultClientScopes": [
+        "basic",
+        "roles",
+        "service_account",
+        "groups",
+        "agent-service-audience"
+      ],
+      "optionalClientScopes": []
+    },
+    {
+      "clientId": "agent-service",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "agent-service-secret",
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "defaultClientScopes": [
+        "basic"
+      ],
+      "optionalClientScopes": []
+    }
+  ],
+  "users": [
+    {
+      "username": "service-account-songmaker-test",
+      "enabled": true,
+      "serviceAccountClientId": "songmaker-test",
+      "realmRoles": [
+        "agent-workload"
+      ]
+    },
+    {
+      "username": "service-account-presentator-test",
+      "enabled": true,
+      "serviceAccountClientId": "presentator-test",
+      "realmRoles": [
+        "agent-workload"
+      ]
+    },
+    {
+      "username": "alice",
+      "enabled": true,
+      "email": "alice@example.test",
+      "emailVerified": true,
+      "firstName": "Alice",
+      "lastName": "Test",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "alice-test-password",
+          "temporary": false
+        }
+      ],
+      "groups": [
+        "/ki-abo",
+        "/apps/songmaker"
+      ]
+    },
+    {
+      "username": "bob",
+      "enabled": true,
+      "email": "bob@example.test",
+      "emailVerified": true,
+      "firstName": "Bob",
+      "lastName": "Test",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "bob-test-password",
+          "temporary": false
+        }
+      ],
+      "groups": [
+        "/apps/songmaker"
+      ]
+    },
+    {
+      "username": "carol",
+      "enabled": true,
+      "email": "carol@example.test",
+      "emailVerified": true,
+      "firstName": "Carol",
+      "lastName": "Test",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "carol-test-password",
+          "temporary": false
+        }
+      ],
+      "groups": []
+    }
+  ]
+}

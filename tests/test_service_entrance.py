@@ -189,7 +189,8 @@ def test_a_token_with_an_unknown_kid_answers_by_whether_the_key_set_can_be_refre
         monotonic_clock=clock,
     )
     with served(app) as base_url:
-        post_run(base_url, run_headers(MINT.workload(), MINT.user()))
+        warm_up = post_run(base_url, run_headers(MINT.workload(), MINT.user()))
+        assert warm_up.status_code != 503, warm_up.text
         clock.advance(KEY_SET_REFRESH_COOLDOWN_SECONDS)
         response = post_run(base_url, run_headers(forged.workload(), MINT.user()))
 

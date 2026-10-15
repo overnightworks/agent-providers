@@ -164,7 +164,8 @@ def test_a_token_of_an_unpublished_key_is_unavailable_once_the_key_set_origin_st
     )
     unpublished_key = TokenMint(key_id="never-published")
     with served(app) as base_url:
-        post_run(base_url, run_headers(_songmaker_workload(), _user_token("alice")))
+        warm_up = post_run(base_url, run_headers(_songmaker_workload(), _user_token("alice")))
+        assert warm_up.status_code != 503, warm_up.text
         origin_stopped = True
         clock.advance(KEY_SET_REFRESH_COOLDOWN_SECONDS)
         response = post_run(

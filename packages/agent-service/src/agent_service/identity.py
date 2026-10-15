@@ -57,7 +57,7 @@ class Caller:
 def build_verifier(
     identity: IdentityConfig,
     fetch_key_set: KeySetFetch,
-    monotonic_clock: MonotonicClock = time.monotonic,
+    monotonic_clock: MonotonicClock,
 ) -> JwtVerifier:
     """The process's one verifier: it owns the key-set cache, refresh lock and cooldown."""
     return JwtVerifier(

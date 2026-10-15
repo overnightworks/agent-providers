@@ -231,10 +231,22 @@ existing `agent_providers.events` is that contract.
   lost stream it asks `GET /runs/{id}`.
 - (d) The heartbeat is a typed event and counts in `seq` like every other
   event.
+- (e) A call gets one answer: a second `tool_result` for it is
+  `duplicate_tool_result`. `failed: interrupted` means the run may have
+  changed state, so without an emitted side-effecting call it is
+  `interrupted_without_side_effect`.
+- (f) Framing (A0b2, `agent_client.sse`): one SSE frame per event, holding
+  `id: <seq>`, `event: <type>` and one `data:` line of compact UTF-8 JSON
+  with the whole event, ended by a blank line; no frame exceeds
+  `MAX_EVENT_BYTES` (1 MiB). The decoder accepts LF, CRLF and CR line ends, a
+  leading byte order mark, `:` comments and `retry:`, and names any other
+  field as `malformed_frame`, a larger frame as `oversized_frame`, data that
+  is not a JSON object as `invalid_json`, and an `event` or `id` that
+  disagrees with the data's `type` or `seq` as `event_type_mismatch` or
+  `id_mismatch`. The first violation ends the decoding.
 
 **Consequence.** A client validates a stream against one contract, and a
-second wire owner cannot appear without contradicting this ruling. The SSE
-framing and decoder follow in A0b2 on top of this union.
+second wire owner cannot appear without contradicting this ruling.
 
 ## H7 CLI isolation and admission
 

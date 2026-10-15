@@ -37,7 +37,7 @@ _UNKNOWN_TAG_ERRORS: Final = frozenset({"union_tag_invalid", "union_tag_not_foun
 
 
 class ViolationKind(StrEnum):
-    """Which promise of the protocol an event broke."""
+    """Which promise of the protocol an event, or the frame carrying it, broke."""
 
     UNKNOWN_TYPE = "unknown_type"
     UNSUPPORTED_VERSION = "unsupported_version"
@@ -52,6 +52,11 @@ class ViolationKind(StrEnum):
     CANCELLED_AFTER_SIDE_EFFECT = "cancelled_after_side_effect"
     INTERRUPTED_WITHOUT_SIDE_EFFECT = "interrupted_without_side_effect"
     TRUNCATED = "truncated"
+    MALFORMED_FRAME = "malformed_frame"
+    OVERSIZED_FRAME = "oversized_frame"
+    INVALID_JSON = "invalid_json"
+    EVENT_TYPE_MISMATCH = "event_type_mismatch"
+    ID_MISMATCH = "id_mismatch"
 
 
 class StreamViolation(BaseModel):

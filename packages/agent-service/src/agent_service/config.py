@@ -151,6 +151,8 @@ def load_config(path: Path) -> ServiceConfig:
         text = path.read_text(encoding="utf-8")  # NOSONAR The operator names this file.
     except OSError as error:
         raise ConfigError(f"{path}: cannot be read: {error.strerror}") from error
+    except UnicodeDecodeError as error:
+        raise ConfigError(f"{path}: not UTF-8 TOML") from error
     try:
         document = tomllib.loads(text)
     except tomllib.TOMLDecodeError as error:

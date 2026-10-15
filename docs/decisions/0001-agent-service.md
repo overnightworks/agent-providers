@@ -138,8 +138,9 @@ body rules be fixed before the build.
   answer or log line carries token text.
 - **The policy.** The service reads one TOML file into frozen models that
   forbid unknown fields; a refused file stops startup naming the field.
-  `[identity]` names issuer, key-set URL (https), audience, subscription group
-  and group claim; `[profiles.<name>]` one profile per provider;
+  `[identity]` names issuer, key-set URL (https), audience, subscription group,
+  group claim and the clock leeway `leeway_seconds` (0 to 300, default 0);
+  `[profiles.<name>]` one profile per provider;
   `[purposes."<p>"]` an optional `cli_provider` and `api_alias`;
   `[apps.<app>]` its `workload_client`, its purposes, and its tools' effects,
   where an unlisted tool counts as side-effecting. `agent_service.routing.route`

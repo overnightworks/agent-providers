@@ -146,3 +146,13 @@ def test_a_missing_file_stops_startup(tmp_path, capsys):
 
     assert exit_status == EXIT_BAD_CONFIG
     assert "cannot be read" in capsys.readouterr().err
+
+
+def test_a_file_that_is_not_utf8_stops_startup(tmp_path, capsys):
+    path = tmp_path / "agent-service.toml"
+    path.write_bytes(VALID_CONFIG.replace("songmaker-test", "songmaker-t\xe9st").encode("latin-1"))
+
+    exit_status = main(["--config", str(path)])
+
+    assert exit_status == EXIT_BAD_CONFIG
+    assert "not UTF-8" in capsys.readouterr().err

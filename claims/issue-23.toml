@@ -1,8 +1,0 @@
-claim_id = "d570b47641a84a41ae45f9d5ca3223d9"
-agent = "Claude fe12493e-3d52-442e-b01b-4ee4336de2f0"
-role = "builder"
-base = "98ce77f178fd295c5e9f80f365ed183cd261b30c"
-branch = "claude/issue-23-a0b1-wire-union"
-scope = ["AGENTS.md", "CLAUDE.md", "README.md", "docs/decisions/0001-agent-service.md", "packages/agent-client/pyproject.toml", "packages/agent-client/src/agent_client", "src/agent_providers/events.py", "tests/test_wire_protocol.py"]
-opened_commit = "2be1611c7d95323a49464ec1b984a8348fd2e540"
-whole_reason = "The wire contract, its stream rules, the effect class that defines interruption, and the docs naming one owner land together."

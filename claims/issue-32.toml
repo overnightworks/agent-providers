@@ -1,0 +1,8 @@
+claim_id = "2eb1870c747f49f0bbc163cd75a05f09"
+agent = "Claude fe12493e-3d52-442e-b01b-4ee4336de2f0"
+role = "builder"
+base = "fef1533c98ac279100aacf7e76c872371f315d92"
+branch = "claude/issue-32-a1a1-service-entrance"
+scope = [".github/workflows/ci.yml", ".github/workflows/release.yml", ".importlinter", "AGENTS.md", "CLAUDE.md", "README.md", "docs/decisions/0001-agent-service.md", "packages/agent-service", "pyproject.toml", "tests/keycloak", "tests/service_support.py", "tests/test_distribution_contract.py", "uv.lock"]
+opened_commit = "7f90c3e588e7ee53249dea52ef28a1dba5f236f2"
+whole_reason = "The service package, its two-token entrance, routing, mapper, wire stream and the real-Keycloak proof are one thin end-to-end slice."

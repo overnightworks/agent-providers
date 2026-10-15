@@ -1,0 +1,8 @@
+claim_id = "af014aec41f449a2bce1be0a9f4b6ca6"
+agent = "Claude fe12493e-3d52-442e-b01b-4ee4336de2f0"
+role = "builder"
+base = "84946eba11cf73187893ac8756dcd78d214f9da3"
+branch = "claude/issue-30-a1a1k-keycloak-shapes"
+scope = [".github/workflows/ci.yml", "docs/decisions/0001-agent-service.md", "pyproject.toml", "tests/keycloak", "tests/test_keycloak_token_shapes.py"]
+opened_commit = "ea1caea918cfc5199881360fed7bb570ff42e2de"
+whole_reason = "A test realm, its CI job, the invariant tests and the ADR facts they prove land together."

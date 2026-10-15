@@ -76,7 +76,7 @@ class RunStarted(_RunEvent):
     """The first event of every run, naming the heartbeat cadence."""
 
     type: Literal["run_started"] = "run_started"
-    seq: Annotated[Literal[0], BeforeValidator(_json_integer)] = 0
+    seq: Annotated[Literal[0], BeforeValidator(_json_integer)]
     heartbeat_interval_s: int = Field(ge=1, le=300)
 
 

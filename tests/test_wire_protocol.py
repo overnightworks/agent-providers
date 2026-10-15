@@ -130,6 +130,16 @@ def test_every_variant_round_trips_through_its_json(raw: dict[str, object]) -> N
             id="run_started after seq 0",
         ),
         pytest.param(
+            {
+                "v": PROTOCOL_VERSION,
+                "run_id": str(RUN_ID),
+                "type": "run_started",
+                "heartbeat_interval_s": 15,
+            },
+            ViolationKind.SCHEMA_MISMATCH,
+            id="run_started without seq",
+        ),
+        pytest.param(
             _wire("run_started", False, heartbeat_interval_s=15),
             ViolationKind.SCHEMA_MISMATCH,
             id="run_started with seq false",
@@ -179,7 +189,7 @@ def test_a_rejection_body_off_the_contract_is_refused(body: dict[str, object]) -
 
 
 def _started() -> RunStarted:
-    return RunStarted(v=PROTOCOL_VERSION, run_id=RUN_ID, heartbeat_interval_s=15)
+    return RunStarted(v=PROTOCOL_VERSION, run_id=RUN_ID, seq=0, heartbeat_interval_s=15)
 
 
 def _call(seq: int, tool_use_id: str, effect: ToolEffect = ToolEffect.SIDE_EFFECTING) -> ToolCall:

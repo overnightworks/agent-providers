@@ -16,10 +16,11 @@ from __future__ import annotations
 
 import json
 import re
+from enum import Enum, auto
 from typing import Any, Final
 
 from agent_client.run_stream import RunStream, StreamViolation, ViolationKind, parse_event
-from agent_client.wire import MAX_EVENT_BYTES, RunEvent
+from agent_client.wire import MAX_EVENT_BYTES, RunEvent, is_run_event
 
 _BYTE_ORDER_MARK: Final = b"\xef\xbb\xbf"
 _LINE_END: Final = re.compile(rb"[\r\n]")
@@ -32,6 +33,12 @@ _COMMENT_MARK: Final = ":"
 Decoded = RunEvent | StreamViolation
 
 
+class _DecoderState(Enum):
+    OPEN = auto()
+    ENDED = auto()
+    BROKE_CONTRACT = auto()
+
+
 class EventTooLarge(ValueError):
     """An event whose frame would exceed ``MAX_EVENT_BYTES``."""
 
@@ -42,6 +49,8 @@ class DecoderClosed(RuntimeError):
 
 def encode_event(event: RunEvent) -> bytes:
     """Write one event as one UTF-8 frame with LF line ends."""
+    if not is_run_event(event):
+        raise TypeError(f"encode_event takes a run event, not a {type(event).__name__}")
     frame = f"id: {event.seq}\nevent: {event.type}\ndata: {event.model_dump_json()}\n\n".encode()
     if len(frame) > MAX_EVENT_BYTES:
         raise EventTooLarge(
@@ -56,14 +65,17 @@ class RunStreamDecoder:
     ``feed`` takes chunks split anywhere and returns the events they
     complete; a violation is always the last item, and it closes the
     decoder. ``close`` ends the stream: an unfinished frame is dropped and a
-    run without its terminal event is reported as truncated. Lines may end in
+    run without its terminal event is reported as truncated; after ``feed``
+    returned a violation it returns nothing, so a consumer may feed every
+    chunk and close at the end of its input. A second ``close`` raises
+    ``DecoderClosed`` unless ``feed`` returned a violation. Lines may end in
     LF, CRLF or CR, the stream may open with a byte order mark, and comments
     and ``retry`` fields are ignored.
     """
 
     def __init__(self) -> None:
         self._stream = RunStream()
-        self._closed = False
+        self._state = _DecoderState.OPEN
         self._first_line = True
         self._line_feed_may_follow = False
         self._unfinished_line = bytearray()
@@ -74,7 +86,7 @@ class RunStreamDecoder:
         self._refuse_if_closed()
         decoded: list[Decoded] = []
         position = self._skip_line_feed_of_split_crlf(chunk)
-        while not self._closed:
+        while self._state is _DecoderState.OPEN:
             line_end = _LINE_END.search(chunk, position)
             if line_end is None:
                 self._hold(chunk[position:], decoded)
@@ -91,13 +103,15 @@ class RunStreamDecoder:
         return decoded
 
     def close(self) -> list[Decoded]:
+        if self._state is _DecoderState.BROKE_CONTRACT:
+            return []
         self._refuse_if_closed()
-        self._closed = True
+        self._state = _DecoderState.ENDED
         violation = self._stream.close()
         return [] if violation is None else [violation]
 
     def _refuse_if_closed(self) -> None:
-        if self._closed:
+        if self._state is not _DecoderState.OPEN:
             raise DecoderClosed("the stream already ended or broke the contract")
 
     def _skip_line_feed_of_split_crlf(self, chunk: bytes) -> int:
@@ -129,7 +143,7 @@ class RunStreamDecoder:
             return
         decoded.append(outcome)
         if isinstance(outcome, StreamViolation):
-            self._closed = True
+            self._state = _DecoderState.BROKE_CONTRACT
 
     def _read_line(self, line: bytes) -> Decoded | None:
         if self._first_line:

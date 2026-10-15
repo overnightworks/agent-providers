@@ -130,7 +130,7 @@ body rules be fixed before the build.
 
   | Check | Answer |
   |---|---|
-  | The workload token is missing, or webauth refuses it before it looks up a key: longer than 8192 characters, not a compact JWS of strict JSON, a forbidden header member (`crit`, `jku`, `jwk`, `x5u`, `x5c`, `b64`), an `alg` other than RS256, or a missing or invalid `kid` | 401 `unauthorized`, one body, `WWW-Authenticate: Bearer` |
+  | The workload token is missing, or webauth refuses it before it looks up a key: longer than 8192 characters, not a compact JWS of strict JSON, a header or claims set nested deeper than 8 levels, a forbidden header member (`crit`, `jku`, `jwk`, `x5u`, `x5c`, `b64`), an `alg` other than RS256, or a missing or invalid `kid` | 401 `unauthorized`, one body, `WWW-Authenticate: Bearer` |
   | The service holds no current key set and cannot fetch one; this is decided when a token is verified (in practice the workload token, verified first) | 503 `unavailable`, `Retry-After: 30` |
   | The workload token fails its signature, issuer, `aud` ∌ `agent-service` or time check, or has an empty `sub`; these are checked only once a current key set is held | 401 `unauthorized`, one body, `WWW-Authenticate: Bearer` |
   | The user token is missing or not `Authorization: Bearer <token>`, or fails verification as the workload token above; or it has no `sub` or a malformed group claim | 401 `unauthorized`, one body, `WWW-Authenticate: Bearer` |

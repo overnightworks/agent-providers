@@ -338,6 +338,24 @@ BODY_REJECTIONS = [
         id="version-is-read-before-the-shape",
     ),
     pytest.param(
+        json.dumps({name: value for name, value in run_body().items() if name != "v"}).encode(),
+        RejectionCode.UNSUPPORTED_VERSION,
+        400,
+        id="no-version",
+    ),
+    pytest.param(
+        b'{"v": 2, "purpose": NaN}',
+        RejectionCode.INVALID_REQUEST,
+        422,
+        id="strict-json-is-checked-before-the-version",
+    ),
+    pytest.param(
+        b'{"v": 2, "v": 2}',
+        RejectionCode.INVALID_REQUEST,
+        422,
+        id="a-member-named-twice-is-checked-before-the-version",
+    ),
+    pytest.param(
         json.dumps(run_body(purpose=PRESENTER)).encode(),
         FORBIDDEN,
         403,

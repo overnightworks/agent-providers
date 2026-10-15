@@ -1,0 +1,7 @@
+claim_id = "bdf7f7c0751e4ac09a1f464b64a9e5c2"
+agent = "Claude fe12493e-3d52-442e-b01b-4ee4336de2f0"
+role = "builder"
+base = "6c806a0358c752b5199c026692cf42a161e69b53"
+branch = "claude/issue-19-a0r-decision-record"
+scope = ["AGENTS.md", "docs/decisions/0001-agent-service.md"]
+opened_commit = "9ff56d25f2ccd9a6e86c523821eef35393b83d17"

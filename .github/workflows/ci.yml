@@ -27,7 +27,7 @@ jobs:
         run: uv lock --check
 
       - name: Ruff
-        run: uv run ruff check src tests
+        run: uv run ruff check src tests packages
 
       - name: Import boundaries
         run: uv run lint-imports
@@ -35,5 +35,50 @@ jobs:
       - name: Tests
         run: uv run pytest tests -q
 
-      - name: Build the distribution
-        run: uv build
+      - name: Build both distributions
+        run: uv build --all-packages
+
+      - name: The client wheel carries the repository licence
+        run: |
+          licence="$(mktemp -d "$RUNNER_TEMP/client-licence.XXXXXX")"
+          python3 -I -m zipfile -e dist/overnightworks_agent_client-*-py3-none-any.whl "$licence"
+          cmp LICENSE "$licence"/overnightworks_agent_client-*.dist-info/licenses/LICENSE
+
+      - name: The client wheel imports alone, outside the workspace
+        run: |
+          proof="$(mktemp -d "$RUNNER_TEMP/client-only.XXXXXX")"
+          uv venv "$proof/venv"
+          uv pip install --python "$proof/venv/bin/python" \
+            "$GITHUB_WORKSPACE"/dist/overnightworks_agent_client-*-py3-none-any.whl
+          cd "$proof"
+          "$proof/venv/bin/python" -I -c '
+          import importlib
+          import importlib.util
+          import pkgutil
+
+          import agent_client
+
+          assert importlib.util.find_spec("agent_providers") is None, "core leaked in"
+          for module in pkgutil.walk_packages(agent_client.__path__, "agent_client."):
+              importlib.import_module(module.name)
+              print("imported", module.name)
+          '
+
+      - name: Both wheels install together and the core imports dispatch
+        run: |
+          proof="$(mktemp -d "$RUNNER_TEMP/two-wheels.XXXXXX")"
+          uv venv "$proof/venv"
+          uv pip install --python "$proof/venv/bin/python" \
+            "$GITHUB_WORKSPACE"/dist/overnightworks_agent_client-*-py3-none-any.whl \
+            "$GITHUB_WORKSPACE"/dist/overnightworks_agent_providers-*-py3-none-any.whl
+          cd "$proof"
+          "$proof/venv/bin/python" -I -c '
+          import agent_client.tools
+          import agent_providers.dispatch
+          import agent_providers.tools
+
+          assert agent_providers.tools.ToolDeclaration is agent_client.tools.ToolDeclaration
+          print("imported", agent_providers.dispatch.__name__, "from", agent_providers.__file__)
+          '
+          printf 'from agent_providers.tools import ToolCatalog, ToolDeclaration\n' > consumer.py
+          uvx pyright@1.1.414 --pythonpath "$proof/venv/bin/python" consumer.py

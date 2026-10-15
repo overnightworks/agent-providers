@@ -18,19 +18,25 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Build the distribution
-        run: uv build
+      - name: Build both distributions
+        run: uv build --all-packages
 
-      - name: The tag names the version that was built
+      - name: The tag names the version both wheels were built at
         run: |
-          built="$(basename "$(ls dist/*.whl)")"
-          expected="overnightworks_agent_providers-${GITHUB_REF_NAME#v}-py3-none-any.whl"
+          version="${GITHUB_REF_NAME#v}"
+          expected="$(printf '%s\n' \
+            "overnightworks_agent_client-${version}-py3-none-any.whl" \
+            "overnightworks_agent_providers-${version}-py3-none-any.whl")"
+          built="$(cd dist && ls *.whl | sort)"
           if [ "$built" != "$expected" ]; then
-            echo "Tag $GITHUB_REF_NAME expects $expected but the build produced $built" >&2
+            echo "Tag $GITHUB_REF_NAME expects exactly:" >&2
+            echo "$expected" >&2
+            echo "but the build produced:" >&2
+            echo "$built" >&2
             exit 1
           fi
 
-      - name: Publish the release with its wheel
+      - name: Publish the release with the wheels the check admitted
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" dist/*.whl --title "$GITHUB_REF_NAME" --generate-notes

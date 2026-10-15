@@ -8,6 +8,7 @@ import logging
 import pytest
 from provider_test_support import COWRITER_TOOL_CATALOG
 
+from agent_client.tools import ToolDeclaration
 from agent_providers.text_tool_protocol import (
     FinalText,
     TextToolCall,
@@ -17,7 +18,7 @@ from agent_providers.text_tool_protocol import (
     render_tool_catalog,
     render_tool_result,
 )
-from agent_providers.tools import ToolCatalog, ToolDeclaration, ToolProtocolMarkup
+from agent_providers.tools import ToolCatalog, ToolProtocolMarkup
 
 
 def _call(payload: str) -> str:

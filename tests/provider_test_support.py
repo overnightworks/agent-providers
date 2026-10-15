@@ -20,13 +20,14 @@ import os
 from typing import Any
 from unittest.mock import MagicMock
 
+from agent_client.tools import ToolDeclaration
 from agent_providers.config import (
     ProviderRuntimeConfig,
     configure,
     current_config,
     reset_config,
 )
-from agent_providers.tools import ToolCatalog, ToolDeclaration
+from agent_providers.tools import ToolCatalog
 
 _fake_cli_processes: list[MagicMock] = []
 

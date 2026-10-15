@@ -1,8 +1,0 @@
-claim_id = "aa08f91273ce429dbd1af901eb4adb5c"
-agent = "Claude fe12493e-3d52-442e-b01b-4ee4336de2f0"
-role = "builder"
-base = "eacdaeb080e7331ef713aa82b2e9753c8539729e"
-branch = "claude/issue-21-a0a-packages"
-scope = [".github/workflows/ci.yml", ".github/workflows/release.yml", ".importlinter", "AGENTS.md", "CLAUDE.md", "README.md", "packages/agent-client", "pyproject.toml", "src/agent_providers/__init__.py", "src/agent_providers/text_tool_protocol.py", "src/agent_providers/tools.py", "tests/provider_test_support.py", "tests/test_distribution_contract.py", "tests/test_text_tool_protocol.py", "uv.lock"]
-opened_commit = "5cf5f9ebbe463ff45d32ec1250a52fee16142a3c"
-whole_reason = "One packaging change: the workspace, the moved contract, its gates, its release and its docs cannot land apart."

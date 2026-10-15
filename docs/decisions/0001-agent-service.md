@@ -227,7 +227,7 @@ existing `agent_providers.events` is that contract.
   discriminated on `type`. A new variant or field is a new protocol version.
 - Core events are wrapped, not replaced: `agent_providers.events.StreamEvent`
   stays the core's in-process provider-turn type, which hosts on v0.1.2 still
-  consume. The mapper from it to the run events lands in A1a with its caller.
+  consume. The mapper from it to the run events lands in A1a1 with its caller.
 - (a) An explicit cancel follows the same interrupted rule as a disconnect.
   Whether a cut-short run ends as `cancelled` or `failed: interrupted` is
   decided by the effect class of its emitted tool calls (H9): one
@@ -343,7 +343,7 @@ repository without PyPI.
 - The repository becomes a uv workspace. The core distribution
   `overnightworks-agent-providers` stays at the root. A new member
   `packages/agent-client/` holds the distribution `overnightworks-agent-client`
-  with import package `agent_client`. A1a later adds `packages/agent-service/`.
+  with import package `agent_client`. A1a1 later adds `packages/agent-service/`.
 - Core pins the client exactly (`==X.Y.Z`) through `{ workspace = true }`, and
   the two are released in lockstep. One tag `vX.Y.Z` publishes exactly the two
   wheels. A test pins all version literals as equal, because uv ignores the pin
@@ -410,8 +410,8 @@ the workload client, the principal, the `/ki-abo` membership read from the
 verified user token, the background purpose, the app's job id, and an expiry of
 at most 24 hours. The background run later presents the workload token plus the
 ticket. A CLI profile serves tickets only if it is marked `background: true`.
-The ticket's token format, keys and rotation are settled in A1a's plan together
-with the capability token (H3); one service-owned signing key covers both.
+The ticket's token format, keys and rotation are settled in A1a4 (signing key and
+capability, H3) and A1a5 (job tickets); one service-owned signing key covers both.
 
 **Consequence.** Background runs carry the same verified identity as the live
 request that started them, for at most a day.

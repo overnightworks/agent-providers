@@ -92,7 +92,9 @@ def verify():
 
 def _access_token(form: dict[str, str]) -> str:
     response = httpx.post(f"{_realm_url()}/protocol/openid-connect/token", data=form, timeout=10)
-    assert response.status_code == 200, f"token endpoint answered {response.status_code}"
+    assert response.status_code == 200, (
+        f"token endpoint answered {response.status_code}: {response.text}"
+    )
     return response.json()["access_token"]
 
 

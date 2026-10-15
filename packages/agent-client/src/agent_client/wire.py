@@ -68,7 +68,30 @@ ToolUseId = Annotated[str, Field(min_length=1)]
 """The one decider of a valid call id, so a call and its result accept the same ids."""
 
 
-def _refuse_non_json(value: object) -> None:
+def _refuse_non_json_object(value: dict[Any, Any]) -> dict[str, Any]:
+    # An explicit stack, not recursion: a frame within the size limit can nest
+    # deeper than Python's recursion limit, and that depth is still valid JSON.
+    pending: list[object] = [value]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, dict):
+            for key in current:
+                _refuse_non_json_key(key)
+            pending.extend(current.values())
+        elif isinstance(current, list):
+            pending.extend(current)
+        else:
+            _refuse_non_json_scalar(current)
+    return value
+
+
+def _refuse_non_json_key(key: object) -> None:
+    if not isinstance(key, str):
+        raise ValueError(f"a {type(key).__name__} key is not a JSON object key")
+    _refuse_lone_surrogates(key)
+
+
+def _refuse_non_json_scalar(value: object) -> None:
     if value is None or isinstance(value, bool | int):
         return
     if isinstance(value, float):
@@ -76,11 +99,6 @@ def _refuse_non_json(value: object) -> None:
             raise ValueError(f"{value} is not a JSON number")
     elif isinstance(value, str):
         _refuse_lone_surrogates(value)
-    elif isinstance(value, list):
-        for item in value:
-            _refuse_non_json(item)
-    elif isinstance(value, dict):
-        _refuse_non_json_object(value)
     else:
         raise ValueError(f"a {type(value).__name__} is not a JSON value")
 
@@ -90,15 +108,6 @@ def _refuse_lone_surrogates(text: str) -> None:
         text.encode("utf-8")
     except UnicodeEncodeError as error:
         raise ValueError("a string with a lone surrogate is not valid Unicode") from error
-
-
-def _refuse_non_json_object(value: dict[Any, Any]) -> dict[str, Any]:
-    for key, item in value.items():
-        if not isinstance(key, str):
-            raise ValueError(f"a {type(key).__name__} key is not a JSON object key")
-        _refuse_lone_surrogates(key)
-        _refuse_non_json(item)
-    return value
 
 
 JsonObject = Annotated[dict[str, Any], AfterValidator(_refuse_non_json_object)]

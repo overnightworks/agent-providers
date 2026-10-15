@@ -164,6 +164,17 @@ def test_a_broken_frame_is_named_and_nothing_is_decoded_after_it(
     assert decoder.close() == []
 
 
+def test_tool_input_nested_a_thousand_levels_deep_decodes_as_a_call() -> None:
+    depth = 1000
+    shallow_call = encode_event(call(1, "call-1", tool_input={"a": 1}))
+    deep_call = shallow_call.replace(b'{"a":1}', b'{"a":' * depth + b"1" + b"}" * depth)
+
+    opening, decoded = RunStreamDecoder().feed(OPENING + deep_call)
+
+    assert opening == A_RUN[0]
+    assert decoded.type == "tool_call"
+
+
 def test_a_closed_decoder_refuses_a_second_close() -> None:
     decoder = RunStreamDecoder()
     decoder.feed(ENCODED)

@@ -205,6 +205,7 @@ def test_tool_input_the_wire_cannot_carry_fails_the_run_as_a_provider_error(tool
             ),
             id="call-id-twice",
         ),
+        pytest.param((StreamEvent(type="x" * 600),), id="unmappable-event-with-a-long-type"),
     ],
 )
 def test_a_runner_that_breaks_the_run_fails_it_as_a_provider_error(script):

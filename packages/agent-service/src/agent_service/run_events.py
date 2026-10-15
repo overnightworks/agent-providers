@@ -56,6 +56,8 @@ HEARTBEAT_INTERVAL_S: Final = 15
 NO_RUNNER_MESSAGE: Final = "No provider can serve this route yet."
 RUNNER_FAILED_MESSAGE: Final = "The provider failed during the run."
 NO_ANSWER_MESSAGE: Final = "The provider ended the run without an answer."
+UNMAPPABLE_EVENT_MESSAGE: Final = "The provider sent an event the service cannot map."
+INVALID_EVENT_MESSAGE: Final = "The provider sent an event that is not valid."
 
 
 class _Unsendable(Exception):
@@ -121,7 +123,7 @@ class _WireRun:
         try:
             return self._mapped(core_event)
         except ValidationError as error:
-            raise _Unsendable(f"The provider's {core_event.type} is not a valid event.") from error
+            raise _Unsendable(INVALID_EVENT_MESSAGE) from error
 
     def _mapped(self, core_event: StreamEvent) -> RunEvent | None:
         header = {"v": PROTOCOL_VERSION, "run_id": self._run_id, "seq": self._seq}
@@ -138,7 +140,7 @@ class _WireRun:
                 )
             case FinalEvent(text=text):
                 return Succeeded(**header, text=text)
-        raise _Unsendable(f"The provider sent a {core_event.type} event the service cannot map.")
+        raise _Unsendable(UNMAPPABLE_EVENT_MESSAGE)
 
     def _tool_call(self, core_event: ToolCallEvent, header: dict[str, object]) -> ToolCall:
         call = ToolCall(

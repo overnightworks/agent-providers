@@ -32,6 +32,7 @@ from service_support import (
     served,
     service_config,
 )
+from webauth.jwt_verification import KeySetFetchError
 
 from agent_client.wire import Failed, FailureCode, RejectionCode
 from agent_providers.events import AssistantTextEvent, FinalEvent
@@ -103,17 +104,28 @@ def test_a_route_without_a_runner_answers_provider_unavailable():
     assert terminal.code is FailureCode.PROVIDER_UNAVAILABLE
 
 
-def test_an_unfetchable_key_set_answers_unavailable():
+@pytest.mark.parametrize(
+    ("workload", "user", "code", "status"),
+    [
+        pytest.param(True, True, RejectionCode.UNAVAILABLE, 503, id="both-tokens"),
+        pytest.param(False, True, RejectionCode.UNAUTHORIZED, 401, id="no-workload-token"),
+        pytest.param(True, False, RejectionCode.UNAVAILABLE, 503, id="no-user-token"),
+    ],
+)
+def test_an_unfetchable_key_set_answers_unavailable_after_the_workload_token_is_checked(
+    workload, user, code, status
+):
     def unreachable_issuer(_url: str) -> bytes:
-        from webauth.jwt_verification import KeySetFetchError
-
         raise KeySetFetchError("the issuer cannot be reached")
 
     app = create_app(service_config(), fetch_key_set=unreachable_issuer)
     with served(app) as base_url:
-        response = post_run(base_url, run_headers(MINT.workload(), MINT.user()))
+        response = post_run(
+            base_url,
+            run_headers(MINT.workload() if workload else None, MINT.user() if user else None),
+        )
 
-    assert_rejected(response, RejectionCode.UNAVAILABLE, 503)
+    assert_rejected(response, code, status)
 
 
 TokenFor = Callable[[], str | None]

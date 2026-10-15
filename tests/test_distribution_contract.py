@@ -1,4 +1,4 @@
-"""The two distributions ship as one release and share one tool contract."""
+"""The three distributions ship as one release and share one tool contract."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import agent_providers.tools
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 _CLIENT_DISTRIBUTION = "overnightworks-agent-client"
+_CORE_DISTRIBUTION = "overnightworks-agent-providers"
 
 
 def _project_table(pyproject: Path) -> dict:
@@ -23,19 +24,23 @@ def _exact_pin(requirements: list[str], distribution: str) -> str:
         for requirement in requirements
         if requirement.startswith(f"{distribution}==")
     ]
-    assert len(pins) == 1, f"core must pin {distribution} exactly once with =="
+    assert len(pins) == 1, f"{distribution} must be pinned exactly once with =="
     return pins[0]
 
 
-def test_core_client_and_pin_carry_one_lockstep_version() -> None:
+def test_core_client_service_and_pins_carry_one_lockstep_version() -> None:
     core = _project_table(_REPOSITORY_ROOT / "pyproject.toml")
     client = _project_table(_REPOSITORY_ROOT / "packages" / "agent-client" / "pyproject.toml")
+    service = _project_table(_REPOSITORY_ROOT / "packages" / "agent-service" / "pyproject.toml")
 
     versions = {
         core["version"],
         client["version"],
+        service["version"],
         agent_providers.__version__,
         _exact_pin(core["dependencies"], _CLIENT_DISTRIBUTION),
+        _exact_pin(service["dependencies"], _CLIENT_DISTRIBUTION),
+        _exact_pin(service["dependencies"], _CORE_DISTRIBUTION),
     }
 
     assert len(versions) == 1, f"version literals disagree: {sorted(versions)}"

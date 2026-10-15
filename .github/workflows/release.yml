@@ -18,15 +18,16 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Build both distributions
+      - name: Build the three distributions
         run: uv build --all-packages
 
-      - name: The tag names the version both wheels were built at
+      - name: The tag names the version all three wheels were built at
         run: |
           version="${GITHUB_REF_NAME#v}"
           expected="$(printf '%s\n' \
             "overnightworks_agent_client-${version}-py3-none-any.whl" \
-            "overnightworks_agent_providers-${version}-py3-none-any.whl")"
+            "overnightworks_agent_providers-${version}-py3-none-any.whl" \
+            "overnightworks_agent_service-${version}-py3-none-any.whl")"
           built="$(cd dist && ls *.whl | sort)"
           if [ "$built" != "$expected" ]; then
             echo "Tag $GITHUB_REF_NAME expects exactly:" >&2

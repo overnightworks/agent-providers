@@ -136,6 +136,15 @@ JsonObject = Annotated[dict[str, Any], AfterValidator(_refuse_non_json_object)]
 """The one decider of a JSON object on the wire: one that survives a round trip unchanged."""
 
 
+def _refuse_non_unicode_text(text: str) -> str:
+    _refuse_lone_surrogates(text)
+    return text
+
+
+UnicodeText = Annotated[str, AfterValidator(_refuse_non_unicode_text)]
+"""Free text a client writes: valid Unicode, so the body it lands in encodes as JSON."""
+
+
 class _StrictModel(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
@@ -236,7 +245,7 @@ class TurnRole(StrEnum):
 
 class TurnMessage(_StrictModel):
     role: Annotated[TurnRole, Field(strict=False)]
-    text: str
+    text: UnicodeText
 
 
 class Turn(_StrictModel):
@@ -246,7 +255,7 @@ class Turn(_StrictModel):
     decides those from the run's ``purpose`` and the caller's identity.
     """
 
-    system: str
+    system: UnicodeText
     messages: list[TurnMessage] = Field(min_length=1)
 
 

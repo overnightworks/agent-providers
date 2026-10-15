@@ -305,6 +305,19 @@ def test_a_run_request_naming_what_the_service_decides_is_refused(field: str) ->
         RunRequest.model_validate_json(json.dumps({**REQUEST, field: "chosen by the client"}))
 
 
+@pytest.mark.parametrize(
+    "turn",
+    [
+        {"system": "\ud800", "messages": [{"role": "user", "text": "a"}]},
+        {"system": "s", "messages": [{"role": "user", "text": "\udfff"}]},
+    ],
+    ids=["in the system prompt", "in a message"],
+)
+def test_a_run_request_with_a_lone_surrogate_in_its_turn_is_refused(turn: dict[str, Any]) -> None:
+    with pytest.raises(ValidationError):
+        RunRequest.model_validate({**REQUEST, "turn": turn})
+
+
 _SHORT_DETAIL_LENGTH = 80
 
 

@@ -12,10 +12,13 @@ from __future__ import annotations
 import json
 import logging
 import time
+import tracemalloc
 from collections.abc import Callable, Iterator
 
+import anyio
 import httpx
 import pytest
+from fastapi import FastAPI
 from service_support import (
     COWRITER,
     PRESENTATOR_CLIENT,
@@ -362,6 +365,51 @@ def test_an_oversized_body_without_a_declared_length_is_refused_while_read(servi
 
     assert "content-length" not in response.request.headers
     assert_rejected(response, RejectionCode.INVALID_REQUEST, 422)
+
+
+async def _asgi_status(app: FastAPI, headers: dict[str, str], body: bytes) -> int:
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/runs",
+        "raw_path": b"/runs",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [(name.lower().encode(), value.encode()) for name, value in headers.items()],
+        "client": ("127.0.0.1", 50000),
+        "server": ("127.0.0.1", 80),
+    }
+    pending = [{"type": "http.request", "body": body, "more_body": False}]
+    sent: list[dict[str, object]] = []
+
+    async def receive() -> dict[str, object]:
+        return pending.pop(0) if pending else {"type": "http.disconnect"}
+
+    async def send(message: dict[str, object]) -> None:
+        sent.append(message)
+
+    await app(scope, receive, send)
+    return sent[0]["status"]
+
+
+def test_a_single_chunk_over_the_limit_is_refused_without_being_buffered():
+    """Driven in-process: uvicorn hands the body over in socket-read pieces, never as one chunk."""
+    chunk_size = 16 * MAX_REQUEST_BYTES
+    chunk = b"x" * chunk_size
+    app = create_app(service_config(), fetch_key_set=MINT.fetch_key_set)
+    headers = run_headers(MINT.workload(), MINT.user())
+    tracemalloc.start()
+    try:
+        status = anyio.run(_asgi_status, app, headers, chunk)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert status == 422
+    assert peak < chunk_size // 2
 
 
 def test_tokens_are_checked_before_the_body(service):

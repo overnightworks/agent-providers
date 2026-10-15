@@ -143,14 +143,15 @@ async def _limited_body(request: Request) -> bytes | None:
     """The body, or ``None`` once it is known to exceed ``MAX_REQUEST_BYTES``.
 
     A declared length over the limit is refused unread, and a body without
-    one is read only until it passes the limit.
+    one is refused at the first chunk that would pass the limit, before that
+    chunk is buffered.
     """
     declared = request.headers.get("Content-Length")
     if declared is not None and (not declared.isdigit() or int(declared) > MAX_REQUEST_BYTES):
         return None
     body = bytearray()
     async for chunk in request.stream():
-        body += chunk
-        if len(body) > MAX_REQUEST_BYTES:
+        if len(body) + len(chunk) > MAX_REQUEST_BYTES:
             return None
+        body += chunk
     return bytes(body)

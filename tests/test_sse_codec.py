@@ -217,9 +217,16 @@ def test_a_frame_whose_tool_input_nests_too_deep_is_named(depth: int, kind: Viol
     assert violation.kind is kind
 
 
-def test_a_closed_decoder_refuses_a_second_close() -> None:
+@pytest.mark.parametrize(
+    "stream",
+    [
+        pytest.param(ENCODED, id="a complete run"),
+        pytest.param(OPENING, id="a run cut before its terminal event"),
+    ],
+)
+def test_a_closed_decoder_refuses_a_second_close(stream: bytes) -> None:
     decoder = RunStreamDecoder()
-    decoder.feed(ENCODED)
+    decoder.feed(stream)
     decoder.close()
 
     with pytest.raises(DecoderClosed):

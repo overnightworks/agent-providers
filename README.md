@@ -5,15 +5,21 @@ over each provider's CLI or its HTTP API — and owns the machinery a host
 application should not rebuild. Live model catalogs and readiness probes, the
 streaming turn transport, the tool loop, a bounded subprocess runner, and the
 sandbox directory-name constants all live here; everything that touches a host's
-own truth reaches the library through the ports the host supplies.
+own truth reaches the library through the ports the host supplies. The agent
+service, the one authenticated entrance through which apps start agent runs,
+lives here too.
 
-Two distributions ship from this repository, released together from one tag:
+Three distributions ship from this repository, released together from one tag:
 
 - `overnightworks-agent-providers`, import package `agent_providers` — the
   provider core.
 - `overnightworks-agent-client`, import package `agent_client` — the light
   client an app installs; it depends on `pydantic` only and owns the tool
-  contract `ToolDeclaration` and the agent service's streamed run contract.
+  contract `ToolDeclaration` and the agent service's run contract: the
+  `RunRequest` that starts a run and the events it streams.
+- `overnightworks-agent-service`, import package `agent_service` — the agent
+  service, run as `agent-service --config PATH`. It builds on the other two and
+  nothing imports it.
 
 ## What it owns, and what it leaves to the host
 
@@ -27,13 +33,20 @@ It owns the machinery that is the same in every deployment:
 | `agent_providers.events` | The `StreamEvent` union a turn emits in-process (assistant text, tool call, tool result, final); not the service wire |
 | `agent_providers.tool_loop` | The provider-agnostic tool loop driving a `ToolExecutor` over a `ToolTransport` |
 | `agent_client.tools` | `ToolDeclaration`: one tool's name, description, JSON-schema arguments and `ToolEffect` |
-| `agent_client.wire` | The one owner of the agent service's wire: the versioned run-event union and the `RunRejection` body |
+| `agent_client.wire` | The one owner of the agent service's wire: the `RunRequest` body, the versioned run-event union and the `RunRejection` body |
 | `agent_client.run_stream` | `parse_event` and `RunStream`: the rules a run's event stream keeps, and how a cut-short run ends |
 | `agent_client.sse` | `encode_event` and `RunStreamDecoder`: one SSE frame per run event, decoded and checked against the wire and its stream rules |
 | `agent_providers.tools` | The `ToolCatalog` and its Anthropic/OpenAI schema projections; re-exports the identical `ToolDeclaration` |
 | `agent_providers.process` | `run_cli_bounded`: the one bounded subprocess layer (start, stdin, first line, deadline, process-group cleanup) |
 | `agent_providers.images` | The `ImagePolicy` an image turn is held to |
 | `agent_providers.sandbox` | The directory-name prefix constants a host's kernel sandbox profile must permit |
+| `agent_service.app` | `POST /runs`: the order of checks, the typed rejections, and the admitted run's event stream |
+| `agent_service.identity` | The two-token check: the workload token bound to one registered app, the user token to one principal |
+| `agent_service.run_request` | The strict read of a `RunRequest` body: strict JSON, then its version, then its shape |
+| `agent_service.config` | The service's TOML: identity, listener, subscription profiles, purposes and apps |
+| `agent_service.routing` | `route`: the one H5 decider between the CLI route, the API route and `not_enabled` |
+| `agent_service.run_events` | The mapping of the core's turn events onto the wire, ending every run with exactly one terminal |
+| `agent_service.runners` | The `Runner` port a route's provider plugs into; production installs none yet |
 
 It leaves the application everything the library cannot know: the MCP tool set
 and its execution, the prompts, where settings are stored, and domain
@@ -41,14 +54,16 @@ ownership. The core depends on the agent client, `pydantic`, `httpx` and
 `anyio` at runtime and on nothing else — no host application, no web framework,
 no database; the client depends on `pydantic` only and never imports the core.
 Import-linter contracts forbid either package reaching back into
-`songmaker_cli` or the sibling `webauth` library and keep the core layered
-above the client; `lint-imports` proves them in CI.
+`songmaker_cli` or the sibling `webauth` library and layer the service above
+the core above the client; only the service verifies tokens, so only it imports
+`webauth`. `lint-imports` proves them in CI.
 
 ## Install
 
-Neither distribution is published on PyPI, and neither name is registered
-there. Install both wheels from the tag's GitHub release, by URL, so a resolver
-never asks PyPI for a name someone else could claim:
+No distribution is published on PyPI, and no name is registered there.
+Install the wheels from the tag's GitHub release, by URL, so a resolver never
+asks PyPI for a name someone else could claim. An app installs the client and
+the core:
 
 ```bash
 pip install \
@@ -117,7 +132,7 @@ silently refused mount.
 ## Development
 
 ```bash
-uv sync --extra dev --extra image
+uv sync --all-packages --extra dev --extra image
 uv run pytest tests -q
 uv run ruff check src tests packages
 uv run lint-imports
@@ -130,9 +145,12 @@ one test imports Pillow at module load; the `[api]` path is exercised without
 the Anthropic SDK installed, which is the library's implicit proof that it never
 imports `anthropic` eagerly.
 
-`uv sync` installs the client from the workspace, so one environment and one
-suite under `tests/` cover both packages. `uv build --all-packages` writes both
-wheels to `dist/`; the release attaches exactly those two.
+`uv sync --all-packages` installs the client and the service from the
+workspace, so one environment and one suite under `tests/` cover all three
+packages. The service's end-to-end proof, `tests/test_service_keycloak.py`,
+runs only where `KEYCLOAK_URL` names the test Keycloak of the
+`keycloak-token-shapes` CI job. `uv build --all-packages` writes the three
+wheels to `dist/`; the release attaches exactly those three.
 
 ## Licence
 

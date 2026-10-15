@@ -99,12 +99,72 @@ webauth verifier, and holds these facts in CI (job `keycloak-token-shapes`):
   `roles`, `web-origins`, `acr`, `service_account`) that the platform realm
   keeps, a workload client is named only by `azp` and `client_id`. Two
   workload clients' service-account tokens also differ in the service-account
-  user's own `sub` and `preferred_username` (`service-account-<clientId>`),
-  which no registry knows in advance, and in `allowed-origins`, each client's
-  web origins (besides `jti` and the times). `clientAddress` and `clientHost`
+  user's own `sub` and `preferred_username`, and in `allowed-origins`, each
+  client's web origins (besides `jti` and the times). `preferred_username` is
+  `service-account-<clientId>`, so only `sub` is unknowable in advance. `clientAddress` and `clientHost`
   name the calling host; the test calls both clients from one host, so it
   leaves them equal. The workload binding must therefore check `azp` and
   `client_id` against the registry.
+
+### A1a1 ruling (head, 15.10.2026)
+
+**Context.** A1a1 builds the service's entrance, `POST /runs`, against the
+token shapes above; the Codex plan review demanded the binding, precedence and
+body rules be fixed before the build.
+
+**Decision.**
+
+- **The workload binding (U1').** A workload token binds its app only when it
+  carries realm role `agent-workload` (which only service accounts hold), its
+  `azp == client_id ==` one registered `workload_client`, `exp - iat` is at
+  most 300 s, and `sub`, `azp` and `client_id` are present. `client_id` alone
+  proves nothing. A `workload_client` registered for two apps stops startup.
+  One process-scoped webauth `JwtVerifier` holds the key-set cache, refresh
+  lock and cooldown, and runs off the event loop.
+- **The order of checks.** The first failure answers:
+
+  | Check | Answer |
+  |---|---|
+  | The workload token, then the user token: missing, not a bearer, or not verified (signature, issuer, `aud` ∌ `agent-service`, time, an empty `sub`); a user token without `sub` or with a malformed group claim | 401 `unauthorized`, one body, `WWW-Authenticate: Bearer` |
+  | The key set cannot be fetched | 503 `unavailable`, `Retry-After: 30` |
+  | The workload binding above fails; the user's `azp` differs from the workload's; the user's `sub` equals the workload's | 403 `forbidden` |
+  | The body, at most 256 KiB enforced before buffering, parsed as strict JSON (no `NaN`, no member twice): its `v` is not 1, or absent | 400 `unsupported_version` |
+  | The body is not strict JSON, too large, or not exactly a `RunRequest` | 422 `invalid_request` |
+  | The purpose is not in the app's list | 403 `forbidden` |
+  | H5 routing answers `not_enabled`; no run starts | 403 `not_enabled` |
+  | Admitted | 200 `text/event-stream` |
+
+  Every rejection is a `RunRejection` with `Cache-Control: no-store`, and no
+  answer or log line carries token text.
+- **The policy.** The service reads one TOML file into frozen models that
+  forbid unknown fields; a refused file stops startup naming the field.
+  `[identity]` names issuer, key-set URL (https), audience, subscription group
+  and group claim; `[profiles.<name>]` one profile per provider;
+  `[purposes."<p>"]` an optional `cli_provider` and `api_alias`;
+  `[apps.<app>]` its `workload_client`, its purposes, and its tools' effects,
+  where an unlisted tool counts as side-effecting. `agent_service.routing.route`
+  is the one pure H5 decider.
+- **The stream.** A runner is a port per route; production installs none
+  until A1b and A2b, so an admitted run on a route without one ends as
+  `failed: provider_unavailable`, never as a success. `agent_service.run_events`
+  owns the mapping from the core's turn events onto the wire: a tool call's
+  input is deep-copied into its event, and an event that `encode_event` cannot
+  write (a non-JSON value, too deep, too large) or that the service's own
+  `RunStream` refuses ends the run as `failed: provider_error` before it is
+  sent. The event is encoded before `RunStream` records it, so a refused one
+  never advances the sequence the client checks.
+- **Ruled sentences.** S1 both tokens are required; S2 a user token cannot
+  pose as the workload; S3 the request names only purpose and turn; S4 H5
+  decides the route; S5 a clean stream ends with exactly one terminal; S6
+  non-JSON tool input never reaches the wire; S7 no runner is never a fake
+  answer. The threat checklist: token substitution, confused deputy via
+  `azp`, cross-app replay, algorithm confusion and key-set DoS (both
+  webauth's), token leakage into logs and bodies; stale groups for a token's
+  lifetime are accepted.
+
+**Consequence.** Tests prove each row with minted tokens over a real socket,
+and `tests/test_service_keycloak.py` proves the entrance end to end with real
+Keycloak 26.8.1 tokens in the `keycloak-token-shapes` job.
 
 ## H2 Whose subscription
 

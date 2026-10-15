@@ -1,7 +1,8 @@
 # Repository agent guidance
 
-`agent-providers` is a library, not an application: it is installed by host
-applications and has no deployment of its own. Every change here is a change to
+`agent-providers` is a library and the agent service built on it: host
+applications install the library, and apps reach the service over HTTP. The
+service's deployment lives in edge, not here. Every change here is a change to
 a public contract that a tag has already frozen somewhere else.
 
 - Before every repository edit, use the globally installed `aco` CLI to
@@ -21,9 +22,11 @@ documents `README.md`, `AGENTS.md` and `CLAUDE.md`. Everything else lives in
 the directory of its owner: the provider core (distribution
 `overnightworks-agent-providers`) under `src/agent_providers/`, the light
 agent client (distribution `overnightworks-agent-client`) under
-`packages/agent-client/`, the suite for both under `tests/`, and the decision
-records under `docs/decisions/` — among them the decision that this
-repository will also host the agent service and how its packages ship. No
+`packages/agent-client/`, the agent service (distribution
+`overnightworks-agent-service`) under `packages/agent-service/`, the suite for
+all three under `tests/`, and the decision records under `docs/decisions/` —
+among them the decision that this repository hosts the agent service and how
+its packages ship. No
 catch-all directory (`tooling/`, `misc/`) and no deeper hierarchy than the
 owner needs.
 
@@ -40,10 +43,14 @@ owner needs.
   imports the core.
 - The agent service's wire has one owner, `agent_client.wire`, with its stream
   rules in `agent_client.run_stream`. `agent_providers.events` is the core's
-  in-process turn event and never a second wire.
-- `.importlinter` forbids `songmaker_cli` and `webauth` in both packages and
-  layers `agent_providers` above `agent_client`; `lint-imports` proves it in
-  CI.
+  in-process turn event and never a second wire; `agent_service.run_events`
+  maps it onto the wire.
+- The service builds on the core and the client, and nothing imports it. It
+  alone verifies tokens, through webauth's `JwtVerifier`, and it alone depends
+  on a web framework (FastAPI, uvicorn).
+- `.importlinter` forbids `songmaker_cli` in all three packages and `webauth`
+  in the core and the client, and layers `agent_service` above
+  `agent_providers` above `agent_client`; `lint-imports` proves it in CI.
 - Two optional extras exist for lazily-imported paths: `agent-providers[api]`
   for the Anthropic SDK the Claude HTTP-API route uses, and
   `agent-providers[image]` for the Pillow the Codex image path uses. Core
@@ -54,7 +61,7 @@ owner needs.
 ## Checks
 
 ```bash
-uv sync --extra dev --extra image
+uv sync --all-packages --extra dev --extra image
 uv run pytest tests -q
 uv run ruff check src tests packages
 uv run lint-imports
@@ -66,18 +73,22 @@ the tool-surface probe is patched. Run it whole. `[image]` is required at
 collection because one test imports Pillow at module load.
 
 CI also proves the built wheels outside the workspace: in a fresh venv, the
-client wheel alone imports every `agent_client` module, and both wheels
+client wheel alone imports every `agent_client` module, client and core
 together import `agent_providers.dispatch` with the identical
-`ToolDeclaration`.
+`ToolDeclaration`, and all three install together and the installed
+`agent-service` refuses a bad config. The `keycloak-token-shapes` job serves
+the test realm from Keycloak and runs `tests/test_service_keycloak.py`, the
+service's end-to-end proof with real tokens; elsewhere that suite skips.
 
 ## Releasing
 
-A release is a tag, and the two distributions move in lockstep. On a `v*` tag
-`.github/workflows/release.yml` builds both wheels, checks that their names
-carry the tag's version, and attaches exactly those two wheels to the GitHub
-release; host applications pin both asset URLs. A tag is never moved — a broken
-release gets the next patch tag — so the pull request that precedes the tag
-raises all four version literals together: both `pyproject.toml` files,
-`agent_providers.__version__`, and core's exact `overnightworks-agent-client`
-pin. `tests/test_distribution_contract.py` fails while they disagree, because
-uv ignores that pin inside the workspace.
+A release is a tag, and the three distributions move in lockstep. On a `v*`
+tag `.github/workflows/release.yml` builds the three wheels, checks that their
+names carry the tag's version, and attaches exactly those three wheels to the
+GitHub release; host applications pin the asset URLs. A tag is never moved — a
+broken release gets the next patch tag — so the pull request that precedes the
+tag raises all seven version literals together: the three `pyproject.toml`
+files, `agent_providers.__version__`, core's exact `overnightworks-agent-client`
+pin, and the service's exact pins on core and client.
+`tests/test_distribution_contract.py` fails while they disagree, because uv
+ignores those pins inside the workspace.

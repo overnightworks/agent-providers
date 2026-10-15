@@ -5,21 +5,26 @@
 The reusable agent provider layer: routes a turn to Claude, Grok or Codex over
 each provider's CLI or HTTP API, with live model catalogs, readiness probes, a
 streaming turn transport, the tool loop, a bounded subprocess runner, and the
-sandbox directory-name constants. A uv workspace of two distributions released
-in lockstep from one tag:
+sandbox directory-name constants. It also hosts the agent service that apps
+start runs through. A uv workspace of three distributions released in lockstep
+from one tag:
 
 - `overnightworks-agent-providers`, import package `agent_providers` — the
   provider core, at the root.
 - `overnightworks-agent-client`, import package `agent_client` — the light
   client (pydantic only) that owns the tool contract `ToolDeclaration` and
-  the agent service's streamed run contract (`agent_client.wire`).
+  the agent service's run contract (`agent_client.wire`: the `RunRequest`
+  body and the streamed run events).
+- `overnightworks-agent-service`, import package `agent_service` — the agent
+  service (`agent-service --config PATH`), which builds on both.
 
 **Python**: 3.12+ | **Package manager**: uv | **Core**: `src/agent_providers/` |
-**Client**: `packages/agent-client/` | **Suite**: `tests/`
+**Client**: `packages/agent-client/` | **Service**: `packages/agent-service/` |
+**Suite**: `tests/`
 
 Extracted from [overnightworks/songmaker](https://github.com/overnightworks/songmaker)
 (issue #825) with its history. Hosts install from this repository's tagged
-release by pinning both wheel URLs, never by name from PyPI.
+release by pinning the wheel URLs, never by name from PyPI.
 
 **Agent policy:** [AGENTS.md](AGENTS.md) is the provider-neutral entrypoint and
 owns the layout, boundary, check and release rules. Read it first.
@@ -27,11 +32,11 @@ owns the layout, boundary, check and release rules. Read it first.
 ## Setup & Checks
 
 ```bash
-uv sync --extra dev --extra image
+uv sync --all-packages --extra dev --extra image
 uv run pytest tests -q       # the whole suite; no live provider needed
 uv run ruff check src tests packages
-uv run lint-imports          # host boundary and core-above-client layers
-uv build --all-packages      # the two wheels the release attaches
+uv run lint-imports          # host boundary and service > core > client layers
+uv build --all-packages      # the three wheels the release attaches
 ```
 
 ## Code patterns

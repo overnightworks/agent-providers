@@ -27,6 +27,7 @@ from provider_test_support import (
     SAMPLE_TOOL_CATALOG,
     CallerCanaryError,
     FailingLogHandler,
+    RaisingLogHandler,
     RunnerFailureWatch,
     a_call_nested_too_deeply_to_decode,
     a_call_to_an_undeclared_tool_carrying,
@@ -1092,6 +1093,42 @@ def test_a_runner_thread_that_cannot_start_reports_by_class_through_a_failing_lo
     assert type(turn.error) is codex_image.CodexImageCliError
     assert len(handler.handled_records) == 2
     image_turn.assert_ended(turn, runner_steps=("start SystemExit", "run SystemExit"))
+
+
+def test_a_failed_runner_whose_outcome_cannot_be_published_leaks_nothing_through_the_thread(
+    monkeypatch, image_turn,
+) -> None:
+    _settle_within_a_few_hundredths(monkeypatch)
+    fail_to_start_the_runner_thread(monkeypatch, SystemExit(A_RUNNER_FAILURE_CANARY))
+    monkeypatch.setattr(
+        process.CliLineChannel, "_close", Mock(side_effect=RuntimeError(A_RUNNER_FAILURE_CANARY)),
+    )
+    _the_child_plays(monkeypatch, ":")
+
+    turn = image_turn.drive(_TURN_SECONDS)
+
+    assert type(turn.error) is codex_image.CodexImageTimeoutError
+    image_turn.watch.wait_for_the_runner_threads_to_end()
+    image_turn.watch.assert_nothing_leaked(turn.error)
+
+
+def test_a_failed_runner_whose_report_raises_leaks_nothing_through_the_thread(
+    monkeypatch, image_turn,
+) -> None:
+    monkeypatch.setattr(
+        codex_protocol, "run_cli_bounded", Mock(side_effect=OSError(A_RUNNER_FAILURE_CANARY)),
+    )
+    handler = RaisingLogHandler([RuntimeError(A_RUNNER_FAILURE_CANARY)])
+    process_logger = logging.getLogger("agent_providers.process")
+    process_logger.addHandler(handler)
+    try:
+        turn = image_turn.drive(_TURN_SECONDS)
+        image_turn.watch.wait_for_the_runner_threads_to_end()
+    finally:
+        process_logger.removeHandler(handler)
+
+    assert type(turn.error) is codex_image.CodexImageCliError
+    image_turn.watch.assert_nothing_leaked(turn.error)
 
 
 @pytest.mark.parametrize(

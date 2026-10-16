@@ -23,6 +23,7 @@ from provider_test_support import (
     GROK_LOGGED_IN,
     SECRET_ENV_KEYS,
     FailingLogHandler,
+    RaisingLogHandler,
     RunnerFailureWatch,
     fail_to_start_the_runner_thread,
     override_provider_runtime,
@@ -3079,13 +3080,7 @@ def test_a_later_failing_report_never_displaces_earlier_control_flow(
 ) -> None:
     process_pool, callbacks = pooled_run
     fail_to_start_the_runner_thread(monkeypatch, RuntimeError(A_RUNNER_FAILURE_CANARY))
-    raising_records = iter(raised_by_records)
-
-    class FailingHandler(logging.Handler):
-        def emit(self, record: logging.LogRecord) -> None:
-            raise next(raising_records, RuntimeError)
-
-    handler = FailingHandler()
+    handler = RaisingLogHandler(raised_by_records)
     process_logger = logging.getLogger("agent_providers.process")
     process_logger.addHandler(handler)
     callbacks["on_spawn_failed"] = _raising(RuntimeError(ANOTHER_RUNNER_FAILURE_CANARY))

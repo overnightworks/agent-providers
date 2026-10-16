@@ -671,3 +671,14 @@ class FailingLogHandler(logging.Handler):
     def handleError(self, record: logging.LogRecord) -> None:
         self.handled_records.append(record)
         super().handleError(record)
+
+
+class RaisingLogHandler(logging.Handler):
+    """A log handler whose emit raises the given errors in turn, then a plain RuntimeError."""
+
+    def __init__(self, errors: Sequence[BaseException] = ()) -> None:
+        super().__init__()
+        self._errors = iter(errors)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        raise next(self._errors, RuntimeError)

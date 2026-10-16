@@ -1330,12 +1330,16 @@ _OPERATORS_LIVE_LOGIN = {
 }
 
 
-def _recording_runner(copies: list[tuple[tuple[str, ...], str]], runner) -> object:
+def _recording_runner(
+    copies: list[tuple[tuple[str, ...], str]], runner, every_file_content: list[bytes],
+) -> object:
     def run_cli_bounded(child, **kwargs):
         codex_home = Path(child.environment["CODEX_HOME"])
-        for child_file in filter(Path.is_file, codex_home.rglob("*")):
-            assert _CANARY_REFRESH_TOKEN.encode() not in child_file.read_bytes()
-        copies.append((child.command, (codex_home / "auth.json").read_text()))
+        login = codex_home / "auth.json"
+        copies.append((child.command, login.read_text() if login.is_file() else ""))
+        every_file_content.extend(
+            child_file.read_bytes() for child_file in filter(Path.is_file, codex_home.rglob("*"))
+        )
         return runner(child, **kwargs)
 
     return run_cli_bounded
@@ -1348,29 +1352,29 @@ def _probe_runner(stdout: str) -> object:
     return run_cli_bounded
 
 
-def _drive_the_catalog_probe(monkeypatch, copies) -> None:
-    monkeypatch.setattr(process, "run_cli_bounded", _recording_runner(copies, _probe_runner("[]")))
+def _drive_the_catalog_probe(monkeypatch, copies, files) -> None:
+    runner = _probe_runner("[]")
+    monkeypatch.setattr(process, "run_cli_bounded", _recording_runner(copies, runner, files))
     process.codex_cli_model_catalog()
 
 
-def _drive_the_login_probe(monkeypatch, copies) -> None:
+def _drive_the_login_probe(monkeypatch, copies, files) -> None:
     runner = _probe_runner("Logged in using ChatGPT")
-    monkeypatch.setattr(process, "run_cli_bounded", _recording_runner(copies, runner))
+    monkeypatch.setattr(process, "run_cli_bounded", _recording_runner(copies, runner, files))
     assert process.codex_cli_login().logged_in is True
 
 
-def _drive_the_tool_turn(monkeypatch, copies) -> None:
+def _drive_the_tool_turn(monkeypatch, copies, files) -> None:
     runner = _runner(_tool_round_lines("done"), _outcome(), [])
-    monkeypatch.setattr(codex_protocol, "run_cli_bounded", _recording_runner(copies, runner))
+    monkeypatch.setattr(codex_protocol, "run_cli_bounded", _recording_runner(copies, runner, files))
     asyncio.run(_collect_tool_events(_codex_tool_events(
         _transport(), lambda _name, _arguments: ToolOutcome("{}", False),
     )))
 
 
-def _drive_the_image_turn(monkeypatch, copies) -> None:
-    monkeypatch.setattr(
-        codex_protocol, "run_cli_bounded", _recording_runner(copies, _generated_png_runner()),
-    )
+def _drive_the_image_turn(monkeypatch, copies, files) -> None:
+    runner = _recording_runner(copies, _generated_png_runner(), files)
+    monkeypatch.setattr(codex_protocol, "run_cli_bounded", runner)
     codex_image.generate_codex_image("prompt", policy=A_COVER_POLICY, deadline=10_000_000)
 
 
@@ -1393,14 +1397,16 @@ def test_no_codex_child_is_handed_the_operators_live_refresh_token(
     clear_agent_cli_caches()
     caplog.set_level(logging.DEBUG)
     copies: list[tuple[tuple[str, ...], str]] = []
+    files: list[bytes] = []
 
-    drive(monkeypatch, copies)
+    drive(monkeypatch, copies, files)
 
     (command, child_login), = copies
     assert json.loads(child_login)["tokens"]["refresh_token"] == ""
     assert json.loads(child_login)["tokens"]["access_token"] == "access-token"
     assert codex_login_mirror.read_bytes() == operators_file
     assert _CANARY_REFRESH_TOKEN not in child_login
+    assert not any(_CANARY_REFRESH_TOKEN.encode() in content for content in files)
     assert not any(_CANARY_REFRESH_TOKEN in argument for argument in command)
     assert _CANARY_REFRESH_TOKEN not in formatted_log_text(caplog.records)
 
@@ -1441,8 +1447,22 @@ def _drive_the_probe_path(_codex_login_mirror: Path) -> BaseException:
 _MALFORMED_LOGIN_WITH_CANARY = f'{{"refresh_token": "{_CANARY_REFRESH_TOKEN}", '.encode()
 
 
+def _drive_the_credential_seam(codex_login_mirror: Path) -> BaseException:
+    with pytest.raises(process.CliCredentialNotConfiguredError) as raised:
+        process.PrivateCredentialHome(
+            codex_login_mirror,
+            Path("auth.json"),
+            prefix="seam-",
+            missing_credential_is_error=True,
+            credential_copy=process.blank_codex_refresh_token,
+        )
+    return raised.value
+
+
 @pytest.mark.parametrize(
-    "drive", (_drive_the_probe_path, _drive_the_image_path), ids=("probe", "image"),
+    "drive",
+    (_drive_the_probe_path, _drive_the_image_path, _drive_the_credential_seam),
+    ids=("probe", "image", "seam"),
 )
 def test_a_malformed_login_leaves_no_credential_content_in_the_error_chain(
     monkeypatch, codex_login_mirror: Path, drive,

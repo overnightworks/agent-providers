@@ -1327,13 +1327,17 @@ def _install_credential(
     try:
         payload = _read_credential(source)
         if credential_copy is not None:
+            login_is_usable = True
             try:
                 payload = credential_copy(payload)
             except CodexLoginMirrorError:
+                payload = b""
+                login_is_usable = False
+            if not login_is_usable:
                 if missing_credential_is_error:
-                    raise CliCredentialNotConfiguredError(
-                        "configured CLI credential is unusable"
-                    ) from None
+                    raise_without_chain(
+                        CliCredentialNotConfiguredError("configured CLI credential is unusable")
+                    )
                 log.warning(
                     "the credential at the configured path %s is not a usable login; "
                     "this probe will report a logged-out provider",

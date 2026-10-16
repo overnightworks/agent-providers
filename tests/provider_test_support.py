@@ -567,18 +567,38 @@ class RunnerFailureWatch:
     def __init__(self, monkeypatch, caplog, capfd) -> None:
         self._caplog = caplog
         self._capfd = capfd
+        self._threads_of_earlier_tests = set(threading.enumerate()) - {threading.current_thread()}
         self.unhandled_thread_errors: list[threading.ExceptHookArgs] = []
-        monkeypatch.setattr(threading, "excepthook", self.unhandled_thread_errors.append)
+        monkeypatch.setattr(threading, "excepthook", self._record_unhandled_thread_error)
         caplog.set_level(logging.DEBUG)
 
+    def _record_unhandled_thread_error(self, error: threading.ExceptHookArgs) -> None:
+        if error.thread not in self._threads_of_earlier_tests:
+            self.unhandled_thread_errors.append(error)
+
+    def _wait_for_the_runner_threads_to_end(self) -> None:
+        for thread in threading.enumerate():
+            if (
+                thread not in self._threads_of_earlier_tests
+                and thread.name.endswith("(_run_cli_bounded)")
+            ):
+                thread.join(timeout=5)
+                assert not thread.is_alive(), "a runner thread outlived its test"
+
     def reported_steps(self) -> list[str]:
+        self._wait_for_the_runner_threads_to_end()
         return [
             record.getMessage().removeprefix(RUNNER_STEP_FAILURE_PREFIX)
             for record in self._caplog.records
             if record.getMessage().startswith(RUNNER_STEP_FAILURE_PREFIX)
+            and record.thread not in self._idents_of_earlier_threads()
         ]
 
+    def _idents_of_earlier_threads(self) -> set[int | None]:
+        return {thread.ident for thread in self._threads_of_earlier_tests}
+
     def assert_nothing_leaked(self, *surfaces: BaseException | str) -> None:
+        self._wait_for_the_runner_threads_to_end()
         captured = self._capfd.readouterr()
         visible = "\n".join([
             formatted_log_text(self._caplog.records),

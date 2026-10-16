@@ -2645,6 +2645,7 @@ def test_a_report_made_while_the_log_handler_fails_never_prints_the_failure_text
         process_logger.removeHandler(handler)
 
     assert outcome.reason is CliRunReason.IO_ERROR
+    assert failure_watch.reported_steps() == ["exchange ValueError"]
     assert len(handler_errors) == 1
     assert process_pool.reservation_count() == 0
     failure_watch.assert_nothing_leaked()

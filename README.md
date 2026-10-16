@@ -63,15 +63,14 @@ the core above the client; only the service verifies tokens, so only it imports
 
 ## Install
 
-No distribution is published on PyPI, and no name is registered there.
-Install the wheels from the tag's GitHub release, by URL, so a resolver never
-asks PyPI for a name someone else could claim. An app installs the client and
-the core:
+No distribution is published on PyPI, and PyPI is not planned: wheels pinned by
+URL and hash from the tag's GitHub release give reproducible, hashed installs
+with no PyPI name to race for. An app installs the client and the core:
 
 ```bash
 pip install \
-  "overnightworks-agent-client @ https://github.com/overnightworks/agent-providers/releases/download/v0.2.0/overnightworks_agent_client-0.2.0-py3-none-any.whl" \
-  "overnightworks-agent-providers @ https://github.com/overnightworks/agent-providers/releases/download/v0.2.0/overnightworks_agent_providers-0.2.0-py3-none-any.whl"
+  "overnightworks-agent-client @ https://github.com/overnightworks/agent-providers/releases/download/v0.2.0/overnightworks_agent_client-0.2.0-py3-none-any.whl#sha256=13ef14197d90d3af3b134424ca3493320b7b47f153a2b10c7c6f34ba7718a988" \
+  "overnightworks-agent-providers @ https://github.com/overnightworks/agent-providers/releases/download/v0.2.0/overnightworks_agent_providers-0.2.0-py3-none-any.whl#sha256=0bc8090d7d4b412a628d03b8cf2285f1eacf6112ed00028f4acdd4d130654a17"
 ```
 
 The core pins the client to its own version exactly, so both URLs name the same
@@ -86,8 +85,8 @@ dependency lazily; in URL form they sit between the name and the `@`:
 
 ```bash
 pip install \
-  "overnightworks-agent-client @ https://github.com/overnightworks/agent-providers/releases/download/v0.2.0/overnightworks_agent_client-0.2.0-py3-none-any.whl" \
-  "overnightworks-agent-providers[api,image] @ https://github.com/overnightworks/agent-providers/releases/download/v0.2.0/overnightworks_agent_providers-0.2.0-py3-none-any.whl"
+  "overnightworks-agent-client @ https://github.com/overnightworks/agent-providers/releases/download/v0.2.0/overnightworks_agent_client-0.2.0-py3-none-any.whl#sha256=13ef14197d90d3af3b134424ca3493320b7b47f153a2b10c7c6f34ba7718a988" \
+  "overnightworks-agent-providers[api,image] @ https://github.com/overnightworks/agent-providers/releases/download/v0.2.0/overnightworks_agent_providers-0.2.0-py3-none-any.whl#sha256=0bc8090d7d4b412a628d03b8cf2285f1eacf6112ed00028f4acdd4d130654a17"
 ```
 
 A host that pins a git commit instead of a release resolves the client only

@@ -1,7 +1,0 @@
-claim_id = "4393be69900d446186d0fe0b2d74c0da"
-agent = "claude"
-role = "builder"
-base = "8812996d73f2734fe5a8ec24b1a66a98eeee5528"
-branch = "fix/image-gate-0147-test"
-scope = ["tests/test_codex_cli_adapter.py"]
-opened_commit = "65f2d9e2cd6e3560f3d69a14c0158f99f1cebbca"

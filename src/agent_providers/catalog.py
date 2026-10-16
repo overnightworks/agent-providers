@@ -154,6 +154,14 @@ type ProviderConfiguration = (
 
 @dataclass(frozen=True)
 class ProviderRouteSnapshot:
+    """What one probe of a provider route found.
+
+    ``models`` is ``list_provider_models``' answer for the route when
+    ``readiness`` is ``READY``, and empty otherwise. It is neither fixed nor
+    complete: a name missing from it is no proof that the route refuses it.
+    ``catalogue_failure`` names why a probed catalogue failed.
+    """
+
     models: tuple[str, ...]
     catalogue_failure: SafeRouteReason | None
     catalog_source: str | None
@@ -295,6 +303,22 @@ def _cli_is_logged_in(provider: str) -> bool:
 
 
 def list_provider_models(provider: str, route: ProviderRoute) -> list[str]:
+    """The model names this route offers for a turn, as its provider lists them now.
+
+    Every provider answers with the same kind of value: a name that a turn on
+    this route accepts as its model. A name is not a fixed model. The Claude CLI
+    lists aliases (``opus``, ``sonnet[1m]``) that the CLI maps itself, and an API
+    id can be a provider-side alias too. Nor is the list complete: it keeps only
+    the names that carry the provider's model prefix or pass its chat filter,
+    Codex leaves out the slugs its CLI hides, and the Claude CLI
+    also accepts full model ids that it does not list. A name missing from the
+    list is no proof that the route refuses it.
+
+    Codex keeps its CLI's priority order; every other route is sorted by name.
+    Raises ProviderModelCatalogUnavailableError rather than return an empty
+    list, and ProviderUnavailableError for an unknown provider or a missing API
+    key.
+    """
     config = current_config()
     if provider not in COWRITER_PROVIDERS:
         raise ProviderUnavailableError(provider, f"Unknown co-writer provider '{provider}'")

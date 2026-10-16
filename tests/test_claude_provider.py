@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import anyio
 import pytest
 from provider_test_support import (
+    CLAUDE_MODEL_CATALOG_STDOUT,
     COWRITER_TOOL_CATALOG,
     MCP_TOOL_NAMES,
     SECRET_ENV_KEYS,
@@ -247,13 +248,6 @@ def test_clearing_the_provider_login_cache_delegates_to_the_runner() -> None:
 # ── list_cli_model_aliases ───────────────────────────────────────────
 
 
-_MODEL_CATALOG_STDOUT = (
-    "Current model: `Opus 5 (1M context)` (effort: high)\n"
-    "Usage: /model <name>. Available: sonnet, opus, haiku, fable, best, "
-    "sonnet[1m], opus[1m], fable[1m], opusplan, default, or a full model ID.\n"
-)
-
-
 def _catalog_run(
     stdout: str = "",
     returncode: int = 0,
@@ -277,7 +271,7 @@ def test_list_cli_model_aliases_parses_available_line() -> None:
         ),
         patch(
             "agent_providers.claude.provider.run_claude_catalog_cli",
-            return_value=_catalog_run(_MODEL_CATALOG_STDOUT),
+            return_value=_catalog_run(CLAUDE_MODEL_CATALOG_STDOUT),
         ),
     ):
         aliases = list_cli_model_aliases()

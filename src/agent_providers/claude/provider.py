@@ -498,6 +498,9 @@ def list_cli_model_aliases() -> list[str]:
     machine-readable catalog endpoint for a CLI-only login. Raises
     UnavailableError, never returns an empty list, if that text doesn't
     contain the expected `Available: a, b, c.` fragment.
+
+    The CLI's closing "or a full model ID" is not a name, and the flag also
+    takes full ids that this list does not hold.
     """
     binary = _require_claude_binary()
     run = run_claude_catalog_cli(binary, ("-p", "/model"))

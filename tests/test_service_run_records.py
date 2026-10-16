@@ -516,13 +516,13 @@ def test_the_reachability_walk_finds_a_canary_that_is_there() -> None:
 
 
 class _ComparisonSpy(str):
-    def __new__(cls, text: str, compared: list[str]) -> _ComparisonSpy:
+    def __new__(cls, text: str, compared: list[tuple[str, object]]) -> _ComparisonSpy:
         spy = super().__new__(cls, text)
         spy.compared = compared
         return spy
 
     def __eq__(self, other: object) -> bool:
-        self.compared.append(str(self))
+        self.compared.append((str(self), other))
         return super().__eq__(other)
 
     __hash__ = str.__hash__
@@ -531,11 +531,11 @@ class _ComparisonSpy(str):
 def test_a_read_of_an_id_never_begun_still_compares_app_issuer_and_subject(
     records: RunRecords,
 ) -> None:
-    compared: list[str] = []
+    compared: list[tuple[str, object]] = []
     app = _ComparisonSpy("app", compared)
     reader = Principal(_ComparisonSpy("issuer", compared), _ComparisonSpy("subject", compared))
 
     answer = records.read(uuid4(), app, reader)
 
     assert answer is None
-    assert sorted(compared) == ["app", "issuer", "subject"]
+    assert sorted(compared) == [("app", ""), ("issuer", ""), ("subject", "")]

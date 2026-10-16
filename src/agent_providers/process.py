@@ -1334,34 +1334,22 @@ def _run_without_credential_remains[T](step: Callable[[], T]) -> T:
     A traceback keeps every frame it passed through alive, locals included, and
     so does every exception chained beneath it: the decoder's error holds the
     document itself. This frame holds no bytes, so it clears the frames of the
-    failure and of each link the step created, cuts those links off, and lets the
-    same exception continue as if raised here, still chained to what the caller
-    was handling. A refusal that deliberately carries no context keeps none.
+    failure, cuts the links the step created off, and lets the same exception
+    continue as if raised here, still chained to what the caller
+    was handling. A refusal that deliberately carries no context keeps none, and
+    the caller's own exception passes through untouched.
     """
     handled_by_the_caller = sys.exception()
     try:
         return step()
     except BaseException as failure:
-        _clear_frames_of_the_links_below(failure, handled_by_the_caller)
+        if failure is handled_by_the_caller:
+            raise
+        traceback.clear_frames(failure.__traceback__.tb_next)
         failure.__cause__ = None
         if failure.__context__ is not None:
             failure.__context__ = handled_by_the_caller
         raise
-
-
-def _clear_frames_of_the_links_below(
-    failure: BaseException, handled_by_the_caller: BaseException | None,
-) -> None:
-    traceback.clear_frames(failure.__traceback__.tb_next)
-    pending = [failure.__cause__, failure.__context__]
-    cleared = {id(failure), id(handled_by_the_caller)}
-    while pending:
-        link = pending.pop()
-        if link is None or id(link) in cleared:
-            continue
-        cleared.add(id(link))
-        traceback.clear_frames(link.__traceback__)
-        pending.extend((link.__cause__, link.__context__))
 
 
 def _read_credential_file(path: Path) -> bytes | None:

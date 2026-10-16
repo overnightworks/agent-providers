@@ -2429,9 +2429,7 @@ def test_the_credential_reader_reports_a_missing_file_as_absent(tmp_path: Path) 
     assert process._read_credential_file(tmp_path / "missing") is None
 
 
-def _assert_nothing_reachable_holds_the_credential(
-    error: BaseException, *, handled_by_the_caller: BaseException | None,
-) -> None:
+def _assert_no_link_holds_the_credential(error: BaseException) -> None:
     # Pytest's assertion rewriting would keep the literal in the test's own frame,
     # which the handled exception's traceback reaches.
     assert not traceback_frames_hold(error, "canary-")
@@ -2439,17 +2437,23 @@ def _assert_nothing_reachable_holds_the_credential(
         attributes = f"{link.args} {vars(link)}"
         assert "canary-" not in attributes
     assert error.__cause__ is None
+
+
+def _assert_nothing_reachable_holds_the_credential(
+    error: BaseException, *, handled_by_the_caller: BaseException | None,
+) -> None:
+    _assert_no_link_holds_the_credential(error)
     assert error.__context__ is handled_by_the_caller
     if handled_by_the_caller is not None:
         callers_frame = handled_by_the_caller.__traceback__.tb_next.tb_frame
         assert callers_frame.f_locals == {"callers_own_state": "intact"}
 
 
-def _enter_through_the_login_decider(tmp_path: Path) -> None:
-    process.codex_cli_login_is_usable()
+def _enter_through_the_login_decider(tmp_path: Path) -> bool:
+    return process.codex_cli_login_is_usable()
 
 
-def _enter_through_a_private_credential_home(tmp_path: Path) -> None:
+def _enter_through_a_private_credential_home(tmp_path: Path) -> str:
     PrivateCredentialHome(
         current_config().codex_cli_auth_file,
         Path(".codex/auth.json"),
@@ -2457,6 +2461,7 @@ def _enter_through_a_private_credential_home(tmp_path: Path) -> None:
         missing_credential_is_error=True,
         credential_copy=process.blank_codex_refresh_token,
     )
+    return "installed"
 
 
 _CREDENTIAL_HANDLING_CODE = frozenset(
@@ -2524,10 +2529,38 @@ def _a_stored_login_read_whole():
 
 
 _LOGIN_SCENARIOS = {
-    "usable": (a_codex_login(), _a_stored_login_read_whole),
-    "malformed": (b'{"token":"canary-access-token",', _a_stored_login_read_whole),
-    "incomplete": (a_codex_login(tokens={"refresh_token": ""}), _a_stored_login_read_whole),
-    "read-fails-mid-way": (a_codex_login(), _a_read_that_fails_after_one_chunk),
+    "usable": (
+        a_codex_login(),
+        _a_stored_login_read_whole,
+        {
+            _enter_through_the_login_decider: True,
+            _enter_through_a_private_credential_home: "installed",
+        },
+    ),
+    "malformed": (
+        b'{"token":"canary-access-token",',
+        _a_stored_login_read_whole,
+        {
+            _enter_through_the_login_decider: AgentCliUnavailableError,
+            _enter_through_a_private_credential_home: CliCredentialNotConfiguredError,
+        },
+    ),
+    "incomplete": (
+        a_codex_login(tokens={"id_token": ""}),
+        _a_stored_login_read_whole,
+        {
+            _enter_through_the_login_decider: False,
+            _enter_through_a_private_credential_home: CliCredentialNotConfiguredError,
+        },
+    ),
+    "read-fails-mid-way": (
+        a_codex_login(),
+        _a_read_that_fails_after_one_chunk,
+        {
+            _enter_through_the_login_decider: AgentCliUnavailableError,
+            _enter_through_a_private_credential_home: AgentCliUnavailableError,
+        },
+    ),
 }
 
 
@@ -2589,7 +2622,7 @@ _INSIDE_A_HANDLER = pytest.mark.parametrize(
 def test_an_interruption_at_any_line_propagates_holding_no_credential_bytes(
     tmp_path: Path, enter, inside_a_handler: bool, scenario: str,
 ) -> None:
-    document, around_the_read = _LOGIN_SCENARIOS[scenario]
+    document, around_the_read, endings = _LOGIN_SCENARIOS[scenario]
     store_codex_login(tmp_path, document)
     open_descriptors = len(os.listdir("/proc/self/fd"))
     interrupted_lines = 0
@@ -2598,30 +2631,37 @@ def test_an_interruption_at_any_line_propagates_holding_no_credential_bytes(
         with around_the_read():
             sys.settrace(_interrupt_at_line(position))
             try:
-                enter(tmp_path)
+                return enter(tmp_path), None, handled
             except KeyboardInterrupt as interruption:
-                return interruption, handled
-            except Exception:
-                return None, handled
+                return None, interruption, handled
+            except Exception as refusal:
+                return None, refusal, handled
             finally:
                 sys.settrace(None)
-        return None, handled
 
     position = 1
-    while (
-        outcome := _drive_in_the_caller(
+    while True:
+        ending, failure, handled = _drive_in_the_caller(
             inside_a_handler, lambda handled: enter_interrupted_at(position, handled),
         )
-    )[0] is not None:
-        interruption, handled = outcome
-        _assert_nothing_reachable_holds_the_credential(
-            interruption, handled_by_the_caller=handled,
-        )
+        if failure is not None:
+            _assert_no_link_holds_the_credential(failure)
         assert len(os.listdir("/proc/self/fd")) == open_descriptors
+        if not isinstance(failure, KeyboardInterrupt):
+            break
+        _assert_nothing_reachable_holds_the_credential(
+            failure, handled_by_the_caller=handled,
+        )
         interrupted_lines += 1
         position += 1
 
     assert interrupted_lines > 5
+    expected_ending = endings[enter]
+    if isinstance(expected_ending, type):
+        assert type(failure) is expected_ending, (ending, failure)
+    else:
+        assert failure is None
+        assert ending == expected_ending
 
 
 @_BOTH_ENTRY_POINTS
@@ -2651,3 +2691,31 @@ def test_a_memory_error_inside_the_malformed_handler_holds_no_credential_bytes(
 
     _assert_nothing_reachable_holds_the_credential(failure, handled_by_the_caller=handled)
     assert len(os.listdir("/proc/self/fd")) == open_descriptors
+
+
+@pytest.mark.usefixtures("a_stored_codex_login")
+def test_a_credential_copy_that_re_raises_the_callers_exception_leaves_it_untouched(
+    tmp_path: Path,
+) -> None:
+    def copy_that_re_raises(source_document: bytes) -> bytes:
+        raise
+
+    def enter_with_the_re_raising_copy(handled: BaseException):
+        with pytest.raises(RuntimeError) as raised:
+            PrivateCredentialHome(
+                current_config().codex_cli_auth_file,
+                Path(".codex/auth.json"),
+                prefix="private-home-",
+                missing_credential_is_error=True,
+                credential_copy=copy_that_re_raises,
+            )
+        return raised.value, handled
+
+    propagated, handled = _drive_in_the_caller(True, enter_with_the_re_raising_copy)
+
+    assert propagated is handled
+    assert propagated.__context__ is None
+    callers_traceback = propagated.__traceback__
+    while callers_traceback.tb_next is not None:
+        callers_traceback = callers_traceback.tb_next
+    assert callers_traceback.tb_frame.f_locals == {"callers_own_state": "intact"}

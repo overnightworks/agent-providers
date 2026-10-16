@@ -1349,10 +1349,11 @@ class _ExceptionLinks:
         )
 
     def restore(self) -> None:
-        self.exception.__traceback__ = self.traceback
-        self.exception.__context__ = self.context
-        self.exception.__cause__ = self.cause
-        self.exception.__suppress_context__ = self.suppress_context
+        restored = self.exception
+        restored.__traceback__ = self.traceback
+        restored.__context__ = self.context
+        restored.__cause__ = self.cause
+        restored.__suppress_context__ = self.suppress_context
 
 
 def _run_without_credential_remains[T](step: Callable[[], T]) -> T:

@@ -14,8 +14,10 @@ from provider_test_support import (
     CALLER_CONTEXTS,
     COWRITER_TOOL_CATALOG,
     DEEPLY_NESTED_JSON,
+    SAMPLE_TOOL_MARKUP,
     CallerCanaryError,
 )
+from pydantic import ValidationError
 
 from agent_client.tools import ToolDeclaration
 from agent_providers.text_tool_protocol import (
@@ -296,6 +298,7 @@ A_CATALOG_WITH_A_NUMBER = ToolCatalog(
             },
         ),
     ),
+    markup=SAMPLE_TOOL_MARKUP,
 )
 
 
@@ -346,14 +349,34 @@ A_BRANDED_CATALOG = ToolCatalog(
 )
 
 
-def test_the_default_markup_is_the_wording_this_package_shipped_with():
-    markup = ToolProtocolMarkup()
+@pytest.mark.parametrize(
+    ("model", "fields", "missing"),
+    [
+        (ToolCatalog, {"tools": COWRITER_TOOL_CATALOG.tools}, {"markup"}),
+        (ToolProtocolMarkup, {}, {"tag_namespace", "product_name"}),
+        (ToolProtocolMarkup, {"product_name": "Atelier"}, {"tag_namespace"}),
+        (ToolProtocolMarkup, {"tag_namespace": "atelier"}, {"product_name"}),
+    ],
+)
+def test_a_catalog_or_markup_without_its_brand_is_refused_by_field_name(model, fields, missing):
+    with pytest.raises(ValidationError) as refusal:
+        model(**fields)
 
-    assert markup.call_open_tag == "<songmaker_tool_call>"
-    assert markup.call_close_tag == "</songmaker_tool_call>"
-    assert markup.result_open_tag == "<songmaker_tool_result>"
-    assert markup.result_close_tag == "</songmaker_tool_result>"
-    assert markup.product_name == "Songmaker"
+    refused = {error["loc"][0] for error in refusal.value.errors()}
+    assert refused == missing
+    assert {error["type"] for error in refusal.value.errors()} == {"missing"}
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"tag_namespace": "", "product_name": "Atelier"},
+        {"tag_namespace": "atelier", "product_name": ""},
+    ],
+)
+def test_an_empty_brand_is_refused(fields):
+    with pytest.raises(ValidationError):
+        ToolProtocolMarkup(**fields)
 
 
 def test_a_host_brands_the_prompt_and_the_markers_it_is_parsed_with():
@@ -455,6 +478,7 @@ def _deeply_nested_catalog(depth: int) -> tuple[ToolCatalog, str]:
         schema = {"type": "object", "properties": {"n": schema}}
     catalog = ToolCatalog(
         tools=(ToolDeclaration(name="nest", description="Nest.", parameters=schema),),
+        markup=SAMPLE_TOOL_MARKUP,
     )
     arguments = '{"n":' * depth + "{}" + "}" * depth
     return catalog, _call(f'{{"name":"nest","arguments":{arguments}}}')

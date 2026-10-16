@@ -2398,8 +2398,10 @@ def test_a_channel_publishes_its_own_overrun_when_the_settle_instant_passes() ->
 
 
 def test_a_channel_without_a_settle_instant_still_times_out() -> None:
+    channel = CliLineChannel(maximum_lines=1)
+
     with pytest.raises(TimeoutError):
-        CliLineChannel(maximum_lines=1).receive(timeout=0.01)
+        channel.receive(timeout=0.01)
 
 
 @pytest.fixture

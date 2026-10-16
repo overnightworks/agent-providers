@@ -289,8 +289,9 @@ def test_a_grok_tool_turn_whose_runner_fails_ends_promptly_and_removes_its_home(
     transport = _transport()
 
     async def fail_and_close() -> ProviderUnavailableError:
+        responses = asyncio.wait_for(_collect_transport_responses(transport), timeout=1)
         with pytest.raises(ProviderUnavailableError) as raised:
-            await asyncio.wait_for(_collect_transport_responses(transport), timeout=1)
+            await responses
         await transport.aclose()
         return raised.value
 

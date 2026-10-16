@@ -3479,10 +3479,9 @@ def test_probe_runner_start_failure_is_a_closed_probe_failure_that_frees_its_res
     thread_start_error = RuntimeError(f"thread start failed {A_RUNNER_FAILURE_CANARY}")
     fail_to_start_the_runner_thread(monkeypatch, thread_start_error)
 
+    deadline = time.monotonic() + 1
     with pytest.raises(UnavailableError) as raised:
-        provider._probe_cli_surface_sync(
-            Path("/usr/bin/claude"), mcp=None, deadline=time.monotonic() + 1,
-        )
+        provider._probe_cli_surface_sync(Path("/usr/bin/claude"), mcp=None, deadline=deadline)
 
     assert str(raised.value) == "Claude CLI probe failed to run"
     assert watch.reported_steps() == ["start RuntimeError"]
@@ -3546,10 +3545,9 @@ def test_a_probe_failure_message_carries_no_runner_exception_text(
     monkeypatch.setattr(provider, "CLAUDE_CLI_MAX_CONCURRENT_PROCESSES", 1)
     homes = _a_probe_runner_that_reports(failed_outcome, monkeypatch)
 
+    deadline = time.monotonic() + 1
     with pytest.raises(UnavailableError) as raised:
-        provider._probe_cli_surface_sync(
-            Path("/usr/bin/claude"), mcp=None, deadline=time.monotonic() + 1,
-        )
+        provider._probe_cli_surface_sync(Path("/usr/bin/claude"), mcp=None, deadline=deadline)
 
     assert str(raised.value) == "Claude CLI probe failed to run"
     assert raised.value.__cause__ is None

@@ -564,12 +564,11 @@ def test_a_codex_tool_turn_whose_spawn_raises_a_base_exception_ends_with_a_named
         raise BaseException(A_RUNNER_FAILURE_CANARY)
 
     monkeypatch.setattr(process, "open_pipes", spawn_that_raises)
-    turn = _collect_tool_events(_codex_tool_events(
-        _transport(), lambda _name, _arguments: ToolOutcome("{}", False),
-    ))
+    events = _codex_tool_events(_transport(), lambda _name, _arguments: ToolOutcome("{}", False))
+    turn = asyncio.wait_for(_collect_tool_events(events), timeout=5)
 
     with pytest.raises(ProviderUnavailableError) as failure:
-        asyncio.run(asyncio.wait_for(turn, timeout=5))
+        asyncio.run(turn)
 
     assert process_pool.reservation_count() == 0
     watch.assert_nothing_leaked(failure.value)

@@ -17,7 +17,7 @@ import weakref
 from collections import deque
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Final, Literal, NotRequired, Required, TypedDict, Unpack, cast
@@ -225,16 +225,22 @@ class _StepFailures:
     def __init__(self, *, catching: type[BaseException] = BaseException) -> None:
         self._catching = catching
         self._failed: list[str] = []
+        self._errors: dict[str, BaseException] = {}
 
     @contextmanager
-    def contained(self, step: str) -> Iterator[None]:
+    def contained(self, step: str, *, reported: bool = True) -> Iterator[None]:
         try:
             yield
         except self._catching as error:
-            self.record(step, error)
+            self._errors[step] = error
+            if reported:
+                self._failed.append(f"{step} {type(error).__name__}")
 
-    def record(self, step: str, error: BaseException) -> None:
-        self._failed.append(f"{step} {type(error).__name__}")
+    def failed(self, step: str) -> bool:
+        return step in self._errors
+
+    def error_raised_by(self, step: str) -> BaseException:
+        return self._errors[step]
 
     def report(self) -> None:
         for failure in self._failed:
@@ -509,9 +515,11 @@ def run_cli_bounded(
     )
     state = _BoundedRunState()
     worker = threading.Thread(target=_run_cli_bounded, args=(state, child, request), daemon=True)
-    start_failure = _start_worker(worker)
-    if start_failure is not None:
-        return _settle_unstarted_run(state, request, start_failure)
+    failures = _StepFailures()
+    with failures.contained("start"):
+        worker.start()
+    if failures.failed("start"):
+        return _settle_unstarted_run(state, request, failures)
     if state.completed.wait(timeout=max(request.deadline - time.monotonic(), 0)):
         return _recorded_outcome(state)
     if not state.started.is_set():
@@ -522,21 +530,12 @@ def run_cli_bounded(
     return _settle_from_caller(state, request, _cleanup_overran_outcome(started=True))
 
 
-def _start_worker(worker: threading.Thread) -> BaseException | None:
-    try:
-        worker.start()
-    except BaseException as error:
-        return error
-    return None
-
-
 def _settle_unstarted_run(
     state: _BoundedRunState,
     request: _CliRunRequest,
-    start_failure: BaseException,
+    failures: _StepFailures,
 ) -> CliRunOutcome:
-    failures = _StepFailures()
-    failures.record("start", start_failure)
+    start_failure = failures.error_raised_by("start")
     with failures.contained("on_spawn_failed"):
         _notify_spawn_failed(request.on_spawn_failed)
     outcome = _settle(
@@ -641,19 +640,17 @@ def _start_bounded_cli(
     failures: _StepFailures,
 ) -> tuple[PipedProcess | CliRunOutcome, str | None]:
     prompt_file_path: str | None = None
-    spawn_failure: BaseException | None = None
-    try:
+    with failures.contained("spawn", reported=False):
         prompted_child, prompt_file_path = _with_private_prompt_file(
             child,
             request.prompt_file_bytes,
             request.prompt_file_arg_index,
         )
         return open_pipes(prompted_child, stderr=request.stderr), prompt_file_path
-    except BaseException as error:
-        spawn_failure = error
     with failures.contained("on_spawn_failed"):
         _notify_spawn_failed(request.on_spawn_failed)
-    return _spawn_failure_outcome(spawn_failure), prompt_file_path
+    spawn_failure = _spawn_failure_outcome(failures.error_raised_by("spawn"))
+    return spawn_failure, prompt_file_path
 
 
 def _spawn_failure_outcome(error: BaseException) -> CliRunOutcome:
@@ -743,7 +740,16 @@ def _outcome_after_prompt_file_cleanup(
         prompt_file_removed = True
     if prompt_file_removed:
         return outcome
-    return replace(outcome, complete=False, reason=CliRunReason.IO_ERROR, io_error=None)
+    return CliRunOutcome(
+        started=outcome.started,
+        spawn_error=outcome.spawn_error,
+        returncode=outcome.returncode,
+        stdout=outcome.stdout,
+        stderr=outcome.stderr,
+        complete=False,
+        became_zombie=outcome.became_zombie,
+        reason=CliRunReason.IO_ERROR,
+    )
 
 
 def _with_private_prompt_file(

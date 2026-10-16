@@ -108,8 +108,9 @@ def test_claude_api_turn_fails_with_a_safe_code_and_runs_no_tool(
         ):
             pass
 
+    turn = _drive_turn()
     with pytest.raises(ProviderUnavailableError) as failure:
-        asyncio.run(_drive_turn())
+        asyncio.run(turn)
 
     assert failure.value.reason.code is safe_code
     assert executed_tools == []

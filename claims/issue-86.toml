@@ -1,0 +1,8 @@
+claim_id = "50da5e838d604e628e907bf21f449ca4"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "f1305ae3d0110ed2ddc194463f3b33227738e9a2"
+branch = "claude/issue-86-provider-name-library-texts"
+scope = ["README.md", "src/agent_providers/catalog.py", "src/agent_providers/constants.py", "src/agent_providers/dispatch.py", "src/agent_providers/errors.py", "tests/test_catalog.py", "tests/test_cowriter_errors.py", "tests/test_dispatch.py", "tests/test_route_failures.py"]
+opened_commit = "e1d607ed5cef680ffbe5c834c7e4b2b05c08a97f"
+whole_reason = "ProviderName replaces COWRITER_PROVIDERS at its one owner and every reader in the same breaking slice, with the texts a caller sees."

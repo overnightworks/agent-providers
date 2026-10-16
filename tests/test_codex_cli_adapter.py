@@ -16,11 +16,13 @@ import pytest
 from PIL import Image
 from provider_test_support import (
     A_CALLER_CANARY,
+    A_RUNNER_FAILURE_CANARY,
     CALLER_CONTEXTS,
     CANARY_ACCESS_TOKEN,
     DEEPLY_NESTED_JSON,
     SAMPLE_TOOL_CATALOG,
     CallerCanaryError,
+    RunnerFailureWatch,
     a_call_nested_too_deeply_to_decode,
     a_call_to_an_undeclared_tool_carrying,
     a_codex_login,
@@ -550,6 +552,28 @@ def test_codex_tool_transport_cleans_its_home_and_does_not_log_protocol_text(
     assert "Codex CLI tool round provider=codex route=cli round=1 duration_ms=" in caplog.text
     for forbidden in (text, note_id, protocol, "private stderr", "private.jsonl"):
         assert forbidden not in caplog.text
+
+
+def test_a_codex_tool_turn_whose_spawn_raises_a_base_exception_ends_with_a_named_failure(
+    monkeypatch, caplog, capfd,
+) -> None:
+    watch = RunnerFailureWatch(monkeypatch, caplog, capfd)
+    process_pool = CodexProcessPool(maximum_processes=2, maximum_image_runs=1)
+    use_codex_process_pool(monkeypatch, process_pool)
+
+    def spawn_that_raises(*_arguments, **_keywords):
+        raise BaseException(A_RUNNER_FAILURE_CANARY)
+
+    monkeypatch.setattr(process, "open_pipes", spawn_that_raises)
+    events = _codex_tool_events(_transport(), lambda _name, _arguments: ToolOutcome("{}", False))
+    turn = asyncio.wait_for(_collect_tool_events(events), timeout=5)
+
+    with pytest.raises(ProviderUnavailableError) as failure:
+        asyncio.run(turn)
+
+    assert process_pool.reservation_count() == 0
+    assert watch.reported_steps() == []
+    watch.assert_nothing_leaked(failure.value)
 
 
 def test_deadline_before_spawn_keeps_the_codex_slot_until_late_reap(monkeypatch) -> None:

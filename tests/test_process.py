@@ -2564,9 +2564,23 @@ def test_a_reap_that_raises_is_handed_off_with_a_sigkill_and_a_background_reap(
         handed_off.append(child)
         background_reap_ended.set()
 
-    monkeypatch.setattr(process, "_reap_process_group", _raising(
-        PermissionError(A_RUNNER_FAILURE_CANARY),
-    ))
+    class StdinWhoseCloseFails:
+        def __init__(self, stdin) -> None:
+            self._stdin = stdin
+
+        @property
+        def closed(self) -> bool:
+            return self._stdin.closed
+
+        def close(self) -> None:
+            self._stdin.close()
+            raise OSError(ANOTHER_RUNNER_FAILURE_CANARY)
+
+    def fail_the_reap_and_the_stdin_close(child) -> bool:
+        child.stdin = StdinWhoseCloseFails(child.stdin)
+        raise PermissionError(A_RUNNER_FAILURE_CANARY)
+
+    monkeypatch.setattr(process, "_reap_process_group", fail_the_reap_and_the_stdin_close)
     monkeypatch.setattr(process, "_reap_in_background", capture_background_reap)
     deadline = time.monotonic() + 0.05
 
@@ -2582,7 +2596,7 @@ def test_a_reap_that_raises_is_handed_off_with_a_sigkill_and_a_background_reap(
     assert all(stream.closed for stream in handed_off_streams)
     assert held_at_release == [1]
     assert process_pool.reservation_count() == 0
-    assert failure_watch.reported_steps() == ["reap PermissionError"]
+    assert failure_watch.reported_steps() == ["reap PermissionError", "hand-off close OSError"]
     failure_watch.assert_nothing_leaked()
 
 

@@ -38,9 +38,9 @@ from service_support import (
 )
 from webauth.jwt_verification import KEY_SET_REFRESH_COOLDOWN_SECONDS, KeySetFetchError
 
-from agent_client.wire import Failed, FailureCode, RejectionCode
+from agent_client.wire import Failed, FailureCode, RejectionCode, RunRejection
 from agent_providers.events import AssistantTextEvent, FinalEvent
-from agent_service.app import create_app
+from agent_service.app import create_app, rejection
 from agent_service.routing import Api, Cli
 from agent_service.run_request import MAX_REQUEST_BYTES
 from agent_service.runners import Runners
@@ -538,3 +538,23 @@ def test_the_admitted_purpose_is_the_one_the_runner_receives(service, runners):
 
     assert runners.cli.admitted[-1].request.purpose == COWRITER
     assert runners.cli.admitted[-1].app == "songmaker"
+
+
+@pytest.mark.parametrize("code", list(RejectionCode))
+def test_every_rejection_code_answers_with_a_status_and_a_message(code):
+    response = rejection(code)
+
+    body = RunRejection.model_validate_json(response.body)
+    assert (body.code, bool(body.message)) == (code, True)
+    assert 400 <= response.status_code < 600
+
+
+def test_a_capability_too_large_rejection_is_422_with_its_own_message_and_no_retry():
+    response = rejection(RejectionCode.CAPABILITY_TOO_LARGE)
+
+    body = RunRejection.model_validate_json(response.body)
+    assert response.status_code == 422
+    assert body.message == "This run's capability would exceed 8192 characters."
+    assert response.headers["cache-control"] == "no-store"
+    assert "www-authenticate" not in response.headers
+    assert "retry-after" not in response.headers

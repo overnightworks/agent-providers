@@ -1,4 +1,4 @@
-"""Grok subscription CLI transport for one co-writer tool-loop turn."""
+"""Grok subscription CLI transport for one tool-loop turn."""
 
 from __future__ import annotations
 
@@ -18,15 +18,17 @@ from agent_providers.claude.provider import (
 )
 from agent_providers.config import current_config, current_turn_config
 from agent_providers.constants import (
-    COWRITER_CLI_TIMEOUT_SECONDS,
-    COWRITER_GROK_CLI_LINE_CHANNEL_CAPACITY,
+    GROK_CLI_LINE_CHANNEL_CAPACITY,
     GROK_CLI_STREAMING_OUTPUT_FORMAT,
+    TURN_TIMEOUT_SECONDS,
 )
 from agent_providers.errors import (
     ProviderUnavailableError,
     SafeRouteReasonCode,
+    TextToolCallRejectedError,
     ToolProtocolRejectionCode,
     normalize_route_failure,
+    raise_without_chain,
 )
 from agent_providers.process import (
     AgentCliUnavailableError,
@@ -44,6 +46,7 @@ from agent_providers.text_tool_protocol import (
 from agent_providers.text_tool_protocol import (
     TextToolCall,
     TextToolProtocolError,
+    TextToolRejection,
     TextToolStreamParser,
     render_tool_result,
 )
@@ -60,8 +63,7 @@ from agent_providers.tools import ToolCatalog
 
 _AUTH_FAILURE_MARKERS: Final = ("401", "oidc", "unauthenticated")
 # "usage" is dropped with the rest: this transport reports no token deltas
-# yet. Surfacing them as a `UsageEvent` is named follow-up work on #825
-# (planner gap 7, atelier-2 port requirement 7) and starts here.
+# yet; surfacing them as a `UsageEvent` would start here.
 _IGNORED_EVENT_TYPES: Final = frozenset({"thought", "usage", "available_commands", "plan"})
 _PROMPT_FILE_ARGUMENT_INDEX: Final = 1
 # Grok owns this larger bound because a 600-second streamed turn can include
@@ -119,7 +121,7 @@ class GrokCliToolTransport:
                 normalize_route_failure(SafeRouteReasonCode.CLI_PROTOCOL_ERROR),
             ) from exc
         self._working_directory = self._home.path.resolve()
-        self._deadline = time.monotonic() + COWRITER_CLI_TIMEOUT_SECONDS
+        self._deadline = time.monotonic() + TURN_TIMEOUT_SECONDS
         self._session_id: str | None = None
         self._round_index = 0
         self._closed = False
@@ -146,22 +148,15 @@ class GrokCliToolTransport:
         """Stream one response and retain its server-issued session ID."""
         if self._closed:
             raise RuntimeError("Grok CLI tool transport is closed")
-        try:
-            prompt = _tool_transport_prompt(self._catalog, message)
-        except TextToolProtocolError:
-            _log_tool_protocol_rejection(ToolProtocolRejectionCode.TOOL_RESULT_BATCH_INVALID)
-            raise ProviderUnavailableError(
-                "grok",
-                "cli",
-                normalize_route_failure(SafeRouteReasonCode.TOOL_PROTOCOL_ERROR),
-            ) from None
+        _refuse_a_multi_result_batch(message)
+        prompt = _tool_transport_prompt(self._catalog, message)
         is_resume = self._session_id is not None
         if is_resume:
             arguments = _grok_cli_tool_arguments(self._model, self._session_id)
         else:
             arguments = _grok_cli_tool_arguments(self._model)
         self._round_index += 1
-        channel = CliLineChannel(COWRITER_GROK_CLI_LINE_CHANNEL_CAPACITY)
+        channel = CliLineChannel(GROK_CLI_LINE_CHANNEL_CAPACITY)
         try:
             child = self._child_for(arguments)
             home_reservation = self._home.reserve()
@@ -184,6 +179,7 @@ class GrokCliToolTransport:
         parser = TextToolStreamParser(self._catalog)
         state = _GrokToolRoundState()
         started_at = time.monotonic()
+        rejection: TextToolRejection | None = None
         try:
             while True:
                 item = await asyncio.to_thread(channel.receive)
@@ -206,15 +202,10 @@ class GrokCliToolTransport:
             )
             self._session_id = session_id
             yield response
-        except TextToolProtocolError:
+        except TextToolProtocolError as refused:
             channel.request_abort()
             await asyncio.shield(runner)
-            _log_tool_protocol_rejection(ToolProtocolRejectionCode.TEXT_TOOL_RESPONSE_INVALID)
-            raise ProviderUnavailableError(
-                "grok",
-                "cli",
-                normalize_route_failure(SafeRouteReasonCode.TOOL_PROTOCOL_ERROR),
-            ) from None
+            rejection = refused.rejection
         except _GrokCliStreamFailure as exc:
             channel.request_abort()
             await asyncio.shield(runner)
@@ -232,11 +223,23 @@ class GrokCliToolTransport:
         finally:
             channel.request_abort()
             await asyncio.shield(runner)
+        if rejection is not None:
+            raise_without_chain(TextToolCallRejectedError("grok", "cli", rejection))
 
     async def aclose(self) -> None:
         """Request cleanup after every current or background reaper finishes."""
         self._closed = True
         await asyncio.shield(asyncio.to_thread(self._home.close))
+
+
+def _refuse_a_multi_result_batch(message: InitialTurn | ToolResultBatch) -> None:
+    if isinstance(message, ToolResultBatch) and len(message.results) != 1:
+        _log_tool_protocol_rejection(ToolProtocolRejectionCode.TOOL_RESULT_BATCH_INVALID)
+        raise ProviderUnavailableError(
+            "grok",
+            "cli",
+            normalize_route_failure(SafeRouteReasonCode.TOOL_PROTOCOL_ERROR),
+        )
 
 
 def _tool_transport_prompt(
@@ -248,12 +251,10 @@ def _tool_transport_prompt(
             message.system,
             flatten_messages("", message.messages),
         ).encode()
-    if len(message.results) != 1:
-        raise TextToolProtocolError()
     result = message.results[0]
     try:
         value = json.loads(result.content)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, RecursionError):
         value = result.content
     return render_tool_result(catalog, value).encode()
 
@@ -360,7 +361,7 @@ def _log_tool_round(
 ) -> None:
     duration_ms = round((time.monotonic() - started_at) * 1000)
     log.info(
-        "Co-writer Grok CLI provider=grok route=cli round=%s session=%s "
+        "Grok CLI tool round provider=grok route=cli round=%s session=%s "
         "duration_ms=%s tool=%s is_error=%s",
         round_index,
         session_id,
@@ -372,7 +373,7 @@ def _log_tool_round(
 
 def _log_tool_protocol_rejection(code: ToolProtocolRejectionCode) -> None:
     log.warning(
-        "Co-writer tool protocol rejection provider=grok route=cli code=%s",
+        "Tool protocol rejection provider=grok route=cli code=%s",
         code,
     )
 
@@ -380,7 +381,7 @@ def _log_tool_protocol_rejection(code: ToolProtocolRejectionCode) -> None:
 def _parse_grok_line(line: bytes) -> tuple[str, dict[str, object]]:
     try:
         parsed = json.loads(line.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
         parsed = None
     if not isinstance(parsed, dict):
         raise _GrokCliStreamFailure(ToolProtocolRejectionCode.CLI_STREAM_RESPONSE_INVALID)

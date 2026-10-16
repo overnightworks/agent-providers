@@ -1,11 +1,7 @@
 """Claude provider — unified interface for CLI and API backends.
 
-Both the lyrical_coherence scorer and the chat co-writing endpoint
-use this module. The backend is selected based on available credentials:
-
-1. API key provided (env var) → ApiProvider
-2. Claude CLI on PATH or in VS Code → CliProvider
-3. Neither → raises UnavailableError
+The Claude CLI and API backends, the MCP-attached and tool-free command
+lines, and the tool-surface gate with its health state.
 """
 
 from __future__ import annotations
@@ -31,6 +27,7 @@ from agent_providers.config import McpServerSpec, current_config, current_turn_c
 from agent_providers.constants import (
     CLAUDE_CLI_COMPLETION_TIMEOUT_SECONDS,
     CLAUDE_CLI_MAX_CONCURRENT_PROCESSES,
+    CLAUDE_CLI_MODEL_LIST_MARKER,
     CLAUDE_CLI_NO_TOOL_SURFACE_TIMEOUT_SECONDS,
     CLAUDE_CLI_SIGTERM_GRACE_SECONDS,
     CLAUDE_CLI_TOOL_SURFACE_FAILURE_CACHE_SECONDS,
@@ -38,9 +35,8 @@ from agent_providers.constants import (
     CLAUDE_CLI_ZOMBIE_FAILURE_CACHE_SECONDS,
     CLAUDE_CLI_ZOMBIE_REAP_TIMEOUT_SECONDS,
     CLI_OUTPUT_READ_LIMIT_BYTES,
-    COWRITER_CLAUDE_CLI_MODEL_LIST_MARKER,
-    COWRITER_MODELS_TIMEOUT_SECONDS,
-    JUDGE_FAILURE_TIMEOUT,
+    DEADLINE_EXCEEDED_REASON,
+    PROBE_TIMEOUT_SECONDS,
 )
 from agent_providers.events import (
     AssistantTextEvent,
@@ -78,12 +74,12 @@ CLAUDE_CLI_BINARY_NOT_FOUND_DETAIL: Final = "Claude CLI binary not found"
 CLAUDE_CLI_UNAVAILABLE_DETAIL: Final = "Claude CLI is unavailable. Check server logs for details."
 
 # The CLI is a bind-mounted, self-updating binary reading a prompt that carries
-# untrusted content (lyrics, @-mentions, tool results). These flags make its
+# untrusted content (host data, @-mentions, tool results). These flags make its
 # reachable tool surface a property of this command line alone: `--tools ""`
 # removes the whole built-in set, so a tool shipped by a future version cannot
 # be called even though nobody here has heard of it; `--setting-sources ""`
 # drops the mounted settings file, whose `permissions.allow` and `defaultMode`
-# would otherwise decide what a co-writer session may do; `--strict-mcp-config`
+# would otherwise decide what a turn may do; `--strict-mcp-config`
 # ignores MCP servers configured anywhere but in our own `--mcp-config`;
 # `--disable-slash-commands` closes the one channel `--tools ""` does not
 # touch — the CLI still resolves its own slash commands and skills from a
@@ -138,7 +134,7 @@ class CliToolSurfaceError(UnavailableError):
     ``verify_no_builtin_cli_tools()``).
 
     Deliberately an ``UnavailableError``: a CLI whose tool surface we cannot
-    vouch for is not a CLI we run untrusted song content through, so every
+    vouch for is not a CLI we run untrusted content through, so every
     caller that already handles "no backend" refuses the turn.
     """
 
@@ -153,8 +149,8 @@ class _ZombieProbeError(UnavailableError):
     """
 
 
-class _JudgeTimeoutExhausted(UnavailableError):
-    """The judge's caller-owned deadline elapsed without probing the CLI."""
+class _DeadlineExhausted(UnavailableError):
+    """The caller-owned deadline elapsed before the one-shot completion started."""
 
 
 class _ClaudeCliProcessPoolSaturated(UnavailableError):
@@ -220,7 +216,7 @@ async def acall_claude_with_mcp(
     turn's user in its environment. Claude's built-in tools are removed from
     the session; only that server's tools are reachable — or none at all,
     where the host configured no MCP server. This path exists exclusively for
-    the co-writer chat flow and requires the CLI backend (the Anthropic SDK
+    MCP-attached turns and requires the CLI backend (the Anthropic SDK
     does not expose MCP servers).
     """
     if model is None:
@@ -232,7 +228,7 @@ async def acall_claude_with_mcp(
 
     home = _claude_private_home()
     try:
-        with _cowriter_cli_arguments(model, user_id, stream=False) as arguments:
+        with _mcp_turn_cli_arguments(model, user_id, stream=False) as arguments:
             try:
                 child = _claude_child_process(binary, arguments, home.path)
                 proc = await _spawn_reserved_async_cli_process(
@@ -305,7 +301,7 @@ async def acall_claude_with_mcp_stream(
 
     home = _claude_private_home()
     try:
-        with _cowriter_cli_arguments(model, user_id, stream=True) as arguments:
+        with _mcp_turn_cli_arguments(model, user_id, stream=True) as arguments:
             try:
                 child = _claude_child_process(binary, arguments, home.path)
                 proc = await _spawn_reserved_async_cli_process(
@@ -498,6 +494,9 @@ def list_cli_model_aliases() -> list[str]:
     machine-readable catalog endpoint for a CLI-only login. Raises
     UnavailableError, never returns an empty list, if that text doesn't
     contain the expected `Available: a, b, c.` fragment.
+
+    The CLI's closing "or a full model ID" is not a name, and the flag also
+    takes full ids that this list does not hold.
     """
     binary = _require_claude_binary()
     run = run_claude_catalog_cli(binary, ("-p", "/model"))
@@ -505,7 +504,7 @@ def list_cli_model_aliases() -> list[str]:
         raise UnavailableError("Claude CLI /model failed to run")
     if not run.complete:
         raise UnavailableError(
-            f"Claude CLI /model timed out after {COWRITER_MODELS_TIMEOUT_SECONDS}s",
+            f"Claude CLI /model timed out after {PROBE_TIMEOUT_SECONDS}s",
         )
     if run.returncode != 0:
         log.warning(
@@ -521,9 +520,9 @@ def list_cli_model_aliases() -> list[str]:
 
 def _parse_cli_model_aliases(stdout: str) -> list[str]:
     for line in stdout.splitlines():
-        if COWRITER_CLAUDE_CLI_MODEL_LIST_MARKER not in line:
+        if CLAUDE_CLI_MODEL_LIST_MARKER not in line:
             continue
-        after_marker = line.split(COWRITER_CLAUDE_CLI_MODEL_LIST_MARKER, 1)[1]
+        after_marker = line.split(CLAUDE_CLI_MODEL_LIST_MARKER, 1)[1]
         aliases = [
             token.strip()
             for token in after_marker.rstrip(".").split(", ")
@@ -692,7 +691,7 @@ def _mcp_cli_arguments(
     *,
     stream: bool = False,
 ) -> list[str]:
-    """Command for a co-writer turn: the host's MCP tools and nothing else.
+    """Command for an MCP-attached turn: the host's MCP tools and nothing else.
 
     ``--allowedTools`` pre-approves that server's tools so the session never
     needs a permission answer nobody is there to give. Everything else is
@@ -718,13 +717,13 @@ def _mcp_cli_arguments(
 
 
 @contextmanager
-def _cowriter_cli_arguments(
+def _mcp_turn_cli_arguments(
     model: str,
     user_id: str,
     *,
     stream: bool,
 ) -> Iterator[list[str]]:
-    """The co-writer's command line, for as long as its MCP config file lives.
+    """The MCP-attached turn's command line, for as long as its MCP config file lives.
 
     A deployment that configures no MCP server (``mcp_server=None``) runs the
     tool-free command line instead — no ``--mcp-config``, no ``--allowedTools``,
@@ -746,23 +745,21 @@ def _cowriter_cli_arguments(
 #
 # Two gates share the machinery below, one per invocation shape:
 #
-# - ``verify_cli_tool_surface()`` guards the co-writer's MCP-attached turn
+# - ``verify_cli_tool_surface()`` guards the MCP-attached turn
 #   (``acall_claude_with_mcp*``): the CLI must announce exactly the tools of
 #   the host's ``McpServerSpec``, nothing more and nothing less. A host that
 #   configured no MCP server routes that turn — and this gate — to the
 #   tool-free shape below instead.
 # - ``verify_no_builtin_cli_tools()`` / ``averify_no_builtin_cli_tools()``
-#   guard every tool-free turn (``_call_cli`` / ``_acall_cli`` — the legacy
-#   chat endpoint and the lyrical-coherence judge both funnel through these):
+#   guard every tool-free turn (``_call_cli`` / ``_acall_cli`` — every
+#   tool-free caller funnels through these):
 #   the CLI must announce no tools at all.
 #
-# Round 5 changed the *shape* of single-flight, not another detail of it.
-# Rounds 3 and 4 held a per-key mutex across the whole probe and then spent
-# two rounds finding a new unbounded wait inside that held lock. A lock
-# held across external I/O always has another hole next to the one just
-# patched, so this round removes the held lock entirely:
+# Single-flight is shaped so that no lock is held across the probe: a lock
+# held across external I/O can always block unboundedly inside the held
+# section, so the probe runs with no lock at all:
 #
-# - The dict lock (``_tool_surface_lock``) now only ever guards a dict
+# - The dict lock (``_tool_surface_lock``) only ever guards a dict
 #   lookup/insert — never a probe, never an await. The first cold caller
 #   for a key publishes a future/event under that lock and releases it
 #   immediately, then probes with *no lock held at all*. Every other
@@ -784,15 +781,14 @@ def _cowriter_cli_arguments(
 #   spawns another zombie.
 #
 # Deliberately two probe kinds, not one reused kind: the MCP-attached probe
-# spawns the host's MCP server subprocess, which for songmaker needs the
-# ``mcp`` extra — registering and listing its tools touches no database,
-# only a tool *call* does, so that is not the reason for the split. The
-# scoring-worker container does not install ``mcp`` (see CLAUDE.md's
-# packaging-boundary note), so this probe would always fail there —
+# spawns the host's MCP server subprocess, which may need dependencies a
+# tool-free container lacks — registering and listing its tools touches no
+# database, only a tool *call* does, so that is not the reason for the
+# split. Where those dependencies are absent this probe would always fail —
 # verified live against the real CLI that a missing MCP connection reports
-# zero tools, not the expected set (see docs/security.md). The no-MCP probe
-# never attaches ``--mcp-config`` at all, so it needs neither and is the one
-# safe to run from every container.
+# zero tools, not the expected set. The no-MCP probe never attaches
+# ``--mcp-config`` at all, so it needs none of them and is the one that
+# runs anywhere.
 #
 # The no-MCP check does not need the MCP-attached one's stronger guarantee:
 # the command line ``_build_cli_cmd`` actually runs has no ``--mcp-config``
@@ -917,17 +913,17 @@ class _ZombieReservation:
 _zombie_registry_lock = threading.Lock()
 _zombie_reap_reservations: set[_ZombieReservation] = set()
 _zombie_reap_tasks: set[asyncio.Task] = set()
-# The independent async tasks that actually run a probe (round 7,
-# Finding 2) — tracked the same way, for the same two reasons: keep a
-# reference so they cannot be garbage-collected while still running, and
-# give shutdown something to cancel.
+# The independent async tasks that actually run a probe — tracked the same
+# way, for the same two reasons: keep a reference so they cannot be
+# garbage-collected while still running, and give shutdown something to
+# cancel.
 _tool_surface_probe_tasks: set[asyncio.Task] = set()
-# The tool-surface gate's most recent verdict, for /health — not the
-# boot-time snapshot ``app.state`` used to carry (round 6): every call to
+# The tool-surface gate's most recent verdict, for a host's health check — not
+# a boot-time snapshot: every call to
 # ``verify_cli_tool_surface()`` updates this, cache hit or fresh probe
-# alike, so a later successful co-writer turn clears an earlier boot-time
+# alike, so a later successful MCP-attached turn clears an earlier boot-time
 # "unverified", and a later drifted build (after a self-update) replaces
-# an earlier "ok" — /health always reads the gate's own current answer,
+# an earlier "ok" — a health check always reads the gate's own current answer,
 # never a value frozen at startup.
 _tool_surface_health_lock = threading.Lock()
 _tool_surface_health_state: Literal["ok", "drift", "unverified"] = "unverified"
@@ -945,8 +941,8 @@ def clear_cli_tool_surface_cache() -> None:
 
 
 def claude_cli_tool_surface_health() -> Literal["ok", "drift", "unverified"]:
-    """The tool-surface gate's most recent verdict — what ``/health``'s
-    ``claude_cli_tool_surface`` field reports. See the module-level
+    """The tool-surface gate's most recent verdict — what a host's health
+    check reports. See the module-level
     comment above ``_tool_surface_health_state`` for why this is a live
     value, not a boot-time snapshot."""
     with _tool_surface_health_lock:
@@ -987,7 +983,7 @@ async def verify_cli_tool_surface() -> Path:
     """Raise unless the mounted CLI reaches nothing but the host's MCP
     tools; return the resolved binary path to run the real turn with.
 
-    Probes with the same ``--mcp-config`` a real co-writer turn attaches, so
+    Probes with the same ``--mcp-config`` a real MCP-attached turn attaches, so
     "clean" means the CLI is actually still connecting that MCP server and
     reporting exactly its tools — not merely reporting no built-ins with
     nothing attached to compare against. A connection that fails to
@@ -1003,14 +999,13 @@ async def verify_cli_tool_surface() -> Path:
     ``_evaluate_tool_surface`` for where that split actually happens.
 
     A host that configures no MCP server (``mcp_server=None``) runs its
-    co-writer turns on the tool-free command line, so this gate verifies
-    that shape instead: no tool at all, the same expectation the judge and
-    the legacy chat endpoint are held to.
+    turns on the tool-free command line, so this gate verifies that shape
+    instead: no tool at all, the same expectation every tool-free turn is
+    held to.
 
-    Also records the outcome as the live ``/health`` state (round 7,
-    Finding 4) — on every call, cache hit or fresh probe alike, so that
-    state always reflects this gate's most recent answer rather than a
-    value frozen at boot.
+    Also records the outcome as the live health state — on every call, cache
+    hit or fresh probe alike, so that state always reflects this gate's most
+    recent answer rather than a value frozen at boot.
     """
     spec = current_turn_config().mcp_server
     try:
@@ -1072,8 +1067,8 @@ def verify_no_builtin_cli_tools() -> Path:
     """Raise unless the mounted CLI reaches no tool at all under
     ``_TOOL_ISOLATION_FLAGS``; return the resolved binary path to run the
     real turn with. Sync twin for ``_call_cli``, which has no event loop to
-    await one in — the scoring worker calls it from a plain synchronous
-    child, not an async context.
+    await one in — a host calls it from a plain synchronous child,
+    not an async context.
     """
     build, key = _tool_surface_key(_NO_TOOLS_EXPECTED)
 
@@ -1108,10 +1103,10 @@ async def _verify_tool_surface_async(
     It is never held while probing.
 
     The caller that claims the slot does not probe inline in its own
-    coroutine — round 7, Finding 2: an inline leader whose own task later
+    coroutine: an inline leader whose own task later
     gets cancelled (an aborted request, say) used to remove the in-flight
     entry and resolve the future right there, even though the real probe
-    (running in a worker thread — Finding 1) kept going in the
+    (running in a worker thread) kept going in the
     background. A third caller landing in that window found no cached
     verdict and no in-flight entry, and started a *second* probe while
     the first was still running. So the probe now runs as an independent
@@ -1215,7 +1210,7 @@ def _resolve_inflight_async(
         return
     if exception is not None:
         future.set_exception(exception)
-        # This runs inside the independent probe task (round 7), which
+        # This runs inside the independent probe task, which
         # never reads the future back itself — every caller, the one that
         # triggered the probe included, awaits it the same way through
         # _await_follower_result_async. But any of them may already have
@@ -1405,7 +1400,7 @@ def _evaluate_tool_surface(
 
     if surface.mcp_connected is False and not unexpected_tools and not slash_commands:
         raise UnavailableError(
-            "Claude CLI could not connect the co-writer MCP server — "
+            "Claude CLI could not connect the host's MCP server — "
             "cannot verify its tool surface",
         )
 
@@ -1592,10 +1587,9 @@ async def _reap_stream_process_after_cancellation(
     completes; the caller still receives its cancellation once cleanup is
     complete.
     """
-    # The non-streaming provider is also used by the scoring-worker image,
-    # which intentionally does not install the server's ASGI dependencies.
-    # This helper is exclusive to the streaming co-writer endpoint, where
-    # FastAPI provides AnyIO.
+    # The non-streaming provider is also used where the host's ASGI
+    # dependencies are intentionally not installed. This helper is exclusive
+    # to streaming turns served under an ASGI host, where AnyIO is provided.
     import anyio
 
     reap_task = asyncio.create_task(_reap_process_group(proc))
@@ -1627,7 +1621,7 @@ async def _reap_process_group(proc: AsyncPipedProcess) -> bool:
     dead (``proc.returncode`` set, or SIGTERM raising ``ProcessLookupError``)
     is expected to report its exit almost instantly, but "expected" is not
     "guaranteed", and an unbounded wait anywhere in this function used to
-    be able to block whoever was waiting on it (rounds 3 and 4) forever.
+    be able to block whoever was waiting on it forever.
 
     Returns ``True`` when the process outlived SIGKILL and was handed to
     a background reaper instead of being confirmed dead here — a zombie,
@@ -1865,7 +1859,7 @@ def _call_api(
     kwargs = _build_api_kwargs(prompt, system, model, max_tokens, messages)
     request_client = (
         client.with_options(
-            timeout=_remaining_judge_timeout(deadline),
+            timeout=_remaining_deadline_seconds(deadline),
             max_retries=0,
         )
         if deadline is not None
@@ -1875,17 +1869,17 @@ def _call_api(
         response = request_client.messages.create(**kwargs)
     except anthropic.APITimeoutError as exc:
         if deadline is not None:
-            raise UnavailableError(JUDGE_FAILURE_TIMEOUT) from exc
+            raise UnavailableError(DEADLINE_EXCEEDED_REASON) from exc
         raise
     text = response.content[0].text if response.content else ""
     log.debug("Claude API response: %d chars", len(text))
     return ClaudeResponse(text=text)
 
 
-def _remaining_judge_timeout(deadline: float) -> float:
+def _remaining_deadline_seconds(deadline: float) -> float:
     remaining = deadline - time.monotonic()
     if remaining <= 0:
-        raise _JudgeTimeoutExhausted(JUDGE_FAILURE_TIMEOUT)
+        raise _DeadlineExhausted(DEADLINE_EXCEEDED_REASON)
     return remaining
 
 
@@ -1922,13 +1916,12 @@ def _call_cli(
     deadline: float | None = None,
 ) -> ClaudeResponse:
     """The tool-free CLI backend behind both ``call_claude()`` and the
-    lyrical-coherence judge (``claude.adapter.call_claude_once``).
+    one-shot completion (``claude.adapter.call_claude_once``).
 
-    Every caller of this function carries content we did not write —
-    lyrics, chat history, a Whisper transcript — into the CLI, so the
-    verified-tool-surface gate lives here rather than in each caller: a
-    future caller of ``call_claude()`` inherits it automatically instead of
-    having to remember it.
+    Every caller of this function carries content we did not write
+    (host data) into the CLI, so the verified-tool-surface gate lives here
+    rather than in each caller: a future caller of ``call_claude()``
+    inherits it automatically instead of having to remember it.
     """
     if model is None:
         model = current_turn_config().claude_chat_model
@@ -1954,14 +1947,14 @@ def _call_cli(
                 child,
                 stdin_text=stdin_body,
                 timeout_seconds=(
-                    _remaining_judge_timeout(deadline)
+                    _remaining_deadline_seconds(deadline)
                     if deadline is not None
                     else CLAUDE_CLI_COMPLETION_TIMEOUT_SECONDS
                 ),
             )
         except PipedProcessTimeout as exc:
             if deadline is not None:
-                raise UnavailableError(JUDGE_FAILURE_TIMEOUT) from exc
+                raise UnavailableError(DEADLINE_EXCEEDED_REASON) from exc
             raise UnavailableError(
                 f"Claude CLI timed out after {CLAUDE_CLI_COMPLETION_TIMEOUT_SECONDS}s",
             ) from exc
@@ -1992,11 +1985,10 @@ async def _acall_cli(
     messages: list[dict[str, str]] | None = None,
 ) -> ClaudeResponse:
     """Async twin of ``_call_cli`` — the tool-free CLI backend behind
-    ``acall_claude()``, whose only current caller is the legacy
-    ``POST /songs/{id}/chat`` endpoint (``chat_api.py``).
+    ``acall_claude()``, for a host's async callers.
 
     Gated the same way and for the same reason as ``_call_cli``: the gate
-    sits in the call path both share, not in ``chat_api.py`` itself.
+    sits in the call path both share, not in each caller.
     """
     if model is None:
         model = current_turn_config().claude_chat_model

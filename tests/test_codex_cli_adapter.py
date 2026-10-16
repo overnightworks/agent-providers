@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
 import time
+import traceback
 from collections.abc import Callable
 from io import BytesIO
 from pathlib import Path
@@ -13,13 +15,23 @@ from pathlib import Path
 import pytest
 from PIL import Image
 from provider_test_support import (
-    COWRITER_TOOL_CATALOG,
+    A_CALLER_CANARY,
+    CALLER_CONTEXTS,
+    DEEPLY_NESTED_JSON,
+    SAMPLE_TOOL_CATALOG,
+    CallerCanaryError,
+    a_call_nested_too_deeply_to_decode,
+    a_call_to_an_undeclared_tool_carrying,
     assert_a_multi_result_batch_is_rejected,
+    assert_the_canary_reaches_only_the_host,
+    drive_turn,
+    formatted_log_text,
     override_provider_runtime,
     override_turn_runtime,
     use_codex_process_pool,
 )
 
+from agent_providers import process
 from agent_providers.codex import image as codex_image
 from agent_providers.codex import protocol as codex_protocol
 from agent_providers.codex import transport as codex_transport
@@ -28,14 +40,18 @@ from agent_providers.errors import (
     CodexProcessPoolSaturatedError,
     ProviderUnavailableError,
     SafeRouteReasonCode,
+    TextToolCallRejectedError,
 )
 from agent_providers.events import AssistantTextEvent, FinalEvent, ToolCallEvent
 from agent_providers.images import ImagePolicy
-from agent_providers.process import CliRunOutcome, CliRunReason
+from agent_providers.process import CliRunOutcome, CliRunReason, clear_agent_cli_caches
+from agent_providers.text_tool_protocol import TextToolRejectionRule
 from agent_providers.tool_loop import (
     InitialTurn,
     ToolCallBatch,
     ToolOutcome,
+    ToolResult,
+    ToolResultBatch,
     stream_tool_loop,
 )
 
@@ -52,7 +68,7 @@ A_COVER_POLICY = ImagePolicy(
 def _transport() -> codex_transport.CodexCliToolTransport:
     """Build the transport under test with songmaker's own tool catalog."""
     return codex_transport.CodexCliToolTransport(
-        model="codex-test", catalog=COWRITER_TOOL_CATALOG,
+        model="codex-test", catalog=SAMPLE_TOOL_CATALOG,
     )
 
 _REDACTED_CODEX_LOGIN = {
@@ -86,7 +102,7 @@ def test_cover_image_capability_requires_every_codex_mount(
         codex_resources_directory=resources,
     )
 
-    assert codex_image.codex_cover_image_capability_is_available()
+    assert codex_image.codex_image_turn_is_available()
 
     if missing == "cli":
         cli.unlink()
@@ -95,7 +111,7 @@ def test_cover_image_capability_requires_every_codex_mount(
     else:
         resources.rmdir()
 
-    assert not codex_image.codex_cover_image_capability_is_available()
+    assert not codex_image.codex_image_turn_is_available()
 
 
 def test_cover_image_capability_requires_the_installed_image_encoder(
@@ -115,7 +131,7 @@ def test_cover_image_capability_requires_the_installed_image_encoder(
     )
     monkeypatch.setattr(codex_image, "image_encoder_is_installed", lambda: False)
 
-    assert not codex_image.codex_cover_image_capability_is_available()
+    assert not codex_image.codex_image_turn_is_available()
 
 
 def test_a_deployment_without_the_image_encoder_refuses_before_it_spawns(
@@ -131,7 +147,7 @@ def test_a_deployment_without_the_image_encoder_refuses_before_it_spawns(
     monkeypatch.setattr(codex_image, "image_encoder_is_installed", lambda: False)
 
     with pytest.raises(codex_image.CodexImageEncoderUnavailableError):
-        codex_image.generate_codex_cover_image(
+        codex_image.generate_codex_image(
             "prompt", policy=A_COVER_POLICY, deadline=10_000_000,
         )
 
@@ -178,6 +194,16 @@ def _runner(lines: list[bytes], outcome: CliRunOutcome, calls: list) -> object:
     return run_cli_bounded
 
 
+def _tool_round_lines(text: str) -> list[bytes]:
+    return [
+        b'{"type":"thread.started","thread_id":"52700000-0000-4000-8000-000000000000"}\n',
+        json.dumps({"type": "item.completed", "item": {
+            "type": "agent_message", "text": text,
+        }}).encode() + b"\n",
+        b'{"type":"turn.completed","usage":{}}\n',
+    ]
+
+
 def _fixture_lines(name: str) -> list[bytes]:
     return [line.encode() + b"\n" for line in (_FIXTURES / name).read_text().splitlines()]
 
@@ -191,10 +217,6 @@ def test_image_tool_block_reasons_are_closed() -> None:
         "unexpected_event",
         "blocked_item",
         "unexpected_item",
-        "bootstrap_command_mismatch",
-        "bootstrap_cwd_present",
-        "bootstrap_sequence_invalid",
-        "bootstrap_missing",
     }
 
 
@@ -204,10 +226,7 @@ def _png_bytes() -> bytes:
     return output.getvalue()
 
 
-def _image_event_stream(codex_home: Path) -> str:
-    return (_FIXTURES / "codex-imagegen-real-stream.jsonl").read_text().replace(
-        "{CODEX_HOME}", str(codex_home.resolve()),
-    )
+_MEASURED_STREAM = (_FIXTURES / "codex-imagegen-0.163.0-events.jsonl").read_text()
 
 
 def _quota_failure(message: str) -> CliRunOutcome:
@@ -289,7 +308,7 @@ def test_codex_tool_transport_uses_an_empty_private_work_directory_on_resume(mon
     rounds = iter([
         [
             json.dumps({"type": "thread.started", "thread_id": thread_id}).encode() + b"\n",
-            b'{"type":"item.completed","item":{"type":"agent_message","text":"<songmaker_tool_call>\\n{\\"name\\":\\"list_songs\\",\\"arguments\\":{}}\\n</songmaker_tool_call>"}}\n',
+            b'{"type":"item.completed","item":{"type":"agent_message","text":"<notes_tool_call>\\n{\\"name\\":\\"list_notes\\",\\"arguments\\":{}}\\n</notes_tool_call>"}}\n',
             b'{"type":"turn.completed","usage":{}}\n',
         ],
         [
@@ -321,7 +340,7 @@ def test_codex_tool_transport_uses_an_empty_private_work_directory_on_resume(mon
     transport = _transport()
     events = asyncio.run(_collect_tool_events(_codex_tool_events(
         transport,
-        lambda _name, _arguments: ToolOutcome('{"songs":[]}', False),
+        lambda _name, _arguments: ToolOutcome('{"notes":[]}', False),
     )))
 
     assert isinstance(events[0], ToolCallEvent)
@@ -345,7 +364,7 @@ def test_codex_tool_transport_uses_an_empty_private_work_directory_on_resume(mon
             assert config in child.command
     assert prompts == [
         b"system\n\nUser: hello",
-        b'<songmaker_tool_result>\n{"songs":[]}\n</songmaker_tool_result>',
+        b'<notes_tool_result>\n{"notes":[]}\n</notes_tool_result>',
     ]
     assert not first_child.working_directory.exists()
     assert first_child.environment == second_child.environment
@@ -360,7 +379,9 @@ def test_codex_tool_transport_rejects_non_uuid_thread_ids(thread_id: str) -> Non
         codex_transport._thread_started_id({"thread_id": thread_id})
 
 
-def test_codex_tool_transport_rejects_a_multi_result_batch_without_a_resume(monkeypatch) -> None:
+def test_codex_tool_transport_rejects_a_multi_result_batch_without_a_resume(
+    monkeypatch, caplog,
+) -> None:
     calls: list = []
     monkeypatch.setattr(codex_protocol, "run_cli_bounded", _runner([
         b'{"type":"thread.started","thread_id":"52700000-0000-4000-8000-000000000000"}\n',
@@ -369,8 +390,10 @@ def test_codex_tool_transport_rejects_a_multi_result_batch_without_a_resume(monk
     ], _outcome(), calls))
     transport = _transport()
 
-    assert_a_multi_result_batch_is_rejected(transport)
+    error = assert_a_multi_result_batch_is_rejected(transport)
+    assert not isinstance(error, TextToolCallRejectedError)
     assert len(calls) == 1
+    assert caplog.records == []
 
 
 @pytest.mark.parametrize("fixture_name", (
@@ -483,12 +506,12 @@ def test_codex_tool_transport_cleans_its_home_and_does_not_log_protocol_text(
     caplog,
 ) -> None:
     calls: list = []
-    lyrics = "private lyrics"
-    song_id = "song-private"
+    text = "private text"
+    note_id = "note-private"
     protocol = (
-        "<songmaker_tool_call>\n"
-        f'{{"name":"update_song_lyrics","arguments":{{"song_id":"{song_id}","lyrics":"{lyrics}"}}}}\n'
-        "</songmaker_tool_call>"
+        "<notes_tool_call>\n"
+        f'{{"name":"update_note_text","arguments":{{"note_id":"{note_id}","text":"{text}"}}}}\n'
+        "</notes_tool_call>"
     )
 
     def run_cli_bounded(child, **kwargs):
@@ -523,7 +546,8 @@ def test_codex_tool_transport_cleans_its_home_and_does_not_log_protocol_text(
 
     asyncio.run(collect_and_close())
     assert not calls[0][0].working_directory.exists()
-    for forbidden in (lyrics, song_id, protocol, "private stderr", "private.jsonl"):
+    assert "Codex CLI tool round provider=codex route=cli round=1 duration_ms=" in caplog.text
+    for forbidden in (text, note_id, protocol, "private stderr", "private.jsonl"):
         assert forbidden not in caplog.text
 
 
@@ -570,7 +594,7 @@ def _generated_png_runner() -> object:
         artifact = codex_home / "generated_images" / "thread" / "cover.png"
         artifact.parent.mkdir(parents=True)
         artifact.write_bytes(_png_bytes())
-        outcome = _outcome(stdout=_image_event_stream(codex_home))
+        outcome = _outcome(stdout=_MEASURED_STREAM)
         kwargs["on_spawned"](1)
         kwargs["on_reaped"](1, False)
         return outcome
@@ -594,10 +618,10 @@ def _host_image_policy(
     )
 
 
-def test_codex_cover_image_accepts_the_recorded_imagegen_stream(monkeypatch) -> None:
+def test_codex_cover_image_accepts_the_measured_0_163_stream(monkeypatch) -> None:
     monkeypatch.setattr(codex_protocol, "run_cli_bounded", _generated_png_runner())
 
-    assert codex_image.generate_codex_cover_image(
+    assert codex_image.generate_codex_image(
         "prompt", policy=A_COVER_POLICY, deadline=10_000_000,
     ).startswith(b"\x89PNG")
 
@@ -605,7 +629,7 @@ def test_codex_cover_image_accepts_the_recorded_imagegen_stream(monkeypatch) -> 
 def test_a_generated_image_is_returned_in_the_shape_the_host_asked_for(monkeypatch) -> None:
     monkeypatch.setattr(codex_protocol, "run_cli_bounded", _generated_png_runner())
 
-    payload = codex_image.generate_codex_cover_image(
+    payload = codex_image.generate_codex_image(
         "prompt",
         policy=_host_image_policy(output_edge_pixels=64),
         deadline=10_000_000,
@@ -629,7 +653,7 @@ def test_a_generated_image_outside_the_hosts_bounds_is_refused(
     monkeypatch.setattr(codex_protocol, "run_cli_bounded", _generated_png_runner())
 
     with pytest.raises(codex_image.CodexImageArtifactError):
-        codex_image.generate_codex_cover_image(
+        codex_image.generate_codex_image(
             "prompt", policy=policy, deadline=10_000_000,
         )
 
@@ -705,6 +729,12 @@ def test_a_generated_image_outside_the_hosts_bounds_is_refused(
             "The requested model is unavailable.",
             None,
         ),
+        (
+            _outcome(stdout='{"type":"thread.started","thread_id":"thread"}\n'),
+            codex_image.CodexImageCliError,
+            None,
+            None,
+        ),
     ),
     ids=(
         "login",
@@ -716,148 +746,93 @@ def test_a_generated_image_outside_the_hosts_bounds_is_refused(
         "usage-limit-hint-keeps-all-but-one-trailing-dot",
         "usage-limit-hint-without-a-time",
         "turn-failed-names-generic-message",
+        "turn-never-completed",
     ),
 )
-def test_codex_cover_image_names_terminal_cli_failures(
+def test_codex_cover_image_names_terminal_cli_failures_without_logging_the_gate(
     monkeypatch,
+    caplog,
     outcome: CliRunOutcome,
     expected_error: type[Exception],
     expected_message: str | None,
     expected_retry_at: str | None,
 ) -> None:
     monkeypatch.setattr(codex_protocol, "run_cli_bounded", _image_runner(outcome))
+    caplog.set_level("WARNING", logger="agent_providers.codex.image")
 
     with pytest.raises(expected_error) as raised:
-        codex_image.generate_codex_cover_image("prompt", policy=A_COVER_POLICY, deadline=10_000_000)
+        _generate_cover()
 
+    assert _warnings(caplog) == []
     if expected_message is not None:
         assert expected_message in str(raised.value)
     if expected_error is codex_image.CodexImageQuotaError:
         assert raised.value.retry_at == expected_retry_at
 
 
-@pytest.mark.parametrize(
-    ("artifact_count", "expected_error"),
-    (
-        (0, codex_image.CodexImageNotCreatedError),
-        (
-            2,
-            codex_image.CodexImageArtifactError,
-        ),
-    ),
-    ids=("missing-png", "ambiguous-pngs"),
-)
-def test_codex_cover_image_rejects_missing_or_ambiguous_generated_artifacts(
-    monkeypatch,
-    artifact_count: int,
-    expected_error: type[Exception],
-) -> None:
+_A_PRIVATE_EVENT_MARKER = "private-event-marker"
+_A_PRIVATE_PROMPT_MARKER = "private-prompt-marker"
+_THREAD_OPENING = [{"type": "thread.started", "thread_id": "thread"}, {"type": "turn.started"}]
+_OPENING_TOKENS = ("thread.started", "turn.started")
+_TURN_COMPLETED = {"type": "turn.completed", "usage": {}}
+_MEASURED_TOKENS = (*_OPENING_TOKENS, "item.completed:agent_message*3", "turn.completed")
+
+
+def _item_event(event_type: str, kind: str) -> dict:
+    item = {"id": "item", "type": kind, "private": _A_PRIVATE_EVENT_MARKER}
+    return {"type": event_type, "item": item}
+
+
+def _jsonl(events: list[dict]) -> str:
+    return "".join(json.dumps(event) + "\n" for event in events)
+
+
+def _write_generated_file(name: str, content: bytes):
+    def create_artifacts(codex_home: Path) -> None:
+        artifact = codex_home / "generated_images" / name
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_bytes(content)
+
+    return create_artifacts
+
+
+def _write_png_beside_a_text_file(codex_home: Path) -> None:
+    _write_generated_file("cover.png", _png_bytes())(codex_home)
+    (codex_home / "generated_images" / "notes.txt").write_text("not an image")
+
+
+def _write_generated_directory(codex_home: Path) -> None:
+    (codex_home / "generated_images" / "thread").mkdir(parents=True)
+
+
+def _write_two_generated_pngs(codex_home: Path) -> None:
+    _write_generated_file("a.png", _png_bytes())(codex_home)
+    _write_generated_file("b.png", _png_bytes())(codex_home)
+
+
+def _symlink_generated_images_root(codex_home: Path) -> None:
+    real_root = codex_home / "elsewhere"
+    real_root.mkdir()
+    (real_root / "cover.png").write_bytes(_png_bytes())
+    (codex_home / "generated_images").symlink_to(real_root, target_is_directory=True)
+
+
+def _stdout_line(event: dict | bytes) -> bytes:
+    return event if isinstance(event, bytes) else json.dumps(event).encode() + b"\n"
+
+
+_StreamedEvents = list[dict | bytes] | Callable[[Path], list[dict]]
+
+
+def _streaming_runner(events: _StreamedEvents, state: dict[str, bool]):
+    """A Codex run that streams its events (or raw lines) and records its abort and reap.
+
+    Events given as a callable are built from the run's resolved CODEX_HOME.
+    """
     def run_cli_bounded(child, **kwargs):
-        codex_home = Path(child.environment["CODEX_HOME"])
-        for index in range(artifact_count):
-            artifact = codex_home / "generated_images" / f"cover-{index}.png"
-            artifact.parent.mkdir(parents=True, exist_ok=True)
-            artifact.write_bytes(_png_bytes())
-        outcome = _outcome(stdout=_image_event_stream(codex_home))
-        kwargs["on_spawned"](1)
-        kwargs["on_reaped"](1, False)
-        return outcome
-
-    monkeypatch.setattr(codex_protocol, "run_cli_bounded", run_cli_bounded)
-
-    with pytest.raises(expected_error):
-        codex_image.generate_codex_cover_image("prompt", policy=A_COVER_POLICY, deadline=10_000_000)
-
-
-def test_codex_cover_image_rejects_the_recorded_no_image_turn(monkeypatch, caplog) -> None:
-    outcome = _outcome(stdout=(_FIXTURES / "codex-cover-no-image-events.jsonl").read_text())
-    monkeypatch.setattr(codex_protocol, "run_cli_bounded", _image_runner(outcome))
-
-    caplog.set_level("WARNING", logger="agent_providers.codex.image")
-    with pytest.raises(codex_image.ImageToolBlockedError) as raised:
-        codex_image.generate_codex_cover_image("prompt", policy=A_COVER_POLICY, deadline=10_000_000)
-
-    assert raised.value.reason is codex_image.ImageToolBlockedReason.BOOTSTRAP_MISSING
-    assert caplog.text.count("Codex image tool rejected") == 1
-    assert "bootstrap_missing" in caplog.text
-    assert "prompt" not in caplog.text
-
-
-@pytest.mark.parametrize(
-    ("scenario", "expected_reason", "rejected_while_streaming"),
-    (
-        ("unexpected-event", codex_image.ImageToolBlockedReason.UNEXPECTED_EVENT, True),
-        ("blocked-item", codex_image.ImageToolBlockedReason.BLOCKED_ITEM, True),
-        ("unexpected-item", codex_image.ImageToolBlockedReason.UNEXPECTED_ITEM, True),
-        (
-            "bootstrap-command-mismatch",
-            codex_image.ImageToolBlockedReason.BOOTSTRAP_COMMAND_MISMATCH,
-            True,
-        ),
-        (
-            "bootstrap-cwd-present",
-            codex_image.ImageToolBlockedReason.BOOTSTRAP_CWD_PRESENT,
-            True,
-        ),
-        (
-            "bootstrap-sequence-invalid",
-            codex_image.ImageToolBlockedReason.BOOTSTRAP_SEQUENCE_INVALID,
-            True,
-        ),
-        ("bootstrap-missing", codex_image.ImageToolBlockedReason.BOOTSTRAP_MISSING, False),
-    ),
-)
-def test_codex_cover_image_reports_every_closed_block_reason_without_private_input(
-    monkeypatch,
-    caplog,
-    scenario: str,
-    expected_reason: codex_image.ImageToolBlockedReason,
-    rejected_while_streaming: bool,
-) -> None:
-    prompt_marker = "private-prompt-marker"
-    event_marker = "private-event-marker"
-    runner_state = {"aborted": False, "reaped": False}
-
-    def run_cli_bounded(child, **kwargs):
-        codex_home = Path(child.environment["CODEX_HOME"])
-        expected_command = codex_image._expected_image_skill_command(codex_home)
-        command_item = {
-            "type": "command_execution",
-            "id": "bootstrap",
-            "command": expected_command,
-            "cwd": None,
-            "status": "in_progress",
-            "exit_code": None,
-            "private": event_marker,
-        }
-        events = {
-            "unexpected-event": {"type": event_marker},
-            "blocked-item": {
-                "type": "item.started",
-                "item": {"type": "web_search", "private": event_marker},
-            },
-            "unexpected-item": {
-                "type": "item.started",
-                "item": {"type": "future_item", "private": event_marker},
-            },
-            "bootstrap-command-mismatch": {
-                "type": "item.started",
-                "item": {**command_item, "command": event_marker},
-            },
-            "bootstrap-cwd-present": {
-                "type": "item.started",
-                "item": {**command_item, "cwd": event_marker},
-            },
-            "bootstrap-sequence-invalid": {
-                "type": "item.started",
-                "item": {**command_item, "status": "completed"},
-            },
-            "bootstrap-missing": {
-                "type": "turn.completed",
-                "usage": {"private": event_marker},
-            },
-        }
-        line = json.dumps(events[scenario]).encode() + b"\n"
+        streamed = (
+            events(Path(child.environment["CODEX_HOME"])) if callable(events) else events
+        )
         channel = kwargs["stdout_line_channel"]
         abort_observed = threading.Event()
         request_abort = channel.request_abort
@@ -868,35 +843,308 @@ def test_codex_cover_image_reports_every_closed_block_reason_without_private_inp
 
         channel.request_abort = observe_abort
         kwargs["on_spawned"](2468)
-        assert channel._send(line)
-        if rejected_while_streaming:
-            assert abort_observed.wait(timeout=1)
-            assert channel.abort_requested()
-            runner_state["aborted"] = True
-        outcome = _outcome(stdout=line.decode())
+        for event in streamed:
+            if not channel._send(_stdout_line(event)):
+                break
+        state["aborted"] = abort_observed.wait(timeout=1)
         kwargs["on_reaped"](2468, False)
-        runner_state["reaped"] = True
-        return outcome
+        state["reaped"] = True
+        return _outcome(stdout=b"".join(map(_stdout_line, streamed)).decode())
 
-    monkeypatch.setattr(codex_protocol, "run_cli_bounded", run_cli_bounded)
+    return run_cli_bounded
+
+
+def _generate_cover(prompt: str = "prompt") -> bytes:
+    return codex_image.generate_codex_image(
+        prompt, policy=A_COVER_POLICY, deadline=10_000_000,
+    )
+
+
+def _warnings(caplog) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "agent_providers.codex.image" and record.levelname == "WARNING"
+    ]
+
+
+def _types_line(tokens: tuple[str, ...]) -> str:
+    return "types=[" + ", ".join(tokens) + "]"
+
+
+_WITH_IMAGE_GEN_ITEMS = [
+    *_THREAD_OPENING,
+    _item_event("item.started", "image_gen"),
+    _item_event("item.completed", "image_gen"),
+    _TURN_COMPLETED,
+]
+
+
+@pytest.mark.parametrize(
+    ("stdout", "create_artifacts"),
+    (
+        (_MEASURED_STREAM, _write_generated_file("thread/cover.png", _png_bytes())),
+        (_MEASURED_STREAM, _write_png_beside_a_text_file),
+        (_jsonl(_WITH_IMAGE_GEN_ITEMS), _write_generated_file("cover.png", _png_bytes())),
+    ),
+    ids=(
+        "png-nested-in-a-directory",
+        "png-beside-a-non-png-file",
+        "image-gen-items-around-the-png",
+    ),
+)
+def test_codex_cover_image_returns_the_generated_png_of_a_completed_turn(
+    monkeypatch, stdout: str, create_artifacts: Callable[[Path], None],
+) -> None:
+    monkeypatch.setattr(
+        codex_protocol, "run_cli_bounded", _image_runner(_outcome(stdout=stdout), create_artifacts),
+    )
+
+    assert _generate_cover().startswith(b"\x89PNG")
+
+
+@pytest.mark.parametrize(
+    ("stdout", "create_artifacts", "expected_tokens"),
+    (
+        (_MEASURED_STREAM, _write_generated_directory, _MEASURED_TOKENS),
+        (_MEASURED_STREAM, _write_generated_file("notes.txt", b"not an image"), _MEASURED_TOKENS),
+        (_MEASURED_STREAM, None, _MEASURED_TOKENS),
+        (
+            (_FIXTURES / "codex-cover-no-image-events.jsonl").read_text(),
+            None,
+            (
+                "thread.started",
+                "item.completed:error",
+                "turn.started",
+                "item.completed:agent_message*2",
+                "turn.completed",
+            ),
+        ),
+        (_jsonl([_TURN_COMPLETED]), None, ("turn.completed",)),
+    ),
+    ids=(
+        "only-an-empty-directory",
+        "only-a-non-png-file",
+        "no-generated-images-directory",
+        "the-recorded-no-image-turn",
+        "only-a-completed-turn",
+    ),
+)
+def test_codex_cover_image_reports_a_completed_turn_without_a_png_as_not_created(
+    monkeypatch,
+    caplog,
+    stdout: str,
+    create_artifacts: Callable[[Path], None] | None,
+    expected_tokens: tuple[str, ...],
+) -> None:
+    monkeypatch.setattr(
+        codex_protocol, "run_cli_bounded", _image_runner(_outcome(stdout=stdout), create_artifacts),
+    )
+    caplog.set_level("WARNING", logger="agent_providers.codex.image")
+
+    with pytest.raises(codex_image.CodexImageNotCreatedError):
+        _generate_cover(_A_PRIVATE_PROMPT_MARKER)
+
+    expected_line = f"Codex image not created route=cli {_types_line(expected_tokens)}"
+    assert _warnings(caplog) == [expected_line]
+    assert all(record.exc_info is None for record in caplog.records)
+    assert _A_PRIVATE_PROMPT_MARKER not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "create_artifacts",
+    (_write_two_generated_pngs, _symlink_generated_images_root),
+    ids=("two-pngs", "symlinked-root"),
+)
+def test_codex_cover_image_refuses_ambiguous_artifacts_without_logging_the_gate(
+    monkeypatch, caplog, create_artifacts: Callable[[Path], None],
+) -> None:
+    monkeypatch.setattr(
+        codex_protocol,
+        "run_cli_bounded",
+        _image_runner(_outcome(stdout=_MEASURED_STREAM), create_artifacts),
+    )
+    caplog.set_level("WARNING", logger="agent_providers.codex.image")
+
+    with pytest.raises(codex_image.CodexImageArtifactError):
+        _generate_cover()
+
+    assert _warnings(caplog) == []
+
+
+def _recorded_0_147_events(codex_home: Path) -> list[dict]:
+    recorded = (_FIXTURES / "codex-imagegen-real-stream.jsonl").read_text()
+    return [
+        json.loads(line)
+        for line in recorded.replace("{CODEX_HOME}", str(codex_home)).splitlines()
+    ]
+
+
+_BLOCKED_TURNS = (
+    pytest.param(
+        _recorded_0_147_events,
+        codex_image.ImageToolBlockedReason.BLOCKED_ITEM,
+        (*_OPENING_TOKENS, "item.completed:agent_message", "item.started:command_execution"),
+        id="the-0.147-skill-read-through-bash",
+    ),
+    *(
+        pytest.param(
+            [*_THREAD_OPENING, _item_event(event_type, kind)],
+            codex_image.ImageToolBlockedReason.BLOCKED_ITEM,
+            (*_OPENING_TOKENS, f"{event_type}:{kind}"),
+            id=f"blocked-item-{kind}-on-{event_type}",
+        )
+        for kind in sorted(codex_protocol.BLOCKED_ITEM_TYPES)
+        for event_type in sorted(codex_protocol.ITEM_EVENT_TYPES)
+    ),
+    pytest.param(
+        [
+            *_THREAD_OPENING,
+            f"{_A_PRIVATE_EVENT_MARKER}, not JSON\n".encode(),
+            _item_event("item.started", "web_search"),
+        ],
+        codex_image.ImageToolBlockedReason.BLOCKED_ITEM,
+        (*_OPENING_TOKENS, "other", "item.started:web_search"),
+        id="an-unparsable-line-is-named-other",
+    ),
+    pytest.param(
+        [*_THREAD_OPENING, {"type": _A_PRIVATE_EVENT_MARKER}],
+        codex_image.ImageToolBlockedReason.UNEXPECTED_EVENT,
+        (*_OPENING_TOKENS, "other"),
+        id="unknown-event-type-is-named-other",
+    ),
+    pytest.param(
+        [*_THREAD_OPENING, _item_event("item.started", "future_item")],
+        codex_image.ImageToolBlockedReason.UNEXPECTED_ITEM,
+        (*_OPENING_TOKENS, "item.started:other"),
+        id="unknown-item-kind-is-named-other",
+    ),
+    pytest.param(
+        [
+            *_THREAD_OPENING,
+            {"type": "turn.failed", "error": {"message": "failed"}},
+            _item_event("item.started", "web_search"),
+        ],
+        codex_image.ImageToolBlockedReason.BLOCKED_ITEM,
+        (*_OPENING_TOKENS, "turn.failed", "item.started:web_search"),
+        id="blocked-item-after-a-failed-turn",
+    ),
+    pytest.param(
+        [
+            *_THREAD_OPENING,
+            {"type": "error", "message": "failed"},
+            _item_event("item.started", "web_search"),
+        ],
+        codex_image.ImageToolBlockedReason.BLOCKED_ITEM,
+        (*_OPENING_TOKENS, "error", "item.started:web_search"),
+        id="blocked-item-after-a-top-level-error",
+    ),
+)
+
+
+@pytest.mark.parametrize(("events", "expected_reason", "expected_tokens"), _BLOCKED_TURNS)
+def test_codex_cover_image_aborts_a_blocked_turn_and_logs_only_closed_names(
+    monkeypatch,
+    caplog,
+    events: _StreamedEvents,
+    expected_reason: codex_image.ImageToolBlockedReason,
+    expected_tokens: tuple[str, ...],
+) -> None:
+    state = {"aborted": False, "reaped": False}
+    monkeypatch.setattr(codex_protocol, "run_cli_bounded", _streaming_runner(events, state))
     caplog.set_level("WARNING", logger="agent_providers.codex.image")
 
     with pytest.raises(codex_image.ImageToolBlockedError) as raised:
-        codex_image.generate_codex_cover_image(
-            prompt_marker,
-            policy=A_COVER_POLICY,
-            deadline=10_000_000,
-        )
+        _generate_cover(_A_PRIVATE_PROMPT_MARKER)
 
-    assert raised.value.reason is expected_reason
-    assert caplog.text.count("Codex image tool rejected") == 1
-    assert expected_reason.value in caplog.text
-    assert prompt_marker not in caplog.text
-    assert event_marker not in caplog.text
-    assert runner_state == {
-        "aborted": rejected_while_streaming,
-        "reaped": True,
-    }
+    assert (raised.value.reason, raised.value.observed) == (expected_reason, expected_tokens)
+    expected_line = (
+        f"Codex image tool rejected route=cli code={expected_reason.value} "
+        f"{_types_line(expected_tokens)}"
+    )
+    assert _warnings(caplog) == [expected_line]
+    assert all(record.exc_info is None for record in caplog.records)
+    for private in (_A_PRIVATE_PROMPT_MARKER, _A_PRIVATE_EVENT_MARKER):
+        assert private not in caplog.text
+        assert private not in repr(raised.value) + str(raised.value)
+    assert state == {"aborted": True, "reaped": True}
+
+
+_ALTERNATING_ITEM_EVENTS = ("item.started", "item.completed")
+
+
+def _alternating_agent_messages(count: int) -> list[dict]:
+    return [
+        _item_event(_ALTERNATING_ITEM_EVENTS[index % 2], "agent_message") for index in range(count)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("events", "expected_tokens"),
+    (
+        (
+            [*_THREAD_OPENING, *_alternating_agent_messages(3), _TURN_COMPLETED],
+            (
+                *_OPENING_TOKENS,
+                "item.started:agent_message",
+                "item.completed:agent_message",
+                "item.started:agent_message",
+                "turn.completed",
+            ),
+        ),
+        (
+            [
+                *_THREAD_OPENING,
+                *[_item_event("item.completed", "agent_message")] * 100,
+                _TURN_COMPLETED,
+            ],
+            (*_OPENING_TOKENS, "item.completed:agent_message*100", "turn.completed"),
+        ),
+        (
+            [
+                *[event for message in _alternating_agent_messages(40) for event in (message,) * 2],
+                _TURN_COMPLETED,
+            ],
+            (
+                "...+9",
+                *(
+                    f"{_ALTERNATING_ITEM_EVENTS[index % 2]}:agent_message*2"
+                    for index in range(9, 40)
+                ),
+                "turn.completed",
+            ),
+        ),
+        (
+            [*_alternating_agent_messages(40), _TURN_COMPLETED],
+            (
+                "...+9",
+                *(f"{_ALTERNATING_ITEM_EVENTS[index % 2]}:agent_message" for index in range(9, 40)),
+                "turn.completed",
+            ),
+        ),
+    ),
+    ids=(
+        "single-occurrences-stay-bare",
+        "repeats-collapse-before-the-window",
+        "dropped-count-counts-collapsed-tokens-not-lines",
+        "a-long-turn-keeps-the-last-32-behind-a-dropped-count",
+    ),
+)
+def test_a_validated_transcript_returns_its_bounded_closed_tokens(
+    tmp_path: Path, events: list[dict], expected_tokens: tuple[str, ...],
+) -> None:
+    assert codex_image._validate_codex_image_events(
+        _jsonl(events), codex_home=tmp_path,
+    ) == expected_tokens
+
+
+def test_a_deviating_transcript_raises_the_blocked_error_with_its_tokens(tmp_path: Path) -> None:
+    transcript = _jsonl([*_THREAD_OPENING, _item_event("item.started", "command_execution")])
+
+    with pytest.raises(codex_image.ImageToolBlockedError) as raised:
+        codex_image._validate_codex_image_events(transcript, codex_home=tmp_path)
+
+    assert raised.value.observed == (*_OPENING_TOKENS, "item.started:command_execution")
 
 
 @pytest.mark.parametrize(
@@ -917,8 +1165,320 @@ def test_codex_public_adapters_reject_unusable_login_mirrors(
     override_provider_runtime(codex_cli_auth_file=auth_file)
 
     with pytest.raises(codex_image.CodexImageLoginError):
-        codex_image.generate_codex_cover_image("prompt", policy=A_COVER_POLICY, deadline=10_000_000)
+        codex_image.generate_codex_image("prompt", policy=A_COVER_POLICY, deadline=10_000_000)
     with pytest.raises(ProviderUnavailableError) as raised:
         _transport()
 
     assert raised.value.reason.code is SafeRouteReasonCode.CLI_AUTH_REJECTED
+
+
+@CALLER_CONTEXTS
+def test_a_refused_codex_call_hands_its_text_only_to_the_host(
+    monkeypatch, caplog, while_the_caller_handles_an_exception,
+) -> None:
+    monkeypatch.setattr(
+        codex_protocol,
+        "run_cli_bounded",
+        _runner(_tool_round_lines(a_call_to_an_undeclared_tool_carrying()), _outcome(), []),
+    )
+    caplog.set_level(logging.DEBUG)
+
+    turn = drive_turn(
+        "codex",
+        correlation_id="job-41",
+        while_the_caller_handles_an_exception=while_the_caller_handles_an_exception,
+    )
+
+    assert_the_canary_reaches_only_the_host(
+        turn,
+        caplog.records,
+        provider="codex",
+        rule=TextToolRejectionRule.UNKNOWN_TOOL,
+        correlation_id="job-41",
+    )
+
+
+@CALLER_CONTEXTS
+def test_a_codex_call_nested_too_deeply_is_refused_not_a_failed_route(
+    monkeypatch, caplog, while_the_caller_handles_an_exception,
+) -> None:
+    monkeypatch.setattr(
+        codex_protocol,
+        "run_cli_bounded",
+        _runner(_tool_round_lines(a_call_nested_too_deeply_to_decode()), _outcome(), []),
+    )
+    caplog.set_level(logging.DEBUG)
+
+    turn = drive_turn(
+        "codex",
+        while_the_caller_handles_an_exception=while_the_caller_handles_an_exception,
+    )
+
+    assert isinstance(turn.error, TextToolCallRejectedError)
+    assert turn.error.reason.code is SafeRouteReasonCode.TOOL_PROTOCOL_ERROR
+    assert turn.error.rejection.rule is TextToolRejectionRule.CALL_NOT_JSON
+    assert "RecursionError" not in formatted_log_text(caplog.records)
+
+
+async def _drain_first_round(transport) -> None:
+    async for _ in transport.stream(InitialTurn("system", [])):
+        pass
+
+
+def test_a_codex_event_line_nested_too_deeply_is_refused_as_a_cli_protocol_error(
+    monkeypatch,
+) -> None:
+    calls: list = []
+    lines = [DEEPLY_NESTED_JSON.encode() + b"\n"]
+    monkeypatch.setattr(codex_protocol, "run_cli_bounded", _runner(lines, _outcome(), calls))
+    transport = _transport()
+
+    async def collect() -> None:
+        with pytest.raises(ProviderUnavailableError) as raised:
+            await _drain_first_round(transport)
+        assert raised.value.reason.code is SafeRouteReasonCode.CLI_PROTOCOL_ERROR
+        await transport.aclose()
+
+    asyncio.run(collect())
+
+    assert len(calls) == 1
+
+
+def test_a_codex_tool_result_nested_too_deeply_is_passed_on_in_the_next_prompt(
+    monkeypatch,
+) -> None:
+    calls: list = []
+    lines = _tool_round_lines('<notes_tool_call>\n{"name":"list_notes","arguments":{}}\n'
+                              "</notes_tool_call>")
+    monkeypatch.setattr(codex_protocol, "run_cli_bounded", _runner(lines, _outcome(), calls))
+    transport = _transport()
+
+    async def collect() -> None:
+        await _drain_first_round(transport)
+        nested_result = ToolResultBatch((ToolResult("one", DEEPLY_NESTED_JSON, False),))
+        assert [item async for item in transport.stream(nested_result)]
+        await transport.aclose()
+
+    asyncio.run(collect())
+
+    assert DEEPLY_NESTED_JSON.encode() in calls[1][1]["stdin_payload"]
+
+
+_UNDECODABLE_EVENT_LINES = pytest.mark.parametrize(
+    "event_line",
+    [
+        pytest.param(b'{"type":"item.completed","text":"event-line-canary\n', id="malformed-json"),
+        pytest.param(b"\xff\xfe event-line-canary\n", id="invalid-utf-8"),
+    ],
+)
+
+
+@_UNDECODABLE_EVENT_LINES
+def test_the_codex_line_reader_refuses_an_undecodable_line_without_chaining_it(event_line):
+    with pytest.raises(codex_protocol.CodexCliStreamFailure) as raised:
+        codex_protocol.parse_codex_line(event_line)
+
+    assert raised.value.code == "codex_cli_stream_protocol_error"
+    assert raised.value.__context__ is None
+    assert raised.value.__cause__ is None
+
+
+@_UNDECODABLE_EVENT_LINES
+@CALLER_CONTEXTS
+def test_a_codex_event_line_the_cli_cannot_decode_leaves_no_chain_to_its_text(
+    monkeypatch, event_line, while_the_caller_handles_an_exception,
+) -> None:
+    monkeypatch.setattr(codex_protocol, "run_cli_bounded", _runner([event_line], _outcome(), []))
+    transport = _transport()
+
+    async def stream_the_turn() -> BaseException:
+        try:
+            async for _ in transport.stream(InitialTurn("system", [])):
+                pass
+        except ProviderUnavailableError as error:
+            return error
+        raise AssertionError("the undecodable line was accepted")
+
+    async def stream_while_handling_an_exception() -> BaseException:
+        try:
+            raise CallerCanaryError(A_CALLER_CANARY)
+        except CallerCanaryError:
+            return await stream_the_turn()
+
+    stream = (
+        stream_while_handling_an_exception
+        if while_the_caller_handles_an_exception
+        else stream_the_turn
+    )
+    error = asyncio.run(stream())
+
+    assert isinstance(error, ProviderUnavailableError)
+    assert error.reason.code is SafeRouteReasonCode.CLI_PROTOCOL_ERROR
+    assert str(error) == "CLI returned an invalid response."
+    assert error.__context__ is None
+    assert error.__cause__ is None
+    assert "event-line-canary" not in "".join(traceback.format_exception(error))
+
+
+_CANARY_REFRESH_TOKEN = "canary-refresh-token-of-the-operator"
+_OPERATORS_LIVE_LOGIN = {
+    **_REDACTED_CODEX_LOGIN,
+    "tokens": {
+        **_REDACTED_CODEX_LOGIN["tokens"],
+        "refresh_token": _CANARY_REFRESH_TOKEN,
+        "session_token": _CANARY_REFRESH_TOKEN,
+    },
+}
+
+
+def _recording_runner(
+    copies: list[tuple[tuple[str, ...], str]], runner, every_file_content: list[bytes],
+) -> object:
+    def run_cli_bounded(child, **kwargs):
+        codex_home = Path(child.environment["CODEX_HOME"])
+        login = codex_home / "auth.json"
+        copies.append((child.command, login.read_text() if login.is_file() else ""))
+        every_file_content.extend(
+            child_file.read_bytes() for child_file in filter(Path.is_file, codex_home.rglob("*"))
+        )
+        return runner(child, **kwargs)
+
+    return run_cli_bounded
+
+
+def _probe_runner(stdout: str) -> object:
+    def run_cli_bounded(_child, **_kwargs):
+        return _outcome(stdout=stdout)
+
+    return run_cli_bounded
+
+
+def _drive_the_catalog_probe(monkeypatch, copies, files) -> None:
+    runner = _probe_runner("[]")
+    monkeypatch.setattr(process, "run_cli_bounded", _recording_runner(copies, runner, files))
+    process.codex_cli_model_catalog()
+
+
+def _drive_the_login_probe(monkeypatch, copies, files) -> None:
+    runner = _probe_runner("Logged in using ChatGPT")
+    monkeypatch.setattr(process, "run_cli_bounded", _recording_runner(copies, runner, files))
+    assert process.codex_cli_login().logged_in is True
+
+
+def _drive_the_tool_turn(monkeypatch, copies, files) -> None:
+    runner = _runner(_tool_round_lines("done"), _outcome(), [])
+    monkeypatch.setattr(codex_protocol, "run_cli_bounded", _recording_runner(copies, runner, files))
+    asyncio.run(_collect_tool_events(_codex_tool_events(
+        _transport(), lambda _name, _arguments: ToolOutcome("{}", False),
+    )))
+
+
+def _drive_the_image_turn(monkeypatch, copies, files) -> None:
+    runner = _recording_runner(copies, _generated_png_runner(), files)
+    monkeypatch.setattr(codex_protocol, "run_cli_bounded", runner)
+    codex_image.generate_codex_image("prompt", policy=A_COVER_POLICY, deadline=10_000_000)
+
+
+@pytest.mark.parametrize(
+    "drive",
+    (
+        _drive_the_catalog_probe,
+        _drive_the_login_probe,
+        _drive_the_tool_turn,
+        _drive_the_image_turn,
+    ),
+    ids=("catalog", "login-status", "tool-turn", "image-turn"),
+)
+def test_no_codex_child_is_handed_the_operators_live_refresh_token(
+    monkeypatch, caplog, codex_login_mirror: Path, drive,
+) -> None:
+    codex_login_mirror.write_text(json.dumps(_OPERATORS_LIVE_LOGIN))
+    operators_file = codex_login_mirror.read_bytes()
+    monkeypatch.setattr(process, "resolve_cli_binary", lambda _binary: Path("/usr/bin/codex"))
+    clear_agent_cli_caches()
+    caplog.set_level(logging.DEBUG)
+    copies: list[tuple[tuple[str, ...], str]] = []
+    files: list[bytes] = []
+
+    drive(monkeypatch, copies, files)
+
+    (command, child_login), = copies
+    assert json.loads(child_login)["tokens"]["refresh_token"] == ""
+    assert json.loads(child_login)["tokens"]["access_token"] == "access-token"
+    assert codex_login_mirror.read_bytes() == operators_file
+    assert _CANARY_REFRESH_TOKEN not in child_login
+    assert not any(_CANARY_REFRESH_TOKEN.encode() in content for content in files)
+    assert not any(_CANARY_REFRESH_TOKEN in argument for argument in command)
+    assert _CANARY_REFRESH_TOKEN not in formatted_log_text(caplog.records)
+
+
+def _exception_chain(error: BaseException) -> list[BaseException]:
+    chain, pending = [], [error]
+    while pending:
+        current = pending.pop()
+        if current in chain:
+            continue
+        chain.append(current)
+        pending.extend(link for link in (current.__cause__, current.__context__) if link)
+    return chain
+
+
+def _values_held_by_the_traceback_frames(error: BaseException) -> list[object]:
+    held = []
+    for link in _exception_chain(error):
+        frame_holder = link.__traceback__
+        while frame_holder is not None:
+            held.extend(frame_holder.tb_frame.f_locals.values())
+            frame_holder = frame_holder.tb_next
+    return held
+
+
+def _drive_the_image_path(_codex_login_mirror: Path) -> BaseException:
+    with pytest.raises(codex_image.CodexImageLoginError) as raised:
+        codex_image.generate_codex_image("prompt", policy=A_COVER_POLICY, deadline=10_000_000)
+    return raised.value
+
+
+def _drive_the_probe_path(_codex_login_mirror: Path) -> BaseException:
+    with pytest.raises(process.CodexLoginMirrorError) as raised:
+        process.blank_codex_refresh_token(_MALFORMED_LOGIN_WITH_CANARY)
+    return raised.value
+
+
+_MALFORMED_LOGIN_WITH_CANARY = f'{{"refresh_token": "{_CANARY_REFRESH_TOKEN}", '.encode()
+
+
+def _drive_the_credential_seam(codex_login_mirror: Path) -> BaseException:
+    with pytest.raises(process.CliCredentialNotConfiguredError) as raised:
+        process.PrivateCredentialHome(
+            codex_login_mirror,
+            Path("auth.json"),
+            prefix="seam-",
+            missing_credential_is_error=True,
+            credential_copy=process.blank_codex_refresh_token,
+        )
+    return raised.value
+
+
+@pytest.mark.parametrize(
+    "drive",
+    (_drive_the_probe_path, _drive_the_image_path, _drive_the_credential_seam),
+    ids=("probe", "image", "seam"),
+)
+def test_a_malformed_login_leaves_no_credential_content_in_the_error_chain(
+    monkeypatch, codex_login_mirror: Path, drive,
+) -> None:
+    codex_login_mirror.write_bytes(_MALFORMED_LOGIN_WITH_CANARY)
+    monkeypatch.setattr(process, "resolve_cli_binary", lambda _binary: Path("/usr/bin/codex"))
+
+    error = drive(codex_login_mirror)
+
+    chain = _exception_chain(error)
+    assert not any(
+        _CANARY_REFRESH_TOKEN in "".join(traceback.format_exception(link)) for link in chain
+    )
+    assert all(not isinstance(link, ValueError) for link in chain)
+    assert not any(
+        _CANARY_REFRESH_TOKEN in (value.decode() if isinstance(value, bytes) else str(value))
+        for value in _values_held_by_the_traceback_frames(error)
+    )

@@ -28,15 +28,16 @@ It owns the machinery that is the same in every deployment:
 | Module | Owns |
 |---|---|
 | `agent_providers.config` | The deployment facts every module reads, installed once per process via `configure()` |
-| `agent_providers.catalog` | Live provider/route readiness probes and model listings (`probe_provider_route`, `list_provider_models`) |
-| `agent_providers.dispatch` | Routing one turn to a provider and route, and the cover-image capability |
+| `agent_providers.catalog` | Live provider/route readiness probes and the model names each route offers, aliases or ids as the provider lists them (`probe_provider_route`, `list_provider_models`) |
+| `agent_providers.dispatch` | Routing one turn to a provider and route, and the image capability |
 | `agent_providers.events` | The `StreamEvent` union a turn emits in-process (assistant text, tool call, tool result, final); not the service wire |
 | `agent_providers.tool_loop` | The provider-agnostic tool loop driving a `ToolExecutor` over a `ToolTransport` |
 | `agent_client.tools` | `ToolDeclaration`: one tool's name, description, JSON-schema arguments and `ToolEffect` |
 | `agent_client.wire` | The one owner of the agent service's wire: the `RunRequest` body, the versioned run-event union, the `RunRejection` body and the `RunStatus` body of `GET /runs/{id}` |
 | `agent_client.run_stream` | `parse_event` and `RunStream`: the rules a run's event stream keeps, and how a cut-short run ends |
 | `agent_client.sse` | `encode_event` and `RunStreamDecoder`: one SSE frame per run event, decoded and checked against the wire and its stream rules |
-| `agent_providers.tools` | The `ToolCatalog` and its Anthropic/OpenAI schema projections; re-exports the identical `ToolDeclaration` |
+| `agent_client.capability` | The format of the run capability the service mints and an app's MCP server verifies (A1m): token type `agent-capability+jwt`, at most 8,192 characters, the strict `CapabilityClaims`, and `McpOrigin`, the one decider of an app's canonical https MCP origin |
+| `agent_providers.tools` | The `ToolCatalog`, its host-declared `ToolProtocolMarkup` and its Anthropic/OpenAI schema projections; re-exports the identical `ToolDeclaration` |
 | `agent_providers.spawn` | `ChildProcess` and the only calls in this library that create a child process |
 | `agent_providers.process` | `run_cli_bounded`: the bounded runner over a `ChildProcess` (start, stdin, first line, deadline, process-group cleanup) |
 | `agent_providers.images` | The `ImagePolicy` an image turn is held to |
@@ -44,7 +45,9 @@ It owns the machinery that is the same in every deployment:
 | `agent_service.app` | `POST /runs` and `GET /runs/{id}`: the order of checks, the typed rejections, the admitted run's event stream (`_RunResponse`, which closes the run whenever its response ends), and the run status that only the app and user that started a run may read |
 | `agent_service.identity` | The two-token check: the workload token bound to one registered app, the user token to one principal |
 | `agent_service.run_request` | The strict read of a `RunRequest` body: strict JSON, then its version, then its shape |
-| `agent_service.config` | The service's TOML: identity, listener, run pacing and limits, subscription profiles, purposes and apps |
+| `agent_service.config` | The service's TOML: identity, listener, run pacing and limits, subscription profiles, purposes and apps, the optional `[signing] key_file` the signing key is read from, each app's optional https MCP origin (canonical, one per app, needing `[signing]`), and the startup preflight that measures every app's capability against 8,192 characters |
+| `agent_service.signing` | The service's one signing key: an RSA-3072 PEM (exponent 65537) read once at startup and never made by the service, refused when unsound; its `kid` is the RFC 7638 thumbprint, and `SigningKey.sign(claims, token_type)` writes a typed RS256 token. No capability is minted until A1a4-2b. Generation and rotation: see the A1a4 ruling in `docs/decisions/0001-agent-service.md` |
+| `agent_service.capability` | The capability's claims and signing and its 8,192-character guard (`CapabilityTooLarge`), and the startup preflight that measures each app's capability with a subject reserve of 255 quotation marks, `iat = 9_999_999_999` and `exp = floor(iat + max_duration_s)`; the actual signed-token guard remains authoritative. `capability_too_large` (422) answers an oversized capability at admission. No run receives a capability until A1a4-2b |
 | `agent_service.routing` | `route`: the one H5 decider between the CLI route, the API route and `not_enabled` |
 | `agent_service.run_events` | The mapping of the core's turn events onto the wire frames, ending every run with exactly one terminal, except the cut stream of a dropped client (H6); also the run's tool-call and byte budget |
 | `agent_service.run_liveness` | When frames go out: the heartbeat, the idle timeout and the maximum duration, enforced by a supervisor that does not depend on the client reading, and drops a client that stops taking frames |
@@ -61,17 +64,35 @@ Import-linter contracts forbid either package reaching back into
 the core above the client; only the service verifies tokens, so only it imports
 `webauth`. `lint-imports` proves them in CI.
 
+## Terms
+
+| Term | Meaning |
+|---|---|
+| turn | One exchange: a system prompt and messages in, a stream of events out (`stream_turn`). |
+| tool | A capability the host declares in its `ToolCatalog`. |
+| tool call, tool result, tool round | One requested invocation, its outcome, and one provider response's batch of calls. |
+| tool executor | The host's port that runs one tool call (`ToolExecutor`). |
+| host | The application that embeds the library. |
+| host data | Anything a host supplies or a host tool returns: system prompt, messages, tool arguments and results, an exception raised by host code. The library forwards it where its contract says and never logs it. |
+| provider | `claude`, `grok` or `codex` (`ProviderName`). |
+| route | `cli` or `api` (`ProviderRoute`); a *provider route* is one provider on one route. |
+| one-shot completion | A tool-free single request bounded by a caller-owned deadline (`call_provider_once`). |
+| image turn | A Codex CLI turn that produces one image under an `ImagePolicy`. |
+| tool markup | The tag namespace and product name a host's text-protocol tools wear (`ToolProtocolMarkup`). |
+| user | The person a turn runs for (`user_id`). |
+| working root | The host's private directory below which the library creates every private directory and file (`cli_working_directory_root`). |
+
 ## Install
 
-No distribution is published on PyPI, and no name is registered there.
-Install the wheels from the tag's GitHub release, by URL, so a resolver never
-asks PyPI for a name someone else could claim. An app installs the client and
-the core:
+No distribution is published on PyPI, and PyPI is not planned: wheels pinned by
+URL and hash from the tag's GitHub release give byte-exact, hash-checked wheels
+with no PyPI name to race for; their dependencies still resolve from PyPI. An app
+installs the client and the core:
 
 ```bash
 pip install \
-  "overnightworks-agent-client @ https://github.com/overnightworks/agent-providers/releases/download/v0.2.0/overnightworks_agent_client-0.2.0-py3-none-any.whl" \
-  "overnightworks-agent-providers @ https://github.com/overnightworks/agent-providers/releases/download/v0.2.0/overnightworks_agent_providers-0.2.0-py3-none-any.whl"
+  "overnightworks-agent-client @ https://github.com/overnightworks/agent-providers/releases/download/v0.2.0/overnightworks_agent_client-0.2.0-py3-none-any.whl#sha256=13ef14197d90d3af3b134424ca3493320b7b47f153a2b10c7c6f34ba7718a988" \
+  "overnightworks-agent-providers @ https://github.com/overnightworks/agent-providers/releases/download/v0.2.0/overnightworks_agent_providers-0.2.0-py3-none-any.whl#sha256=0bc8090d7d4b412a628d03b8cf2285f1eacf6112ed00028f4acdd4d130654a17"
 ```
 
 The core pins the client to its own version exactly, so both URLs name the same
@@ -86,9 +107,11 @@ dependency lazily; in URL form they sit between the name and the `@`:
 
 ```bash
 pip install \
-  "overnightworks-agent-client @ https://github.com/overnightworks/agent-providers/releases/download/v0.2.0/overnightworks_agent_client-0.2.0-py3-none-any.whl" \
-  "overnightworks-agent-providers[api,image] @ https://github.com/overnightworks/agent-providers/releases/download/v0.2.0/overnightworks_agent_providers-0.2.0-py3-none-any.whl"
+  "overnightworks-agent-client @ https://github.com/overnightworks/agent-providers/releases/download/v0.2.0/overnightworks_agent_client-0.2.0-py3-none-any.whl#sha256=13ef14197d90d3af3b134424ca3493320b7b47f153a2b10c7c6f34ba7718a988" \
+  "overnightworks-agent-providers[api,image] @ https://github.com/overnightworks/agent-providers/releases/download/v0.2.0/overnightworks_agent_providers-0.2.0-py3-none-any.whl#sha256=0bc8090d7d4b412a628d03b8cf2285f1eacf6112ed00028f4acdd4d130654a17"
 ```
+
+A uv host lists the same URLs in its `pyproject.toml`; `uv lock` records each wheel's sha256 in the host's own `uv.lock`, and `uv sync` checks it.
 
 A host that pins a git commit instead of a release resolves the client only
 under uv, which reads the workspace source from the repository; pip would look
@@ -133,9 +156,17 @@ cleanup. This is not evidence that a CLI refreshes credentials in practice.
 
 The library logs closed diagnostic codes for rejected Grok tool-protocol and
 Codex image-gate paths. They identify a stable rejection class without copying
-provider events, prompts, arguments, paths, IDs, or exception text into logs.
-`ImageToolBlockedError` describes this library's image-gate decision; it is not
-an administrative diagnosis from Codex. The earlier Songmaker #899 evidence
+prompts, arguments, paths, IDs, or exception text into logs. The Codex image
+route's three codes are `unexpected_event`, `blocked_item` and
+`unexpected_item`, logged as
+`Codex image tool rejected route=cli code=<code> types=[...]`; a completed turn
+that drew nothing is logged as `Codex image not created route=cli types=[...]`.
+`types` is the turn's event sequence as closed event and kind *names* from the
+gate's own sets, never event contents: anything outside them is `other`,
+consecutive repeats read `name*N`, and a long turn keeps its last 32 names
+behind a leading `...+K`. `ImageToolBlockedError` describes this library's
+image-gate decision and carries the same names as `observed`; it is not an
+administrative diagnosis from Codex. The earlier Songmaker #899 evidence
 cannot reconstruct the concrete Grok or image cause, so a new provider run is
 needed to observe these codes.
 
@@ -154,8 +185,42 @@ also runs turns adds a `TurnRuntimeConfig` as `turns`: the chat model, the
 Codex mounts and process caps, the prompt-file names, and an optional
 `McpServerSpec` describing the host's MCP server. A catalog-only host passes no
 `turns` at all and never invents a value it does not have; a host that runs no
-MCP server passes `mcp_server=None` inside `turns`. A host migrates at its next
-pin bump (both models refuse unknown fields):
+MCP server passes `mcp_server=None` inside `turns`. A host migrates at its pin bump: see [Migrating to 0.3.0](#migrating-to-030).
+
+A turn path reached
+without `turns` raises `TurnRuntimeNotConfiguredError` instead of running against a
+guess.
+
+The other host obligations arrive as arguments where they are needed:
+
+- `ToolExecutor` (`agent_providers.tool_loop`) — the port that runs one tool
+  call and returns its `ToolOutcome`. Its docstring states what a failure is,
+  what raising means and what the loop logs.
+- `ToolCatalog` (`agent_providers.tools`) — the tool declarations, projected to
+  each provider's schema, and the host-declared `ToolProtocolMarkup` whose
+  brand the text protocol's markers wear.
+- `McpServerSpec` (`agent_providers.config`) — how the host's MCP server is
+  launched and which tools it exposes.
+- `ImagePolicy` (`agent_providers.images`) — the constraints an image turn is
+  held to.
+- `TextToolCallRejectedError` (`agent_providers.errors`) — a
+  `ProviderUnavailableError` a Grok or Codex turn raises when the model's text tool
+  call breaks the protocol. Its `rejection` names the rule and where the call
+  broke (`offset`, `length`), plus a piece of the refused text of at most 1,024
+  code points, masked as a `SecretStr` (`rejection.excerpt.get_secret_value()`).
+  `SecretStr` masks display and pydantic's JSON, but not pickle, copy or
+  `vars()`, and traceback locals can hold the whole response. The library logs
+  the rule and the numbers, never the text, and keeps no copy; whether the text
+  is written anywhere is the host's decision.
+- The `StreamEvent` union (`agent_providers.events`) — what a turn emits
+  in-process, which a host calling the core consumes. The agent service's wire
+  is `agent_client.wire`, not this union.
+
+## Migrating to 0.3.0
+
+A host migrates at its pin bump to 0.3.0; both configuration models refuse unknown fields.
+
+### Configuration
 
 | Before (`ProviderRuntimeConfig`) | Now |
 |---|---|
@@ -172,23 +237,36 @@ pin bump (both models refuse unknown fields):
 | (absent) | `cli_binary_search_path`: new and required |
 | (absent) | `claude_cli_auth_file`: new and required, the file copied read-only into each Claude turn's private home |
 
-A turn path reached
-without `turns` raises `TurnRuntimeNotConfiguredError` instead of running against a
-guess.
+### Names and values
 
-The other host obligations arrive as arguments where they are needed:
-
-- `ToolExecutor` (`agent_providers.tool_loop`) — the callable the tool loop
-  invokes to run one requested tool and return its `ToolOutcome`.
-- `ToolCatalog` (`agent_providers.tools`) — the tool declarations, projected to
-  each provider's schema.
-- `McpServerSpec` (`agent_providers.config`) — how the host's MCP server is
-  launched and which tools it exposes.
-- `ImagePolicy` (`agent_providers.images`) — the constraints an image turn is
-  held to.
-- The `StreamEvent` union (`agent_providers.events`) — what a turn emits
-  in-process, which a host calling the core consumes. The agent service's wire
-  is `agent_client.wire`, not this union.
+| Before | Now | Host action |
+|---|---|---|
+| `dispatch.stream_cowriter_turn` | `dispatch.stream_turn` | Rename the import. |
+| `dispatch.CoverImageCapability` | `dispatch.ImageCapability` | Rename. |
+| `dispatch.cover_image_capability` | `dispatch.image_capability` | Rename. |
+| `codex.image.generate_codex_cover_image` | `codex.image.generate_codex_image` | Rename the import and every patch of an imported binding. |
+| `codex.image.codex_cover_image_capability_is_available` (also patched as `dispatch.codex_cover_image_capability_is_available`) | `codex.image.codex_image_turn_is_available` | Rename the import and the patch targets. |
+| `constants.COWRITER_CLI_TIMEOUT_SECONDS` | `constants.TURN_TIMEOUT_SECONDS` | Rename. |
+| `constants.COWRITER_MODELS_TIMEOUT_SECONDS` | `constants.PROBE_TIMEOUT_SECONDS` | Rename; patch `agent_providers.process.PROBE_TIMEOUT_SECONDS`. |
+| `constants.COWRITER_CLAUDE_API_MAX_TOKENS` | `constants.CLAUDE_API_MAX_TOKENS` | Rename. |
+| `constants.COWRITER_GROK_CLI_LINE_CHANNEL_CAPACITY` | `constants.GROK_CLI_LINE_CHANNEL_CAPACITY` | Rename. |
+| `constants.COWRITER_GROK_CHAT_URL` | `constants.GROK_CHAT_URL` | Rename. |
+| `constants.COWRITER_GROK_MODELS_URL` | `constants.GROK_MODELS_URL` | Rename. |
+| `constants.COWRITER_OPENAI_CHAT_URL` | `constants.OPENAI_CHAT_URL` | Rename. |
+| `constants.COWRITER_OPENAI_MODELS_URL` | `constants.OPENAI_MODELS_URL` | Rename. |
+| `constants.COWRITER_ANTHROPIC_MODELS_URL` | `constants.ANTHROPIC_MODELS_URL` | Rename. |
+| `constants.COWRITER_GROK_MODEL_PREFIX` | `constants.GROK_MODEL_PREFIX` | Rename. |
+| `constants.COWRITER_GROK_NON_CHAT_MARKERS` | `constants.GROK_NON_CHAT_MARKERS` | Rename. |
+| `constants.COWRITER_OPENAI_CHAT_PREFIXES` | `constants.OPENAI_CHAT_PREFIXES` | Rename. |
+| `constants.COWRITER_OPENAI_NON_CHAT_MARKERS` | `constants.OPENAI_NON_CHAT_MARKERS` | Rename. |
+| `constants.COWRITER_CLAUDE_MODEL_PREFIX` | `constants.CLAUDE_MODEL_PREFIX` | Rename. |
+| `constants.COWRITER_CLAUDE_CLI_MODEL_LIST_MARKER` | `constants.CLAUDE_CLI_MODEL_LIST_MARKER` | Rename. |
+| `constants.JUDGE_FAILURE_TIMEOUT` = `"judge_timeout"` | `constants.DEADLINE_EXCEEDED_REASON` = `"deadline_exceeded"` | Update `jobs/_runtime.py` and `scoring/lyrical_coherence.py` together to use `DEADLINE_EXCEEDED_REASON`; new timeout jobs record `deadline_exceeded`, while existing stored job errors remain unchanged. No historical data rewrite is part of this release. |
+| `tool_loop.COWRITER_MAX_TOOL_ROUNDS` | `tool_loop.MAX_TOOL_ROUNDS` | Rename the import and the patch target. |
+| `constants.COWRITER_PROVIDERS` | `constants.ProviderName`, a `StrEnum` with `CLAUDE`, `GROK`, `CODEX` | A member equals its value string, so `"claude" in ProviderName` is true and `"bob" in ProviderName` is false without raising; `frozenset(ProviderName)`, `sorted(...)`, f-strings, `json.dumps` and `str`-keyed dict lookups behave as with the old set. The members are `str` subclasses, so `repr(...)` shows the member and `type(x) is str` is false; `ProviderModelCatalogUnavailableError.provider` may now be a member, so compare by value, not by type. Iteration order is claude, grok, codex. A host contract that reads constants by AST must also read a class definition. |
+| The tool messages `Co-Writer tool failed.`, `Co-Writer tool response was invalid.`, `Co-Writer tool-call limit was reached.` | `Tool failed.`, `Tool response was invalid.`, `Tool-call limit was reached.` | Map the `code` for product wording. `Tool response was invalid.` is also the `str()` of `TextToolCallRejectedError`. The other twelve messages are unchanged. |
+| The catalog error `Unknown co-writer provider '<name>'` | `Unknown provider '<name>'` | Update any text match; the exception types are unchanged. |
+| `ToolProtocolMarkup()` defaults `songmaker` / `Songmaker`; `ToolCatalog.markup` optional | Both fields and `ToolCatalog.markup` required | Declare `markup=ToolProtocolMarkup(tag_namespace="songmaker", product_name="Songmaker")`; the rendered prompt stays byte-identical. |
 
 ## Sandbox
 
@@ -201,6 +279,28 @@ of these prefixes. This library ships the constants, not a profile — a host
 brings its own AppArmor/seccomp profile that permits exactly those prefixes and
 derives it from these values, so a rename becomes a red test rather than a
 silently refused mount.
+
+The Codex image gate admits the events Codex CLI 0.163.0 measurably emits for
+a cover turn, and no command at all. One real turn on 0.163.0 (16.10.2026)
+under a production sandbox profile streamed `thread.started`, `turn.started`,
+three `item.completed:agent_message`, `turn.completed`, left one PNG under
+`generated_images/` and exited 0: the image call is invisible to
+`exec --json`, and no `command_execution` item appears. A command can only add
+capability to a turn, so none is admitted, and none is required: a
+`command_execution` item ends the turn as `blocked_item`. Requiring the skill
+read the older CLI made was a canary, not a guard, and it blocked every cover
+on 0.163.0. The supported CLI is 0.163.0, where this was measured; 0.147.0
+read the skill through the shell, which is now refused as `blocked_item`, so a
+host still on 0.147 must move to 0.163. If a later CLI reads the skill through
+the shell again, the logged `types` show `item.started:command_execution`, and
+that path is measured before it is admitted. The residual: on 0.163.0 the
+gate's block checks cover only the tool calls the CLI *reports*. The image call
+itself is not reported, and this measurement does not establish whether other
+tools invoked through the same path are reported either. A returned PNG is tied
+to the turn only by its location under the private `CODEX_HOME` and by the
+re-encode under the host's `ImagePolicy`. The gate is therefore defence in
+depth; the containment is the read-only sandbox plus the host's AppArmor and
+seccomp profile, which the host owns.
 
 ## Development
 

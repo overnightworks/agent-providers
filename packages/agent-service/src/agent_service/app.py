@@ -33,6 +33,7 @@ from fastapi.responses import Response, StreamingResponse
 from starlette.types import Receive, Scope, Send
 from webauth.jwt_verification import KeySetFetch, MonotonicClock, fetch_key_set_over_https
 
+from agent_client.capability import MAX_CAPABILITY_CHARACTERS
 from agent_client.wire import PROTOCOL_VERSION, RejectionCode, RunRejection, RunRequest
 from agent_service.config import ServiceConfig
 from agent_service.identity import Caller, CallerCheck, build_verifier
@@ -56,6 +57,7 @@ _STATUS: Final[Mapping[RejectionCode, HTTPStatus]] = {
     RejectionCode.INVALID_REQUEST: HTTPStatus.UNPROCESSABLE_ENTITY,
     RejectionCode.UNAVAILABLE: HTTPStatus.SERVICE_UNAVAILABLE,
     RejectionCode.NOT_FOUND: HTTPStatus.NOT_FOUND,
+    RejectionCode.CAPABILITY_TOO_LARGE: HTTPStatus.UNPROCESSABLE_ENTITY,
 }
 
 _MESSAGE: Final[Mapping[RejectionCode, str]] = {
@@ -68,6 +70,8 @@ _MESSAGE: Final[Mapping[RejectionCode, str]] = {
     RejectionCode.INVALID_REQUEST: "The body is not a valid run request.",
     RejectionCode.UNAVAILABLE: "The service cannot check tokens right now; retry later.",
     RejectionCode.NOT_FOUND: "No such run.",
+    RejectionCode.CAPABILITY_TOO_LARGE: "This run's capability would exceed"
+    f" {MAX_CAPABILITY_CHARACTERS} characters.",
 }
 
 

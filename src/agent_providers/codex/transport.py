@@ -1,4 +1,4 @@
-"""The Codex subscription CLI transport for one co-writer tool-loop turn."""
+"""The Codex subscription CLI transport for one tool-loop turn."""
 
 from __future__ import annotations
 
@@ -46,12 +46,14 @@ from agent_providers.codex.protocol import (
     top_level_error_message,
 )
 from agent_providers.config import current_config
-from agent_providers.constants import COWRITER_CLI_TIMEOUT_SECONDS
+from agent_providers.constants import TURN_TIMEOUT_SECONDS
 from agent_providers.errors import (
     CodexProcessPoolSaturatedError,
     ProviderUnavailableError,
     SafeRouteReasonCode,
+    TextToolCallRejectedError,
     normalize_route_failure,
+    raise_without_chain,
 )
 from agent_providers.process import (
     CliLineChannel,
@@ -68,6 +70,7 @@ from agent_providers.text_tool_protocol import (
 from agent_providers.text_tool_protocol import (
     TextToolCall,
     TextToolProtocolError,
+    TextToolRejection,
     TextToolStreamParser,
     render_tool_result,
 )
@@ -144,7 +147,7 @@ class CodexCliToolTransport:
                 "cli",
                 normalize_route_failure(SafeRouteReasonCode.CLI_AUTH_REJECTED),
             ) from None
-        self._deadline = time.monotonic() + COWRITER_CLI_TIMEOUT_SECONDS
+        self._deadline = time.monotonic() + TURN_TIMEOUT_SECONDS
         self._thread_id: str | None = None
         self._round_index = 0
         self._closed = False
@@ -156,14 +159,8 @@ class CodexCliToolTransport:
         """Stream one response, retaining only the server-issued thread ID."""
         if self._closed:
             raise RuntimeError("Codex CLI tool transport is closed")
-        try:
-            prompt = _tool_transport_prompt(self._catalog, message)
-        except TextToolProtocolError:
-            raise ProviderUnavailableError(
-                "codex",
-                "cli",
-                normalize_route_failure(SafeRouteReasonCode.TOOL_PROTOCOL_ERROR),
-            ) from None
+        _refuse_a_multi_result_batch(message)
+        prompt = _tool_transport_prompt(self._catalog, message)
         is_resume = self._thread_id is not None
         arguments = _codex_tool_arguments(
             self._model,
@@ -195,6 +192,8 @@ class CodexCliToolTransport:
         parser = TextToolStreamParser(self._catalog)
         state = _CodexToolRoundState()
         started_at = time.monotonic()
+        rejection: TextToolRejection | None = None
+        stream_failure_reason: SafeRouteReasonCode | None = None
         try:
             while True:
                 item = await asyncio.to_thread(channel.receive)
@@ -225,30 +224,31 @@ class CodexCliToolTransport:
             if thread_id is not None:
                 self._thread_id = thread_id
             yield response
-        except TextToolProtocolError:
+        except TextToolProtocolError as refused:
             channel.request_abort()
             await asyncio.shield(runner)
-            raise ProviderUnavailableError(
-                "codex",
-                "cli",
-                normalize_route_failure(SafeRouteReasonCode.TOOL_PROTOCOL_ERROR),
-            ) from None
+            rejection = refused.rejection
         except CodexCliStreamFailure as exc:
             channel.request_abort()
             await asyncio.shield(runner)
-            reason = (
+            stream_failure_reason = (
                 SafeRouteReasonCode.TOOL_EXECUTION_FAILED
                 if exc.code == "codex_cli_tool_call_blocked"
                 else SafeRouteReasonCode.CLI_PROTOCOL_ERROR
             )
-            raise ProviderUnavailableError(
-                "codex",
-                "cli",
-                normalize_route_failure(reason),
-            ) from None
         finally:
             channel.request_abort()
             await asyncio.shield(runner)
+        if rejection is not None:
+            raise_without_chain(TextToolCallRejectedError("codex", "cli", rejection))
+        if stream_failure_reason is not None:
+            raise_without_chain(
+                ProviderUnavailableError(
+                    "codex",
+                    "cli",
+                    normalize_route_failure(stream_failure_reason),
+                ),
+            )
 
     async def aclose(self) -> None:
         """Remove all private session and prompt material after reaping a round."""
@@ -341,6 +341,15 @@ def _run_codex_tool_round(
         return outcome
 
 
+def _refuse_a_multi_result_batch(message: InitialTurn | ToolResultBatch) -> None:
+    if isinstance(message, ToolResultBatch) and len(message.results) != 1:
+        raise ProviderUnavailableError(
+            "codex",
+            "cli",
+            normalize_route_failure(SafeRouteReasonCode.TOOL_PROTOCOL_ERROR),
+        )
+
+
 def _tool_transport_prompt(
     catalog: ToolCatalog,
     message: InitialTurn | ToolResultBatch,
@@ -351,12 +360,10 @@ def _tool_transport_prompt(
             message.system,
             flatten_messages("", message.messages),
         ).encode()
-    if len(message.results) != 1:
-        raise TextToolProtocolError()
     result = message.results[0]
     try:
         value = json.loads(result.content)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, RecursionError):
         value = result.content
     return render_tool_result(catalog, value).encode()
 
@@ -480,7 +487,7 @@ def _log_codex_tool_round(
 ) -> None:
     duration_ms = round((time.monotonic() - started_at) * 1000)
     log.info(
-        "Co-writer Codex CLI provider=codex route=cli round=%s duration_ms=%s tool=%s is_error=%s",
+        "Codex CLI tool round provider=codex route=cli round=%s duration_ms=%s tool=%s is_error=%s",
         round_index,
         duration_ms,
         tool_name or "none",

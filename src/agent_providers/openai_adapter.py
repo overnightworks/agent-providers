@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 
-from agent_providers.constants import COWRITER_CLI_TIMEOUT_SECONDS
+from agent_providers.constants import TURN_TIMEOUT_SECONDS
 from agent_providers.errors import (
     ProviderUnavailableError,
     SafeRouteReasonCode,
@@ -44,7 +44,7 @@ async def stream_openai_compatible_turn(
 ) -> AsyncIterator[StreamEvent]:
     """Stream one OpenAI-compatible turn through the host's tool catalog."""
     try:
-        async with httpx.AsyncClient(timeout=COWRITER_CLI_TIMEOUT_SECONDS) as client:
+        async with httpx.AsyncClient(timeout=TURN_TIMEOUT_SECONDS) as client:
             transport = _OpenAITransport(
                 client=client,
                 provider=provider,
@@ -268,10 +268,9 @@ def call_openai_compatible_once(
 ) -> str:
     """Synchronous, tool-free, single-turn completion.
 
-    Used by the lyrical-coherence judge (#315), which needs one verdict, not
-    the tool-using multi-round chat ``stream_openai_compatible_turn`` gives
-    the co-writer — so it runs under the judge's own budget, not the
-    co-writer's much longer session timeout.
+    A one-shot completion needs one answer, not the tool-using multi-round
+    chat ``stream_openai_compatible_turn`` gives a turn — so it runs under its
+    caller's own timeout, not under ``TURN_TIMEOUT_SECONDS``.
     """
     messages: list[dict[str, str]] = []
     if system:

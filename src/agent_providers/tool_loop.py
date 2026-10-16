@@ -1,25 +1,25 @@
-"""The transport-independent co-writer tool loop.
+"""The transport-independent tool loop.
 
 Transports own their provider wire format.  This module owns the single
 conversation rule shared by every tool-capable route: one initial turn,
 at most eight tool rounds, then one final-text chance.
 
-The host supplies the two things this loop cannot know: the ``ToolExecutor``
-that actually runs a tool, and the sentence a caller sees when that executor
-fails — one owner for that text, in the host's error vocabulary.
-
-Self-contained by design: no application import, so the package can be
-released on its own (issue #825).
+The caller supplies the host's ``ToolExecutor``, whose contract stands at its
+definition, and the sentence the model reads when that executor raises.
 """
 
 from __future__ import annotations
 
 import logging
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from agent_providers.errors import (
+    TextToolCallRejectedError,
+    ToolProtocolRejectionCode,
+)
 from agent_providers.events import (
     AssistantTextEvent,
     FinalEvent,
@@ -27,10 +27,11 @@ from agent_providers.events import (
     ToolCallEvent,
     ToolResultEvent,
 )
+from agent_providers.text_tool_protocol import TextToolRejection
 
 log = logging.getLogger(__name__)
 
-COWRITER_MAX_TOOL_ROUNDS = 8
+MAX_TOOL_ROUNDS = 8
 
 
 @dataclass(frozen=True)
@@ -61,6 +62,7 @@ class ToolCallBatch:
 class ToolOutcome:
     """What a ``ToolExecutor`` returns for one requested tool invocation.
 
+    ``content`` is what the model reads; ``is_error`` marks a tool that failed.
     The executor never learns which call it answers, so the loop — not the
     host — pairs this outcome with its ``tool_use_id`` into a ``ToolResult``.
     """
@@ -100,11 +102,39 @@ class FinalText:
 
 
 TransportResponse = TextDelta | ToolCallBatch | FinalText
-ToolExecutor = Callable[[str, dict[str, Any]], ToolOutcome]
+
+
+class ToolExecutor(Protocol):
+    """The host's port that runs one tool call and reports its outcome.
+
+    The loop calls it once per requested call, in the order the provider
+    returned them, synchronously on the turn's event loop, so a slow tool
+    holds the turn until it returns. ``name`` and ``arguments`` are the
+    model's request. The Grok and Codex CLI routes first check them against
+    the catalog: a declared name, and arguments that match its schema. The API
+    routes pass on what the provider's own tool calling returned. Validate
+    what the tool relies on.
+
+    A tool that fails is an outcome, not an exception: return
+    ``ToolOutcome(content, is_error=True)``. The loop hands ``content``
+    unchanged to the model and to the turn's ``ToolResultEvent``, and the turn
+    goes on.
+
+    Raising an ``Exception`` is a host defect. The loop logs one ERROR record
+    that names only the exception's class, never its message or traceback,
+    because both are host data. It answers the model with the turn's
+    tool-failure sentence as an error outcome, and the turn goes on.
+
+    Per call the loop logs one INFO record with the provider, route, round,
+    call id, correlation id, duration, tool name and ``is_error``. It never
+    logs ``arguments`` or ``content``.
+    """
+
+    def __call__(self, name: str, arguments: dict[str, Any], /) -> ToolOutcome: ...
 
 
 class ToolTransport(Protocol):
-    """Stateful provider transport for one co-writer turn."""
+    """Stateful provider transport for one turn."""
 
     def stream(
         self,
@@ -193,8 +223,33 @@ async def stream_tool_loop(
             ):
                 yield event
             next_message = ToolResultBatch(tuple(results))
+    except TextToolCallRejectedError as rejected:
+        _log_rejected_call(rejected.rejection, provider, route, round_index, correlation_id)
+        raise
     finally:
         await transport.aclose()
+
+
+def _log_rejected_call(
+    rejection: TextToolRejection,
+    provider: str,
+    route: str,
+    round_index: int,
+    correlation_id: str | None,
+) -> None:
+    """Write the one line a refused call earns: its place, never its text."""
+    log.warning(
+        "Tool call rejected provider=%s route=%s round=%s correlation_id=%s "
+        "code=%s rule=%s offset=%s length=%s",
+        provider,
+        route,
+        round_index,
+        correlation_id,
+        ToolProtocolRejectionCode.TEXT_TOOL_RESPONSE_INVALID,
+        rejection.rule,
+        rejection.offset,
+        rejection.length,
+    )
 
 
 async def _stream_response_events(
@@ -221,7 +276,7 @@ async def _final_events(
 
 
 def _next_round_index(round_index: int) -> int:
-    if round_index == COWRITER_MAX_TOOL_ROUNDS:
+    if round_index == MAX_TOOL_ROUNDS:
         raise ToolLoopLimitError()
     return round_index + 1
 
@@ -297,15 +352,12 @@ def _execute_tool(tool_round: _ToolRound, call: ToolCall) -> ToolOutcome:
     try:
         outcome = tool_round.executor(call.name, call.arguments)
     except Exception as exc:
-        # The executor is the host's port and reports a failed tool as a
-        # ToolOutcome, so anything raised is a host defect. The exception text
-        # is host data the library cannot classify, so only the class is
-        # logged; exc_info=False withholds the traceback on purpose.
+        # Raising is a host defect; see ToolExecutor for what is logged and why.
         log.error("Host tool executor raised %s", type(exc).__name__, exc_info=False)
         outcome = ToolOutcome(tool_round.tool_failure_message, True)
     duration_ms = round((time.monotonic() - started_at) * 1000)
     log.info(
-        "Co-writer tool provider=%s route=%s round=%s call_id=%s "
+        "Tool call provider=%s route=%s round=%s call_id=%s "
         "correlation_id=%s duration_ms=%s tool=%s is_error=%s",
         tool_round.provider,
         tool_round.route,

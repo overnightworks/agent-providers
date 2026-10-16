@@ -2,7 +2,7 @@
 
 The provider layer runs Claude, Grok and Codex on someone else's machine: its
 binaries, credential mirrors, mounted resource directories, chat model, API
-keys and the MCP server a co-writer turn attaches are deployment facts the host
+keys and the MCP server a turn attaches are deployment facts the host
 owns, not values this package may guess. It therefore reads them from one
 frozen value the host installs once per process via :func:`configure`, instead
 of reaching into an application settings module.
@@ -23,9 +23,6 @@ replacing an installed configuration with a *different* one raises
 :class:`ProviderRuntimeAlreadyConfiguredError` rather than letting the later
 caller quietly win; :func:`reset_config` drops the installation again — the
 test-suite counterpart of clearing a settings cache.
-
-Self-contained by design: pydantic only, no application import, so the package
-can be released on its own (issue #825).
 """
 
 from __future__ import annotations
@@ -37,7 +34,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 
 class McpServerSpec(BaseModel):
-    """The one stdio MCP server a host attaches to a co-writer turn.
+    """The one stdio MCP server a host attaches to a turn.
 
     The provider layer knows no MCP server of its own. It writes this
     declaration into the temporary ``--mcp-config`` file the CLI reads,

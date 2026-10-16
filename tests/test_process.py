@@ -16,7 +16,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from provider_test_support import SECRET_ENV_KEYS, override_provider_runtime, shell_child
+from provider_test_support import (
+    GROK_LOGGED_IN,
+    SECRET_ENV_KEYS,
+    override_provider_runtime,
+    shell_child,
+)
 
 from agent_providers import process
 from agent_providers.config import current_config
@@ -30,6 +35,7 @@ from agent_providers.process import (
     GROK_CLI_CREDENTIALS_INVALID_DETAIL,
     AgentCliUnavailableError,
     CachedProbe,
+    CliCredentialNotConfiguredError,
     CliLineChannel,
     CliProbeBudgetExceeded,
     CliRun,
@@ -49,13 +55,6 @@ from agent_providers.process import (
 )
 from agent_providers.spawn import INHERITED_MACHINE_VARIABLES, ChildProcess
 
-GROK_LOGGED_IN = """You are logged in with grok.com.
-
-Available models:
-  * grok-4.6 (default)
-  - grok-4.5
-  - deepseek-v4-flash
-"""
 GROK_LOGGED_OUT = """You are not authenticated.
 
 Available models:
@@ -407,7 +406,7 @@ def test_a_follower_waits_only_its_own_single_flight_budget(monkeypatch) -> None
 def test_run_cli_returns_after_its_answer_budget_and_cleanup_grace(monkeypatch) -> None:
     answer_budget = 0.05
     cleanup_grace = 0.05
-    monkeypatch.setattr("agent_providers.process.COWRITER_MODELS_TIMEOUT_SECONDS", answer_budget)
+    monkeypatch.setattr("agent_providers.process.PROBE_TIMEOUT_SECONDS", answer_budget)
     monkeypatch.setattr("agent_providers.process.CLI_TERMINATION_GRACE_SECONDS", cleanup_grace)
 
     started_at = time.monotonic()
@@ -456,7 +455,7 @@ def test_a_cli_that_floods_us_is_read_only_up_to_the_limit() -> None:
 def test_a_cli_that_never_answers_is_given_up_on() -> None:
     with (
         _a_shell_pretending_to_be_a_cli(),
-        patch("agent_providers.process.COWRITER_MODELS_TIMEOUT_SECONDS", 0.2),
+        patch("agent_providers.process.PROBE_TIMEOUT_SECONDS", 0.2),
     ):
         assert run_catalog_cli(shell_child("-c", "while :; do :; done")).complete is False
 
@@ -473,7 +472,7 @@ def test_a_cli_that_leaves_a_child_behind_is_terminated_with_its_group() -> None
 
     with (
         _a_shell_pretending_to_be_a_cli(),
-        patch("agent_providers.process.COWRITER_MODELS_TIMEOUT_SECONDS", 0.2),
+        patch("agent_providers.process.PROBE_TIMEOUT_SECONDS", 0.2),
         patch("agent_providers.spawn.subprocess.Popen", side_effect=capture_process),
     ):
         assert run_catalog_cli(shell_child("-c", command)).complete is False
@@ -495,7 +494,7 @@ def test_a_sigterm_ignoring_cli_and_child_are_reaped_after_sigkill() -> None:
 
     with (
         _a_shell_pretending_to_be_a_cli(),
-        patch("agent_providers.process.COWRITER_MODELS_TIMEOUT_SECONDS", 0.05),
+        patch("agent_providers.process.PROBE_TIMEOUT_SECONDS", 0.05),
         patch("agent_providers.process.CLI_TERMINATION_GRACE_SECONDS", 0.1),
         patch("agent_providers.spawn.subprocess.Popen", side_effect=capture_process),
     ):
@@ -528,7 +527,7 @@ def test_a_spawn_that_returns_after_its_deadline_is_reaped() -> None:
             reaped.set()
 
     with (
-        patch("agent_providers.process.COWRITER_MODELS_TIMEOUT_SECONDS", 0.1),
+        patch("agent_providers.process.PROBE_TIMEOUT_SECONDS", 0.1),
         patch("agent_providers.spawn.subprocess.Popen", side_effect=late_process),
         patch("agent_providers.process._reap_process_group", side_effect=capture_reap),
     ):
@@ -900,7 +899,7 @@ def test_bounded_runner_stops_collecting_at_the_byte_limit(monkeypatch) -> None:
 
 
 def test_run_cli_discards_partial_output_when_its_read_deadline_expires(monkeypatch) -> None:
-    monkeypatch.setattr("agent_providers.process.COWRITER_MODELS_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr("agent_providers.process.PROBE_TIMEOUT_SECONDS", 0.2)
     monkeypatch.setattr("agent_providers.process.CLI_TERMINATION_GRACE_SECONDS", 0.01)
 
     run = run_catalog_cli(shell_child("-c", "printf partial; exec sleep 10"))
@@ -917,7 +916,7 @@ def test_run_cli_keeps_a_started_cli_result_when_cleanup_reports_a_zombie(monkey
         started.append(child)
         return child
 
-    monkeypatch.setattr("agent_providers.process.COWRITER_MODELS_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr("agent_providers.process.PROBE_TIMEOUT_SECONDS", 0.2)
     monkeypatch.setattr("agent_providers.process.CLI_TERMINATION_GRACE_SECONDS", 0.01)
     monkeypatch.setattr(
         "agent_providers.process._wait_for_process_group_exit",
@@ -1226,6 +1225,22 @@ def test_private_credential_home_removes_a_failed_setup(tmp_path: Path) -> None:
             Path(".grok/auth.json"),
             prefix="private-home-",
             missing_credential_is_error=True,
+        )
+
+    assert not list(tmp_path.glob("private-home-*"))
+
+
+def test_an_unusable_login_is_an_error_where_a_missing_credential_is(tmp_path: Path) -> None:
+    unusable = tmp_path / "unusable.json"
+    unusable.write_text("not json")
+
+    with pytest.raises(CliCredentialNotConfiguredError):
+        PrivateCredentialHome(
+            unusable,
+            Path("auth.json"),
+            prefix="private-home-",
+            missing_credential_is_error=True,
+            credential_copy=process.blank_codex_refresh_token,
         )
 
     assert not list(tmp_path.glob("private-home-*"))
@@ -2179,3 +2194,62 @@ def test_credential_probe_names_malformed_mounted_credentials(
 
     with pytest.raises(AgentCliUnavailableError, match=detail):
         function()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        None,
+        "not json",
+        "[]",
+        '{"tokens": []}',
+        '{"auth_mode": "chatgpt", "tokens": {}}',
+        '{"auth_mode": "apikey", "OPENAI_API_KEY": "sk-synthetic"}',
+    ),
+    ids=(
+        "missing", "not-json", "not-an-object", "tokens-not-an-object", "no-access-token",
+        "api-key-only",
+    ),
+)
+def test_an_unusable_codex_login_makes_the_probe_answer_logged_out(
+    tmp_path, monkeypatch, payload: str | None,
+) -> None:
+    auth_file = tmp_path / "codex-auth.json"
+    if payload is not None:
+        auth_file.write_text(payload)
+    override_provider_runtime(codex_cli_auth_file=auth_file)
+    monkeypatch.setattr(process, "resolve_cli_binary", lambda _binary: Path(sys.executable))
+    monkeypatch.setattr(
+        process,
+        "CODEX_CLI_STATUS_ARGS",
+        (
+            "-c",
+            "import os, sys; "
+            "sys.stdout.write('Logged in using ChatGPT' "
+            "if os.path.exists(os.path.join(os.environ['CODEX_HOME'], 'auth.json')) "
+            "else 'Not logged in')",
+        ),
+    )
+
+    assert codex_cli_login().logged_in is False
+
+
+def test_the_grok_probe_hands_its_child_the_login_byte_for_byte(tmp_path, monkeypatch) -> None:
+    auth_file = tmp_path / "grok-auth.json"
+    auth_file.write_bytes(b'{"realm": {"key": "grok-synthetic-key"}}')
+    override_provider_runtime(grok_cli_auth_file=auth_file)
+    monkeypatch.setattr(process, "resolve_cli_binary", lambda _binary: Path("/usr/bin/grok"))
+    copies: list[bytes] = []
+
+    def run_cli_bounded(child, **_kwargs):
+        copies.append((Path(child.environment["GROK_HOME"]) / "auth.json").read_bytes())
+        return CliRunOutcome(
+            started=True, spawn_error=None, returncode=0, stdout=GROK_LOGGED_IN, stderr="",
+            complete=True, became_zombie=False, reason=CliRunReason.COMPLETE,
+        )
+
+    monkeypatch.setattr(process, "run_cli_bounded", run_cli_bounded)
+    clear_agent_cli_caches()
+
+    assert grok_cli_status().login.logged_in is True
+    assert copies == [auth_file.read_bytes()]

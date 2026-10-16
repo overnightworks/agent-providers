@@ -4,18 +4,20 @@ This module owns the wire representation and validation only.  Which tools
 exist, what they are called and what they accept comes from the host's
 :class:`~agent_providers.tools.ToolCatalog`; executing one is the host's job
 as well.
-
-Self-contained by design: no application import, so the package can be
-released on its own (issue #825).
 """
 
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from enum import StrEnum
+from typing import Final, NamedTuple, NoReturn
+
+from pydantic import SecretStr
 
 from agent_client.tools import ToolDeclaration
 from agent_client.wire import refuse_non_json_constant
+from agent_providers.errors import raise_without_chain
 from agent_providers.tools import ToolCatalog, ToolProtocolMarkup
 
 _CALL_EXAMPLE = '{"name":"tool_name","arguments":{}}'
@@ -23,6 +25,8 @@ _CALL_EXAMPLE = '{"name":"tool_name","arguments":{}}'
 # RFC 8259's insignificant-whitespace set -- what json.JSONDecoder itself
 # treats as separator whitespace around a value.
 _JSON_WHITESPACE = " \t\n\r"
+
+REJECTION_EXCERPT_RADIUS: Final = 512
 
 
 def _protocol_instructions(markup: ToolProtocolMarkup) -> str:
@@ -45,7 +49,7 @@ type JsonValue = JsonPrimitive | list[JsonValue] | dict[str, JsonValue]
 
 @dataclass(frozen=True)
 class TextToolCall:
-    """A validated call ready for the co-writer tool executor."""
+    """A validated call ready for the host's tool executor."""
 
     name: str
     arguments: dict[str, JsonValue]
@@ -61,12 +65,47 @@ class FinalText:
 type ParsedTextToolResponse = TextToolCall | FinalText
 
 
-class TextToolProtocolError(Exception):
-    """A safe, named rejection of malformed text-tool output.
+class TextToolRejectionRule(StrEnum):
+    """The seven rules a refused call can break, in the order they are checked."""
 
-    Carries nothing: the host names the failure its users see, this package
-    only says that the response did not obey the protocol.
+    CALL_NOT_JSON = "call_not_json"
+    CLOSE_TAG_NOT_AFTER_CALL = "close_tag_not_after_call"
+    TEXT_AFTER_CALL = "text_after_call"
+    SECOND_CALL = "second_call"
+    NOT_A_CALL_OBJECT = "not_a_call_object"
+    UNKNOWN_TOOL = "unknown_tool"
+    ARGUMENTS_OFF_SCHEMA = "arguments_off_schema"
+
+
+@dataclass(frozen=True)
+class TextToolRejection:
+    """Which rule a refused block broke, where, and a masked piece around it.
+
+    ``offset`` and ``length`` count Python code points of the block, which
+    starts at its opening tag.  The excerpt is the exact slice of the block
+    within :data:`REJECTION_EXCERPT_RADIUS` code points of ``offset``.
     """
+
+    rule: TextToolRejectionRule
+    offset: int
+    length: int
+    excerpt_start: int
+    excerpt: SecretStr
+
+
+class TextToolProtocolError(Exception):
+    """A refusal of malformed text-tool output, raised only by the parser.
+
+    The rejection holds the refused text only as a masked excerpt; the
+    message, ``args`` and ``str()`` stay empty.
+    """
+
+    def __init__(self, rejection: TextToolRejection) -> None:
+        super().__init__()
+        self.rejection = rejection
+
+    def __reduce__(self) -> tuple[type[TextToolProtocolError], tuple[TextToolRejection]]:
+        return (type(self), (self.rejection,))
 
 
 def render_tool_catalog(catalog: ToolCatalog) -> str:
@@ -92,12 +131,11 @@ def render_tool_result(catalog: ToolCatalog, result: JsonValue) -> str:
 
 def parse_text_tool_response(catalog: ToolCatalog, response: str) -> ParsedTextToolResponse:
     """Parse one complete model response into either a call or ordinary text."""
-    leading_whitespace_length = len(response) - len(response.lstrip())
-    candidate = response[leading_whitespace_length:]
-    if not _has_opening_line(catalog.markup, candidate):
+    block = response.strip()
+    if not _has_opening_line(catalog.markup, response.lstrip()):
         return FinalText(response)
 
-    return _parse_call(catalog, candidate, response)
+    return _parse_call(catalog, block)
 
 
 class TextToolStreamParser:
@@ -263,7 +301,7 @@ def _advance_markdown_fences(
     return inside_markdown_fence, line_prefix
 
 
-def _parse_call(catalog: ToolCatalog, candidate: str, original_response: str) -> TextToolCall:
+def _parse_call(catalog: ToolCatalog, block: str) -> TextToolCall:
     """Parse the one call a one-shot response must contain and nothing else.
 
     The boundary is where the call's own JSON value ends -- see
@@ -272,23 +310,14 @@ def _parse_call(catalog: ToolCatalog, candidate: str, original_response: str) ->
     trailing prose or a second call.
     """
     markup = catalog.markup
-    close_tag = markup.call_close_tag
-    candidate = candidate.strip()
-    opening_line_length = (
-        len(markup.opening_line_crlf)
-        if candidate.startswith(markup.opening_line_crlf)
-        else len(markup.opening_line_lf)
+    boundary = _first_json_boundary(
+        block,
+        _opening_line_length(markup, block),
+        markup.call_close_tag,
     )
-    call_content = candidate[opening_line_length:]
-    boundary = _first_json_boundary(call_content, close_tag)
-    if boundary is None:
-        raise TextToolProtocolError()
-    payload, call_end = boundary
-    if call_content[call_end:]:
-        raise TextToolProtocolError()
-    if candidate != original_response.strip():
-        raise TextToolProtocolError()
-    return _validated_call(catalog, payload)
+    if block[boundary.call_end :]:
+        _refuse(TextToolRejectionRule.TEXT_AFTER_CALL, block, boundary.call_end)
+    return _validated_call(catalog, block, boundary)
 
 
 def _parse_streamed_call(catalog: ToolCatalog, buffer: str) -> TextToolCall:
@@ -302,7 +331,7 @@ def _parse_streamed_call(catalog: ToolCatalog, buffer: str) -> TextToolCall:
 
     The close is whatever immediately follows the call's own JSON value --
     see :func:`_first_json_boundary`. The JSON decoder consumes a closing
-    tag written inside a string value (lyrics that mention it, say)
+    tag written inside a string value (text that quotes it, say)
     structurally, as ordinary string content, so it is never mistaken for
     the close; only the tag right after the value's end counts. This also
     means the tag no longer has to sit on its own line: the boundary is
@@ -319,71 +348,122 @@ def _parse_streamed_call(catalog: ToolCatalog, buffer: str) -> TextToolCall:
     itself.
     """
     markup = catalog.markup
-    close_tag = markup.call_close_tag
-    candidate = buffer.strip()
-    if candidate.startswith(markup.opening_line_crlf):
-        opening_line_length = len(markup.opening_line_crlf)
-    elif candidate.startswith(markup.opening_line_lf):
-        opening_line_length = len(markup.opening_line_lf)
-    else:
-        raise TextToolProtocolError()
+    block = buffer.strip()
+    boundary = _first_json_boundary(
+        block,
+        _opening_line_length(markup, block),
+        markup.call_close_tag,
+    )
 
-    call_content = candidate[opening_line_length:]
-    boundary = _first_json_boundary(call_content, close_tag)
-    if boundary is None:
-        raise TextToolProtocolError()
-    payload, call_end = boundary
+    second_call_start = _opening_line_start(
+        markup,
+        block[boundary.call_end :],
+        inside_markdown_fence=False,
+        markdown_line_prefix="",
+    )
+    if second_call_start is not None:
+        _refuse(
+            TextToolRejectionRule.SECOND_CALL,
+            block,
+            boundary.call_end + second_call_start,
+        )
 
-    remainder = call_content[call_end:]
-    if _opening_line_start(
-        markup, remainder, inside_markdown_fence=False, markdown_line_prefix="",
-    ) is not None:
-        raise TextToolProtocolError()
-
-    return _validated_call(catalog, payload)
+    return _validated_call(catalog, block, boundary)
 
 
-def _first_json_boundary(text: str, close_tag: str) -> tuple[object, int] | None:
-    """Find the call boundary in ``text`` by JSON validity, not a delimiter.
+def _refuse(rule: TextToolRejectionRule, block: str, offset: int) -> NoReturn:
+    """Raise the rejection of ``block`` at ``offset``, clamped into the block."""
+    length = len(block)
+    offset = min(max(offset, 0), length)
+    excerpt_start = max(0, offset - REJECTION_EXCERPT_RADIUS)
+    excerpt_end = min(length, offset + REJECTION_EXCERPT_RADIUS)
+    raise_without_chain(
+        TextToolProtocolError(
+            TextToolRejection(
+                rule=rule,
+                offset=offset,
+                length=length,
+                excerpt_start=excerpt_start,
+                excerpt=SecretStr(block[excerpt_start:excerpt_end]),
+            ),
+        ),
+    )
 
-    Decodes exactly one JSON value from the front of ``text`` -- one pass,
-    O(len(text)) -- and requires the closing tag to be the next thing after
-    it, modulo JSON whitespace. ``JSONDecoder.raw_decode`` stops the moment
-    the top-level value is complete, so a closing tag written inside a
-    string argument (lyrics that mention it, say) is consumed as ordinary
+
+def _opening_line_length(markup: ToolProtocolMarkup, block: str) -> int:
+    """Length of the opening line the block starts with.
+
+    A block that is only its opening tag has lost the line's newline to
+    ``strip()``: there is no JSON value after it.
+    """
+    if block.startswith(markup.opening_line_crlf):
+        return len(markup.opening_line_crlf)
+    if block.startswith(markup.opening_line_lf):
+        return len(markup.opening_line_lf)
+    _refuse(TextToolRejectionRule.CALL_NOT_JSON, block, len(block))
+
+
+class _CallBoundary(NamedTuple):
+    payload: object
+    value_start: int
+    call_end: int
+
+
+def _first_json_boundary(block: str, opening_line_length: int, close_tag: str) -> _CallBoundary:
+    """Find the call boundary in ``block`` by JSON validity, not a delimiter.
+
+    Decodes exactly one JSON value from just after the opening line -- one
+    pass, O(len(block)) -- and requires the closing tag to be the next thing
+    after it, modulo JSON whitespace. ``JSONDecoder.raw_decode`` stops the
+    moment the top-level value is complete, so a closing tag written inside
+    a string argument (text that quotes it, say) is consumed as ordinary
     string content on the way there rather than examined as a candidate
     boundary; a lookalike-stuffed payload still costs one linear parse, not
     one parse attempt per lookalike.
 
-    Returns the parsed payload and the index just past the closing tag, or
-    ``None`` if the leading text is not JSON or is not immediately followed
-    by the tag.
+    Every position is an index into ``block``. The rejection is raised after
+    the decoder's handler, so nothing of the decoder's error stays chained.
     """
-    leading_whitespace = len(text) - len(text.lstrip(_JSON_WHITESPACE))
+    after_opening_line = block[opening_line_length:]
+    value_start = opening_line_length + len(after_opening_line) - len(
+        after_opening_line.lstrip(_JSON_WHITESPACE),
+    )
     decoder = json.JSONDecoder(parse_constant=refuse_non_json_constant)
     try:
-        payload, value_end = decoder.raw_decode(text, leading_whitespace)
-    except ValueError:
-        return None
-    after_value = text[value_end:]
-    after_whitespace = after_value.lstrip(_JSON_WHITESPACE)
-    if not after_whitespace.startswith(close_tag):
-        return None
-    trailing_whitespace_length = len(after_value) - len(after_whitespace)
-    call_end = value_end + trailing_whitespace_length + len(close_tag)
-    return payload, call_end
+        payload, value_end = decoder.raw_decode(block, value_start)
+    except json.JSONDecodeError as error:
+        broken_at = error.pos
+    except (ValueError, RecursionError):
+        broken_at = value_start
+    else:
+        broken_at = None
+    if broken_at is not None:
+        _refuse(TextToolRejectionRule.CALL_NOT_JSON, block, broken_at)
+
+    after_value = block[value_end:]
+    close_tag_start = len(block) - len(after_value.lstrip(_JSON_WHITESPACE))
+    if not block.startswith(close_tag, close_tag_start):
+        _refuse(TextToolRejectionRule.CLOSE_TAG_NOT_AFTER_CALL, block, close_tag_start)
+    return _CallBoundary(payload, value_start, close_tag_start + len(close_tag))
 
 
-def _validated_call(catalog: ToolCatalog, payload: object) -> TextToolCall:
+def _validated_call(catalog: ToolCatalog, block: str, boundary: _CallBoundary) -> TextToolCall:
+    payload = boundary.payload
     if not isinstance(payload, dict) or set(payload) != {"name", "arguments"}:
-        raise TextToolProtocolError()
+        _refuse(TextToolRejectionRule.NOT_A_CALL_OBJECT, block, boundary.value_start)
     name = payload["name"]
     arguments = payload["arguments"]
     if not isinstance(name, str) or not isinstance(arguments, dict):
-        raise TextToolProtocolError()
+        _refuse(TextToolRejectionRule.NOT_A_CALL_OBJECT, block, boundary.value_start)
     tool = catalog.declaration(name)
-    if tool is None or not _matches_schema(arguments, tool):
-        raise TextToolProtocolError()
+    if tool is None:
+        _refuse(TextToolRejectionRule.UNKNOWN_TOOL, block, boundary.value_start)
+    try:
+        arguments_match = _matches_schema(arguments, tool)
+    except RecursionError:
+        arguments_match = False
+    if not arguments_match:
+        _refuse(TextToolRejectionRule.ARGUMENTS_OFF_SCHEMA, block, boundary.value_start)
     return TextToolCall(name=name, arguments=arguments)
 
 

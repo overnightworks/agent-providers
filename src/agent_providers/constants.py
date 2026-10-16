@@ -9,7 +9,7 @@ every deployment holds the same value and none of them belongs in
 
 Everything that *does* differ per deployment — binaries, credential mirrors,
 mounted directories, models, keys, process caps — arrives through that
-configuration instead, and product vocabulary (a host's defaults, its cover and
+configuration instead, and product vocabulary (a host's defaults, its image and
 history rules, its user-facing texts) stays with the host. The rule is simply
 the split: a value stays here when it is the same in every deployment, and goes
 to the config or the host when it is not.
@@ -17,6 +17,7 @@ to the config or the host when it is not.
 
 from __future__ import annotations
 
+from enum import StrEnum
 from typing import Final
 
 CLI_LOGIN_STATUS_CACHE_SECONDS = 30
@@ -25,12 +26,12 @@ CLI_LOGIN_STATUS_CACHE_SECONDS = 30
 CLI_OUTPUT_READ_LIMIT_BYTES = 64 * 1024
 CLI_TERMINATION_GRACE_SECONDS = 1
 
-COWRITER_CLI_TIMEOUT_SECONDS = 600
-COWRITER_MODELS_TIMEOUT_SECONDS = 15
-COWRITER_CLAUDE_API_MAX_TOKENS = 4_096
-COWRITER_GROK_CLI_LINE_CHANNEL_CAPACITY = 64
+TURN_TIMEOUT_SECONDS = 600
+PROBE_TIMEOUT_SECONDS = 15
+CLAUDE_API_MAX_TOKENS = 4_096
+GROK_CLI_LINE_CHANNEL_CAPACITY = 64
 
-# The real init event measured 0.34s (see docs/security.md); these budgets
+# The real init event measured 0.34s; these budgets
 # keep a wide margin over that without letting a stuck probe block a request
 # for anywhere near as long as the old 30s did.
 CLAUDE_CLI_TOOL_SURFACE_TIMEOUT_SECONDS = 10
@@ -61,32 +62,42 @@ CLAUDE_CLI_ZOMBIE_FAILURE_CACHE_SECONDS = 300
 # degrades to refusing new work (fail-closed), rather than growing without bound.
 CLAUDE_CLI_MAX_CONCURRENT_PROCESSES = 8
 
-# A judge timeout has one stable reason across its provider's own bound and
+# A missed deadline has one stable reason across a provider's own bound and
 # the outer watchdog, so callers need not infer it from incidental prose.
-JUDGE_FAILURE_TIMEOUT: Final[str] = "judge_timeout"
+DEADLINE_EXCEEDED_REASON: Final[str] = "deadline_exceeded"
 
-COWRITER_PROVIDERS: Final[frozenset[str]] = frozenset({"claude", "grok", "codex"})
 
-COWRITER_GROK_CHAT_URL = "https://api.x.ai/v1/chat/completions"
-COWRITER_GROK_MODELS_URL = "https://api.x.ai/v1/models"
-COWRITER_OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
-COWRITER_OPENAI_MODELS_URL = "https://api.openai.com/v1/models"
-COWRITER_ANTHROPIC_MODELS_URL = "https://api.anthropic.com/v1/models"
+class ProviderName(StrEnum):
+    """The providers this library routes a turn to.
+
+    A member equals its name string, so a host's stored string is found by value.
+    """
+
+    CLAUDE = "claude"
+    GROK = "grok"
+    CODEX = "codex"
+
+
+GROK_CHAT_URL = "https://api.x.ai/v1/chat/completions"
+GROK_MODELS_URL = "https://api.x.ai/v1/models"
+OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
+OPENAI_MODELS_URL = "https://api.openai.com/v1/models"
+ANTHROPIC_MODELS_URL = "https://api.anthropic.com/v1/models"
 ANTHROPIC_API_VERSION = "2023-06-01"
 
-COWRITER_GROK_MODEL_PREFIX = "grok-"
-COWRITER_GROK_NON_CHAT_MARKERS: Final[tuple[str, ...]] = (
+GROK_MODEL_PREFIX = "grok-"
+GROK_NON_CHAT_MARKERS: Final[tuple[str, ...]] = (
     "imagine", "image", "video", "voice", "tts", "whisper",
 )
-COWRITER_OPENAI_CHAT_PREFIXES: Final[tuple[str, ...]] = (
+OPENAI_CHAT_PREFIXES: Final[tuple[str, ...]] = (
     "gpt-", "o1", "o3", "o4", "codex",
 )
-COWRITER_OPENAI_NON_CHAT_MARKERS: Final[tuple[str, ...]] = (
+OPENAI_NON_CHAT_MARKERS: Final[tuple[str, ...]] = (
     "whisper", "tts", "embedding", "dall-e", "dalle", "transcribe", "realtime",
     "audio", "image", "search", "moderation",
 )
-COWRITER_CLAUDE_MODEL_PREFIX = "claude-"
-COWRITER_CLAUDE_CLI_MODEL_LIST_MARKER = "Available: "
+CLAUDE_MODEL_PREFIX = "claude-"
+CLAUDE_CLI_MODEL_LIST_MARKER = "Available: "
 
 CLAUDE_CLI_STATUS_ARGS: Final[tuple[str, ...]] = ("auth", "status")
 CLAUDE_CLI_LOGGED_IN_FIELD: Final[str] = "loggedIn"

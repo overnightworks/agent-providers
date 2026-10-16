@@ -5,12 +5,9 @@ route right now* — answered by probing the mounted CLI or the provider's
 model endpoint. And *is this provider set up at all* — answered as one of
 four closed cases a host can render without re-deriving them.
 
-A host names its own surfaces (a chat, a judge, a batch job) and states per
+A host names its own surfaces (a chat, a batch job) and states per
 surface which CLI setup methods that surface can actually use; this package
 knows the providers, not the host's surfaces.
-
-Self-contained by design: no application import, so the package can be
-released on its own (issue #825).
 """
 
 from __future__ import annotations
@@ -37,16 +34,16 @@ from agent_providers.claude.provider import (
 from agent_providers.config import ProviderRuntimeConfig, current_config
 from agent_providers.constants import (
     ANTHROPIC_API_VERSION,
-    COWRITER_ANTHROPIC_MODELS_URL,
-    COWRITER_CLAUDE_MODEL_PREFIX,
-    COWRITER_GROK_MODEL_PREFIX,
-    COWRITER_GROK_MODELS_URL,
-    COWRITER_GROK_NON_CHAT_MARKERS,
-    COWRITER_MODELS_TIMEOUT_SECONDS,
-    COWRITER_OPENAI_CHAT_PREFIXES,
-    COWRITER_OPENAI_MODELS_URL,
-    COWRITER_OPENAI_NON_CHAT_MARKERS,
-    COWRITER_PROVIDERS,
+    ANTHROPIC_MODELS_URL,
+    CLAUDE_MODEL_PREFIX,
+    GROK_MODEL_PREFIX,
+    GROK_MODELS_URL,
+    GROK_NON_CHAT_MARKERS,
+    OPENAI_CHAT_PREFIXES,
+    OPENAI_MODELS_URL,
+    OPENAI_NON_CHAT_MARKERS,
+    PROBE_TIMEOUT_SECONDS,
+    ProviderName,
 )
 from agent_providers.errors import (
     ProviderModelCatalogUnavailableError,
@@ -64,9 +61,6 @@ from agent_providers.process import (
     grok_cli_token_is_present,
 )
 
-_CLAUDE_PROVIDER: Final = "claude"
-_GROK_PROVIDER: Final = "grok"
-_CODEX_PROVIDER: Final = "codex"
 _ANTHROPIC_SDK_DISTRIBUTION: Final = "anthropic"
 ANTHROPIC_API_KEY_ENVIRONMENT: Final = "ANTHROPIC_API_KEY"
 XAI_API_KEY_ENVIRONMENT: Final = "XAI_API_KEY"
@@ -154,6 +148,14 @@ type ProviderConfiguration = (
 
 @dataclass(frozen=True)
 class ProviderRouteSnapshot:
+    """What one probe of a provider route found.
+
+    ``models`` is ``list_provider_models``' answer for the route when
+    ``readiness`` is ``READY``, and empty otherwise. It is neither fixed nor
+    complete: a name missing from it is no proof that the route refuses it.
+    ``catalogue_failure`` names why a probed catalogue failed.
+    """
+
     models: tuple[str, ...]
     catalogue_failure: SafeRouteReason | None
     catalog_source: str | None
@@ -234,7 +236,7 @@ def _api_route_preflight(
             capability, now, ProviderRouteReadinessState.NOT_CONFIGURED,
             SafeRouteReasonCode.API_KEY_NOT_SET, _API_KEY_SETUP_LABEL,
         )
-    if provider == _CLAUDE_PROVIDER and not _anthropic_sdk_available():
+    if provider == ProviderName.CLAUDE and not _anthropic_sdk_available():
         return _route_preflight_snapshot(
             capability, now, ProviderRouteReadinessState.DISTURBED,
             SafeRouteReasonCode.API_HTTP_ERROR, _API_KEY_SETUP_LABEL,
@@ -284,20 +286,40 @@ def provider_route_capability() -> ProviderRouteCapability:
     return ProviderRouteCapability.TOOLS_AVAILABLE
 
 
+def _unknown_provider_message(provider: str) -> str:
+    return f"Unknown provider '{provider}'"
+
+
 def _cli_is_logged_in(provider: str) -> bool:
-    if provider == _CLAUDE_PROVIDER:
+    if provider == ProviderName.CLAUDE:
         return cli_login_status().logged_in
-    if provider == _GROK_PROVIDER:
+    if provider == ProviderName.GROK:
         return grok_cli_status().login.logged_in
-    if provider == _CODEX_PROVIDER:
+    if provider == ProviderName.CODEX:
         return codex_cli_login().logged_in
-    raise ValueError(f"Unknown co-writer provider '{provider}'")
+    raise ValueError(_unknown_provider_message(provider))
 
 
 def list_provider_models(provider: str, route: ProviderRoute) -> list[str]:
+    """The model names this route offers for a turn, as its provider lists them now.
+
+    Every provider answers with the same kind of value: a name that a turn on
+    this route accepts as its model. A name is not a fixed model. The Claude CLI
+    lists aliases (``opus``, ``sonnet[1m]``) that the CLI maps itself, and an API
+    id can be a provider-side alias too. Nor is the list complete: it keeps only
+    the names that carry the provider's model prefix or pass its chat filter,
+    Codex leaves out the slugs its CLI hides, and the Claude CLI
+    also accepts full model ids that it does not list. A name missing from the
+    list is no proof that the route refuses it.
+
+    Codex keeps its CLI's priority order; every other route is sorted by name.
+    Raises ProviderModelCatalogUnavailableError rather than return an empty
+    list, and ProviderUnavailableError for an unknown provider or a missing API
+    key.
+    """
     config = current_config()
-    if provider not in COWRITER_PROVIDERS:
-        raise ProviderUnavailableError(provider, f"Unknown co-writer provider '{provider}'")
+    if provider not in ProviderName:
+        raise ProviderUnavailableError(provider, _unknown_provider_message(provider))
     if route is ProviderRoute.CLI:
         return _models_for_setup_method(provider, _cli_setup_method_for(provider), config)
     key = _secret(_provider_api_credential(provider, config).secret)
@@ -309,13 +331,13 @@ def list_provider_models(provider: str, route: ProviderRoute) -> list[str]:
 
 
 def _cli_setup_method_for(provider: str) -> ProviderSetupMethod:
-    if provider == _CLAUDE_PROVIDER:
+    if provider == ProviderName.CLAUDE:
         return ProviderSetupMethod.CLAUDE_CLI
-    if provider == _GROK_PROVIDER:
+    if provider == ProviderName.GROK:
         return ProviderSetupMethod.GROK_CLI
-    if provider == _CODEX_PROVIDER:
+    if provider == ProviderName.CODEX:
         return ProviderSetupMethod.CODEX_CLI
-    raise ValueError(f"Unknown co-writer provider '{provider}'")
+    raise ValueError(_unknown_provider_message(provider))
 
 
 def models_with_active_model(models: list[str], active_model: str | None) -> list[str]:
@@ -338,16 +360,13 @@ def _models_for_setup_method(
         return _list_codex_cli_models()
 
     key = _secret(_provider_api_credential(provider, config).secret)
-    if provider == _GROK_PROVIDER:
+    if provider == ProviderName.GROK:
         return _list_grok_models(key)
-    if provider == _CODEX_PROVIDER:
+    if provider == ProviderName.CODEX:
         return _list_openai_models(key)
-    if provider == _CLAUDE_PROVIDER:
+    if provider == ProviderName.CLAUDE:
         return _list_claude_models(key)
-    raise ProviderUnavailableError(
-        provider,
-        f"Unknown co-writer provider '{provider}'",
-    )
+    raise ProviderUnavailableError(provider, _unknown_provider_message(provider))
 
 
 def provider_configuration(
@@ -363,7 +382,7 @@ def provider_configuration(
     credential = _provider_api_credential(provider, current_config())
     cli_method = _cli_setup_method(provider)
     if _secret(credential.secret):
-        if provider == _CLAUDE_PROVIDER and not _anthropic_sdk_available():
+        if provider == ProviderName.CLAUDE and not _anthropic_sdk_available():
             return ProviderCapabilityMissing(provider, _ANTHROPIC_SDK_DISTRIBUTION)
         return ProviderReady(
             provider,
@@ -379,11 +398,11 @@ def provider_configuration(
 
 def _cli_setup_method(provider: str) -> ProviderSetupMethod | None:
     try:
-        if provider == _CLAUDE_PROVIDER and cli_login_status().logged_in:
+        if provider == ProviderName.CLAUDE and cli_login_status().logged_in:
             return ProviderSetupMethod.CLAUDE_CLI
-        if provider == _GROK_PROVIDER and grok_cli_token_is_present():
+        if provider == ProviderName.GROK and grok_cli_token_is_present():
             return ProviderSetupMethod.GROK_CLI
-        if provider == _CODEX_PROVIDER and codex_cli_access_token_is_present():
+        if provider == ProviderName.CODEX and codex_cli_access_token_is_present():
             return ProviderSetupMethod.CODEX_CLI
     except AgentCliUnavailableError as exc:
         log.warning("%s CLI probe unavailable: %s", provider, type(exc).__name__)
@@ -400,25 +419,19 @@ def _anthropic_sdk_available() -> bool:
 def _provider_api_credential(
     provider: str, config: ProviderRuntimeConfig,
 ) -> _ProviderApiCredential:
-    if provider == _CLAUDE_PROVIDER:
+    if provider == ProviderName.CLAUDE:
         return _ProviderApiCredential(
             config.anthropic_api_key, ANTHROPIC_API_KEY_ENVIRONMENT,
         )
-    if provider == _GROK_PROVIDER:
+    if provider == ProviderName.GROK:
         return _ProviderApiCredential(
             config.xai_api_key, XAI_API_KEY_ENVIRONMENT,
         )
-    if provider == _CODEX_PROVIDER:
+    if provider == ProviderName.CODEX:
         return _ProviderApiCredential(
             config.openai_api_key, OPENAI_API_KEY_ENVIRONMENT,
         )
-    if provider not in COWRITER_PROVIDERS:
-        raise ProviderUnavailableError(
-            provider, f"Unknown co-writer provider '{provider}'",
-        )
-    raise ProviderUnavailableError(
-        provider, f"No API credential is defined for co-writer provider '{provider}'",
-    )
+    raise ProviderUnavailableError(provider, _unknown_provider_message(provider))
 
 
 def _secret(value) -> str:
@@ -430,7 +443,7 @@ def _secret(value) -> str:
 def _http_model_ids(url: str, headers: dict[str, str], provider: str) -> list[str]:
     try:
         response = httpx.get(
-            url, headers=headers, timeout=COWRITER_MODELS_TIMEOUT_SECONDS,
+            url, headers=headers, timeout=PROBE_TIMEOUT_SECONDS,
         )
     except httpx.HTTPError as exc:
         raise ProviderModelCatalogUnavailableError(
@@ -468,17 +481,17 @@ def _http_model_ids(url: str, headers: dict[str, str], provider: str) -> list[st
 
 def _list_grok_models(key: str) -> list[str]:
     ids = _http_model_ids(
-        COWRITER_GROK_MODELS_URL,
+        GROK_MODELS_URL,
         {"Authorization": f"Bearer {key}"},
-        _GROK_PROVIDER,
+        ProviderName.GROK,
     )
     chat = [
         model_id for model_id in ids
-        if _is_provider_model_id(_GROK_PROVIDER, model_id)
+        if _is_provider_model_id(ProviderName.GROK, model_id)
     ]
     if not chat:
         raise ProviderModelCatalogUnavailableError(
-            _GROK_PROVIDER,
+            ProviderName.GROK,
             "no chat models returned by grok",
             normalize_route_failure(SafeRouteReasonCode.CATALOGUE_PROTOCOL_ERROR),
         )
@@ -490,17 +503,17 @@ def _list_grok_cli_models() -> list[str]:
         model_names = grok_cli_status().model_names
     except AgentCliUnavailableError as exc:
         raise ProviderModelCatalogUnavailableError(
-            _GROK_PROVIDER,
+            ProviderName.GROK,
             "could not list grok CLI models",
             normalize_route_failure(SafeRouteReasonCode.CATALOGUE_PROTOCOL_ERROR),
         ) from exc
     chat = [
         model_id for model_id in model_names
-        if _is_provider_model_id(_GROK_PROVIDER, model_id)
+        if _is_provider_model_id(ProviderName.GROK, model_id)
     ]
     if not chat:
         raise ProviderModelCatalogUnavailableError(
-            _GROK_PROVIDER,
+            ProviderName.GROK,
             "no chat models returned by grok CLI",
             normalize_route_failure(SafeRouteReasonCode.CATALOGUE_PROTOCOL_ERROR),
         )
@@ -512,7 +525,7 @@ def _list_codex_cli_models() -> list[str]:
         output = codex_cli_model_catalog()
     except AgentCliUnavailableError as exc:
         raise ProviderModelCatalogUnavailableError(
-            _CODEX_PROVIDER,
+            ProviderName.CODEX,
             "could not list codex CLI models",
             normalize_route_failure(SafeRouteReasonCode.CATALOGUE_PROTOCOL_ERROR),
         ) from exc
@@ -532,7 +545,7 @@ def _list_codex_cli_models() -> list[str]:
             raise ValueError("codex debug models returned duplicate model slugs")
     except (ValidationError, ValueError) as exc:
         raise ProviderModelCatalogUnavailableError(
-            _CODEX_PROVIDER,
+            ProviderName.CODEX,
             "could not parse codex CLI model catalog",
             normalize_route_failure(SafeRouteReasonCode.CATALOGUE_PROTOCOL_ERROR),
         ) from exc
@@ -545,17 +558,17 @@ def _list_codex_cli_models() -> list[str]:
 
 def _list_openai_models(key: str) -> list[str]:
     ids = _http_model_ids(
-        COWRITER_OPENAI_MODELS_URL,
+        OPENAI_MODELS_URL,
         {"Authorization": f"Bearer {key}"},
-        _CODEX_PROVIDER,
+        ProviderName.CODEX,
     )
     chat = [
         model_id for model_id in ids
-        if _is_provider_model_id(_CODEX_PROVIDER, model_id)
+        if _is_provider_model_id(ProviderName.CODEX, model_id)
     ]
     if not chat:
         raise ProviderModelCatalogUnavailableError(
-            _CODEX_PROVIDER,
+            ProviderName.CODEX,
             "no chat models returned by codex",
             normalize_route_failure(SafeRouteReasonCode.CATALOGUE_PROTOCOL_ERROR),
         )
@@ -567,13 +580,13 @@ def _list_claude_cli_models() -> list[str]:
         aliases = list_cli_model_aliases()
     except ClaudeCliUnavailableError as exc:
         raise ProviderModelCatalogUnavailableError(
-            _CLAUDE_PROVIDER,
+            ProviderName.CLAUDE,
             CLAUDE_CLI_MODEL_CATALOG_ERROR,
             normalize_route_failure(SafeRouteReasonCode.CATALOGUE_PROTOCOL_ERROR),
         ) from exc
     if not aliases:
         raise ProviderModelCatalogUnavailableError(
-            _CLAUDE_PROVIDER,
+            ProviderName.CLAUDE,
             "no chat models returned by claude CLI",
             normalize_route_failure(SafeRouteReasonCode.CATALOGUE_PROTOCOL_ERROR),
         )
@@ -582,20 +595,20 @@ def _list_claude_cli_models() -> list[str]:
 
 def _list_claude_models(key: str) -> list[str]:
     ids = _http_model_ids(
-        COWRITER_ANTHROPIC_MODELS_URL,
+        ANTHROPIC_MODELS_URL,
         {
             "x-api-key": key,
             "anthropic-version": ANTHROPIC_API_VERSION,
         },
-        _CLAUDE_PROVIDER,
+        ProviderName.CLAUDE,
     )
     chat = [
         model_id for model_id in ids
-        if _is_provider_model_id(_CLAUDE_PROVIDER, model_id)
+        if _is_provider_model_id(ProviderName.CLAUDE, model_id)
     ]
     if not chat:
         raise ProviderModelCatalogUnavailableError(
-            _CLAUDE_PROVIDER,
+            ProviderName.CLAUDE,
             "no chat models returned by claude",
             normalize_route_failure(SafeRouteReasonCode.CATALOGUE_PROTOCOL_ERROR),
         )
@@ -608,16 +621,16 @@ def _contains_marker(model_id: str, markers: tuple[str, ...]) -> bool:
 
 
 def _is_provider_model_id(provider: str, model_id: str) -> bool:
-    if provider == _CLAUDE_PROVIDER:
-        return model_id.startswith(COWRITER_CLAUDE_MODEL_PREFIX)
-    if provider == _GROK_PROVIDER:
+    if provider == ProviderName.CLAUDE:
+        return model_id.startswith(CLAUDE_MODEL_PREFIX)
+    if provider == ProviderName.GROK:
         return (
-            model_id.startswith(COWRITER_GROK_MODEL_PREFIX)
-            and not _contains_marker(model_id, COWRITER_GROK_NON_CHAT_MARKERS)
+            model_id.startswith(GROK_MODEL_PREFIX)
+            and not _contains_marker(model_id, GROK_NON_CHAT_MARKERS)
         )
-    if provider == _CODEX_PROVIDER:
+    if provider == ProviderName.CODEX:
         return (
-            model_id.startswith(COWRITER_OPENAI_CHAT_PREFIXES)
-            and not _contains_marker(model_id, COWRITER_OPENAI_NON_CHAT_MARKERS)
+            model_id.startswith(OPENAI_CHAT_PREFIXES)
+            and not _contains_marker(model_id, OPENAI_NON_CHAT_MARKERS)
         )
     return False

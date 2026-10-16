@@ -6,8 +6,8 @@ loop, and the sandbox building blocks. Application concerns — MCP tools,
 prompts, settings storage, domain ownership — stay with the application, which
 supplies them through ports.
 
-Independent of `songmaker_cli` so it can be released as its own distribution;
-the boundary is enforced by the `.importlinter` contract.
+Independent of any host application; the `.importlinter` contract enforces that
+boundary.
 """
 
 __version__ = "0.2.0"

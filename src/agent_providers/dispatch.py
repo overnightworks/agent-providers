@@ -1,13 +1,10 @@
 """Run one turn on the provider and route the host selected — never another.
 
 A route is chosen by the host and executed here, with no fallback: a failing
-CLI never silently becomes an HTTP call, because a musician who signed a CLI
+CLI never silently becomes an HTTP call, because a user who signed a CLI
 in did not agree to spend an API key. Everything a turn needs beyond the
 route — the tools it may call and who may run them — arrives from the host
 as a catalog and an executor.
-
-Self-contained by design: no application import, so the package can be
-released on its own (issue #825).
 """
 
 from __future__ import annotations
@@ -26,13 +23,13 @@ from agent_providers.claude.adapter import (
 from agent_providers.claude.provider import (
     UnavailableError as ClaudeUnavailableError,
 )
-from agent_providers.codex.image import codex_cover_image_capability_is_available
+from agent_providers.codex.image import codex_image_turn_is_available
 from agent_providers.codex.transport import CodexCliToolTransport
 from agent_providers.config import current_config
 from agent_providers.constants import (
-    COWRITER_GROK_CHAT_URL,
-    COWRITER_OPENAI_CHAT_URL,
-    COWRITER_PROVIDERS,
+    GROK_CHAT_URL,
+    OPENAI_CHAT_URL,
+    ProviderName,
 )
 from agent_providers.errors import (
     ProviderUnavailableError,
@@ -66,8 +63,8 @@ from agent_providers.tools import (
 
 log = logging.getLogger(__name__)
 
-# Cover images come from Codex's CLI image turn; no other provider or route
-# ships an image tool today (#822).
+# Images come from Codex's CLI image turn; no other provider or route
+# ships an image tool today.
 _IMAGE_TOOL_PROVIDER: Final[str] = "codex"
 _IMAGE_TOOL_ROUTE: Final[ProviderRoute] = ProviderRoute.CLI
 
@@ -79,14 +76,14 @@ class _ApiConnection:
 
 
 @dataclass(frozen=True)
-class CoverImageCapability:
+class ImageCapability:
     """One route's image answer: does it own the tool, and what blocks it today."""
 
     carries_image_tool: bool
     failure: SafeRouteReason | None
 
 
-async def stream_cowriter_turn(
+async def stream_turn(
     *,
     provider: str,
     route: ProviderRoute,
@@ -98,7 +95,7 @@ async def stream_cowriter_turn(
     catalog: ToolCatalog,
     correlation_id: str | None = None,
 ) -> AsyncIterator[StreamEvent]:
-    if provider not in COWRITER_PROVIDERS:
+    if provider not in ProviderName:
         raise _unavailable(provider, route, SafeRouteReasonCode.ROUTE_FAILED)
     if not model:
         raise _unavailable(provider, route, SafeRouteReasonCode.ROUTE_FAILED)
@@ -125,7 +122,7 @@ async def stream_cowriter_turn(
         raise _unavailable(provider, route, SafeRouteReasonCode.ROUTE_FAILED) from exc
     except Exception as exc:
         log.warning(
-            "Co-writer adapter failed provider=%s route=%s class=%s",
+            "Turn failed provider=%s route=%s class=%s",
             provider,
             route,
             type(exc).__name__,
@@ -206,7 +203,7 @@ async def _stream_grok_cli_tool_turn(
     catalog: ToolCatalog,
     correlation_id: str | None,
 ) -> AsyncIterator[StreamEvent]:
-    """Run Grok's text protocol through the shared co-writer tool loop."""
+    """Run Grok's text protocol through the shared tool loop."""
     async for event in _stream_cli_tool_turn(
         provider="grok",
         system=system,
@@ -227,7 +224,7 @@ async def _stream_codex_cli_tool_turn(
     catalog: ToolCatalog,
     correlation_id: str | None,
 ) -> AsyncIterator[StreamEvent]:
-    """Run Codex's text protocol through the shared co-writer tool loop."""
+    """Run Codex's text protocol through the shared tool loop."""
     async for event in _stream_cli_tool_turn(
         provider="codex",
         system=system,
@@ -269,7 +266,7 @@ async def _stream_cli_tool_turn(
         ) from exc
     except ToolLoopProtocolError as exc:
         log.warning(
-            "Co-writer tool protocol rejection provider=%s route=cli code=%s",
+            "Tool protocol rejection provider=%s route=cli code=%s",
             provider,
             ToolProtocolRejectionCode.TOOL_LOOP_TERMINAL_INVALID,
         )
@@ -282,7 +279,7 @@ def call_provider_once(
     *, provider: str, model: str, prompt: str, timeout: int, system: str | None = None,
 ) -> str:
     """Run one tool-free completion on the provider's HTTP API."""
-    if provider not in COWRITER_PROVIDERS or not model:
+    if provider not in ProviderName or not model:
         raise _unavailable(provider, ProviderRoute.API, SafeRouteReasonCode.ROUTE_FAILED)
     try:
         if provider == "claude":
@@ -302,7 +299,7 @@ def call_provider_once(
             raise
         raise _unavailable(provider, ProviderRoute.API, SafeRouteReasonCode.ROUTE_FAILED) from exc
     except Exception as exc:
-        log.warning("Judge adapter failed provider=%s class=%s", provider, type(exc).__name__)
+        log.warning("One-shot completion failed provider=%s class=%s", provider, type(exc).__name__)
         raise _unavailable(provider, ProviderRoute.API, SafeRouteReasonCode.ROUTE_FAILED) from exc
 
 
@@ -314,12 +311,12 @@ def _api_connection(provider: str) -> _ApiConnection:
     if provider == "grok":
         return _ApiConnection(
             _require_secret(provider, ProviderRoute.API, config.xai_api_key),
-            COWRITER_GROK_CHAT_URL,
+            GROK_CHAT_URL,
         )
     if provider == "codex":
         return _ApiConnection(
             _require_secret(provider, ProviderRoute.API, config.openai_api_key),
-            COWRITER_OPENAI_CHAT_URL,
+            OPENAI_CHAT_URL,
         )
     raise _unavailable(provider, ProviderRoute.API, SafeRouteReasonCode.ROUTE_FAILED)
 
@@ -337,25 +334,21 @@ def _require_secret(provider: str, route: ProviderRoute, secret) -> str:
     return value
 
 
-def cover_image_capability(provider: str, route: ProviderRoute) -> CoverImageCapability:
-    """Answer whether one provider route can create cover images, or name why not.
-
-    Every caller that needs the answer — the cover job, the provider status,
-    and the admin surface — asks here instead of deciding for itself.
-    """
+def image_capability(provider: str, route: ProviderRoute) -> ImageCapability:
+    """Answer whether one provider route can run an image turn, or name why not."""
     if provider != _IMAGE_TOOL_PROVIDER or route is not _IMAGE_TOOL_ROUTE:
-        return CoverImageCapability(
+        return ImageCapability(
             carries_image_tool=False,
             failure=normalize_route_failure(SafeRouteReasonCode.NO_IMAGE_TOOL),
         )
-    return CoverImageCapability(
+    return ImageCapability(
         carries_image_tool=True, failure=_codex_cli_image_route_failure(),
     )
 
 
 def _codex_cli_image_route_failure() -> SafeRouteReason | None:
     """Name what keeps the mounted Codex CLI from running an image turn."""
-    if not codex_cover_image_capability_is_available():
+    if not codex_image_turn_is_available():
         return normalize_route_failure(SafeRouteReasonCode.CLI_BINARY_UNAVAILABLE)
     try:
         signed_in = codex_cli_access_token_is_present()

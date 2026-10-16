@@ -17,28 +17,89 @@ against values this package owns.
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import os
+import shlex
 import stat
 import tempfile
+import traceback
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 from unittest.mock import MagicMock
 
 import pytest
 
 from agent_client.tools import ToolDeclaration
+from agent_providers.catalog import ProviderRoute
 from agent_providers.config import (
     ProviderRuntimeConfig,
     configure,
     current_config,
     reset_config,
 )
-from agent_providers.errors import ProviderUnavailableError, SafeRouteReasonCode
+from agent_providers.dispatch import stream_turn
+from agent_providers.errors import (
+    ProviderUnavailableError,
+    SafeRouteReasonCode,
+    TextToolCallRejectedError,
+    ToolProtocolRejectionCode,
+    normalize_route_failure,
+)
+from agent_providers.events import AssistantTextEvent, StreamEvent
+from agent_providers.process import CliRunOutcome, CliRunReason
 from agent_providers.spawn import ChildProcess, closed_environment
-from agent_providers.tool_loop import InitialTurn, ToolResult, ToolResultBatch
-from agent_providers.tools import ToolCatalog
+from agent_providers.text_tool_protocol import TextToolRejectionRule
+from agent_providers.tool_loop import (
+    InitialTurn,
+    ToolOutcome,
+    ToolResult,
+    ToolResultBatch,
+)
+from agent_providers.tools import ToolCatalog, ToolProtocolMarkup
 
 _fake_cli_processes: list[MagicMock] = []
+
+GROK_LOGGED_IN = """You are logged in with grok.com.
+
+Available models:
+  * grok-4.6 (default)
+  - grok-4.5
+  - deepseek-v4-flash
+"""
+CLAUDE_MODEL_CATALOG_STDOUT = (
+    "Current model: `Opus 5 (1M context)` (effort: high)\n"
+    "Usage: /model <name>. Available: sonnet, opus, haiku, fable, best, "
+    "sonnet[1m], opus[1m], fable[1m], opusplan, default, or a full model ID.\n"
+)
+
+
+def fake_cli_executable(
+    directory: Path,
+    answers: Mapping[tuple[str, ...], str],
+    *,
+    calls_log: Path | None = None,
+) -> Path:
+    """An executable that prints the stored answer for the arguments it is started with.
+
+    Any other arguments exit 1. With ``calls_log`` every start appends one line
+    holding its arguments, so a test can count how often the CLI was started.
+    """
+    answer_files: dict[tuple[str, ...], Path] = {}
+    for index, (arguments, stdout) in enumerate(answers.items()):
+        answer_files[arguments] = directory / f"answer-{index}"
+        answer_files[arguments].write_text(stdout)
+    cases = "".join(
+        f"  {shlex.quote(' '.join(arguments))}) cat {shlex.quote(str(answer_file))} ;;\n"
+        for arguments, answer_file in answer_files.items()
+    )
+    log_line = f'echo "$*" >> {shlex.quote(str(calls_log))}\n' if calls_log else ""
+    executable = directory / "fake-cli"
+    executable.write_text(f'#!/bin/sh\n{log_line}case "$*" in\n{cases}  *) exit 1 ;;\nesac\n')
+    executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+    return executable
 
 
 def assert_private_credential_child(
@@ -154,7 +215,7 @@ SECRET_ENV_KEYS: tuple[str, ...] = (
     "XAI_API_KEY",
     "OPENAI_API_KEY",
     "SESSION_SECRET",
-    "SONGMAKER_INTERNAL_TOKEN",
+    "NOTES_INTERNAL_TOKEN",
     "DATABASE_URL",
     "REDIS_URL",
     "POSTGRES_USER",
@@ -167,18 +228,18 @@ SECRET_ENV_KEYS: tuple[str, ...] = (
 )
 
 MCP_TOOL_NAMES: frozenset[str] = frozenset({
-    "list_albums",
-    "list_songs",
-    "search_songs",
-    "get_song",
-    "get_version",
-    "get_generation",
-    "create_song",
-    "update_song_lyrics",
-    "update_song_prompt",
-    "update_song_style",
-    "rename_song",
-    "suggest_album_cover",
+    "list_folders",
+    "list_notes",
+    "search_notes",
+    "get_note",
+    "get_revision",
+    "get_attachment",
+    "create_note",
+    "update_note_text",
+    "update_note_summary",
+    "update_note_tags",
+    "rename_note",
+    "suggest_folder_icon",
 })
 
 _STRING = {"type": "string"}
@@ -198,100 +259,108 @@ def _object(
     return schema
 
 
-COWRITER_TOOL_CATALOG: ToolCatalog = ToolCatalog(
+SAMPLE_TOOL_MARKUP: Final = ToolProtocolMarkup(
+    tag_namespace="notes", product_name="Notes"
+)
+
+SAMPLE_TOOL_CATALOG: ToolCatalog = ToolCatalog(
     tools=(
         ToolDeclaration(
-            name="list_albums",
-            description="List all albums owned by the current user.",
+            name="list_folders",
+            description="List all folders owned by the current user.",
             parameters=_object({}),
         ),
         ToolDeclaration(
-            name="list_songs",
+            name="list_notes",
             description=(
-                "List songs. Without album_id, every owned song; "
-                "with album_id, that album."
+                "List notes. Without folder_id, every owned note; "
+                "with folder_id, that folder."
             ),
-            parameters=_object({"album_id": _STRING}),
+            parameters=_object({"folder_id": _STRING}),
         ),
         ToolDeclaration(
-            name="search_songs",
-            description="Search songs by title substring. Limit defaults to 20, max 50.",
+            name="search_notes",
+            description="Search notes by title substring. Limit defaults to 20, max 50.",
             parameters=_object({"query": _STRING, "limit": _INT}, ["query"]),
         ),
         ToolDeclaration(
-            name="get_song",
-            description="Read the full state of a song.",
-            parameters=_object({"song_id": _STRING}, ["song_id"]),
+            name="get_note",
+            description="Read the full state of a note.",
+            parameters=_object({"note_id": _STRING}, ["note_id"]),
         ),
         ToolDeclaration(
-            name="get_version",
-            description="Read a specific version snapshot of a song.",
+            name="get_revision",
+            description="Read a specific revision snapshot of a note.",
             parameters=_object(
-                {"song_id": _STRING, "version_id": _STRING}, ["song_id", "version_id"],
+                {"note_id": _STRING, "revision_id": _STRING}, ["note_id", "revision_id"],
             ),
         ),
         ToolDeclaration(
-            name="get_generation",
-            description="Read a generation's metadata, scores, whisper transcript, and rating.",
-            parameters=_object({"generation_id": _STRING}, ["generation_id"]),
+            name="get_attachment",
+            description="Read an attachment's metadata, size, preview text, and rating.",
+            parameters=_object({"attachment_id": _STRING}, ["attachment_id"]),
         ),
         ToolDeclaration(
-            name="create_song",
-            description="Create a new song in an album.",
+            name="create_note",
+            description="Create a new note in a folder.",
             parameters=_object(
                 {
-                    "album_id": _STRING,
+                    "folder_id": _STRING,
                     "title": _STRING,
-                    "lyrics": _STRING,
+                    "text": _STRING,
                     "prompt": _STRING,
                 },
-                ["album_id", "title"],
+                ["folder_id", "title"],
             ),
         ),
         ToolDeclaration(
-            name="update_song_lyrics",
-            description="Replace the song's current lyrics.",
-            parameters=_object({"song_id": _STRING, "lyrics": _STRING}, ["song_id", "lyrics"]),
+            name="update_note_text",
+            description="Replace the note's current text.",
+            parameters=_object({"note_id": _STRING, "text": _STRING}, ["note_id", "text"]),
         ),
         ToolDeclaration(
-            name="update_song_prompt",
-            description="Replace the song's current style prompt.",
-            parameters=_object({"song_id": _STRING, "prompt": _STRING}, ["song_id", "prompt"]),
+            name="update_note_summary",
+            description="Replace the note's current summary.",
+            parameters=_object({"note_id": _STRING, "prompt": _STRING}, ["note_id", "prompt"]),
         ),
         ToolDeclaration(
-            name="update_song_style",
-            description="Update bpm, key_scale, and/or audio_duration.",
+            name="update_note_tags",
+            description="Update bpm, key_scale, and/or audio_duration tags.",
             parameters=_object(
                 {
-                    "song_id": _STRING,
+                    "note_id": _STRING,
                     "bpm": _INT,
                     "key_scale": _STRING,
                     "audio_duration": _INT,
                 },
-                ["song_id"],
+                ["note_id"],
             ),
         ),
         ToolDeclaration(
-            name="rename_song",
-            description="Rename a song's title.",
-            parameters=_object({"song_id": _STRING, "title": _STRING}, ["song_id", "title"]),
+            name="rename_note",
+            description="Rename a note's title.",
+            parameters=_object({"note_id": _STRING, "title": _STRING}, ["note_id", "title"]),
         ),
         ToolDeclaration(
-            name="suggest_album_cover",
+            name="suggest_folder_icon",
             description=(
-                "Request three album cover suggestions. "
+                "Request three folder icon suggestions. "
                 "Returns the queued job ID and status."
             ),
-            parameters=_object({"album_id": _STRING}, ["album_id"]),
+            parameters=_object({"folder_id": _STRING}, ["folder_id"]),
         ),
     ),
+    markup=SAMPLE_TOOL_MARKUP,
 )
 
 
-def assert_a_multi_result_batch_is_rejected(transport: Any) -> None:
-    """Drive a tool transport past its first turn, then hand it two results at once."""
+def assert_a_multi_result_batch_is_rejected(transport: Any) -> ProviderUnavailableError:
+    """Drive a tool transport past its first turn, then hand it two results at once.
 
-    async def reject_batch() -> None:
+    Returns the refusal, so a caller can say what kind of error it was.
+    """
+
+    async def reject_batch() -> ProviderUnavailableError:
         assert [item async for item in transport.stream(InitialTurn("system", []))]
         batch = ToolResultBatch((
             ToolResult("one", "1", False),
@@ -302,5 +371,180 @@ def assert_a_multi_result_batch_is_rejected(transport: Any) -> None:
                 pass
         assert raised.value.reason.code is SafeRouteReasonCode.TOOL_PROTOCOL_ERROR
         await transport.aclose()
+        return raised.value
 
-    asyncio.run(reject_batch())
+    return asyncio.run(reject_batch())
+
+
+GROK_SESSION_ID: Final = "3e04bf5b-4e1c-4f26-8e1e-2f17c5f6d9cf"
+
+
+def grok_cli_outcome(
+    *, returncode: int = 0, complete: bool = True, stderr: str = "",
+) -> CliRunOutcome:
+    return CliRunOutcome(
+        started=True,
+        spawn_error=None,
+        returncode=returncode,
+        stdout="",
+        stderr=stderr,
+        complete=complete,
+        became_zombie=False,
+        reason=CliRunReason.COMPLETE,
+    )
+
+
+def grok_cli_runner(lines, outcome, calls):
+    def run_cli_bounded(child, **kwargs):
+        calls.append((child.command, kwargs))
+        for line in lines:
+            assert kwargs["stdout_line_channel"]._send(line)
+        kwargs["stdout_line_channel"]._close(outcome)
+        return outcome
+
+    return run_cli_bounded
+
+
+def grok_tool_round_lines(text: str, session_id: str = GROK_SESSION_ID) -> list[bytes]:
+    return [
+        json.dumps({"type": "text", "data": text}).encode() + b"\n",
+        json.dumps({
+            "type": "end", "stopReason": "stop", "sessionId": session_id,
+        }).encode() + b"\n",
+    ]
+
+
+A_CANARY: Final = "canary-text-3f9c71"
+A_CALLER_CANARY: Final = "caller-canary-8b21e5"
+PROSE_BEFORE_THE_CALL: Final = "Looking that up.\n"
+DEEPLY_NESTED_JSON: Final = "[" * 100_000
+CALLER_CONTEXTS: Final = pytest.mark.parametrize(
+    "while_the_caller_handles_an_exception",
+    [
+        pytest.param(False, id="no-active-caller-exception"),
+        pytest.param(True, id="caller-handling-a-canary-exception"),
+    ],
+)
+
+
+def a_call_to_an_undeclared_tool_carrying(canary: str = A_CANARY) -> str:
+    return (
+        f"{PROSE_BEFORE_THE_CALL}<notes_tool_call>\n"
+        f'{{"name":"delete_everything","arguments":{{"text":"{canary}"}}}}\n'
+        "</notes_tool_call>"
+    )
+
+
+def a_call_nested_too_deeply_to_decode() -> str:
+    return f"<notes_tool_call>\n{DEEPLY_NESTED_JSON}\n</notes_tool_call>"
+
+
+class CallerCanaryError(Exception):
+    """The error a caller is already handling when a refused call arrives."""
+
+
+@dataclass(frozen=True)
+class DrivenTurn:
+    events: list[StreamEvent]
+    error: BaseException | None
+    executed: list[str]
+
+
+def drive_turn(
+    provider: str,
+    *,
+    correlation_id: str | None = None,
+    while_the_caller_handles_an_exception: bool = False,
+) -> DrivenTurn:
+    """Run a turn through ``stream_turn`` and return what the host sees.
+
+    The error is caught where the host catches it, inside the caller's own
+    handler when ``while_the_caller_handles_an_exception`` is set.
+    """
+    events: list[StreamEvent] = []
+    executed: list[str] = []
+
+    def executor(name: str, _arguments: dict[str, Any]) -> ToolOutcome:
+        executed.append(name)
+        return ToolOutcome("unreachable", False)
+
+    async def turn() -> BaseException | None:
+        try:
+            async for event in stream_turn(
+                provider=provider,
+                route=ProviderRoute.CLI,
+                model=f"{provider}-test",
+                user_id="user-1",
+                system="system",
+                messages=[{"role": "user", "content": "hello"}],
+                executor=executor,
+                catalog=SAMPLE_TOOL_CATALOG,
+                correlation_id=correlation_id,
+            ):
+                events.append(event)
+        except ProviderUnavailableError as error:
+            return error
+        return None
+
+    async def turn_while_handling_an_exception() -> BaseException | None:
+        try:
+            raise CallerCanaryError(A_CALLER_CANARY)
+        except CallerCanaryError:
+            return await turn()
+
+    run = turn_while_handling_an_exception if while_the_caller_handles_an_exception else turn
+    return DrivenTurn(events, asyncio.run(run()), executed)
+
+
+def formatted_log_text(records: Sequence[logging.LogRecord]) -> str:
+    """Every record as the standard formatter writes it, ``exc_info`` included."""
+    formatter = logging.Formatter()
+    return "\n".join(formatter.format(record) for record in records)
+
+
+def assert_the_canary_reaches_only_the_host(
+    turn: DrivenTurn,
+    records: Sequence[logging.LogRecord],
+    *,
+    provider: str,
+    rule: TextToolRejectionRule,
+    correlation_id: str,
+) -> None:
+    """The refused call's canary is on the host's error and nowhere else."""
+    error = turn.error
+    assert isinstance(error, TextToolCallRejectedError)
+    assert isinstance(error, ProviderUnavailableError)
+    assert error.reason == normalize_route_failure(SafeRouteReasonCode.TOOL_PROTOCOL_ERROR)
+    assert (error.provider, error.route) == (provider, "cli")
+    assert error.rejection.rule is rule
+    assert error.__context__ is None
+    assert error.__cause__ is None
+    assert turn.executed == []
+    assert "".join(
+        event.text for event in turn.events if isinstance(event, AssistantTextEvent)
+    ) == PROSE_BEFORE_THE_CALL
+
+    surfaces = {
+        "log records": formatted_log_text(records),
+        "str(error)": str(error),
+        "error.args": repr(error.args),
+        "traceback": "".join(traceback.format_exception(error)),
+        "error.reason": error.reason.model_dump_json(),
+        "events": repr(turn.events),
+    }
+    for surface, text in surfaces.items():
+        assert A_CANARY not in text, surface
+        assert A_CALLER_CANARY not in text, surface
+    assert A_CANARY in error.rejection.excerpt.get_secret_value()
+
+    refusal_lines = [r for r in records if "text_tool_response_invalid" in r.getMessage()]
+    assert [(r.name, r.levelno, r.exc_info) for r in refusal_lines] == [
+        ("agent_providers.tool_loop", logging.WARNING, None),
+    ]
+    rejection = error.rejection
+    assert refusal_lines[0].getMessage() == (
+        f"Tool call rejected provider={provider} route=cli round=0 "
+        f"correlation_id={correlation_id} "
+        f"code={ToolProtocolRejectionCode.TEXT_TOOL_RESPONSE_INVALID} "
+        f"rule={rule} offset={rejection.offset} length={rejection.length}"
+    )

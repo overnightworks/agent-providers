@@ -7,6 +7,14 @@ owns, not values this package may guess. It therefore reads them from one
 frozen value the host installs once per process via :func:`configure`, instead
 of reaching into an application settings module.
 
+The configuration is cut along the two ways into this library. A host that only
+asks which models exist and whether a provider is logged in configures
+:class:`ProviderRuntimeConfig` alone; a host that also runs turns adds
+:class:`TurnRuntimeConfig`. Turn facts are therefore never mandatory fields a
+catalog host has to invent an answer for, and a turn path that runs without
+them fails loudly through :func:`current_turn_config` rather than against a
+guessed value.
+
 Nothing is installed by default. :func:`current_config` raises
 :class:`ProviderRuntimeNotConfiguredError` until the host has configured the
 process, so a forgotten call fails loudly at the first provider turn rather
@@ -53,22 +61,52 @@ class McpServerSpec(BaseModel):
     tool_names: frozenset[str] = Field(min_length=1)
 
 
-class ProviderRuntimeConfig(BaseModel):
-    """Every deployment fact the provider layer needs, as one immutable value.
+class TurnRuntimeConfig(BaseModel):
+    """The deployment facts a turn needs and a catalog never reads.
 
-    ``cli_working_directory_root`` is the directory below which every turn
-    creates its private working directory, so a deployment that confines the
-    agent CLIs — songmaker sandboxes them under ``/tmp`` — states that root
-    once instead of inheriting whatever ``TMPDIR`` happens to be.
-    ``cli_prompt_file_prefix`` names the temporary file a prompt too private
-    for a command line is written to, and ``cli_prompt_file_placeholder`` is
-    the argument a transport writes in that file's place until it exists.
-    All three carry the host's name, so the host states them.
+    Claude and Grok turns receive a fresh private credential home beneath
+    ``cli_working_directory_root``. Codex does the same for its own turn paths.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     claude_chat_model: str
+    codex_code_mode_host_binary: Path
+    codex_resources_directory: Path
+
+    codex_max_concurrent_processes: int = Field(ge=1)
+    codex_max_concurrent_image_runs: int = Field(ge=1)
+
+    cli_prompt_file_prefix: str = Field(min_length=1)
+    cli_prompt_file_placeholder: str = Field(min_length=1)
+
+    mcp_server: McpServerSpec | None
+
+
+class ProviderRuntimeConfig(BaseModel):
+    """Every deployment fact the provider layer needs, as one immutable value.
+
+    ``cli_working_directory_root`` is the directory below which every child
+    creates its private working directory and every temporary file this layer
+    writes, so a deployment that confines the agent CLIs — songmaker sandboxes
+    them under ``/tmp`` — states that root once instead of inheriting whatever
+    ``TMPDIR`` happens to be.
+
+    ``cli_binary_search_path`` is the only place a bare CLI name is resolved
+    from. A child is always started from an absolute binary; resolving one
+    against the parent's inherited ``PATH`` would put that choice back in the
+    environment this layer closed.
+
+    ``claude_cli_auth_file``, ``grok_cli_auth_file`` and ``codex_cli_auth_file``
+    are the credential files the catalog paths copy, mode 0400, into a private
+    child home. Those children receive only that home, the provider's own home
+    variable, ``PATH`` and the machine's locale, proxy and CA settings — never
+    the operator's credential directory, whose renewal writes would otherwise
+    succeed with the parent's rights.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
     anthropic_api_key: SecretStr | None = None
     xai_api_key: SecretStr | None = None
     openai_api_key: SecretStr | None = None
@@ -77,23 +115,15 @@ class ProviderRuntimeConfig(BaseModel):
     grok_cli_binary: str
     codex_cli_binary: str
     claude_cli_binary_search_globs: tuple[str, ...] = ()
+    cli_binary_search_path: tuple[Path, ...]
 
+    claude_cli_auth_file: Path
     grok_cli_auth_file: Path
-    grok_cli_session_root: Path
     codex_cli_auth_file: Path
-    codex_code_mode_host_binary: Path
-    codex_resources_directory: Path
-
-    codex_max_concurrent_processes: int = Field(ge=1)
-    codex_max_concurrent_image_runs: int = Field(ge=1)
 
     cli_working_directory_root: Path
-    cli_prompt_file_prefix: str = Field(min_length=1)
-    cli_prompt_file_placeholder: str = Field(min_length=1)
 
-    secret_env_keys: tuple[str, ...]
-
-    mcp_server: McpServerSpec | None
+    turns: TurnRuntimeConfig | None = None
 
 
 class ProviderRuntimeNotConfiguredError(RuntimeError):
@@ -104,9 +134,18 @@ class ProviderRuntimeAlreadyConfiguredError(RuntimeError):
     """A second, differing configuration was installed over a live one."""
 
 
+class TurnRuntimeNotConfiguredError(RuntimeError):
+    """A turn path ran under a configuration that covers only the catalog."""
+
+
 _NOT_CONFIGURED_DETAIL = (
     "The agent-provider runtime is unconfigured. Call "
     "agent_providers.config.configure() during application startup."
+)
+
+_TURNS_NOT_CONFIGURED_DETAIL = (
+    "This process is configured for the provider catalog only. Install a "
+    "TurnRuntimeConfig as ProviderRuntimeConfig.turns before running a turn."
 )
 
 _ALREADY_CONFIGURED_DETAIL = (
@@ -141,6 +180,19 @@ def current_config() -> ProviderRuntimeConfig:
     if config is None:
         raise ProviderRuntimeNotConfiguredError(_NOT_CONFIGURED_DETAIL)
     return config
+
+
+def current_turn_config() -> TurnRuntimeConfig:
+    """Return the installed turn configuration, or refuse to run a turn.
+
+    A catalog-only host configures no turn facts, so a turn path reaching this
+    deployment is a wiring defect. It says so here instead of running against
+    an invented model name or an invented resource directory.
+    """
+    turns = current_config().turns
+    if turns is None:
+        raise TurnRuntimeNotConfiguredError(_TURNS_NOT_CONFIGURED_DETAIL)
+    return turns
 
 
 def reset_config() -> None:

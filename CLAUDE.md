@@ -48,9 +48,11 @@ uv build --all-packages      # the three wheels the release attaches
 - **Host obligations are ports, passed in.** The tool set (`ToolExecutor`,
   `ToolCatalog`), the MCP server (`McpServerSpec`), and the image constraints
   (`ImagePolicy`) arrive from the host — the library never invents them.
-- **One bounded subprocess layer.** Every CLI spawn goes through
-  `agent_providers.process.run_cli_bounded`, which owns start, stdin, first
-  line, deadline, and process-group cleanup.
+- **One spawn owner, one bounded runner.** Every child is a `ChildProcess`
+  (complete environment, absolute binary, explicit `cwd`) created only in
+  `agent_providers.spawn`; the bounded runner
+  `agent_providers.process.run_cli_bounded` owns start, stdin, first line,
+  deadline, and process-group cleanup.
 - **No inline comments.** Names carry the meaning; a comment explains only a
   non-obvious *why*.
 - **Tests name the behaviour they pin** and use the builders in

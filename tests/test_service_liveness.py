@@ -301,6 +301,8 @@ async def test_a_client_that_stopped_reading_finds_no_pile_of_heartbeats():
         assert drive.seqs == [0, 1, 2]
         drive.stall()
 
+    drive.assert_nothing_left()
+
 
 @pytest.mark.parametrize("spoken", [QUIET, TEXT], ids=["empty-fragment", "text"])
 @in_loop

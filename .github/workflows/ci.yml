@@ -21,20 +21,25 @@ jobs:
         with:
           enable-cache: true
 
+      # The workspace's own packages are put on the path rather than built, so
+      # every checking step runs only locked wheels and no setup script.
       - name: Install dependencies
-        run: uv sync --all-packages --extra dev --extra image
-
-      - name: Lockfile is current
-        run: uv lock --check
+        run: uv sync --locked --all-packages --extra dev --extra image --no-build --no-install-workspace
 
       - name: Ruff
-        run: uv run ruff check src tests packages
+        env:
+          PYTHONPATH: src:packages/agent-client/src:packages/agent-service/src
+        run: uv run --locked --no-sync --no-build ruff check src tests packages
 
       - name: Import boundaries
-        run: uv run lint-imports
+        env:
+          PYTHONPATH: src:packages/agent-client/src:packages/agent-service/src
+        run: uv run --locked --no-sync --no-build lint-imports
 
       - name: Tests
-        run: uv run pytest tests -q
+        env:
+          PYTHONPATH: src:packages/agent-client/src:packages/agent-service/src
+        run: uv run --locked --no-sync --no-build pytest tests -q
 
       - name: Build the three distributions
         run: uv build --all-packages
@@ -153,7 +158,7 @@ jobs:
         env:
           PYTHONPATH: src:packages/agent-client/src:packages/agent-service/src
         run: >-
-          uv run --no-sync --no-build pytest -p no:cacheprovider
+          uv run --locked --no-sync --no-build pytest -p no:cacheprovider
           tests/test_service_keycloak.py -m keycloak -q -rP
 
       - name: Keycloak log on failure

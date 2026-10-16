@@ -31,6 +31,7 @@ from provider_test_support import (
     use_codex_process_pool,
 )
 
+from agent_providers import process
 from agent_providers.codex import image as codex_image
 from agent_providers.codex import protocol as codex_protocol
 from agent_providers.codex import transport as codex_transport
@@ -43,7 +44,6 @@ from agent_providers.errors import (
 )
 from agent_providers.events import AssistantTextEvent, FinalEvent, ToolCallEvent
 from agent_providers.images import ImagePolicy
-from agent_providers import process
 from agent_providers.process import CliRunOutcome, CliRunReason, clear_agent_cli_caches
 from agent_providers.text_tool_protocol import TextToolRejectionRule
 from agent_providers.tool_loop import (
@@ -1348,9 +1348,8 @@ def _drive_the_catalog_probe(monkeypatch, copies) -> None:
 
 
 def _drive_the_login_probe(monkeypatch, copies) -> None:
-    monkeypatch.setattr(
-        process, "run_cli_bounded", _recording_runner(copies, _probe_runner("Logged in using ChatGPT")),
-    )
+    runner = _probe_runner("Logged in using ChatGPT")
+    monkeypatch.setattr(process, "run_cli_bounded", _recording_runner(copies, runner))
     assert process.codex_cli_login().logged_in is True
 
 

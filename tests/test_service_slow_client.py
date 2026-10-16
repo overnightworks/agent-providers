@@ -210,7 +210,7 @@ async def test_a_client_taking_a_frame_every_29_seconds_keeps_its_chatty_run():
 
 @pytest.mark.parametrize(
     ("closing_while", "cancellations"),
-    [("close-held", 1), ("close-held", 3), ("close-done", 0)],
+    [("close-held", 1), ("close-held", 3), ("close-done", 1), ("close-done", 3)],
 )
 @in_loop
 async def test_closing_the_stream_of_a_dropped_client_waits_for_the_one_close(

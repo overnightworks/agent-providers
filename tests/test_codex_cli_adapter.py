@@ -819,9 +819,10 @@ def _stdout_line(event: dict | bytes) -> bytes:
     return event if isinstance(event, bytes) else json.dumps(event).encode() + b"\n"
 
 
-def _streaming_runner(
-    events: list[dict | bytes] | Callable[[Path], list[dict]], state: dict[str, bool],
-):
+_StreamedEvents = list[dict | bytes] | Callable[[Path], list[dict]]
+
+
+def _streaming_runner(events: _StreamedEvents, state: dict[str, bool]):
     """A Codex run that streams its events (or raw lines) and records its abort and reap.
 
     Events given as a callable are built from the run's resolved CODEX_HOME.
@@ -1043,7 +1044,7 @@ _BLOCKED_TURNS = (
 def test_codex_cover_image_aborts_a_blocked_turn_and_logs_only_closed_names(
     monkeypatch,
     caplog,
-    events: list[dict],
+    events: _StreamedEvents,
     expected_reason: codex_image.ImageToolBlockedReason,
     expected_tokens: tuple[str, ...],
 ) -> None:

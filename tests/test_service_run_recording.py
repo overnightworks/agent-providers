@@ -1259,7 +1259,7 @@ async def test_a_stray_cancellation_of_a_step_ends_the_run_as_that_step_s_own_fa
     propagated, logged, frames, record = cancelled
     assert (as_own(propagated), [(event, as_own(kind)) for event, kind in logged]) == own[:2]
     assert (frames, record) == own[2:]
-    assert "CancelledError" in [propagated, *(kind for _event, kind in logged)]
+    assert [propagated, *(kind for _event, kind in logged)].count("CancelledError") == 1
     assert unretrieved == []
     assert not [step for step in _Step if step.canary in caplog.text]
 

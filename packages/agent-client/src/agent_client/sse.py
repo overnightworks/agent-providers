@@ -20,7 +20,7 @@ from enum import Enum, auto
 from typing import Any, Final
 
 from agent_client.run_stream import RunStream, StreamViolation, ViolationKind, parse_event
-from agent_client.wire import MAX_EVENT_BYTES, RunEvent, is_run_event
+from agent_client.wire import MAX_EVENT_BYTES, RunEvent, is_run_event, refuse_non_json_constant
 
 _BYTE_ORDER_MARK: Final = b"\xef\xbb\xbf"
 _LINE_END: Final = re.compile(rb"[\r\n]")
@@ -83,6 +83,8 @@ class RunStreamDecoder:
         self._fields: dict[str, str] = {}
 
     def feed(self, chunk: bytes) -> list[Decoded]:
+        if isinstance(chunk, str):
+            raise TypeError("feed takes bytes, not str")
         self._refuse_if_closed()
         decoded: list[Decoded] = []
         position = self._skip_line_feed_of_split_crlf(chunk)
@@ -204,16 +206,12 @@ def _json_object(data: str) -> dict[str, Any] | StreamViolation:
     # A frame within the size limit can still nest deeper than the parser's
     # recursion limit; that is the sender's broken JSON, not the client's fault.
     try:
-        value = json.loads(data, parse_constant=_refuse_non_json_constant)
+        value = json.loads(data, parse_constant=refuse_non_json_constant)
     except (ValueError, RecursionError) as error:
         return StreamViolation(kind=ViolationKind.INVALID_JSON, detail=f"data is not JSON: {error}")
     if not isinstance(value, dict):
         return StreamViolation(kind=ViolationKind.INVALID_JSON, detail="data is not a JSON object")
     return value
-
-
-def _refuse_non_json_constant(constant: str) -> object:
-    raise ValueError(f"{constant} is not a JSON value")
 
 
 def _malformed(detail: str) -> StreamViolation:

@@ -15,7 +15,7 @@ from typing import Any, Final
 
 from pydantic import TypeAdapter, ValidationError
 
-from agent_client.wire import ProtocolVersion, RejectionCode, RunRequest
+from agent_client.wire import ProtocolVersion, RejectionCode, RunRequest, refuse_non_json_constant
 
 MAX_REQUEST_BYTES: Final = 256 * 1024
 
@@ -31,7 +31,7 @@ def parse_run_request(body: bytes) -> RunRequest | RejectionCode:
         document = json.loads(
             body.decode("utf-8-sig"),
             object_pairs_hook=_refuse_duplicate_members,
-            parse_constant=_refuse_constant,
+            parse_constant=refuse_non_json_constant,
         )
     except (ValueError, RecursionError):
         return RejectionCode.INVALID_REQUEST
@@ -52,7 +52,3 @@ def _refuse_duplicate_members(members: list[tuple[str, Any]]) -> dict[str, Any]:
     if len(document) != len(members):
         raise _NotStrictJson("a member is named twice")
     return document
-
-
-def _refuse_constant(constant: str) -> object:
-    raise _NotStrictJson(f"{constant} is not a JSON value")

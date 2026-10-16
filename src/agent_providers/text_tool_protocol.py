@@ -15,6 +15,7 @@ import json
 from dataclasses import dataclass
 
 from agent_client.tools import ToolDeclaration
+from agent_client.wire import refuse_non_json_constant
 from agent_providers.tools import ToolCatalog, ToolProtocolMarkup
 
 _CALL_EXAMPLE = '{"name":"tool_name","arguments":{}}'
@@ -359,7 +360,7 @@ def _first_json_boundary(text: str, close_tag: str) -> tuple[object, int] | None
     by the tag.
     """
     leading_whitespace = len(text) - len(text.lstrip(_JSON_WHITESPACE))
-    decoder = json.JSONDecoder(parse_constant=_reject_non_json_constant)
+    decoder = json.JSONDecoder(parse_constant=refuse_non_json_constant)
     try:
         payload, value_end = decoder.raw_decode(text, leading_whitespace)
     except ValueError:
@@ -371,10 +372,6 @@ def _first_json_boundary(text: str, close_tag: str) -> tuple[object, int] | None
     trailing_whitespace_length = len(after_value) - len(after_whitespace)
     call_end = value_end + trailing_whitespace_length + len(close_tag)
     return payload, call_end
-
-
-def _reject_non_json_constant(value: str) -> None:
-    raise ValueError(value)
 
 
 def _validated_call(catalog: ToolCatalog, payload: object) -> TextToolCall:

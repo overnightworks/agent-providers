@@ -30,6 +30,8 @@ from agent_client.wire import (
 
 INTERRUPTED_MESSAGE: Final = "The run was cut short after a side-effecting tool call."
 _SHOWN_VERSION_LENGTH: Final = 20
+_SHOWN_PROBLEM_LENGTH: Final = 200
+_SHOWN_PROBLEM_COUNT: Final = 5
 
 _RUN_EVENT: Final[TypeAdapter[RunEvent]] = TypeAdapter(RunEvent)
 _PROTOCOL_VERSION: Final[TypeAdapter[ProtocolVersion]] = TypeAdapter(ProtocolVersion)
@@ -100,14 +102,25 @@ def _violation_from(error: ValidationError) -> StreamViolation:
         if any(problem["type"] in _UNKNOWN_TAG_ERRORS for problem in problems)
         else ViolationKind.SCHEMA_MISMATCH
     )
-    detail = "; ".join(_located(problem["loc"], problem["msg"]) for problem in problems)
+    shown = [
+        _located(problem["loc"], problem["msg"]) for problem in problems[:_SHOWN_PROBLEM_COUNT]
+    ]
+    if len(problems) > _SHOWN_PROBLEM_COUNT:
+        shown.append(f"… and {len(problems) - _SHOWN_PROBLEM_COUNT} more")
+    detail = "; ".join(shown)
     return StreamViolation(kind=kind, detail=detail)
 
 
 def _located(location: tuple[int | str, ...], message: str) -> str:
+    shown_message = _brief(message)
     if not location:
-        return message
-    return f"{'.'.join(str(part) for part in location)}: {message}"
+        return shown_message
+    shown_location = _brief(".".join(str(part) for part in location))
+    return f"{shown_location}: {shown_message}"
+
+
+def _brief(untrusted: str) -> str:
+    return untrusted[:_SHOWN_PROBLEM_LENGTH]
 
 
 class RunStream:

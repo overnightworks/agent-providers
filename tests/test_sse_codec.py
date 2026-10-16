@@ -45,6 +45,11 @@ OPENING = encode_event(A_RUN[0])
 HEARTBEAT = encode_event(heartbeat(1))
 
 
+def _tool_call_frame_with(constant: str) -> bytes:
+    frame = encode_event(call(1, "call-1", tool_input={"x": 0}))
+    return frame.replace(b'"x":0', b'"x":' + constant.encode())
+
+
 def _decode(*chunks: bytes) -> list[Decoded]:
     decoder = RunStreamDecoder()
     decoded = [item for chunk in chunks for item in decoder.feed(chunk)]
@@ -130,10 +135,13 @@ def test_a_run_decodes_the_same_wherever_its_bytes_split(spelled: bytes) -> None
         pytest.param(
             HEARTBEAT.replace(b"data: {", b"data: {{"), ViolationKind.INVALID_JSON, id="not JSON"
         ),
-        pytest.param(
-            b"id: 1\nevent: heartbeat\ndata: NaN\n\n",
-            ViolationKind.INVALID_JSON,
-            id="NaN, which JSON has no word for",
+        *(
+            pytest.param(
+                _tool_call_frame_with(constant),
+                ViolationKind.INVALID_JSON,
+                id=f"{constant} inside a well-formed tool call",
+            )
+            for constant in ("NaN", "Infinity", "-Infinity")
         ),
         pytest.param(
             b'id: 1\nevent: heartbeat\ndata: ["heartbeat"]\n\n',
@@ -176,6 +184,13 @@ def test_a_broken_frame_is_named_and_nothing_is_decoded_after_it(
         decoder.feed(HEARTBEAT)
     assert decoder.close() == []
     assert decoder.close() == []
+
+
+def test_feeding_text_instead_of_bytes_is_a_type_error_naming_feed() -> None:
+    decoder = RunStreamDecoder()
+
+    with pytest.raises(TypeError, match="feed takes bytes"):
+        decoder.feed("id: 1\n\n")  # type: ignore[arg-type]
 
 
 def _tool_input_nested(depth: int) -> dict[str, Any]:

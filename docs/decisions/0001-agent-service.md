@@ -422,8 +422,8 @@ Piece 2 of A1a3 (`agent_service.run_events`, the budget beside `seq`):
     not counted, so the byte budget never keeps a terminal from being queued;
     a dropped client gets none. The per-frame cap stays
     `provider_error` and may exceed a small `max_bytes`.
-17. A refused event is charged nothing, takes no `seq` and is never recorded by
-    `RunStream`; the limit terminal takes the `seq` it would have had. The
+17. An event the budget refuses is charged nothing, takes no `seq` and is never
+    recorded by `RunStream`; the limit terminal takes the `seq` it would have had. The
     order is encode, budget (calls before bytes), stream rules, send.
 18. A limit hit is returned as a terminal to a client that takes frames, so it uses piece 1's stop path
     (rule 9): the runner is stopped before the terminal is queued, even with

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 
 import pytest
 from service_support import QUIET, Drive, GatedRunner, StepClock, driven, in_loop
@@ -152,35 +153,33 @@ async def test_a_dropped_client_is_not_sent_the_event_the_runner_yielded_at_the_
     assert drive.types == ["run_started", "heartbeat"]
 
 
-class _ClockPassingBetweenReads(StepClock):
-    """A clock that jumps to an instant on a chosen reading, as time passes between two lines."""
+class _ClockPassingWhileHandling(StepClock):
+    """A clock that jumps to an instant on the first reading a named method makes."""
 
-    def __init__(self) -> None:
+    def __init__(self, method: str, instant: float) -> None:
         super().__init__()
-        self._jump: tuple[int, float] | None = None
-
-    def jump_on_reading(self, number: int, instant: float) -> None:
-        self._jump = (number, instant)
+        self._method = method
+        self._instant = instant
+        self.jumped = False
 
     def __call__(self) -> float:
-        if self._jump is not None:
-            number, instant = self._jump
-            self._jump = (number - 1, instant) if number > 1 else None
-            if number == 1:
-                self.now = instant
+        reader = sys._getframe(1).f_code.co_name
+        if reader == self._method and not self.jumped:
+            self.now = self._instant
+            self.jumped = True
         return super().__call__()
 
 
 @in_loop
 async def test_no_runner_step_is_asked_for_after_the_stall_instant_passed_while_handling_an_event():
-    clock = _ClockPassingBetweenReads()
+    clock = _ClockPassingWhileHandling("_handle_outcome", 45)
     async with driven(clock=clock, read=False) as drive:
         drive.took(await anext(drive.frames))
         await drive.run_to(44)
         steps_waiting = drive.runner.steps
-        clock.jump_on_reading(2, 45)
         drive.runner.release(QUIET)
         await drive.clock.parked()
+        assert clock.jumped, "the clock never jumped: no reading was made while handling the event"
         assert (drive.runner.steps, drive.runner.closes) == (steps_waiting, 1)
         await drive.drain()
 

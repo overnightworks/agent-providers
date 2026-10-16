@@ -247,7 +247,7 @@ async def test_a_breach_behind_a_pending_frame_stays_unobserved_until_the_client
 
 
 @pytest.mark.parametrize(
-    ("max_tool_calls", "event_at_599", "calls_sent", "expected_message"),
+    ("max_tool_calls", "event_at_the_maximum", "calls_sent", "expected_message"),
     [
         pytest.param(
             1,
@@ -267,7 +267,7 @@ async def test_a_breach_behind_a_pending_frame_stays_unobserved_until_the_client
 )
 @in_loop
 async def test_an_event_yielded_at_the_maximum_is_judged_before_the_maximum(
-    max_tool_calls, event_at_599, calls_sent, expected_message
+    max_tool_calls, event_at_the_maximum, calls_sent, expected_message
 ):
     async with driven(runs=RunConfig(max_tool_calls=max_tool_calls)) as drive:
         await drive.speak_quietly_every(100, 400)
@@ -275,7 +275,7 @@ async def test_an_event_yielded_at_the_maximum_is_judged_before_the_maximum(
         drive.runner.release(call("c0"))
         drive.runner.release(result("c0"))
         await drive.run_to(599)
-        drive.runner.release(event_at_599)
+        drive.runner.release(event_at_the_maximum)
         drive.clock.advance_to(600)
         await drive.finished()
 

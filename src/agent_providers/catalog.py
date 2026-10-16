@@ -54,8 +54,8 @@ from agent_providers.errors import (
 )
 from agent_providers.process import (
     AgentCliUnavailableError,
-    codex_cli_access_token_is_present,
     codex_cli_login,
+    codex_cli_login_is_usable,
     codex_cli_model_catalog,
     grok_cli_status,
     grok_cli_token_is_present,
@@ -402,7 +402,7 @@ def _cli_setup_method(provider: str) -> ProviderSetupMethod | None:
             return ProviderSetupMethod.CLAUDE_CLI
         if provider == ProviderName.GROK and grok_cli_token_is_present():
             return ProviderSetupMethod.GROK_CLI
-        if provider == ProviderName.CODEX and codex_cli_access_token_is_present():
+        if provider == ProviderName.CODEX and codex_cli_login_is_usable():
             return ProviderSetupMethod.CODEX_CLI
     except AgentCliUnavailableError as exc:
         log.warning("%s CLI probe unavailable: %s", provider, type(exc).__name__)

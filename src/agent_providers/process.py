@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import atexit
 import concurrent.futures
+import errno
+import functools
 import json
 import logging
 import os
 import selectors
 import shutil
 import signal
+import stat
+import sys
 import tempfile
 import threading
 import time
@@ -20,8 +24,10 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Final, Literal, NotRequired, Required, TypedDict, Unpack
+from types import TracebackType
+from typing import Any, Final, Literal, NotRequired, Required, TypedDict, Unpack, cast
 
+from agent_providers.codex_login import CodexLoginVerdict, assess_codex_login
 from agent_providers.config import current_config, current_turn_config
 from agent_providers.constants import (
     CLAUDE_CLI_AUTH_METHOD_FIELD,
@@ -122,6 +128,11 @@ class CliRunOutcome:
     io_error: OSError | None = None
 
 
+_RUNNER_TIMEOUT_REASONS = frozenset(
+    {CliRunReason.DEADLINE_BEFORE_SPAWN, CliRunReason.CLEANUP_OVERRAN}
+)
+
+
 class CliLineChannel:
     """A bounded stream of complete stdout lines from one CLI run."""
 
@@ -143,33 +154,67 @@ class CliLineChannel:
     def abort_requested(self) -> bool:
         return self._abort_requested.is_set()
 
-    def receive(self, timeout: float | None = None) -> bytes | CliRunOutcome:
-        deadline = None if timeout is None else time.monotonic() + timeout
+    def receive(
+        self,
+        timeout: float | None = None,
+        *,
+        settle_by: float | None = None,
+    ) -> bytes | CliRunOutcome:
+        give_up_at = None if timeout is None else time.monotonic() + timeout
         with self._condition:
             while True:
                 if self._lines:
                     return self._lines.popleft()
                 if self._outcome is not None:
                     return self._outcome
-                remaining = None if deadline is None else deadline - time.monotonic()
-                if remaining is not None and remaining <= 0:
+                now = time.monotonic()
+                if settle_by is not None and now >= settle_by:
+                    return self._terminate_with(_cleanup_overran_outcome(started=True))
+                if give_up_at is not None and now >= give_up_at:
                     raise TimeoutError("CLI line channel did not produce an item in time")
-                self._condition.wait(timeout=remaining)
+                wake_instants = [
+                    instant for instant in (give_up_at, settle_by) if instant is not None
+                ]
+                self._condition.wait(timeout=min(wake_instants) - now if wake_instants else None)
 
     def _send(self, line: bytes) -> bool:
         with self._condition:
-            if self._abort_requested.is_set() or len(self._lines) >= self._maximum_lines:
+            if (
+                self._outcome is not None
+                or self._abort_requested.is_set()
+                or len(self._lines) >= self._maximum_lines
+            ):
                 return False
             self._lines.append(line)
             self._condition.notify_all()
             return True
 
-    def _close(self, outcome: CliRunOutcome) -> None:
+    def _close(self, outcome: CliRunOutcome) -> CliRunOutcome:
         with self._condition:
+            return self._terminate_with(outcome)
+
+    def _terminate_with(self, outcome: CliRunOutcome) -> CliRunOutcome:
+        if self._outcome is None:
             if not outcome.complete:
                 self._lines.clear()
             self._outcome = outcome
+            if outcome.reason in _RUNNER_TIMEOUT_REASONS:
+                self._abort_requested.set()
             self._condition.notify_all()
+        return self._outcome
+
+
+def _cleanup_overran_outcome(*, started: bool) -> CliRunOutcome:
+    return CliRunOutcome(
+        started=started,
+        spawn_error=None,
+        returncode=None,
+        stdout="",
+        stderr="",
+        complete=False,
+        became_zombie=False,
+        reason=CliRunReason.CLEANUP_OVERRAN,
+    )
 
 
 @dataclass
@@ -179,17 +224,68 @@ class _BoundedRunState:
     lock: threading.Lock = field(default_factory=threading.Lock)
     outcome: CliRunOutcome | None = None
 
+    def record(self, outcome: CliRunOutcome) -> CliRunOutcome:
+        with self.lock:
+            if self.outcome is None:
+                self.outcome = outcome
+            recorded = self.outcome
+        self.completed.set()
+        return recorded
+
+
+class _StepFailures:
+    """The steps of a run that raised, kept by name and exception class only."""
+
+    def __init__(self) -> None:
+        self._failed: list[str] = []
+        self._errors: dict[str, BaseException] = {}
+        self._first_control_flow: BaseException | None = None
+
+    @contextmanager
+    def contained(self, step: str, *, reported: bool = True) -> Iterator[None]:
+        try:
+            yield
+        except BaseException as error:  # NOSONAR(S5754) every exit publishes; callers re-raise
+            self._errors[step] = error
+            if self._first_control_flow is None and not isinstance(error, Exception):
+                self._first_control_flow = error
+            if reported:
+                self._failed.append(f"{step} {type(error).__name__}")
+
+    def failed(self, step: str) -> bool:
+        return step in self._errors
+
+    def error_raised_by(self, step: str) -> BaseException:
+        return self._errors[step]
+
+    def report(self) -> None:
+        for failure in self._failed:
+            with self.contained("report", reported=False):
+                log.error("agent CLI runner step failed: %s", failure)
+
+    def raise_control_flow(self) -> None:
+        """Re-raise the first failure that is not an ``Exception`` (caller thread only)."""
+        if self._first_control_flow is not None:
+            raise self._first_control_flow
+
 
 LOGGED_OUT = CliLogin(logged_in=False, auth_method=None)
 
 # A probe can spend its answer budget and then two termination grace periods
 # reaping its process group. Give callers enough time to receive that outcome.
 CLI_PROBE_CALLER_TIMEOUT_MARGIN_SECONDS = 0.1
-CLI_PROBE_CALLER_TIMEOUT_SECONDS = (
-    PROBE_TIMEOUT_SECONDS
-    + (2 * CLI_TERMINATION_GRACE_SECONDS)
-    + CLI_PROBE_CALLER_TIMEOUT_MARGIN_SECONDS
-)
+
+
+def _cli_settle_margin_seconds() -> float:
+    return 2 * CLI_TERMINATION_GRACE_SECONDS + CLI_PROBE_CALLER_TIMEOUT_MARGIN_SECONDS
+
+
+def cli_settle_deadline(deadline: float) -> float:
+    """The instant by which a run with this deadline has published its outcome."""
+    return deadline + _cli_settle_margin_seconds()
+
+
+CLI_PROBE_CALLER_TIMEOUT_SECONDS = PROBE_TIMEOUT_SECONDS + _cli_settle_margin_seconds()
 _BACKGROUND_REAP_POLL_SECONDS: Final = 0.1
 
 log = logging.getLogger(__name__)
@@ -202,7 +298,11 @@ CredentialCopy = Callable[[bytes], bytes]
 # Measured on claude 2.1.266: the CLI reports its subscription login from
 # this file below HOME alone, without a network call.
 _CLAUDE_CATALOG_CREDENTIAL_PATH: Final = Path(".claude/.credentials.json")
-_CATALOG_CREDENTIAL_READ_LIMIT_BYTES: Final = 256 * 1024
+_CREDENTIAL_FILE_READ_LIMIT_BYTES: Final = 256 * 1024
+_CREDENTIAL_SYMLINK_DETAIL: Final = "CLI credential is a symbolic link"
+_CREDENTIAL_NOT_REGULAR_DETAIL: Final = "CLI credential is not a regular file"
+_CREDENTIAL_OVERSIZE_DETAIL: Final = "CLI credentials exceed the copy bound"
+_CREDENTIAL_UNREADABLE_DETAIL: Final = "could not read CLI credentials"
 _GROK_CREDENTIAL_HOME_VARIABLE: Final = "GROK_HOME"
 _CODEX_CREDENTIAL_HOME_VARIABLE: Final = "CODEX_HOME"
 
@@ -389,7 +489,6 @@ class _CliRunKeywordArgs(TypedDict, total=False):
     deadline: Required[float]
     stderr: NotRequired[StderrPolicy]
     output_read_limit_bytes: NotRequired[int | None]
-    cleanup_margin_seconds: NotRequired[float | None]
     on_spawned: NotRequired[Callable[[int], None] | None]
     on_spawn_failed: NotRequired[Callable[[], None] | None]
     on_reaped: NotRequired[Callable[[int, bool], None] | None]
@@ -441,43 +540,81 @@ def run_cli_bounded(
         prompt_file_arg_index=options.get("prompt_file_arg_index"),
     )
     state = _BoundedRunState()
-    threading.Thread(
-        target=_run_cli_bounded,
-        args=(state, child, request),
-        daemon=True,
-    ).start()
-    if not state.completed.wait(timeout=max(request.deadline - time.monotonic(), 0)):
-        if not state.started.is_set():
-            return CliRunOutcome(
-                started=False,
-                spawn_error=None,
-                returncode=None,
-                stdout="",
-                stderr="",
-                complete=False,
-                became_zombie=False,
-                reason=CliRunReason.DEADLINE_BEFORE_SPAWN,
-            )
-        cleanup_margin = options.get("cleanup_margin_seconds")
-        if cleanup_margin is None:
-            cleanup_margin = (
-                2 * CLI_TERMINATION_GRACE_SECONDS + CLI_PROBE_CALLER_TIMEOUT_MARGIN_SECONDS
-            )
-        if not state.completed.wait(timeout=cleanup_margin):
-            return CliRunOutcome(
-                started=True,
-                spawn_error=None,
-                returncode=None,
-                stdout="",
-                stderr="",
-                complete=False,
-                became_zombie=False,
-                reason=CliRunReason.CLEANUP_OVERRAN,
-            )
+    worker = threading.Thread(target=_run_cli_bounded, args=(state, child, request), daemon=True)
+    failures = _StepFailures()
+    with failures.contained("start"):
+        worker.start()
+    if failures.failed("start"):
+        return _settle_unstarted_run(state, request, failures)
+    if state.completed.wait(timeout=max(request.deadline - time.monotonic(), 0)):
+        return _recorded_outcome(state)
+    if not state.started.is_set():
+        return _settle_from_caller(state, request, _deadline_before_spawn_outcome())
+    settle_wait = max(cli_settle_deadline(request.deadline) - time.monotonic(), 0)
+    if state.completed.wait(timeout=settle_wait):
+        return _recorded_outcome(state)
+    return _settle_from_caller(state, request, _cleanup_overran_outcome(started=True))
+
+
+def _settle_unstarted_run(
+    state: _BoundedRunState,
+    request: _CliRunRequest,
+    failures: _StepFailures,
+) -> CliRunOutcome:
+    start_failure = failures.error_raised_by("start")
+    with failures.contained("on_spawn_failed"):
+        _notify_spawn_failed(request.on_spawn_failed)
+    outcome = _settle(
+        state,
+        request.stdout_line_channel,
+        _spawn_failure_outcome(start_failure),
+        failures,
+    )
+    failures.report()
+    failures.raise_control_flow()
+    return outcome
+
+
+def _recorded_outcome(state: _BoundedRunState) -> CliRunOutcome:
     with state.lock:
-        if state.outcome is None:
-            raise RuntimeError("bounded CLI runner completed without an outcome")
-        return state.outcome
+        return cast(CliRunOutcome, state.outcome)
+
+
+def _settle_from_caller(
+    state: _BoundedRunState,
+    request: _CliRunRequest,
+    outcome: CliRunOutcome,
+) -> CliRunOutcome:
+    failures = _StepFailures()
+    settled = _settle(state, request.stdout_line_channel, outcome, failures)
+    failures.report()
+    failures.raise_control_flow()
+    return settled
+
+
+def _settle(
+    state: _BoundedRunState,
+    channel: CliLineChannel | None,
+    outcome: CliRunOutcome,
+    failures: _StepFailures,
+) -> CliRunOutcome:
+    if channel is not None:
+        with failures.contained("close"):
+            outcome = channel._close(outcome)
+    return state.record(outcome)
+
+
+def _deadline_before_spawn_outcome() -> CliRunOutcome:
+    return CliRunOutcome(
+        started=False,
+        spawn_error=None,
+        returncode=None,
+        stdout="",
+        stderr="",
+        complete=False,
+        became_zombie=False,
+        reason=CliRunReason.DEADLINE_BEFORE_SPAWN,
+    )
 
 
 @dataclass(frozen=True)
@@ -502,61 +639,41 @@ def _run_cli_bounded(
     child: ChildProcess,
     request: _CliRunRequest,
 ) -> None:
-    process, prompt_file_path, outcome = _start_bounded_cli(
-        child,
-        request.stderr,
-        request.on_spawn_failed,
-        request.prompt_file_bytes,
-        request.prompt_file_arg_index,
-    )
-    output = _CliOutput(
-        bytearray(),
-        bytearray(),
-        complete=False,
-        reason=CliRunReason.IO_ERROR,
-    )
-    try:
-        if process is not None:
-            state.started.set()
-            _notify_spawned(request.on_spawned, process.pid)
-            output = _exchange_bounded(
-                process,
-                request.stdin_payload,
-                request.read,
-                request.deadline,
-                request.output_read_limit_bytes,
-                request.stdout_line_channel,
-            )
-    finally:
-        if process is not None:
-            outcome = _finished_bounded_cli_run(process, output, request.on_reaped)
-        outcome = _cleanup_bounded_cli_prompt_file(prompt_file_path, outcome)
-        if outcome is None:
-            raise RuntimeError("bounded CLI runner exited without an outcome")
-        _publish_bounded_outcome(state, outcome)
-        if request.stdout_line_channel is not None:
-            request.stdout_line_channel._close(outcome)
+    failures = _StepFailures()
+    started, prompt_file_path = _start_bounded_cli(child, request, failures)
+    background_reap_process: PipedProcess | None = None
+    if isinstance(started, CliRunOutcome):
+        outcome = started
+    else:
+        state.started.set()
+        output = _exchange_after_spawn(started, request, failures)
+        outcome, handed_off = _reaped_outcome(started, output, request.on_reaped, failures)
+        if handed_off and request.on_reaped is not None:
+            background_reap_process = started
+    outcome = _outcome_after_prompt_file_cleanup(prompt_file_path, outcome, failures)
+    _settle(state, request.stdout_line_channel, outcome, failures)
+    failures.report()
+    if background_reap_process is not None:
+        _reap_in_background(background_reap_process, request.on_reaped)
 
 
 def _start_bounded_cli(
     child: ChildProcess,
-    stderr: StderrPolicy,
-    on_spawn_failed: Callable[[], None] | None,
-    prompt_file_bytes: bytes | None,
-    prompt_file_arg_index: int | None,
-) -> tuple[PipedProcess | None, str | None, CliRunOutcome | None]:
+    request: _CliRunRequest,
+    failures: _StepFailures,
+) -> tuple[PipedProcess | CliRunOutcome, str | None]:
     prompt_file_path: str | None = None
-    try:
+    with failures.contained("spawn", reported=False):
         prompted_child, prompt_file_path = _with_private_prompt_file(
             child,
-            prompt_file_bytes,
-            prompt_file_arg_index,
+            request.prompt_file_bytes,
+            request.prompt_file_arg_index,
         )
-        process = open_pipes(prompted_child, stderr=stderr)
-    except Exception as error:
-        _notify_spawn_failed(on_spawn_failed)
-        return None, prompt_file_path, _spawn_failure_outcome(error)
-    return process, prompt_file_path, None
+        return open_pipes(prompted_child, stderr=request.stderr), prompt_file_path
+    with failures.contained("on_spawn_failed"):
+        _notify_spawn_failed(request.on_spawn_failed)
+    spawn_failure = _spawn_failure_outcome(failures.error_raised_by("spawn"))
+    return spawn_failure, prompt_file_path
 
 
 def _spawn_failure_outcome(error: BaseException) -> CliRunOutcome:
@@ -572,21 +689,45 @@ def _spawn_failure_outcome(error: BaseException) -> CliRunOutcome:
     )
 
 
-def _finished_bounded_cli_run(
+def _exchange_after_spawn(
+    process: PipedProcess,
+    request: _CliRunRequest,
+    failures: _StepFailures,
+) -> _CliOutput:
+    output = _CliOutput(
+        bytearray(),
+        bytearray(),
+        complete=False,
+        reason=CliRunReason.IO_ERROR,
+    )
+    spawn_announced = False
+    with failures.contained("on_spawned"):
+        _notify_spawned(request.on_spawned, process.pid)
+        spawn_announced = True
+    if spawn_announced:
+        with failures.contained("exchange"):
+            output = _exchange_bounded(
+                process,
+                request.stdin_payload,
+                request.read,
+                request.deadline,
+                request.output_read_limit_bytes,
+                request.stdout_line_channel,
+            )
+    return output
+
+
+def _reaped_outcome(
     process: PipedProcess,
     output: _CliOutput,
     on_reaped: Callable[[int, bool], None] | None,
-) -> CliRunOutcome:
-    became_zombie = _reap_process_group(process)
-    if became_zombie and on_reaped is not None:
-        threading.Thread(
-            target=_reap_in_background,
-            args=(process, on_reaped),
-            daemon=True,
-        ).start()
-    else:
-        _notify_reaped(on_reaped, process.pid, became_zombie=False)
-    return CliRunOutcome(
+    failures: _StepFailures,
+) -> tuple[CliRunOutcome, bool]:
+    became_zombie = _reap_or_hand_off(process, failures)
+    if not became_zombie:
+        with failures.contained("on_reaped"):
+            _notify_reaped(on_reaped, process.pid, became_zombie=False)
+    outcome = CliRunOutcome(
         started=True,
         spawn_error=None,
         returncode=process.returncode,
@@ -597,31 +738,47 @@ def _finished_bounded_cli_run(
         reason=output.reason,
         io_error=output.io_error,
     )
+    return outcome, became_zombie
 
 
-def _cleanup_bounded_cli_prompt_file(
+def _reap_or_hand_off(process: PipedProcess, failures: _StepFailures) -> bool:
+    """Reap the group; a reap that raises is handed to the background reap."""
+    with failures.contained("reap"):
+        return _reap_process_group(process)
+    with failures.contained("hand-off"):
+        _signal_process_group(process.pid, signal.SIGKILL)
+    for stream in (process.stdin, process.stdout, process.stderr):
+        if stream is not None:
+            with failures.contained("hand-off close"):
+                stream.close()
+    return True
+
+
+def _outcome_after_prompt_file_cleanup(
     prompt_file_path: str | None,
-    outcome: CliRunOutcome | None,
-) -> CliRunOutcome | None:
+    outcome: CliRunOutcome,
+    failures: _StepFailures,
+) -> CliRunOutcome:
     if prompt_file_path is None:
         return outcome
-    try:
+    prompt_file_removed = False
+    with failures.contained("prompt_file"):
         _unlink_prompt_file(prompt_file_path)
-    except OSError as error:
-        if outcome is None:
-            raise RuntimeError("bounded CLI runner exited without an outcome")
-        return CliRunOutcome(
-            started=outcome.started,
-            spawn_error=outcome.spawn_error,
-            returncode=outcome.returncode,
-            stdout=outcome.stdout,
-            stderr=outcome.stderr,
-            complete=False,
-            became_zombie=outcome.became_zombie,
-            reason=CliRunReason.IO_ERROR,
-            io_error=error,
-        )
-    return outcome
+        prompt_file_removed = True
+    if prompt_file_removed:
+        return outcome
+    prompt_file_error = failures.error_raised_by("prompt_file")
+    return CliRunOutcome(
+        started=outcome.started,
+        spawn_error=outcome.spawn_error,
+        returncode=outcome.returncode,
+        stdout=outcome.stdout,
+        stderr=outcome.stderr,
+        complete=False,
+        became_zombie=outcome.became_zombie,
+        reason=CliRunReason.IO_ERROR,
+        io_error=prompt_file_error if isinstance(prompt_file_error, OSError) else None,
+    )
 
 
 def _with_private_prompt_file(
@@ -666,12 +823,6 @@ _DEADLINE_REASONS = frozenset(
         CliRunReason.DEADLINE_WHILE_READING,
     }
 )
-
-
-def _publish_bounded_outcome(state: _BoundedRunState, outcome: CliRunOutcome) -> None:
-    with state.lock:
-        state.outcome = outcome
-    state.completed.set()
 
 
 def _notify_spawned(callback: Callable[[int], None] | None, process_id: int) -> None:
@@ -1086,12 +1237,15 @@ class PrivateCredentialHome:
             _live_homes.add(self)
         try:
             os.chmod(self._home, 0o700)
-            _install_credential(
-                self._home,
-                auth_file,
-                relative_destination,
-                missing_credential_is_error=missing_credential_is_error,
-                credential_copy=credential_copy,
+            _run_without_credential_remains(
+                functools.partial(
+                    _install_credential,
+                    self._home,
+                    auth_file,
+                    relative_destination,
+                    missing_credential_is_error=missing_credential_is_error,
+                    credential_copy=credential_copy,
+                ),
             )
         except OSError:
             self._discard_failed_setup()
@@ -1254,47 +1408,13 @@ def blank_codex_refresh_token(source_document: bytes) -> bytes:
     break the stored login, so every Codex child receives this copy instead of
     the operator's file.
     """
-    blanked = _blanked_codex_login(source_document)
-    # The traceback keeps this frame alive, so the document must not stay in it.
+    blanked = assess_codex_login(source_document).blanked_document
+    # The Codex turn mirror calls this outside the credential boundary, and the
+    # traceback keeps this frame alive, so the document must not stay in it.
     del source_document
     if blanked is None:
         raise_without_chain(CodexLoginMirrorError())
     return blanked
-
-
-def _blanked_codex_login(source_document: bytes) -> bytes | None:
-    try:
-        document = json.loads(source_document)
-    except (ValueError, RecursionError):
-        return None
-    if not isinstance(document, dict):
-        return None
-    tokens = document.get("tokens")
-    if not isinstance(tokens, dict):
-        return None
-    access_token = tokens.get("access_token")
-    auth_mode = document.get("auth_mode")
-    id_token = tokens.get("id_token")
-    account_id = tokens.get("account_id")
-    last_refresh = document.get("last_refresh")
-    if not all(
-        isinstance(value, str) and value
-        for value in (auth_mode, access_token, id_token, account_id, last_refresh)
-    ):
-        return None
-    return json.dumps(
-        {
-            "auth_mode": auth_mode,
-            "OPENAI_API_KEY": None,
-            "last_refresh": last_refresh,
-            "tokens": {
-                "id_token": id_token,
-                "access_token": access_token,
-                "account_id": account_id,
-                "refresh_token": "",
-            },
-        }
-    ).encode()
 
 
 def _install_credential(
@@ -1305,12 +1425,8 @@ def _install_credential(
     missing_credential_is_error: bool,
     credential_copy: CredentialCopy | None = None,
 ) -> None:
-    flags = os.O_RDONLY
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    try:
-        source = os.open(auth_file, flags)
-    except FileNotFoundError:
+    payload = _read_credential_file(auth_file)
+    if payload is None:
         if missing_credential_is_error:
             raise CliCredentialNotConfiguredError("configured CLI credential is missing") from None
         # A probe with no credential answers "logged out", which is
@@ -1322,53 +1438,188 @@ def _install_credential(
             auth_file,
         )
         return
-    except OSError as exc:
-        raise AgentCliUnavailableError("could not read CLI credentials") from exc
-    try:
-        payload = _read_credential(source)
-        if credential_copy is not None:
-            login_is_usable = True
-            try:
-                payload = credential_copy(payload)
-            except CodexLoginMirrorError:
-                payload = b""
-                login_is_usable = False
-            if not login_is_usable:
-                if missing_credential_is_error:
-                    raise_without_chain(
-                        CliCredentialNotConfiguredError("configured CLI credential is unusable")
-                    )
-                log.warning(
-                    "the credential at the configured path %s is not a usable login; "
-                    "this probe will report a logged-out provider",
-                    auth_file,
-                )
-                return
-        destination_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        if hasattr(os, "O_NOFOLLOW"):
-            destination_flags |= os.O_NOFOLLOW
-        destination_path = home / relative_destination
-        destination_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        destination = os.open(destination_path, destination_flags, 0o400)
+    if credential_copy is not None:
+        login_is_usable = True
         try:
-            _write_credential(destination, payload)
-            os.fchmod(destination, 0o400)
-        finally:
-            os.close(destination)
+            payload = credential_copy(payload)
+        except CodexLoginMirrorError:
+            payload = b""
+            login_is_usable = False
+        if not login_is_usable:
+            if missing_credential_is_error:
+                raise_without_chain(
+                    CliCredentialNotConfiguredError("configured CLI credential is unusable")
+                )
+            log.warning(
+                "the credential at the configured path %s is not a usable login; "
+                "this probe will report a logged-out provider",
+                auth_file,
+            )
+            return
+    destination_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        destination_flags |= os.O_NOFOLLOW
+    destination_path = home / relative_destination
+    destination_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    destination = os.open(destination_path, destination_flags, 0o400)
+    try:
+        _write_credential(destination, payload)
+        os.fchmod(destination, 0o400)
     finally:
-        os.close(source)
+        os.close(destination)
 
 
-def _read_credential(descriptor: int) -> bytes:
+@dataclass(frozen=True)
+class _ExceptionLinks:
+    """What an exception points at: its traceback and its three chain attributes."""
+
+    exception: BaseException
+    traceback: TracebackType | None
+    context: BaseException | None
+    cause: BaseException | None
+    suppress_context: bool
+
+    @classmethod
+    def of(cls, exception: BaseException) -> "_ExceptionLinks":
+        return cls(
+            exception,
+            exception.__traceback__,
+            exception.__context__,
+            exception.__cause__,
+            exception.__suppress_context__,
+        )
+
+    def restore(self) -> None:
+        restored = self.exception
+        restored.__traceback__ = self.traceback
+        restored.__context__ = self.context
+        restored.__cause__ = self.cause  # NOSONAR(S5707) restores the snapshot of a real __cause__
+        restored.__suppress_context__ = self.suppress_context
+
+
+def _run_without_credential_remains[T](step: Callable[[], T]) -> T:
+    """Run a step that touches credential bytes; no exception leaves it holding them.
+
+    A traceback keeps every frame it passed through alive, locals included, and
+    so does every exception chained beneath it: the decoder's error holds the
+    document itself. This frame holds no bytes, so it clears the frames of the
+    failure, cuts the links the step created off, and lets the same exception
+    continue as if raised here, still chained to what the caller was handling.
+    A refusal that deliberately carries no context keeps none. The caller's own
+    exception is restored to exactly what it was at entry on every outcome, so
+    the step can neither leave links in it nor clear the frames it already had.
+    """
+    handled_by_the_caller = sys.exception()
+    callers_links = (
+        _ExceptionLinks.of(handled_by_the_caller) if handled_by_the_caller is not None else None
+    )
+    callers_traceback = _traceback_entries_of(handled_by_the_caller)
+    try:
+        return step()
+    except BaseException as failure:
+        _clear_frames_and_cut_links(
+            failure, failure.__traceback__.tb_next, callers_traceback, handled_by_the_caller,
+        )
+        raise
+    finally:
+        if callers_links is not None:
+            callers_links.restore()
+
+
+def _traceback_entries_of(exception: BaseException | None) -> list[TracebackType]:
+    entries = []
+    entry = exception.__traceback__ if exception is not None else None
+    while entry is not None:
+        entries.append(entry)
+        entry = entry.tb_next
+    return entries
+
+
+def _clear_frames_and_cut_links(
+    failure: BaseException,
+    first_entry: TracebackType | None,
+    callers_traceback: list[TracebackType],
+    handled_by_the_caller: BaseException | None,
+) -> None:
+    """Clear the failure's finished frames and cut its inner links, group members included."""
+    entry = first_entry
+    while entry is not None and not any(entry is kept for kept in callers_traceback):
+        try:
+            entry.tb_frame.clear()
+        except RuntimeError:
+            break  # a frame still executing belongs to the caller; below it is the earlier raise
+        entry = entry.tb_next
+    failure.__cause__ = None
+    if failure.__context__ is not None:
+        failure.__context__ = handled_by_the_caller
+    if isinstance(failure, BaseExceptionGroup):
+        for member in failure.exceptions:
+            _clear_frames_and_cut_links(
+                member, member.__traceback__, callers_traceback, handled_by_the_caller,
+            )
+
+
+def _read_credential_file(path: Path) -> bytes | None:
+    """Read a credential source: ``None`` when absent, an error when not a plain file.
+
+    The open never follows a link and never waits on a FIFO; the kind is judged
+    on the opened descriptor, so nothing can swap the file in between. No buffer
+    is held in this frame while a refusal is raised.
+    """
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        refusal = (
+            _CREDENTIAL_SYMLINK_DETAIL
+            if exc.errno == errno.ELOOP
+            else _CREDENTIAL_UNREADABLE_DETAIL
+        )
+        raise_without_chain(AgentCliUnavailableError(refusal))
+    try:
+        content, refusal = _read_regular_file(descriptor)
+    finally:
+        closed = _close_descriptor(descriptor)
+    if not closed:
+        content, refusal = None, _CREDENTIAL_UNREADABLE_DETAIL
+    if refusal is not None:
+        raise_without_chain(AgentCliUnavailableError(refusal))
+    return content
+
+
+def _close_descriptor(descriptor: int) -> bool:
+    try:
+        os.close(descriptor)
+    except OSError:
+        return False
+    return True
+
+
+def _read_regular_file(descriptor: int) -> tuple[bytes | None, str | None]:
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            return None, _CREDENTIAL_NOT_REGULAR_DETAIL
+        content = _read_within_bound(descriptor)
+    except OSError:
+        return None, _CREDENTIAL_UNREADABLE_DETAIL
+    if content is None:
+        return None, _CREDENTIAL_OVERSIZE_DETAIL
+    return content, None
+
+
+def _read_within_bound(descriptor: int) -> bytes | None:
     chunks: list[bytes] = []
     size = 0
     while True:
-        chunk = os.read(descriptor, 65_536)
+        chunk = os.read(
+            descriptor, min(65_536, _CREDENTIAL_FILE_READ_LIMIT_BYTES + 1 - size),
+        )
         if not chunk:
             return b"".join(chunks)
         size += len(chunk)
-        if size > _CATALOG_CREDENTIAL_READ_LIMIT_BYTES:
-            raise AgentCliUnavailableError("CLI credentials exceed the copy bound")
+        if size > _CREDENTIAL_FILE_READ_LIMIT_BYTES:
+            return None
         chunks.append(chunk)
 
 
@@ -1403,14 +1654,14 @@ def _reap_in_background(
     process: PipedProcess,
     on_reaped: Callable[[int, bool], None] | None,
 ) -> None:
-    try:
+    failures = _StepFailures()
+    with failures.contained("background reap of agent CLI process group"):
         while _process_group_exists(process.pid):
             process.poll()
             time.sleep(_BACKGROUND_REAP_POLL_SECONDS)
-    except OSError:
-        log.exception("background reap of agent CLI process group %s failed", process.pid)
-    finally:
+    with failures.contained("on_reaped"):
         _notify_reaped(on_reaped, process.pid, became_zombie=True)
+    failures.report()
 
 
 def _wait_for_process_group_exit(process: PipedProcess, timeout: float) -> bool:
@@ -1520,31 +1771,19 @@ def grok_cli_token_is_present() -> bool:
     return False
 
 
-def codex_cli_access_token_is_present() -> bool:
-    """Whether the Codex CLI credential mirror contains a non-empty access token."""
-    try:
-        raw_auth = current_config().codex_cli_auth_file.read_text()
-    except FileNotFoundError:
+def codex_cli_login_is_usable() -> bool:
+    """Whether the Codex CLI credential mirror holds a login that can start a child."""
+    return _run_without_credential_remains(_codex_login_in_the_mirror_is_usable)
+
+
+def _codex_login_in_the_mirror_is_usable() -> bool:
+    document = _read_credential_file(current_config().codex_cli_auth_file)
+    if document is None:
         return False
-    except OSError as exc:
-        raise AgentCliUnavailableError("could not read Codex CLI credentials") from exc
-    try:
-        document = json.loads(raw_auth)
-    except json.JSONDecodeError as exc:
-        raise AgentCliUnavailableError(CODEX_CLI_CREDENTIALS_INVALID_DETAIL) from exc
-    if not isinstance(document, dict):
-        raise AgentCliUnavailableError(CODEX_CLI_CREDENTIALS_INVALID_DETAIL)
-    if "tokens" not in document:
-        return False
-    tokens = document["tokens"]
-    if not isinstance(tokens, dict):
-        raise AgentCliUnavailableError(CODEX_CLI_CREDENTIALS_INVALID_DETAIL)
-    if "access_token" not in tokens:
-        return False
-    access_token = tokens["access_token"]
-    if not isinstance(access_token, str):
-        raise AgentCliUnavailableError(CODEX_CLI_CREDENTIALS_INVALID_DETAIL)
-    return bool(access_token)
+    verdict = assess_codex_login(document).verdict
+    if verdict is CodexLoginVerdict.MALFORMED:
+        raise_without_chain(AgentCliUnavailableError(CODEX_CLI_CREDENTIALS_INVALID_DETAIL))
+    return verdict is CodexLoginVerdict.USABLE
 
 
 def _parse_grok_login(output: str) -> CliLogin:

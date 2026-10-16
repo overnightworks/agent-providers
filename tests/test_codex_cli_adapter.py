@@ -787,6 +787,11 @@ def _stdout_line(event: dict | bytes) -> bytes:
 def _streaming_runner(events: list[dict | bytes], state: dict[str, bool]):
     """A Codex run that streams its events (or raw lines) and records its abort and reap."""
     def run_cli_bounded(_command, **kwargs):
+        codex_home = Path(kwargs["extra_env"]["CODEX_HOME"]).resolve()
+        lines = [
+            _stdout_line(event).replace(b"{CODEX_HOME}", str(codex_home).encode())
+            for event in events
+        ]
         channel = kwargs["stdout_line_channel"]
         abort_observed = threading.Event()
         request_abort = channel.request_abort
@@ -797,13 +802,13 @@ def _streaming_runner(events: list[dict | bytes], state: dict[str, bool]):
 
         channel.request_abort = observe_abort
         kwargs["on_spawned"](2468)
-        for event in events:
-            if not channel._send(_stdout_line(event)):
+        for line in lines:
+            if not channel._send(line):
                 break
         state["aborted"] = abort_observed.wait(timeout=1)
         kwargs["on_reaped"](2468, False)
         state["reaped"] = True
-        return _outcome(stdout=b"".join(map(_stdout_line, events)).decode())
+        return _outcome(stdout=b"".join(lines).decode())
 
     return run_cli_bounded
 

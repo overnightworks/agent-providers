@@ -26,6 +26,7 @@ import asyncio
 import logging
 import math
 import traceback
+import weakref
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -312,7 +313,9 @@ class RunFailures:
     def __init__(self, run_id: UUID) -> None:
         self._run_id = run_id
         self._failures: list[_Failure] = []
-        self._converted: dict[asyncio.CancelledError, RunStepCancelled] = {}
+        self._converted: dict[
+            int, tuple[weakref.ref[asyncio.CancelledError], RunStepCancelled]
+        ] = {}
 
     def attempt(self, part: FailedPart, step: Callable[[], None]) -> None:
         """Take ``step``, recording its failure instead of raising it.
@@ -337,11 +340,25 @@ class RunFailures:
         it still counts once, at its first part.
         """
         if isinstance(failure, asyncio.CancelledError):
-            if failure not in self._converted:
-                self._converted[failure] = RunStepCancelled(part, failure)
-            failure = self._converted[failure]
+            failure = self._converted_once(part, failure)
         self._failures.append(_Failure(part, failure))
         return failure
+
+    def _converted_once(
+        self, part: FailedPart, cancelled: asyncio.CancelledError
+    ) -> RunStepCancelled:
+        """The one ``RunStepCancelled`` of ``cancelled``, told apart by identity alone.
+
+        The stray is held weakly, because a propagated failure reaches this
+        collection through its traceback, and the stray's frames must not
+        live on through it.
+        """
+        known = self._converted.get(id(cancelled))
+        if known is not None and known[0]() is cancelled:
+            return known[1]
+        converted = RunStepCancelled(part, cancelled)
+        self._converted[id(cancelled)] = (weakref.ref(cancelled), converted)
+        return converted
 
     @property
     def met_any(self) -> bool:

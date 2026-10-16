@@ -982,7 +982,7 @@ class _Ending:
 
     @property
     def is_possible(self) -> bool:
-        """Whether the harness can drive this combination; the service reaches every other.
+        """Whether the service can reach this combination; the table drives every one it can.
 
         * A close is never cancelled in the body: ``aclose`` throws into the
           stream paused at a ``yield``, where nothing awaits.
@@ -990,16 +990,9 @@ class _Ending:
           once the runner's stop has finished, so it waits in the body.
         * The disconnect report is made only when the stream is cut short: by
           a close, or by a cancellation in the body.
-
-        The harness cannot time one combination the service reaches: a reader
-        cancelled in the body of a run its stall dropped, without a held
-        close. The stall needs a client that takes nothing until the drop,
-        and the stop that follows ends before a reader started then waits.
         """
         match self.cancellation:
             case _Cancellation.IN_THE_BODY if self.closer is _Closer.CLOSES:
-                return False
-            case _Cancellation.IN_THE_BODY if self.stalls and not self.holds_close:
                 return False
             case _Cancellation.DURING_TEARDOWN if self.closer is _Closer.READS:
                 return False
@@ -1050,11 +1043,15 @@ async def _end_a_run(
     at 45 s. A reader of a run that nothing else ends gets its answer. A
     close cut in its teardown of a run that ended by itself, without a held
     close, comes right after the drop report, while the runner's stop is
-    still under way. A reader cut in the body of a run whose clock broke,
-    without a held close, waits for its next frame from the first one on and
-    is cancelled when the drop report is taken, while the runner stops.
+    still under way. A reader cut in the body of a run that ended by itself,
+    without a held close, is cancelled while the runner stops: one whose
+    clock broke waits for its next frame from the first one on and is
+    cancelled when the drop report is taken; one whose stall dropped it
+    starts reading at the drop report and is cancelled once it waits in the
+    stream.
     """
     closers: list[asyncio.Task[object]] = []
+    cuts: list[asyncio.Task[None]] = []
     cancelled_by_a_step: list[bool] = []
     dropped = asyncio.Event()
     cut_while_it_stops = (
@@ -1066,10 +1063,17 @@ async def _end_a_run(
     def taking(step: _Step) -> None:
         if step is _Step.DROP_REPORT:
             dropped.set()
-            if cut_while_it_stops:
+            if cut_while_it_stops and ending.stalls:
+                closers.append(asyncio.create_task(drive.drain()))
+                cuts.append(asyncio.create_task(cut_once_it_reads(closers[0])))
+            elif cut_while_it_stops:
                 cancelled_by_a_step.append(drive.frames.ag_running and closers[0].cancel())
         if step is _Step.RECORD_END and cancel_at_the_record_end:
             cancelled_by_a_step.append(closers[0].cancel())
+
+    async def cut_once_it_reads(reader: asyncio.Task[object]) -> None:
+        await _spun_until(lambda: drive.frames.ag_running or reader.done())
+        cancelled_by_a_step.append(drive.frames.ag_running and reader.cancel())
 
     records = _RecordsThatFail(ending.failing, taking, ending.breaks)
     clock = (
@@ -1090,17 +1094,18 @@ async def _end_a_run(
                 await drive.run_to(44)
                 drive.clock.advance_to(45)
             await _spun_until(dropped.is_set)
-        elif not cut_while_it_stops:
+        elif not cut_while_it_stops or ending.stalls:
             await drive.clock.parked()
             if ending.stalls:
                 await drive.run_to(45)
             elif not ending.ends_by_itself and ending.cancellation is _Cancellation.NONE:
                 if ending.closer is _Closer.READS:
                     runner.release(FINAL)
-        closing = drive.frames.aclose() if ending.closer is _Closer.CLOSES else drive.drain()
-        closers.append(asyncio.create_task(closing))
+        if not closers:
+            closing = drive.frames.aclose() if ending.closer is _Closer.CLOSES else drive.drain()
+            closers.append(asyncio.create_task(closing))
         if cut_while_it_stops:
-            await asyncio.wait(closers)
+            await asyncio.wait(closers + cuts)
         elif cut_in_the_teardown:
             await _spun_until(lambda: drive.frames.ag_running or closers[0].done())
         else:
@@ -1141,16 +1146,17 @@ async def _watched_loop() -> AsyncIterator[list[dict[str, object]]]:
     gc.collect()
 
 
-def test_the_ending_table_drives_a_reader_cut_in_the_body_of_every_run_its_clock_ended():
-    """Rule 14: the table leaves out no combination the harness can time."""
+@pytest.mark.parametrize("ender", [_Step.CLOCK, _Step.DROP_REPORT])
+def test_the_ending_table_drives_a_reader_cut_in_the_body_of_every_run_that_ended_by_itself(
+    ender,
+):
+    """Rule 14: the table leaves out no run its broken clock or its stall ended."""
     table = {param.values[0] for param in _every_ending()}
     cut_readers = [
-        _Ending(
-            _Cancellation.IN_THE_BODY, _Closer.READS, holds_close, frozenset(others) | {_Step.CLOCK}
-        )
+        _Ending(_Cancellation.IN_THE_BODY, _Closer.READS, holds_close, frozenset(others) | {ender})
         for holds_close in (False, True)
         for size in range(len(_Step))
-        for others in itertools.combinations(set(_Step) - {_Step.CLOCK}, size)
+        for others in itertools.combinations(set(_Step) - {ender}, size)
     ]
     assert [ending for ending in cut_readers if ending not in table] == []
 
@@ -1339,21 +1345,19 @@ def _cancelled_unasked(step: _Step) -> asyncio.CancelledError:
     return asyncio.CancelledError(step.canary)
 
 
-def _frames_reachable_from(root: object) -> list[types.FrameType]:
-    """Every frame an observer of ``root`` can reach through its references."""
+def _reaches_a_frame_of(root: object, function: Callable[..., object]) -> bool:
+    """Whether an observer of ``root`` can reach a frame of ``function`` through references."""
     seen: set[int] = set()
     pending = [root]
-    frames: list[types.FrameType] = []
     while pending:
         current = pending.pop()
         if id(current) in seen or isinstance(current, type | types.ModuleType):
             continue
         seen.add(id(current))
-        if isinstance(current, types.FrameType):
-            frames.append(current)
-        else:
-            pending.extend(gc.get_referents(current))
-    return frames
+        if isinstance(current, types.FrameType) and current.f_code is function.__code__:
+            return True
+        pending.extend(gc.get_referents(current))
+    return False
 
 
 def _a_step_cancelled_unasked() -> None:
@@ -1361,16 +1365,36 @@ def _a_step_cancelled_unasked() -> None:
     raise _cancelled_unasked(_Step.RECORD_END) from LookupError(local_value["payload"])
 
 
-@in_loop
-async def test_a_stray_cancellation_keeps_none_of_the_frames_it_passed():
-    """No frame local of the step a stray cancellation left is reachable from its failure."""
-    try:
+def _cancelled_after_passing_a_step(_step: _Step) -> asyncio.CancelledError:
+    with pytest.raises(asyncio.CancelledError) as stray:
         _a_step_cancelled_unasked()
-    except asyncio.CancelledError as cancelled:
-        recorded = RunFailures(uuid.uuid4()).add(FailedPart.CLEANUP, cancelled)
+    return stray.value
 
-    assert type(recorded) is RunStepCancelled
-    assert _frames_reachable_from(recorded) == []
+
+@pytest.mark.parametrize(
+    "failing",
+    [
+        pytest.param(frozenset({_Step.RECORD_END}), id="record_end"),
+        pytest.param(
+            frozenset({_Step.DISCONNECT_REPORT, _Step.RECORD_END}), id="disconnect-record_end"
+        ),
+    ],
+)
+@in_loop
+async def test_a_propagated_stray_cancellation_keeps_no_frame_of_the_step_it_left(failing):
+    """Rule 14: nothing reachable from the failure a close raises keeps the stray's frames."""
+    records = _RecordsThatFail(failing, breaks=_cancelled_after_passing_a_step)
+    async with driven(GatedRunner(), records=records, read=False) as drive:
+        drive.took(await anext(drive.frames))
+        await drive.clock.parked()
+        closer = asyncio.create_task(drive.frames.aclose())
+        await asyncio.wait({closer})
+    propagated = closer.exception()
+    del drive, records, closer
+    gc.collect()
+
+    assert type(propagated) is RunStepCancelled
+    assert not _reaches_a_frame_of(propagated, _a_step_cancelled_unasked)
 
 
 @pytest.mark.parametrize("again", list(FailedPart))
@@ -1389,6 +1413,40 @@ async def test_a_stray_cancellation_recorded_again_stays_one_failure_of_its_firs
     assert raised.value is first
     assert first.part is FailedPart.SUPERVISION
     assert _failure_lines(caplog) == []
+
+
+class _CancelledLikeAnyOther(asyncio.CancelledError):
+    """A cancellation equal to every other of its class, as a subclass may define itself."""
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, _CancelledLikeAnyOther)
+
+    def __hash__(self) -> int:
+        return 0
+
+
+def _raised(cancelled: asyncio.CancelledError) -> asyncio.CancelledError:
+    with pytest.raises(asyncio.CancelledError) as raised:
+        raise cancelled
+    return raised.value
+
+
+@in_loop
+async def test_two_equal_but_distinct_stray_cancellations_stay_two_failures(caplog):
+    """Rule 14: the service tells failures apart by identity, never by equality."""
+    run_id = uuid.uuid4()
+    failures = RunFailures(run_id)
+    supervision, cleanup = _raised(_CancelledLikeAnyOther()), _raised(_CancelledLikeAnyOther())
+    failures.add(FailedPart.SUPERVISION, supervision)
+    second = failures.add(FailedPart.CLEANUP, cleanup)
+
+    with pytest.raises(RunStepCancelled) as raised:
+        failures.leave(cancellation=None, body_failure=None)
+    assert raised.value is second
+    assert second.part is FailedPart.CLEANUP
+    assert [(event, kind) for event, kind, _raiser in _failure_lines(caplog)] == [
+        (_SUPERVISION.format(run_id), RunStepCancelled.__name__)
+    ]
 
 
 @in_loop

@@ -233,10 +233,10 @@ async def acall_claude_with_mcp(
     try:
         with _cowriter_cli_arguments(model, user_id, stream=False) as arguments:
             try:
-                home_reservation = home.reserve()
+                child = _claude_child_process(binary, arguments, home.path)
                 proc = await _spawn_reserved_async_cli_process(
-                    _claude_child_process(binary, arguments, home.path),
-                    home_reservation=home_reservation,
+                    child,
+                    home_reservation=home.reserve(),
                 )
             except FileNotFoundError:
                 raise CliBinaryUnavailableError(CLAUDE_CLI_BINARY_NOT_FOUND_DETAIL)
@@ -306,10 +306,10 @@ async def acall_claude_with_mcp_stream(
     try:
         with _cowriter_cli_arguments(model, user_id, stream=True) as arguments:
             try:
-                home_reservation = home.reserve()
+                child = _claude_child_process(binary, arguments, home.path)
                 proc = await _spawn_reserved_async_cli_process(
-                    _claude_child_process(binary, arguments, home.path),
-                    home_reservation=home_reservation,
+                    child,
+                    home_reservation=home.reserve(),
                     stream_buffer_limit=_STREAM_BUFFER_LIMIT,
                 )
             except FileNotFoundError:
@@ -1935,8 +1935,8 @@ def _call_cli(
     flat_prompt = flatten_messages(prompt, messages)
     stdin_body = stdin_prompt(system, flat_prompt)
     home = _claude_private_home()
-    home_reservation = home.reserve()
     child = _claude_child_process(binary, _cli_arguments(model), home.path)
+    home_reservation = home.reserve()
 
     reservation = _reserve_zombie_admission()
     if reservation is None:
@@ -2001,10 +2001,10 @@ async def _acall_cli(
     stdin_body = stdin_prompt(system, flat_prompt)
     home = _claude_private_home()
     try:
-        home_reservation = home.reserve()
+        child = _claude_child_process(binary, _cli_arguments(model), home.path)
         proc = await _spawn_reserved_async_cli_process(
-            _claude_child_process(binary, _cli_arguments(model), home.path),
-            home_reservation=home_reservation,
+            child,
+            home_reservation=home.reserve(),
         )
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(

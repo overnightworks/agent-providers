@@ -38,7 +38,7 @@ It owns the machinery that is the same in every deployment:
 | `agent_client.sse` | `encode_event` and `RunStreamDecoder`: one SSE frame per run event, decoded and checked against the wire and its stream rules |
 | `agent_providers.tools` | The `ToolCatalog` and its Anthropic/OpenAI schema projections; re-exports the identical `ToolDeclaration` |
 | `agent_providers.spawn` | `ChildProcess` and the only calls in this library that create a child process |
-| `agent_providers.process` | `run_cli_bounded`: the one bounded subprocess layer (start, stdin, first line, deadline, process-group cleanup) |
+| `agent_providers.process` | `run_cli_bounded`: the bounded runner over a `ChildProcess` (start, stdin, first line, deadline, process-group cleanup) |
 | `agent_providers.images` | The `ImagePolicy` an image turn is held to |
 | `agent_providers.sandbox` | The directory-name prefix constants a host's kernel sandbox profile must permit |
 | `agent_service.app` | `POST /runs`: the order of checks, the typed rejections, and the admitted run's event stream |
@@ -146,13 +146,28 @@ binary name is resolved against, the credential files, and the working root
 below which every private directory and temporary file is created. A host that
 also runs turns adds a `TurnRuntimeConfig` as `turns`: the chat model, the
 Codex mounts and process caps, the prompt-file names, and an optional
-`McpServerSpec` describing the host's MCP server. `claude_cli_home`,
-`grok_cli_home`, and `grok_cli_session_root` were removed, and `TurnRuntimeConfig`
-refuses them (`extra="forbid"`), so a host drops them at its next pin bump;
-provide the existing credential files and `cli_working_directory_root` instead. A host
-that runs no MCP server passes `mcp_server=None`; a catalog-only host passes no
-`turns` at all and never invents a value it does not have. A turn path reached
-without one raises `TurnRuntimeNotConfiguredError` instead of running against a
+`McpServerSpec` describing the host's MCP server. A catalog-only host passes no
+`turns` at all and never invents a value it does not have; a host that runs no
+MCP server passes `mcp_server=None` inside `turns`. A host migrates at its next
+pin bump (both models refuse unknown fields):
+
+| Before (`ProviderRuntimeConfig`) | Now |
+|---|---|
+| `claude_chat_model` | `turns.claude_chat_model` |
+| `codex_code_mode_host_binary` | `turns.codex_code_mode_host_binary` |
+| `codex_resources_directory` | `turns.codex_resources_directory` |
+| `codex_max_concurrent_processes` | `turns.codex_max_concurrent_processes` |
+| `codex_max_concurrent_image_runs` | `turns.codex_max_concurrent_image_runs` |
+| `cli_prompt_file_prefix` | `turns.cli_prompt_file_prefix` |
+| `cli_prompt_file_placeholder` | `turns.cli_prompt_file_placeholder` |
+| `mcp_server` | `turns.mcp_server` |
+| `secret_env_keys` | removed: a child gets a closed environment, so there is nothing to scrub |
+| `grok_cli_session_root` | removed: a turn's Grok home is a private directory below `cli_working_directory_root` |
+| (absent) | `cli_binary_search_path`: new and required |
+| (absent) | `claude_cli_auth_file`: new and required, the file copied read-only into each Claude turn's private home |
+
+A turn path reached
+without `turns` raises `TurnRuntimeNotConfiguredError` instead of running against a
 guess.
 
 The other host obligations arrive as arguments where they are needed:

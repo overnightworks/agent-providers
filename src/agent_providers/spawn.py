@@ -33,6 +33,7 @@ from typing import Final, Literal
 
 HOME_VARIABLE: Final = "HOME"
 SEARCH_PATH_VARIABLE: Final = "PATH"
+TEMPORARY_DIRECTORY_VARIABLE: Final = "TMPDIR"
 
 # Names whose value is a property of the machine, not of the operator's
 # account: without them an agent CLI cannot resolve its own helpers, speak the
@@ -66,8 +67,9 @@ class ChildProcessSpecificationError(ValueError):
 def closed_environment(home: Path, **provider_variables: str) -> dict[str, str]:
     """Build a child's complete environment around one private home.
 
-    The result is exactly ``HOME``, ``PATH``, the machine variables this host
-    actually sets, and the provider's own variables. A caller cannot extend an
+    The result is exactly ``HOME``, ``TMPDIR`` (the same private home, so the
+    child's scratch files go with it), ``PATH``, the machine variables this
+    host actually sets, and the provider's own variables. A caller cannot extend an
     inherited base, because there is none.
     """
     environment = {
@@ -75,6 +77,7 @@ def closed_environment(home: Path, **provider_variables: str) -> dict[str, str]:
     }
     environment[SEARCH_PATH_VARIABLE] = os.environ.get(SEARCH_PATH_VARIABLE) or os.defpath
     environment[HOME_VARIABLE] = str(home)
+    environment[TEMPORARY_DIRECTORY_VARIABLE] = str(home)
     environment.update(provider_variables)
     return environment
 

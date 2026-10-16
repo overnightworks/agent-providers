@@ -235,10 +235,8 @@ class GrokCliToolTransport:
 
     async def aclose(self) -> None:
         """Request cleanup after every current or background reaper finishes."""
-        if self._closed:
-            return
         self._closed = True
-        await asyncio.to_thread(self._home.close)
+        await asyncio.shield(asyncio.to_thread(self._home.close))
 
 
 def _tool_transport_prompt(

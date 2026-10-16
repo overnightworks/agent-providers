@@ -17,98 +17,114 @@ unset ``HOME`` at construction, whatever the caller forgot.
 from __future__ import annotations
 
 import ast
+import os
+import sys
 from pathlib import Path
 
 import pytest
 
 from agent_providers import spawn
-from agent_providers.spawn import ChildProcess, ChildProcessSpecificationError, closed_environment
-
-SOURCE_ROOT = Path(spawn.__file__).parent
-SPAWN_OWNER = Path(spawn.__file__)
-
-# Every way this interpreter can turn a command line into a running child.
-SPAWN_PRIMITIVES = frozenset(
-    {
-        "Popen",
-        "run",
-        "call",
-        "check_call",
-        "check_output",
-        "getoutput",
-        "getstatusoutput",
-        "create_subprocess_exec",
-        "create_subprocess_shell",
-        "subprocess_exec",
-        "subprocess_shell",
-        "system",
-        "popen",
-        "posix_spawn",
-        "posix_spawnp",
-        "execv",
-        "execve",
-        "execvp",
-        "execvpe",
-        "execl",
-        "execle",
-        "execlp",
-        "execlpe",
-        "spawnv",
-        "spawnve",
-        "spawnvp",
-        "spawnvpe",
-        "spawnl",
-        "spawnle",
-        "spawnlp",
-        "spawnlpe",
-        "fork",
-        "forkpty",
-        "spawn",
-        "Process",
-        "Pool",
-    }
+from agent_providers.spawn import (
+    ChildProcess,
+    ChildProcessSpecificationError,
+    closed_environment,
+    run_capturing,
 )
 
-SPAWNING_MODULES = frozenset({"subprocess", "os", "asyncio", "pty", "multiprocessing"})
+REPOSITORY_ROOT = Path(spawn.__file__).parents[2]
+SOURCE_ROOTS = (
+    REPOSITORY_ROOT / "src" / "agent_providers",
+    *sorted((REPOSITORY_ROOT / "packages").glob("*/src")),
+)
+SPAWN_OWNER = Path(spawn.__file__)
 
-
-def _imported_primitive_names(tree: ast.Module) -> set[str]:
-    """The local names a ``from … import`` bound to a spawn primitive."""
-    return {
-        alias.asname or alias.name
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom)
-        and node.module is not None
-        and node.module.split(".")[0] in SPAWNING_MODULES
-        for alias in node.names
-        if alias.name in SPAWN_PRIMITIVES
+# Every way this interpreter can turn a command line into a running child,
+# named by the module that defines it.
+SPAWN_PRIMITIVES = frozenset(
+    {
+        "subprocess.Popen",
+        "subprocess.run",
+        "subprocess.call",
+        "subprocess.check_call",
+        "subprocess.check_output",
+        "subprocess.getoutput",
+        "subprocess.getstatusoutput",
+        "asyncio.create_subprocess_exec",
+        "asyncio.create_subprocess_shell",
+        "asyncio.subprocess.create_subprocess_exec",
+        "asyncio.subprocess.create_subprocess_shell",
+        "os.system",
+        "os.popen",
+        "os.fork",
+        "os.forkpty",
+        "pty.spawn",
+        "pty.fork",
+        "multiprocessing.Process",
+        "multiprocessing.Pool",
     }
+)
+SPAWN_PRIMITIVE_PREFIXES = ("os.exec", "os.spawn", "os.posix_spawn")
+EVENT_LOOP_SPAWN_METHODS = frozenset({"subprocess_exec", "subprocess_shell"})
+
+
+def _import_bindings(tree: ast.Module) -> dict[str, str]:
+    """The qualified name each locally bound import name stands for."""
+    bindings: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                bound = alias.asname or alias.name.split(".")[0]
+                bindings[bound] = alias.name if alias.asname else bound
+        elif isinstance(node, ast.ImportFrom) and node.module is not None:
+            for alias in node.names:
+                bindings[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+    return bindings
+
+
+def _qualified_callee(callee: ast.expr, bindings: dict[str, str]) -> str | None:
+    """Resolve ``alias.attr.attr`` through the imports; None for anything else."""
+    attributes: list[str] = []
+    while isinstance(callee, ast.Attribute):
+        attributes.append(callee.attr)
+        callee = callee.value
+    if not isinstance(callee, ast.Name) or callee.id not in bindings:
+        return None
+    return ".".join([bindings[callee.id], *reversed(attributes)])
+
+
+def _is_spawn_primitive(qualified_name: str) -> bool:
+    return qualified_name in SPAWN_PRIMITIVES or qualified_name.startswith(
+        SPAWN_PRIMITIVE_PREFIXES,
+    )
 
 
 def _spawn_calls(tree: ast.Module) -> list[tuple[str, ast.Call]]:
     """Every call in one module that reaches a process-creation primitive.
 
-    Both call shapes count, and both tests below resolve them the same way:
-    the owner module is the one place where the rule still has to hold, so a
+    The owner module is the one place where the rule still has to hold, so a
     bare ``Popen(command)`` there must not read as anything else.
     """
-    imported = _imported_primitive_names(tree)
+    bindings = _import_bindings(tree)
     calls: list[tuple[str, ast.Call]] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        callee = node.func
-        if isinstance(callee, ast.Attribute) and callee.attr in SPAWN_PRIMITIVES:
-            calls.append((callee.attr, node))
-        elif isinstance(callee, ast.Name) and callee.id in imported:
-            calls.append((callee.id, node))
+        qualified = _qualified_callee(node.func, bindings)
+        if qualified is not None and _is_spawn_primitive(qualified):
+            calls.append((qualified, node))
+        elif (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr in EVENT_LOOP_SPAWN_METHODS
+        ):
+            calls.append((node.func.attr, node))
     return calls
 
 
 def test_only_the_spawn_owner_creates_a_child_process() -> None:
     trespassers = [
-        f"{module.relative_to(SOURCE_ROOT)}:{call.lineno} calls {name}"
-        for module in sorted(SOURCE_ROOT.rglob("*.py"))
+        f"{module.relative_to(REPOSITORY_ROOT)}:{call.lineno} calls {name}"
+        for source_root in SOURCE_ROOTS
+        for module in sorted(source_root.rglob("*.py"))
         if module != SPAWN_OWNER
         for name, call in _spawn_calls(ast.parse(module.read_text(encoding="utf-8")))
     ]
@@ -116,6 +132,38 @@ def test_only_the_spawn_owner_creates_a_child_process() -> None:
         "These call sites start a child outside agent_providers.spawn, so nothing "
         f"makes them describe a complete environment: {trespassers}"
     )
+
+
+def test_the_call_site_check_scans_the_client_and_the_service() -> None:
+    scanned = {root.parent.name for root in SOURCE_ROOTS}
+
+    assert {"agent-client", "agent-service"} <= scanned
+
+
+@pytest.mark.parametrize(
+    ("source", "spawned"),
+    [
+        ("import subprocess as sp\nsp.run(['x'])", "subprocess.run"),
+        ("from os import execv as replace_process\nreplace_process('x', [])", "os.execv"),
+        (
+            "import asyncio as aio\naio.create_subprocess_exec('x')",
+            "asyncio.create_subprocess_exec",
+        ),
+        ("from multiprocessing import Process as Worker\nWorker()", "multiprocessing.Process"),
+        ("import pty\npty.spawn(['x'])", "pty.spawn"),
+        ("import os\nos.posix_spawn('x', [], {})", "os.posix_spawn"),
+    ],
+)
+def test_the_call_site_check_finds_a_spawn_under_any_import_alias(
+    source: str, spawned: str,
+) -> None:
+    assert [name for name, _ in _spawn_calls(ast.parse(source))] == [spawned]
+
+
+def test_the_call_site_check_ignores_run_calls_that_start_no_child() -> None:
+    source = "import uvicorn\nuvicorn.run(app)\nrunner.run()\n"
+
+    assert _spawn_calls(ast.parse(source)) == []
 
 
 def test_the_spawn_owner_hands_every_primitive_an_explicit_environment() -> None:
@@ -194,6 +242,17 @@ def test_a_closed_environment_carries_no_secret_from_the_host(
     assert environment["GROK_HOME"] == str(tmp_path / "private")
 
 
+def test_a_closed_environment_points_temporary_files_at_the_private_home(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "operator-tmp"))
+
+    environment = closed_environment(tmp_path / "private")
+
+    assert environment["TMPDIR"] == str(tmp_path / "private")
+
+
 def test_a_closed_environment_carries_the_machine_settings_a_cli_needs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -206,3 +265,29 @@ def test_a_closed_environment_carries_the_machine_settings_a_cli_needs(
     assert environment["HTTPS_PROXY"] == "http://proxy.invalid:3128"
     assert environment["SSL_CERT_FILE"] == "/etc/ssl/certs/ca-bundle.crt"
     assert environment["PATH"]
+
+
+@pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="needs /proc/self/fd")
+def test_a_child_inherits_no_descriptor_the_parent_holds_open(tmp_path: Path) -> None:
+    probe = (
+        "import os, sys\n"
+        "print(os.path.exists(f'/proc/self/fd/{sys.argv[1]}'))\n"
+    )
+    read_end, write_end = os.pipe()
+    os.set_inheritable(read_end, True)
+    try:
+        completed = run_capturing(
+            ChildProcess(
+                binary=Path(sys.executable),
+                arguments=("-c", probe, str(read_end)),
+                environment=closed_environment(tmp_path),
+                working_directory=tmp_path,
+            ),
+            stdin_text="",
+            timeout_seconds=30,
+        )
+    finally:
+        os.close(read_end)
+        os.close(write_end)
+
+    assert completed.stdout.strip() == "False"

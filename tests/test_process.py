@@ -17,6 +17,7 @@ import pytest
 from provider_test_support import SECRET_ENV_KEYS, override_provider_runtime, shell_child
 
 from agent_providers import process
+from agent_providers.config import current_config
 from agent_providers.constants import (
     CLAUDE_CLI_AUTH_METHOD_FIELD,
     CLAUDE_CLI_LOGGED_IN_FIELD,
@@ -33,6 +34,7 @@ from agent_providers.process import (
     CliRunOutcome,
     CliRunReason,
     PrivateCredentialHome,
+    PrivateCredentialHomeRemovalError,
     _run_credentialed_catalog_cli,
     claude_cli_login,
     clear_agent_cli_caches,
@@ -1063,7 +1065,7 @@ def test_a_cli_that_is_not_installed_cannot_be_asked() -> None:
 
 def _expected_closed_names(credential_home_variable: str) -> list[str]:
     """Every name a closed child may carry: its own plus the machine's."""
-    return ["HOME", "PATH", credential_home_variable] + [
+    return ["HOME", "TMPDIR", "PATH", credential_home_variable] + [
         name for name in INHERITED_MACHINE_VARIABLES if os.environ.get(name)
     ]
 
@@ -1143,6 +1145,54 @@ def test_private_credential_home_keeps_its_copy_until_the_last_reap(tmp_path: Pa
     assert not home.path.exists()
 
 
+def _credential_home(tmp_path: Path) -> PrivateCredentialHome:
+    source = tmp_path / "source.json"
+    source.write_text(_CATALOG_AUTH_PAYLOAD)
+    return PrivateCredentialHome(
+        source,
+        Path(".claude/.credentials.json"),
+        prefix="private-home-",
+        missing_credential_is_error=True,
+    )
+
+
+def test_private_credential_home_removes_a_read_only_directory_a_child_left(
+    tmp_path: Path,
+) -> None:
+    home = _credential_home(tmp_path)
+    child_directory = home.path / "child-made"
+    child_directory.mkdir()
+    (child_directory / "scratch.txt").write_text("scratch")
+    child_directory.chmod(0o500)
+
+    home.close()
+
+    assert not home.path.exists()
+
+
+def test_private_credential_home_surfaces_a_failed_removal_and_retries_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = _credential_home(tmp_path)
+    remove_tree = process.shutil.rmtree
+
+    def refuse_removal(_path) -> None:
+        raise PermissionError(13, "denied", "secret-looking-name")
+
+    monkeypatch.setattr(process.shutil, "rmtree", refuse_removal)
+
+    with pytest.raises(PrivateCredentialHomeRemovalError) as raised:
+        home.close()
+
+    assert "secret-looking-name" not in str(raised.value)
+    assert home.path.exists()
+
+    monkeypatch.setattr(process.shutil, "rmtree", remove_tree)
+    home.close()
+
+    assert not home.path.exists()
+
+
 def test_private_credential_home_removes_a_failed_setup(tmp_path: Path) -> None:
     with pytest.raises(AgentCliUnavailableError, match="configured CLI credential is missing"):
         PrivateCredentialHome(
@@ -1162,6 +1212,7 @@ def test_catalog_child_sees_only_the_closed_environment_variables(
     original_home, credential = _prepare_catalog_credential(
         tmp_path, monkeypatch, auth_field=auth_field,
     )
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "operator-tmp"))
 
     run = _run_credentialed_catalog_cli(
         Path("/usr/bin/env"),
@@ -1179,6 +1230,8 @@ def test_catalog_child_sees_only_the_closed_environment_variables(
     assert observed["HOME"] != str(original_home)
     assert not Path(observed["HOME"]).is_relative_to(original_home)
     assert observed["PATH"] == os.environ.get("PATH", os.defpath)
+    assert observed["TMPDIR"] != str(tmp_path / "operator-tmp")
+    assert Path(observed["TMPDIR"]).is_relative_to(current_config().cli_working_directory_root)
     assert "CATALOG_ENV_LEAK" not in observed
     assert not Path(observed["HOME"]).exists()
 

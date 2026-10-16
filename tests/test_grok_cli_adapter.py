@@ -20,7 +20,7 @@ from agent_providers.config import current_config, current_turn_config
 from agent_providers.errors import ProviderUnavailableError, SafeRouteReasonCode
 from agent_providers.events import AssistantTextEvent, FinalEvent, ToolCallEvent
 from agent_providers.grok import transport as grok_cli_adapter
-from agent_providers.process import CliRunOutcome, CliRunReason
+from agent_providers.process import CliRunOutcome, CliRunReason, PrivateCredentialHome
 from agent_providers.tool_loop import (
     InitialTurn,
     ToolCallBatch,
@@ -40,6 +40,9 @@ def _transport() -> grok_cli_adapter.GrokCliToolTransport:
     )
 
 
+_SESSION_ID = "3e04bf5b-4e1c-4f26-8e1e-2f17c5f6d9cf"
+
+
 def test_grok_turn_without_a_configured_credential_is_logged_out(tmp_path: Path) -> None:
     override_provider_runtime(grok_cli_auth_file=tmp_path / "missing.json")
 
@@ -48,8 +51,36 @@ def test_grok_turn_without_a_configured_credential_is_logged_out(tmp_path: Path)
 
     assert raised.value.reason.code is SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED
 
-_SESSION_ID = "3e04bf5b-4e1c-4f26-8e1e-2f17c5f6d9cf"
 
+def test_grok_credential_home_is_removed_when_aclose_is_cancelled_and_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = current_config().cli_working_directory_root
+    before = set(root.iterdir())
+    transport = _transport()
+    homes = set(root.iterdir()) - before
+    assert homes
+    cleanup_may_finish = threading.Event()
+    close_home = PrivateCredentialHome.close
+
+    def close_once_allowed(home: PrivateCredentialHome) -> None:
+        cleanup_may_finish.wait()
+        close_home(home)
+
+    monkeypatch.setattr(PrivateCredentialHome, "close", close_once_allowed)
+
+    async def cancel_then_retry() -> None:
+        closing = asyncio.create_task(transport.aclose())
+        await asyncio.sleep(0)
+        closing.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await closing
+        cleanup_may_finish.set()
+        await transport.aclose()
+
+    asyncio.run(cancel_then_retry())
+
+    assert not any(home.exists() for home in homes)
 
 def _outcome(*, returncode: int = 0, complete: bool = True, stderr: str = "") -> CliRunOutcome:
     return CliRunOutcome(

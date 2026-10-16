@@ -58,6 +58,10 @@ class CliCredentialNotConfiguredError(AgentCliUnavailableError):
     """Raised when a turn cannot copy its configured credential source."""
 
 
+class PrivateCredentialHomeRemovalError(RuntimeError):
+    """Raised when a private credential home could not be removed; it stays owned for a retry."""
+
+
 class CliProbeBudgetExceeded(AgentCliUnavailableError):
     """Raised when one caller outwaits a still-running cached probe."""
 
@@ -1068,7 +1072,7 @@ class PrivateCredentialHome:
                 missing_credential_is_error=missing_credential_is_error,
             )
         except BaseException:
-            shutil.rmtree(self._home, ignore_errors=True)
+            _remove_private_tree(self._home)
             raise
 
     @property
@@ -1096,7 +1100,7 @@ class PrivateCredentialHome:
 
     def _remove_if_unused_locked(self) -> None:
         if self._cleanup_requested and not self._reservations and not self._cleaned:
-            shutil.rmtree(self._home, ignore_errors=True)
+            _remove_private_tree(self._home)
             self._cleaned = True
 
 
@@ -1111,13 +1115,41 @@ class _PrivateCredentialHomeReservation:
             if self._released:
                 return
             self._released = True
-        self._home._release()
+        try:
+            self._home._release()
+        except PrivateCredentialHomeRemovalError as error:
+            log.error("%s: a later close retries the removal", error)
 
     def on_spawn_failed(self) -> None:
         self.release()
 
     def on_reaped(self, _process_id: int, _became_zombie: bool) -> None:
         self.release()
+
+
+def _remove_private_tree(root: Path) -> None:
+    try:
+        shutil.rmtree(root)
+    except OSError:
+        try:
+            _make_tree_removable(root)
+            shutil.rmtree(root)
+        except OSError as error:
+            raise PrivateCredentialHomeRemovalError(
+                f"private credential home removal failed ({type(error).__name__})",
+            ) from None
+
+
+def _make_tree_removable(root: Path) -> None:
+    """Reopen directories a child made read-only so their entries can be unlinked."""
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        os.chmod(directory, 0o700)
+        with os.scandir(directory) as entries:
+            pending.extend(
+                Path(entry.path) for entry in entries if entry.is_dir(follow_symlinks=False)
+            )
 
 
 @contextmanager

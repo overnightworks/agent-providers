@@ -1442,10 +1442,15 @@ def test_private_credential_home_is_removed_at_exit_after_its_finalizer_failed(
     assert not Path(home_path).exists()
 
 
+@pytest.mark.parametrize(
+    "prelude",
+    ["", "import tempfile\n_held = tempfile.TemporaryDirectory()\n"],
+    ids=["no finalizer before the import", "a weakref finalizer created before the import"],
+)
 def test_private_credential_home_still_alive_at_exit_is_removed_after_its_finalizer_failed(
-    tmp_path: Path,
+    tmp_path: Path, prelude: str,
 ) -> None:
-    (home_path,) = _run_home_script(_HOME_STILL_ALIVE_AT_EXIT_SCRIPT, tmp_path)
+    (home_path,) = _run_home_script(prelude + _HOME_STILL_ALIVE_AT_EXIT_SCRIPT, tmp_path)
 
     assert not Path(home_path).exists()
 

@@ -33,7 +33,7 @@ import ast
 import asyncio
 import os
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 
 import pytest
@@ -100,10 +100,10 @@ def _imports_a_spawn_route(node: ast.ImportFrom, name: str) -> bool:
     return module.split(".")[0] == "asyncio" and name in SPAWNING_ASYNCIO_NAMES
 
 
-def _is_os_read_from_attribute(node: ast.Attribute) -> bool:
+def _is_os_read_from_attribute(node: ast.Attribute, os_names: set[str]) -> bool:
     return (
         isinstance(node.value, ast.Attribute)
-        and node.value.attr == "os"
+        and node.value.attr in os_names
         and _is_spawning_os_name(node.attr)
     )
 
@@ -114,6 +114,26 @@ def _is_os_reference(value: ast.expr | None, os_names: set[str]) -> bool:
     )
 
 
+def _module_scope_statements(nodes: Iterable[ast.AST]) -> Iterator[ast.stmt]:
+    for node in nodes:
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            continue
+        if isinstance(node, ast.stmt):
+            yield node
+        yield from _module_scope_statements(ast.iter_child_nodes(node))
+
+
+def _name_bindings(
+    target: ast.expr, value: ast.expr | None,
+) -> Iterator[tuple[str, ast.expr | None]]:
+    if isinstance(target, ast.Name):
+        yield target.id, value
+    elif isinstance(target, ast.Tuple | ast.List):
+        paired = isinstance(value, ast.Tuple | ast.List) and len(value.elts) == len(target.elts)
+        for index, element in enumerate(target.elts):
+            yield from _name_bindings(element, value.elts[index] if paired else None)
+
+
 def _os_names(tree: ast.Module) -> set[str]:
     names = {
         alias.asname or alias.name
@@ -122,15 +142,14 @@ def _os_names(tree: ast.Module) -> set[str]:
         for alias in node.names
         if alias.name == "os"
     } | {"os"}
-    for statement in tree.body:
-        if isinstance(statement, ast.Assign) and _is_os_reference(statement.value, names):
-            names.update(t.id for t in statement.targets if isinstance(t, ast.Name))
-        elif (
-            isinstance(statement, ast.AnnAssign)
-            and isinstance(statement.target, ast.Name)
-            and _is_os_reference(statement.value, names)
-        ):
-            names.add(statement.target.id)
+    for statement in _module_scope_statements(tree.body):
+        if isinstance(statement, ast.Assign):
+            bindings = [b for t in statement.targets for b in _name_bindings(t, statement.value)]
+        elif isinstance(statement, ast.AnnAssign):
+            bindings = list(_name_bindings(statement.target, statement.value))
+        else:
+            continue
+        names.update(name for name, value in bindings if _is_os_reference(value, names))
     return names
 
 
@@ -154,7 +173,7 @@ def _spawn_policy_violations(tree: ast.Module) -> list[str]:
         elif isinstance(node, ast.Attribute):
             if node.attr in SPAWNING_ATTRIBUTES:
                 violations.append(f"{node.lineno}: .{node.attr}")
-            elif _is_os_read_from_attribute(node) or (
+            elif _is_os_read_from_attribute(node, os_names) or (
                 isinstance(node.value, ast.Name)
                 and node.value.id in os_names
                 and _is_spawning_os_name(node.attr)
@@ -271,6 +290,10 @@ def test_the_call_site_check_scans_the_client_and_the_service() -> None:
         "from asyncio.base_subprocess import BaseSubprocessTransport",
         "import asyncio\nasyncio.unix_events.SafeChildWatcher()",
         "loop._make_subprocess_transport(factory, ['x'])",
+        "import os\ntry:\n    o = os\nexcept ImportError:\n    o = None\no.system('x')",
+        "import os\nif True:\n    o = os\no.system('x')",
+        "import os\no, p = os, 1\no.system('x')",
+        "class C:\n    import os as o\nC.o.system('x')",
         "import x\nx.pty.fork()",
         "import x\nx.multiprocessing.Process()",
         "import x\nx.posix.fork()",

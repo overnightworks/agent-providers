@@ -1074,6 +1074,7 @@ class PrivateCredentialHome:
         self._finalizer = weakref.finalize(
             self, _remove_abandoned_tree, self._home, os.getpid(),
         )
+        _live_homes.add(self)
         try:
             os.chmod(self._home, 0o700)
             _install_credential(
@@ -1158,14 +1159,16 @@ def _remove_abandoned_tree(root: Path, creator_process_id: int) -> None:
 
 
 def _sweep_failed_homes_at_exit() -> None:
+    for home in tuple(_live_homes):
+        home._finalizer()
     for root, creator_process_id in tuple(_homes_awaiting_exit_sweep):
         if os.getpid() == creator_process_id:
             _remove_private_tree(root)
 
 
-# Registered at import, before any weakref.finalize exists. atexit runs handlers
-# last-in first-out, so weakref's exit hook runs first and fills the registry,
-# and this sweep runs after it.
+# The sweep finalizes the still-live homes itself, so it holds whichever of its
+# and weakref's exit hooks atexit runs first; a finalizer runs at most once.
+_live_homes: weakref.WeakSet["PrivateCredentialHome"] = weakref.WeakSet()
 _homes_awaiting_exit_sweep: set[tuple[Path, int]] = set()
 atexit.register(_sweep_failed_homes_at_exit)
 

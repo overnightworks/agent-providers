@@ -196,6 +196,7 @@ def _failed_at(drive: Drive, instant: float, code: FailureCode) -> Failed:
         pytest.param(600, False, Deadlines(615, 600, 600), Action.LIMIT, id="maximum-beats-idle"),
         pytest.param(600, False, Deadlines(600, 600), Action.LIMIT, id="maximum-beats-heartbeat"),
         pytest.param(120, False, Deadlines(120, 600, 120), Action.IDLE, id="idle-beats-heartbeat"),
+        pytest.param(15, True, Deadlines(15, 600, 120), Action.EVENT, id="event-beats-heartbeat"),
         pytest.param(15, False, Deadlines(15, 600, 120), Action.HEARTBEAT, id="heartbeat-due"),
         pytest.param(120, False, Deadlines(120, 600), Action.HEARTBEAT, id="no-idle-no-step"),
         pytest.param(14, False, Deadlines(15, 600, 120), Action.WAIT, id="nothing-due"),
@@ -317,6 +318,17 @@ async def test_a_client_that_stopped_reading_finds_no_pile_of_heartbeats():
         drive.stall()
 
     drive.assert_nothing_left()
+
+
+@in_loop
+async def test_text_at_the_heartbeat_instant_goes_out_and_the_next_heartbeat_falls_due_after_it():
+    async with driven() as drive:
+        await drive.run_to(14)
+        drive.runner.release(TEXT)
+        drive.clock.advance_to(15)
+
+        assert await drive.clock.parked() == 30
+    assert drive.types == ["run_started", "assistant_text"]
 
 
 @pytest.mark.parametrize("spoken", [QUIET, TEXT], ids=["empty-fragment", "text"])
@@ -497,15 +509,16 @@ async def test_the_terminal_waits_for_the_runners_close_to_finish(last_quiet, du
     assert runner.log[-3:] == ["closing", "closed", "taken:failed"]
 
 
+@pytest.mark.parametrize("cancel_at", [10, 120], ids=["runner-active", "idle-timeout"])
 @pytest.mark.parametrize("cancellations", [1, 2, 3])
 @in_loop
 async def test_a_consumer_cancelled_while_the_close_runs_returns_only_after_the_close(
-    cancellations,
+    cancellations, cancel_at
 ):
     runner = GatedRunner()
     runner.hold_close()
     async with driven(runner) as drive:
-        await drive.run_to(120)
+        await drive.run_to(cancel_at)
         for _ in range(cancellations):
             drive.reader.cancel()
             await drive.clock.parked()
@@ -520,8 +533,9 @@ async def test_a_consumer_cancelled_while_the_close_runs_returns_only_after_the_
     drive.assert_nothing_left()
 
 
+@pytest.mark.parametrize("close_at", [16, 120], ids=["runner-active", "idle-timeout"])
 @in_loop
-async def test_closing_the_stream_returns_only_after_the_runners_close_has_finished():
+async def test_closing_the_stream_returns_only_after_the_runners_close_has_finished(close_at):
     runner = GatedRunner()
     runner.hold_close()
     async with driven(runner, read=False) as drive:
@@ -529,11 +543,11 @@ async def test_closing_the_stream_returns_only_after_the_runners_close_has_finis
         first_beat = asyncio.create_task(anext(drive.frames))
         await drive.run_to(15)
         drive.took(await first_beat)
-        await drive.run_to(120)
-        assert _close_steps(runner) == ["closing"]
+        await drive.run_to(close_at)
 
         closing = asyncio.create_task(drive.frames.aclose())
         await drive.clock.parked()
+        assert _close_steps(runner) == ["closing"]
         assert not closing.done()
         runner.release_close()
         await closing
@@ -545,9 +559,7 @@ async def test_closing_the_stream_returns_only_after_the_runners_close_has_finis
 
 @pytest.mark.parametrize("ending", ["idle_timeout", "succeeded"])
 @in_loop
-async def test_a_runner_whose_close_fails_is_logged_and_the_terminal_is_unchanged(
-    ending, caplog
-):
+async def test_a_runner_whose_close_fails_is_logged_and_the_terminal_is_unchanged(ending, caplog):
     runner = GatedRunner()
     runner.close_error = OSError("reap failed")
     caplog.set_level(logging.ERROR)

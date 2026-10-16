@@ -20,6 +20,8 @@ from agent_providers.process import (
     AgentCliUnavailableError,
     CliRunOutcome,
     CliRunReason,
+    CodexLoginMirrorError,
+    blank_codex_refresh_token,
     resolve_cli_binary,
     run_cli_bounded,
 )
@@ -65,10 +67,6 @@ class CodexCliStreamFailure(Exception):
 
     def __init__(self, code: str) -> None:
         self.code = code
-
-
-class CodexLoginMirrorError(Exception):
-    """The redacted Codex login mirror cannot start an isolated CLI."""
 
 
 def codex_child_process(
@@ -129,61 +127,15 @@ def run_reserved_codex_cli(
 
 
 def copy_codex_login_mirror(codex_home: Path) -> None:
-    """Install the complete redacted mirror in one private Codex home.
-
-    Both Codex routes need the CLI's full subscription-login shape. The
-    host-side mirror has already redacted renewal credentials; this last copy
-    still writes a blank refresh field so an unexpectedly unredacted source
-    cannot give the child a renewable login.
-    """
-    source = current_config().codex_cli_auth_file
-    target = codex_home / "auth.json"
+    """Install the operator's Codex login, refresh token blanked, in one private home."""
     try:
+        source = current_config().codex_cli_auth_file
         if not source.is_file():
             raise CodexLoginMirrorError()
-        document = json.loads(source.read_text())
-        if not isinstance(document, dict):
-            raise CodexLoginMirrorError()
-        tokens = document.get("tokens")
-        if not isinstance(tokens, dict):
-            raise CodexLoginMirrorError()
-        access_token = tokens.get("access_token")
-        if not isinstance(access_token, str) or not access_token:
-            raise CodexLoginMirrorError()
-        auth_mode = document.get("auth_mode")
-        id_token = tokens.get("id_token")
-        account_id = tokens.get("account_id")
-        last_refresh = document.get("last_refresh")
-        if not all(
-            isinstance(value, str) and value
-            for value in (
-                auth_mode,
-                id_token,
-                account_id,
-                last_refresh,
-            )
-        ):
-            raise CodexLoginMirrorError()
-        redacted_refresh_token = access_token[:0]
-        target.write_text(
-            json.dumps(
-                {
-                    "auth_mode": auth_mode,
-                    "OPENAI_API_KEY": None,
-                    "last_refresh": last_refresh,
-                    "tokens": {
-                        "id_token": id_token,
-                        "access_token": access_token,
-                        "account_id": account_id,
-                        "refresh_token": redacted_refresh_token,
-                    },
-                }
-            )
-        )
+        target = codex_home / "auth.json"
+        target.write_bytes(blank_codex_refresh_token(source.read_bytes()))
         target.chmod(0o600)
-    except CodexLoginMirrorError:
-        raise
-    except (OSError, TypeError, json.JSONDecodeError) as exc:
+    except OSError as exc:
         raise CodexLoginMirrorError() from exc
 
 

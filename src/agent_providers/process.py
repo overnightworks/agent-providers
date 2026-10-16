@@ -41,6 +41,7 @@ from agent_providers.constants import (
     GROK_CLI_STATUS_ARGS,
     PROBE_TIMEOUT_SECONDS,
 )
+from agent_providers.errors import raise_without_chain
 from agent_providers.spawn import (
     ChildProcess,
     PipedProcess,
@@ -197,6 +198,7 @@ GROK_CLI_CREDENTIALS_INVALID_DETAIL: Final = "could not parse Grok CLI credentia
 CODEX_CLI_CREDENTIALS_INVALID_DETAIL: Final = "could not parse Codex CLI credentials"
 _CATALOG_HOME_PREFIX: Final = "agent-cli-catalog-"
 _CATALOG_AUTH_FILE_PATH: Final = Path("auth.json")
+CredentialCopy = Callable[[bytes], bytes]
 # Measured on claude 2.1.266: the CLI reports its subscription login from
 # this file below HOME alone, without a network call.
 _CLAUDE_CATALOG_CREDENTIAL_PATH: Final = Path(".claude/.credentials.json")
@@ -995,6 +997,7 @@ def _catalog_cli_output(
     *,
     credential_home_variable: str,
     auth_file: Path,
+    credential_copy: CredentialCopy | None = None,
 ) -> str | None:
     binary = resolve_cli_binary(binary_name)
     if binary is None:
@@ -1004,6 +1007,7 @@ def _catalog_cli_output(
         args,
         credential_home_variable=credential_home_variable,
         auth_file=auth_file,
+        credential_copy=credential_copy,
     )
     if run is None or not run.complete or run.returncode != 0:
         return None
@@ -1018,10 +1022,13 @@ def _run_credentialed_catalog_cli(
     *,
     credential_home_variable: str,
     auth_file: Path,
+    credential_copy: CredentialCopy | None = None,
     stderr: StderrPolicy = "capture",
     output_read_limit_bytes: int | None = None,
 ) -> CliRun | None:
-    with _catalog_credential_home(auth_file, _CATALOG_AUTH_FILE_PATH) as home:
+    with _catalog_credential_home(
+        auth_file, _CATALOG_AUTH_FILE_PATH, credential_copy=credential_copy,
+    ) as home:
         # Grok resolves the invoking account's profile when HOME is absent,
         # even with GROK_HOME set (measured on grok 1.0.4). HOME is containment.
         environment = closed_environment(home, **{credential_home_variable: str(home)})
@@ -1059,6 +1066,7 @@ class PrivateCredentialHome:
         *,
         prefix: str,
         missing_credential_is_error: bool,
+        credential_copy: CredentialCopy | None = None,
     ) -> None:
         try:
             created = tempfile.mkdtemp(
@@ -1083,6 +1091,7 @@ class PrivateCredentialHome:
                 auth_file,
                 relative_destination,
                 missing_credential_is_error=missing_credential_is_error,
+                credential_copy=credential_copy,
             )
         except OSError:
             self._discard_failed_setup()
@@ -1215,17 +1224,77 @@ def _make_tree_removable(root: Path) -> None:
 
 
 @contextmanager
-def _catalog_credential_home(auth_file: Path, relative_destination: Path) -> Iterator[Path]:
+def _catalog_credential_home(
+    auth_file: Path,
+    relative_destination: Path,
+    *,
+    credential_copy: CredentialCopy | None = None,
+) -> Iterator[Path]:
     owner = PrivateCredentialHome(
         auth_file,
         relative_destination,
         prefix=_CATALOG_HOME_PREFIX,
         missing_credential_is_error=False,
+        credential_copy=credential_copy,
     )
     try:
         yield owner.path
     finally:
         owner.close()
+
+
+class CodexLoginMirrorError(Exception):
+    """The Codex login cannot start an isolated CLI."""
+
+
+def blank_codex_refresh_token(source_document: bytes) -> bytes:
+    """Return the Codex login a child may hold: complete, but not renewable.
+
+    A child that refreshes would rotate the operator's real refresh token and
+    break the stored login, so every Codex child receives this copy instead of
+    the operator's file.
+    """
+    blanked = _blanked_codex_login(source_document)
+    # The traceback keeps this frame alive, so the document must not stay in it.
+    del source_document
+    if blanked is None:
+        raise_without_chain(CodexLoginMirrorError())
+    return blanked
+
+
+def _blanked_codex_login(source_document: bytes) -> bytes | None:
+    try:
+        document = json.loads(source_document)
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    tokens = document.get("tokens")
+    if not isinstance(tokens, dict):
+        return None
+    access_token = tokens.get("access_token")
+    auth_mode = document.get("auth_mode")
+    id_token = tokens.get("id_token")
+    account_id = tokens.get("account_id")
+    last_refresh = document.get("last_refresh")
+    if not all(
+        isinstance(value, str) and value
+        for value in (auth_mode, access_token, id_token, account_id, last_refresh)
+    ):
+        return None
+    return json.dumps(
+        {
+            "auth_mode": auth_mode,
+            "OPENAI_API_KEY": None,
+            "last_refresh": last_refresh,
+            "tokens": {
+                "id_token": id_token,
+                "access_token": access_token,
+                "account_id": account_id,
+                "refresh_token": "",
+            },
+        }
+    ).encode()
 
 
 def _install_credential(
@@ -1234,6 +1303,7 @@ def _install_credential(
     relative_destination: Path,
     *,
     missing_credential_is_error: bool,
+    credential_copy: CredentialCopy | None = None,
 ) -> None:
     flags = os.O_RDONLY
     if hasattr(os, "O_NOFOLLOW"):
@@ -1256,6 +1326,24 @@ def _install_credential(
         raise AgentCliUnavailableError("could not read CLI credentials") from exc
     try:
         payload = _read_credential(source)
+        if credential_copy is not None:
+            login_is_usable = True
+            try:
+                payload = credential_copy(payload)
+            except CodexLoginMirrorError:
+                payload = b""
+                login_is_usable = False
+            if not login_is_usable:
+                if missing_credential_is_error:
+                    raise_without_chain(
+                        CliCredentialNotConfiguredError("configured CLI credential is unusable")
+                    )
+                log.warning(
+                    "the credential at the configured path %s is not a usable login; "
+                    "this probe will report a logged-out provider",
+                    auth_file,
+                )
+                return
         destination_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         if hasattr(os, "O_NOFOLLOW"):
             destination_flags |= os.O_NOFOLLOW
@@ -1501,6 +1589,7 @@ def _probe_codex_login() -> CliLogin:
         CODEX_CLI_STATUS_ARGS,
         credential_home_variable=_CODEX_CREDENTIAL_HOME_VARIABLE,
         auth_file=current_config().codex_cli_auth_file,
+        credential_copy=blank_codex_refresh_token,
     )
     if output is None:
         return LOGGED_OUT
@@ -1517,6 +1606,7 @@ def codex_cli_model_catalog() -> str:
         CODEX_CLI_MODELS_ARGS,
         credential_home_variable=_CODEX_CREDENTIAL_HOME_VARIABLE,
         auth_file=current_config().codex_cli_auth_file,
+        credential_copy=blank_codex_refresh_token,
         stderr="devnull",
         output_read_limit_bytes=CODEX_CLI_MODEL_CATALOG_OUTPUT_READ_LIMIT_BYTES,
     )

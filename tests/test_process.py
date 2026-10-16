@@ -35,6 +35,7 @@ from agent_providers.process import (
     GROK_CLI_CREDENTIALS_INVALID_DETAIL,
     AgentCliUnavailableError,
     CachedProbe,
+    CliCredentialNotConfiguredError,
     CliLineChannel,
     CliProbeBudgetExceeded,
     CliRun,
@@ -1229,6 +1230,22 @@ def test_private_credential_home_removes_a_failed_setup(tmp_path: Path) -> None:
     assert not list(tmp_path.glob("private-home-*"))
 
 
+def test_an_unusable_login_is_an_error_where_a_missing_credential_is(tmp_path: Path) -> None:
+    unusable = tmp_path / "unusable.json"
+    unusable.write_text("not json")
+
+    with pytest.raises(CliCredentialNotConfiguredError):
+        PrivateCredentialHome(
+            unusable,
+            Path("auth.json"),
+            prefix="private-home-",
+            missing_credential_is_error=True,
+            credential_copy=process.blank_codex_refresh_token,
+        )
+
+    assert not list(tmp_path.glob("private-home-*"))
+
+
 def test_private_credential_home_forgets_a_failed_setup_it_removed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2177,3 +2194,62 @@ def test_credential_probe_names_malformed_mounted_credentials(
 
     with pytest.raises(AgentCliUnavailableError, match=detail):
         function()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        None,
+        "not json",
+        "[]",
+        '{"tokens": []}',
+        '{"auth_mode": "chatgpt", "tokens": {}}',
+        '{"auth_mode": "apikey", "OPENAI_API_KEY": "sk-synthetic"}',
+    ),
+    ids=(
+        "missing", "not-json", "not-an-object", "tokens-not-an-object", "no-access-token",
+        "api-key-only",
+    ),
+)
+def test_an_unusable_codex_login_makes_the_probe_answer_logged_out(
+    tmp_path, monkeypatch, payload: str | None,
+) -> None:
+    auth_file = tmp_path / "codex-auth.json"
+    if payload is not None:
+        auth_file.write_text(payload)
+    override_provider_runtime(codex_cli_auth_file=auth_file)
+    monkeypatch.setattr(process, "resolve_cli_binary", lambda _binary: Path(sys.executable))
+    monkeypatch.setattr(
+        process,
+        "CODEX_CLI_STATUS_ARGS",
+        (
+            "-c",
+            "import os, sys; "
+            "sys.stdout.write('Logged in using ChatGPT' "
+            "if os.path.exists(os.path.join(os.environ['CODEX_HOME'], 'auth.json')) "
+            "else 'Not logged in')",
+        ),
+    )
+
+    assert codex_cli_login().logged_in is False
+
+
+def test_the_grok_probe_hands_its_child_the_login_byte_for_byte(tmp_path, monkeypatch) -> None:
+    auth_file = tmp_path / "grok-auth.json"
+    auth_file.write_bytes(b'{"realm": {"key": "grok-synthetic-key"}}')
+    override_provider_runtime(grok_cli_auth_file=auth_file)
+    monkeypatch.setattr(process, "resolve_cli_binary", lambda _binary: Path("/usr/bin/grok"))
+    copies: list[bytes] = []
+
+    def run_cli_bounded(child, **_kwargs):
+        copies.append((Path(child.environment["GROK_HOME"]) / "auth.json").read_bytes())
+        return CliRunOutcome(
+            started=True, spawn_error=None, returncode=0, stdout=GROK_LOGGED_IN, stderr="",
+            complete=True, became_zombie=False, reason=CliRunReason.COMPLETE,
+        )
+
+    monkeypatch.setattr(process, "run_cli_bounded", run_cli_bounded)
+    clear_agent_cli_caches()
+
+    assert grok_cli_status().login.logged_in is True
+    assert copies == [auth_file.read_bytes()]

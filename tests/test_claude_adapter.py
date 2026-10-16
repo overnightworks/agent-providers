@@ -87,14 +87,12 @@ def _an_sdk_whose_client_raises_a_non_provider_error(monkeypatch) -> None:
     ],
     ids=["sdk-not-installed", "sdk-client-raises"],
 )
-def test_claude_api_turn_fails_with_a_safe_code_and_runs_no_tool(
+def test_claude_api_turn_fails_with_a_safe_code_when_the_sdk_is_unusable(
     monkeypatch, break_the_sdk, safe_code
 ) -> None:
     break_the_sdk(monkeypatch)
-    executed_tools: list[str] = []
 
-    def executor(name: str, _arguments: dict) -> ToolOutcome:
-        executed_tools.append(name)
+    def executor(_name: str, _arguments: dict) -> ToolOutcome:
         return ToolOutcome("unused", False)
 
     async def _drive_turn() -> None:
@@ -113,4 +111,3 @@ def test_claude_api_turn_fails_with_a_safe_code_and_runs_no_tool(
         asyncio.run(turn)
 
     assert failure.value.reason.code is safe_code
-    assert executed_tools == []

@@ -755,13 +755,11 @@ def _mcp_turn_cli_arguments(
 #   tool-free caller funnels through these):
 #   the CLI must announce no tools at all.
 #
-# Single-flight is shaped so that no lock is ever held across the probe.
-# A per-key mutex held across the whole probe keeps finding a new unbounded
-# wait inside that held lock, and a lock held across external I/O always has
-# another hole next to the one just patched, so the held lock is absent
-# entirely:
+# Single-flight is shaped so that no lock is held across the probe: a lock
+# held across external I/O can always block unboundedly inside the held
+# section, so the probe runs with no lock at all:
 #
-# - The dict lock (``_tool_surface_lock``) now only ever guards a dict
+# - The dict lock (``_tool_surface_lock``) only ever guards a dict
 #   lookup/insert — never a probe, never an await. The first cold caller
 #   for a key publishes a future/event under that lock and releases it
 #   immediately, then probes with *no lock held at all*. Every other
@@ -1069,8 +1067,8 @@ def verify_no_builtin_cli_tools() -> Path:
     """Raise unless the mounted CLI reaches no tool at all under
     ``_TOOL_ISOLATION_FLAGS``; return the resolved binary path to run the
     real turn with. Sync twin for ``_call_cli``, which has no event loop to
-    await one in — the scoring worker calls it from a plain synchronous
-    child, not an async context.
+    await one in — a host calls it from a plain synchronous child,
+    not an async context.
     """
     build, key = _tool_surface_key(_NO_TOOLS_EXPECTED)
 
@@ -1920,11 +1918,10 @@ def _call_cli(
     """The tool-free CLI backend behind both ``call_claude()`` and the
     one-shot completion (``claude.adapter.call_claude_once``).
 
-    Every caller of this function carries content we did not write —
-    host data — into the CLI, so the
-    verified-tool-surface gate lives here rather than in each caller: a
-    future caller of ``call_claude()`` inherits it automatically instead of
-    having to remember it.
+    Every caller of this function carries content we did not write
+    (host data) into the CLI, so the verified-tool-surface gate lives here
+    rather than in each caller: a future caller of ``call_claude()``
+    inherits it automatically instead of having to remember it.
     """
     if model is None:
         model = current_turn_config().claude_chat_model

@@ -5,6 +5,7 @@ from __future__ import annotations
 import errno
 import gc
 import json
+import linecache
 import logging
 import os
 import stat
@@ -29,6 +30,7 @@ from provider_test_support import (
 )
 
 from agent_providers import process
+from agent_providers.codex_login import assess_codex_login
 from agent_providers.config import current_config
 from agent_providers.constants import (
     CLAUDE_CLI_AUTH_METHOD_FIELD,
@@ -2426,61 +2428,129 @@ def test_the_credential_reader_reports_a_missing_file_as_absent(tmp_path: Path) 
 
 
 def _assert_no_frame_holds_the_credential(error: BaseException) -> None:
-    assert not traceback_frames_hold(error, "synthetic-credential-canary")
+    # Pytest's assertion rewriting would keep the literal in the test's own frame,
+    # which the handled exception's traceback reaches.
+    assert not traceback_frames_hold(error, "canary-")
 
 
-def _interruption_from_the_read(canary: bytes):
-    pending_reads = [canary]
-
-    def read_then_interrupt(descriptor: int, length: int) -> bytes:
-        if pending_reads:
-            return pending_reads.pop()
-        raise KeyboardInterrupt
-
-    return process.os, "read", read_then_interrupt
+def _enter_through_the_login_decider(tmp_path: Path) -> None:
+    process.codex_cli_login_is_usable()
 
 
-def _interruption_from_the_close(_canary: bytes):
-    real_close = os.close
+def _enter_through_a_private_credential_home(tmp_path: Path) -> None:
+    PrivateCredentialHome(
+        current_config().codex_cli_auth_file,
+        Path(".codex/auth.json"),
+        prefix="private-home-",
+        missing_credential_is_error=True,
+        credential_copy=process.blank_codex_refresh_token,
+    )
 
-    def close_then_interrupt(descriptor: int) -> None:
-        real_close(descriptor)
-        raise SystemExit
 
-    return process.os, "close", close_then_interrupt
+_CREDENTIAL_HANDLING_CODE = frozenset(
+    function.__code__
+    for function in (
+        process._read_credential_file,
+        process._read_regular_file,
+        process._read_within_bound,
+        process._install_credential,
+        process.blank_codex_refresh_token,
+        process._codex_login_in_the_mirror_is_usable,
+        assess_codex_login,
+    )
+)
+
+
+_LINES_THAT_ACQUIRE_OR_RELEASE_A_DESCRIPTOR = (
+    "try:", "os.open(", "os.close(", "_close_descriptor(",
+)
+
+
+def _acquires_or_releases_a_descriptor(frame) -> bool:
+    source = linecache.getline(frame.f_code.co_filename, frame.f_lineno).strip()
+    return any(marker in source for marker in _LINES_THAT_ACQUIRE_OR_RELEASE_A_DESCRIPTOR)
+
+
+def _interrupt_at_line(position: int):
+    seen_lines = 0
+
+    def on_line(frame, event, argument):
+        nonlocal seen_lines
+        # An interruption delivered before the line that closes a descriptor, or
+        # between an open and its try, leaves it open in any Python code.
+        if event == "line" and not _acquires_or_releases_a_descriptor(frame):
+            seen_lines += 1
+            if seen_lines == position:
+                raise KeyboardInterrupt
+        return on_line
+
+    def on_call(frame, event, argument):
+        return on_line if frame.f_code in _CREDENTIAL_HANDLING_CODE else None
+
+    return on_call
+
+
+@pytest.fixture
+def a_stored_codex_login(tmp_path: Path) -> None:
+    auth_file = tmp_path / "codex-auth.json"
+    auth_file.write_bytes(a_codex_login())
+    override_provider_runtime(codex_cli_auth_file=auth_file, cli_working_directory_root=tmp_path)
 
 
 @pytest.mark.parametrize(
-    ("interrupt", "interruption"),
-    (
-        (_interruption_from_the_read, KeyboardInterrupt),
-        (_interruption_from_the_close, SystemExit),
-    ),
-    ids=("read", "close"),
+    "enter",
+    (_enter_through_the_login_decider, _enter_through_a_private_credential_home),
+    ids=("login-decider", "private-credential-home"),
 )
-@pytest.mark.parametrize("inside_a_handler", (False, True), ids=("plain-call", "inside-a-handler"))
-def test_the_credential_reader_lets_an_interruption_through_holding_no_credential_bytes(
-    tmp_path: Path, interrupt, interruption, inside_a_handler: bool,
+@pytest.mark.usefixtures("a_stored_codex_login")
+def test_a_decoder_failure_propagates_unchanged_holding_no_credential_bytes(
+    tmp_path: Path, enter,
 ) -> None:
-    source = tmp_path / "source"
-    source.write_text("synthetic-credential-canary")
     open_descriptors = len(os.listdir("/proc/self/fd"))
-    target, name, replacement = interrupt(b"synthetic-credential-canary")
 
-    def read_the_credential() -> BaseException:
-        with patch.object(target, name, replacement):
-            with pytest.raises(interruption) as raised:
-                process._read_credential_file(source)
-        return raised.value
+    with patch.object(json.decoder.JSONDecoder, "raw_decode", side_effect=MemoryError):
+        with pytest.raises(MemoryError) as raised:
+            enter(tmp_path)
 
-    if inside_a_handler:
+    _assert_no_frame_holds_the_credential(raised.value)
+    assert len(os.listdir("/proc/self/fd")) == open_descriptors
+
+@pytest.mark.parametrize(
+    "enter",
+    (_enter_through_the_login_decider, _enter_through_a_private_credential_home),
+    ids=("login-decider", "private-credential-home"),
+)
+@pytest.mark.usefixtures("a_stored_codex_login")
+@pytest.mark.parametrize("inside_a_handler", (False, True), ids=("plain-call", "inside-a-handler"))
+def test_an_interruption_at_any_line_propagates_holding_no_credential_bytes(
+    tmp_path: Path, enter, inside_a_handler: bool,
+) -> None:
+    open_descriptors = len(os.listdir("/proc/self/fd"))
+    interrupted_lines = 0
+
+    def enter_interrupted_at(position: int) -> BaseException | None:
+        sys.settrace(_interrupt_at_line(position))
+        try:
+            enter(tmp_path)
+        except KeyboardInterrupt as interruption:
+            return interruption
+        finally:
+            sys.settrace(None)
+        return None
+
+    def drive(position: int) -> BaseException | None:
+        if not inside_a_handler:
+            return enter_interrupted_at(position)
         try:
             raise RuntimeError("an error the caller is already handling")
-        except RuntimeError as handled:
-            caught = read_the_credential()
-            assert caught.__context__ is handled
-    else:
-        caught = read_the_credential()
+        except RuntimeError:
+            return enter_interrupted_at(position)
 
-    _assert_no_frame_holds_the_credential(caught)
-    assert len(os.listdir("/proc/self/fd")) == open_descriptors
+    position = 1
+    while (interruption := drive(position)) is not None:
+        _assert_no_frame_holds_the_credential(interruption)
+        assert len(os.listdir("/proc/self/fd")) == open_descriptors
+        interrupted_lines += 1
+        position += 1
+
+    assert interrupted_lines > 20

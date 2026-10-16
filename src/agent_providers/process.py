@@ -5,6 +5,7 @@ from __future__ import annotations
 import atexit
 import concurrent.futures
 import errno
+import functools
 import json
 import logging
 import os
@@ -15,6 +16,7 @@ import stat
 import tempfile
 import threading
 import time
+import traceback
 import weakref
 from collections import deque
 from collections.abc import Callable, Iterator
@@ -1093,12 +1095,15 @@ class PrivateCredentialHome:
             _live_homes.add(self)
         try:
             os.chmod(self._home, 0o700)
-            _install_credential(
-                self._home,
-                auth_file,
-                relative_destination,
-                missing_credential_is_error=missing_credential_is_error,
-                credential_copy=credential_copy,
+            _run_with_credential_frames_cleared(
+                functools.partial(
+                    _install_credential,
+                    self._home,
+                    auth_file,
+                    relative_destination,
+                    missing_credential_is_error=missing_credential_is_error,
+                    credential_copy=credential_copy,
+                ),
             )
         except OSError:
             self._discard_failed_setup()
@@ -1262,7 +1267,8 @@ def blank_codex_refresh_token(source_document: bytes) -> bytes:
     the operator's file.
     """
     blanked = assess_codex_login(source_document).blanked_document
-    # The traceback keeps this frame alive, so the document must not stay in it.
+    # The Codex turn mirror calls this outside the credential boundary, and the
+    # traceback keeps this frame alive, so the document must not stay in it.
     del source_document
     if blanked is None:
         raise_without_chain(CodexLoginMirrorError())
@@ -1321,6 +1327,21 @@ def _install_credential(
         os.close(destination)
 
 
+def _run_with_credential_frames_cleared[T](step: Callable[[], T]) -> T:
+    """Run a step that touches credential bytes; no exception leaves it holding them.
+
+    A traceback keeps every frame it passed through alive, locals included, and
+    the decoder's frames below the library hold the decoded text. This frame
+    holds no bytes itself, so it clears everything beneath it before the same
+    exception continues.
+    """
+    try:
+        return step()
+    except BaseException as failure:
+        traceback.clear_frames(failure.__traceback__.tb_next)
+        raise
+
+
 def _read_credential_file(path: Path) -> bytes | None:
     """Read a credential source: ``None`` when absent, an error when not a plain file.
 
@@ -1340,13 +1361,9 @@ def _read_credential_file(path: Path) -> bytes | None:
         )
         raise_without_chain(AgentCliUnavailableError(refusal))
     try:
-        try:
-            content, refusal = _read_regular_file(descriptor)
-        finally:
-            closed = _close_descriptor(descriptor)
-    except BaseException:
-        content = None
-        raise
+        content, refusal = _read_regular_file(descriptor)
+    finally:
+        closed = _close_descriptor(descriptor)
     if not closed:
         content, refusal = None, _CREDENTIAL_UNREADABLE_DETAIL
     if refusal is not None:
@@ -1377,21 +1394,16 @@ def _read_regular_file(descriptor: int) -> tuple[bytes | None, str | None]:
 def _read_within_bound(descriptor: int) -> bytes | None:
     chunks: list[bytes] = []
     size = 0
-    try:
-        while True:
-            chunk = os.read(
-                descriptor, min(65_536, _CREDENTIAL_FILE_READ_LIMIT_BYTES + 1 - size),
-            )
-            if not chunk:
-                return b"".join(chunks)
-            size += len(chunk)
-            if size > _CREDENTIAL_FILE_READ_LIMIT_BYTES:
-                return None
-            chunks.append(chunk)
-    except BaseException:
-        chunks.clear()
-        chunk = b""
-        raise
+    while True:
+        chunk = os.read(
+            descriptor, min(65_536, _CREDENTIAL_FILE_READ_LIMIT_BYTES + 1 - size),
+        )
+        if not chunk:
+            return b"".join(chunks)
+        size += len(chunk)
+        if size > _CREDENTIAL_FILE_READ_LIMIT_BYTES:
+            return None
+        chunks.append(chunk)
 
 
 def _write_credential(descriptor: int, payload: bytes) -> None:
@@ -1544,12 +1556,14 @@ def grok_cli_token_is_present() -> bool:
 
 def codex_cli_login_is_usable() -> bool:
     """Whether the Codex CLI credential mirror holds a login that can start a child."""
+    return _run_with_credential_frames_cleared(_codex_login_in_the_mirror_is_usable)
+
+
+def _codex_login_in_the_mirror_is_usable() -> bool:
     document = _read_credential_file(current_config().codex_cli_auth_file)
     if document is None:
         return False
     verdict = assess_codex_login(document).verdict
-    # The traceback keeps this frame alive, so the document must not stay in it.
-    del document
     if verdict is CodexLoginVerdict.MALFORMED:
         raise_without_chain(AgentCliUnavailableError(CODEX_CLI_CREDENTIALS_INVALID_DETAIL))
     return verdict is CodexLoginVerdict.USABLE

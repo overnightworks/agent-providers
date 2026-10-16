@@ -14,6 +14,10 @@ jobs:
     name: checks
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # The organisation's SONAR_TOKEN reaches only public repositories and
+    # non-fork runs, so the gate arms itself on the credential it needs.
+    env:
+      SONAR_ENABLED: ${{ secrets.SONAR_TOKEN != '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
@@ -21,20 +25,25 @@ jobs:
         with:
           enable-cache: true
 
+      # The workspace's own packages are put on the path rather than built, so
+      # every checking step runs only locked wheels and no setup script.
       - name: Install dependencies
-        run: uv sync --all-packages --extra dev --extra image
-
-      - name: Lockfile is current
-        run: uv lock --check
+        run: uv sync --locked --all-packages --extra dev --extra image --no-build --no-install-workspace
 
       - name: Ruff
-        run: uv run ruff check src tests packages
+        env:
+          PYTHONPATH: src:packages/agent-client/src:packages/agent-service/src
+        run: uv run --locked --no-sync --no-build ruff check src tests packages
 
       - name: Import boundaries
-        run: uv run lint-imports
+        env:
+          PYTHONPATH: src:packages/agent-client/src:packages/agent-service/src
+        run: uv run --locked --no-sync --no-build lint-imports
 
       - name: Tests
-        run: uv run pytest tests -q
+        env:
+          PYTHONPATH: src:packages/agent-client/src:packages/agent-service/src
+        run: uv run --locked --no-sync --no-build pytest tests -q
 
       - name: Build the three distributions
         run: uv build --all-packages
@@ -101,6 +110,24 @@ jobs:
           test "$status" -eq 2
           grep -q 'identity.jwks_url' refused.txt
 
+      - name: Report the skip when no SONAR_TOKEN reaches this run
+        if: ${{ env.SONAR_ENABLED != 'true' }}
+        run: >-
+          echo "::notice::SonarCloud open findings skipped: this run received
+          no SONAR_TOKEN, so the findings were never read."
+
+      # Automatic Analysis grades a quality gate of ratings that an accepted or
+      # false-positive finding leaves; this step fails with the open findings of
+      # the scope instead. The reference is a commit, not a tag, because this
+      # step guards security findings.
+      - name: SonarCloud open findings
+        if: ${{ env.SONAR_ENABLED == 'true' }}
+        # The action bounds each call; this is the hard ceiling because it pages.
+        timeout-minutes: 5
+        uses: overnightworks/marketplace/.github/actions/sonar-findings-gate@85b0e13e0530ed12b5a81208681015eda6f7854b # sonar-findings-gate-v1
+        with:
+          sonar-token: ${{ secrets.SONAR_TOKEN }}
+
   keycloak-token-shapes:
     name: keycloak-token-shapes
     runs-on: ubuntu-latest
@@ -153,7 +180,7 @@ jobs:
         env:
           PYTHONPATH: src:packages/agent-client/src:packages/agent-service/src
         run: >-
-          uv run --no-sync --no-build pytest -p no:cacheprovider
+          uv run --locked --no-sync --no-build pytest -p no:cacheprovider
           tests/test_service_keycloak.py -m keycloak -q -rP
 
       - name: Keycloak log on failure

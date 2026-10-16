@@ -2703,6 +2703,37 @@ def test_a_cleanup_that_outlasts_the_settle_instant_is_published_by_the_channel_
     failure_watch.assert_nothing_leaked()
 
 
+def test_the_returned_outcome_is_the_overrun_a_consumer_already_published(
+    monkeypatch, failure_watch, pooled_run,
+) -> None:
+    process_pool, callbacks = pooled_run
+    monkeypatch.setattr("agent_providers.process.CLI_TERMINATION_GRACE_SECONDS", 0.2)
+    channel = CliLineChannel(maximum_lines=1)
+    release_reap = threading.Event()
+    real_reap = process._reap_process_group
+    monkeypatch.setattr(
+        process,
+        "_reap_process_group",
+        lambda child: (release_reap.wait(timeout=2), real_reap(child))[1],
+    )
+    deadline = time.monotonic() + 0.05
+    consumed: list[bytes | CliRunOutcome] = []
+    consumer = threading.Thread(
+        target=lambda: consumed.append(channel.receive(settle_by=deadline + 0.01)),
+    )
+    consumer.start()
+
+    outcome = _run_pooled(
+        "exec sleep 10", callbacks, deadline=deadline, stdout_line_channel=channel,
+    )
+    release_reap.set()
+    consumer.join(timeout=1)
+
+    assert outcome is consumed[0]
+    assert channel.receive(timeout=0) is outcome
+    failure_watch.assert_nothing_leaked()
+
+
 def test_a_spawn_that_returns_after_the_deadline_is_published_and_reaped_late(
     monkeypatch, failure_watch, pooled_run,
 ) -> None:

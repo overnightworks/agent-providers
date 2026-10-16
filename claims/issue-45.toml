@@ -1,8 +1,0 @@
-claim_id = "70f58d4e067f4008afa0881542541b32"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "42352c1204201224615576e8f1eebb74bb35ea3b"
-branch = "claude/issue-45-sonar-python"
-scope = ["src/agent_providers/codex/image.py", "src/agent_providers/text_tool_protocol.py", "src/agent_providers/tool_loop.py", "tests/provider_test_support.py", "tests/test_codex_cli_adapter.py", "tests/test_codex_process_pool.py", "tests/test_grok_cli_adapter.py", "tests/test_service_liveness.py", "tests/test_sse_codec.py", "tests/test_wire_protocol.py"]
-opened_commit = "03c1c25dde3cabc0a27cd816a3e08ecedde1d512"
-whole_reason = "One Sonar slice: nine one-line findings spread over the modules that own them, each fix local to its line."

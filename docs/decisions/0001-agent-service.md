@@ -577,16 +577,26 @@ Rules:
    runner's close has finished or failed, exactly once, whoever waits and
    however often a waiter is cancelled, and before any wait for frame
    delivery. `_supervise`'s finalizer guarantees that the slot closes; it is
-   not the completion notification. `_stop` re-raises a failed cleanup, so a
-   recording defect surfaces as a supervision failure. One decider
-   (`run_liveness._ending`) says which failure of a run's ending propagates: a
+   not the completion notification. `_stop` raises what the decider decides
+   once the runner is stopped, so a recording defect cuts the stream the way a
+   supervision failure does. No step of a run's ending raises its failure past
+   the decider: the supervision (its clock, its drive and the drop report it
+   makes) and the cleanup (the disconnect report and the record's end) record
+   each failure in the run's one collection (`run_liveness.RunFailures`), in
+   the order the failures happened. One pure decider (`run_liveness._exit_of`)
+   reads that collection, any cancellation and the body's outcome: a
    cancellation always wins, whether it was caught during teardown or arrived
-   in the body; then a cleanup failure; then a supervision failure, unless the
-   body raised. Every other failure is logged once. The service logs every
-   failure, a runner's and a failed close included, by its class and its stack
-   positions (`file:line:function`), never by its message, notes or chained
-   exceptions. With no runner, the run is recorded complete before its first
-   frame is handed out.
+   in the body; then the first cleanup failure; then the first supervision
+   failure, unless the body raised. Every other failure is logged exactly
+   once. Every failure the service logs, a runner's and a failed close
+   included, is logged by its class and its stack positions
+   (`file:line:function`), never by its message, notes or chained exceptions.
+   A propagated failure is not logged by the service: Starlette and the ASGI
+   server log it in their own format, message and chain included. Every
+   failure that can propagate comes from the service's own recorder, clock or
+   loss report, so none carries provider or user text; a runner's failure is
+   logged through the one helper instead and never propagates. With no
+   runner, the run is recorded complete before its first frame is handed out.
 9. The ending is the accepted terminal; `cancellation_terminal()` is used only
    when there is none. `run_over()` passes no fallback when a terminal was
    accepted. The fallback's state and code are all that is read: it is never

@@ -56,7 +56,9 @@ from agent_providers.events import (
 )
 from agent_service.config import AppConfig, RunConfig
 from agent_service.run_liveness import (
+    FailedPart,
     RunClock,
+    RunFailures,
     RunnerExhausted,
     RunnerOutcome,
     RunnerRaised,
@@ -96,33 +98,37 @@ async def run_frames(
     records: RunRecords,
 ) -> AsyncGenerator[bytes, None]:
     wire = _WireRun(admitted, app, runs, records)
+    failures = RunFailures(admitted.run_id)
     started = wire.started()
     started_at = clock()
     if runner is None:
         failed = wire.failed(FailureCode.PROVIDER_UNAVAILABLE, NO_RUNNER_MESSAGE)
-        wire.run_over()
-        with _client_lost_when_closed(wire):
+        with failures.leaving(), _client_lost_when_closed(wire, failures):
+            failures.attempt(FailedPart.CLEANUP, wire.run_over)
             yield started
             yield failed
         return
     events = runner.run(admitted)
     async with (
-        SupervisedRun(admitted.run_id, wire, events, runs, clock, started_at) as supervised,
-        aclosing(supervised.frames()) as frames,
+        SupervisedRun(admitted.run_id, wire, events, runs, clock, started_at, failures) as run,
+        aclosing(run.frames()) as frames,
     ):
-        with _client_lost_when_closed(wire):
+        with _client_lost_when_closed(wire, failures):
             yield started
             async for frame in frames:
                 yield frame
 
 
 @contextmanager
-def _client_lost_when_closed(wire: _WireRun) -> Iterator[None]:
-    """Latch the loss before any cleanup runs, when the response cancels or closes the stream."""
+def _client_lost_when_closed(wire: _WireRun, failures: RunFailures) -> Iterator[None]:
+    """Latch the loss before any cleanup runs, when the response cancels or closes the stream.
+
+    A failed report is the cleanup's failure, recorded for the run's exit to decide.
+    """
     try:
         yield
     except (asyncio.CancelledError, GeneratorExit):
-        wire.client_lost(ClientLoss.DISCONNECTED)
+        failures.attempt(FailedPart.CLEANUP, lambda: wire.client_lost(ClientLoss.DISCONNECTED))
         raise
 
 

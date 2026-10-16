@@ -26,7 +26,8 @@ import asyncio
 import logging
 import math
 import traceback
-from collections.abc import AsyncGenerator, AsyncIterator, Coroutine
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
@@ -55,7 +56,9 @@ def log_failure(logger: logging.Logger, event: str, failure: BaseException) -> N
     """
     positions = ", ".join(
         f"{Path(frame.filename).name}:{frame.lineno}:{frame.name}"
-        for frame in traceback.extract_tb(failure.__traceback__)
+        for frame in traceback.StackSummary.extract(
+            traceback.walk_tb(failure.__traceback__), lookup_lines=False
+        )
     )
     logger.error("%s: %s at %s", event, type(failure).__name__, positions)
 
@@ -211,52 +214,113 @@ async def _finished(task: asyncio.Task[object]) -> asyncio.CancelledError | None
     return interrupted
 
 
-class _Part(Enum):
-    CLEANUP = "cleanup"
+class FailedPart(Enum):
+    """Which part of a run's ending a failure belongs to (decision record 0001, A1a2 item 8)."""
+
     SUPERVISION = "supervision"
+    CLEANUP = "cleanup"
 
 
 @dataclass(frozen=True)
 class _Failure:
-    part: _Part
+    part: FailedPart
     error: BaseException
 
 
 @dataclass(frozen=True)
-class _Ending:
-    """What leaving a run raises, if anything, and the failures it only logs."""
+class _Exit:
+    """What leaving a run raises, if anything, and the failures it logs, in order."""
 
     raised: BaseException | None
-    unraised: tuple[_Failure, ...]
+    logged: tuple[_Failure, ...]
 
 
-def _ending(
+def _exit_of(
+    failures: Sequence[_Failure],
     *,
     cancellation: asyncio.CancelledError | None,
     body_failure: BaseException | None,
-    cleanup_failure: BaseException | None,
-    supervision_failures: tuple[BaseException, ...] = (),
-) -> _Ending:
-    """Which outcome of a run's ending propagates; every other failure is only logged.
+) -> _Exit:
+    """The one decision of what leaving a run raises; every other failure is logged once.
 
-    * A cancellation always wins: one caught while the run was torn down is
-      raised, and one that arrived in the body (``body_failure``) is left to
-      propagate.
-    * Otherwise a cleanup failure is raised over a supervision failure.
-    * Otherwise the first supervision failure is raised, unless the body raised.
+    ``failures`` are every failure the run's steps met, in the order they
+    happened; a failure met twice counts once, at its first part.
+
+    1. A cancellation always wins: one caught while the run was torn down is
+       raised, and one that arrived in the body (``body_failure``) is left to
+       propagate.
+    2. Otherwise the first cleanup failure is raised.
+    3. Otherwise the first supervision failure is raised, unless the body
+       raised: then the body's outcome stands.
     """
-    cleanup = () if cleanup_failure is None else (_Failure(_Part.CLEANUP, cleanup_failure),)
-    failures = cleanup + tuple(
-        _Failure(_Part.SUPERVISION, failure) for failure in supervision_failures
-    )
+    distinct: list[_Failure] = []
+    for failure in failures:
+        if all(failure.error is not known.error for known in distinct):
+            distinct.append(failure)
     if cancellation is not None:
-        return _Ending(cancellation, failures)
-    if isinstance(body_failure, asyncio.CancelledError) or not failures:
-        return _Ending(None, failures)
-    first, *rest = failures
-    if first.part is _Part.SUPERVISION and body_failure is not None:
-        return _Ending(None, failures)
-    return _Ending(first.error, tuple(rest))
+        return _Exit(cancellation, tuple(distinct))
+    if isinstance(body_failure, asyncio.CancelledError):
+        return _Exit(None, tuple(distinct))
+    cleanup = [failure for failure in distinct if failure.part is FailedPart.CLEANUP]
+    if cleanup:
+        raised = cleanup[0]
+    elif distinct and body_failure is None:
+        raised = distinct[0]
+    else:
+        return _Exit(None, tuple(distinct))
+    return _Exit(raised.error, tuple(failure for failure in distinct if failure is not raised))
+
+
+class RunFailures:
+    """The failures one run's ending met, in the order they happened.
+
+    No step of a run's ending raises its failure past this collection: each
+    one is recorded here, and leaving the run raises or logs what ``_exit_of``
+    decides.
+    """
+
+    def __init__(self, run_id: UUID) -> None:
+        self._run_id = run_id
+        self._failures: list[_Failure] = []
+
+    def attempt(self, part: FailedPart, step: Callable[[], None]) -> None:
+        """Take ``step``, recording its failure instead of raising it."""
+        try:
+            step()
+        except Exception as failure:
+            self.add(part, failure)
+
+    def add(self, part: FailedPart, failure: BaseException) -> None:
+        self._failures.append(_Failure(part, failure))
+
+    def raised(self, cancellation: asyncio.CancelledError | None) -> BaseException | None:
+        """What a stop of the runner raises: the decided failure, nothing logged yet."""
+        return _exit_of(self._failures, cancellation=cancellation, body_failure=None).raised
+
+    def leave(
+        self,
+        *,
+        cancellation: asyncio.CancelledError | None,
+        body_failure: BaseException | None,
+    ) -> None:
+        """Log every failure the decision does not raise, then raise the one it does."""
+        decided = _exit_of(self._failures, cancellation=cancellation, body_failure=body_failure)
+        for failure in decided.logged:
+            log_failure(
+                log, f"The {failure.part.value} of run {self._run_id} failed", failure.error
+            )
+        if decided.raised is not None:
+            raise decided.raised
+
+    @contextmanager
+    def leaving(self) -> Iterator[None]:
+        """Leave a run that has no supervisor by the same decision."""
+        try:
+            yield
+        except BaseException as body_failure:
+            self.leave(cancellation=None, body_failure=body_failure)
+            raise
+        self.leave(cancellation=None, body_failure=None)
 
 
 def _failure_of(task: asyncio.Task[None] | None) -> BaseException | None:
@@ -295,6 +359,7 @@ class SupervisedRun:
         runs: RunConfig,
         clock: RunClock,
         started_at: float,
+        failures: RunFailures,
     ) -> None:
         self._run_id = run_id
         self._wire = wire
@@ -314,7 +379,8 @@ class SupervisedRun:
         self._pump: asyncio.Task[None]
         self._supervisor: asyncio.Task[None]
         self._cleanup: asyncio.Task[None] | None = None
-        self._supervision_failure: Exception | None = None
+        self._failures = failures
+        self._drop_reported = False
 
     async def __aenter__(self) -> SupervisedRun:
         self._pump = asyncio.create_task(self._pump_runner())
@@ -327,42 +393,17 @@ class SupervisedRun:
         exc: BaseException | None,
         exc_traceback: TracebackType | None,
     ) -> None:
-        """Leave once the runner is closed; ``_ending`` decides what propagates.
-
-        Every failure that does not propagate is logged once, by ``log_failure``.
-        """
+        """Leave once the runner is closed, raising or logging what ``_exit_of`` decides."""
         self._supervisor.cancel()
         waited = await _finished(self._supervisor)
         reaped = await self._reaped()
-        cleanup_failure = _failure_of(self._cleanup)
-        ending = _ending(
-            cancellation=waited or reaped,
-            body_failure=exc,
-            cleanup_failure=cleanup_failure,
-            supervision_failures=self._supervision_failures(cleanup_failure),
-        )
-        for failure in ending.unraised:
-            event = f"The {failure.part.value} of run {self._run_id} failed"
-            log_failure(log, event, failure.error)
-        if ending.raised is not None:
-            raise ending.raised
-
-    def _supervision_failures(
-        self, cleanup_failure: BaseException | None
-    ) -> tuple[BaseException, ...]:
-        """The supervisor's own failure, then the one ``_supervise`` caught, each once.
-
-        The cleanup failure is never one of them: the supervisor raises it again
-        when its own stop fails, and it is the cleanup's failure, not the
-        supervision's.
-        """
-        failures: list[BaseException] = []
-        for failure in (_failure_of(self._supervisor), self._supervision_failure):
-            if failure is None or failure is cleanup_failure:
-                continue
-            if all(failure is not known for known in failures):
-                failures.append(failure)
-        return tuple(failures)
+        for part, task in (
+            (FailedPart.SUPERVISION, self._supervisor),
+            (FailedPart.CLEANUP, self._cleanup),
+        ):
+            if (failure := _failure_of(task)) is not None:
+                self._failures.add(part, failure)
+        self._failures.leave(cancellation=waited or reaped, body_failure=exc)
 
     async def frames(self) -> AsyncIterator[bytes]:
         while (frame := await self._slot.take()) is not None:
@@ -384,10 +425,9 @@ class SupervisedRun:
     async def _supervise(self) -> None:
         try:
             await self._drive()
-        except Exception as error:
-            self._supervision_failure = error
-            self._wire.client_lost(ClientLoss.DROPPED)
-            raise
+        except Exception as failure:
+            self._failures.add(FailedPart.SUPERVISION, failure)
+            self._report_drop()
         finally:
             try:
                 await self._stop()
@@ -518,8 +558,16 @@ class SupervisedRun:
 
     async def _drop(self) -> None:
         log.warning("The client of run %s stopped taking frames and was dropped", self._run_id)
-        self._wire.client_lost(ClientLoss.DROPPED)
+        self._report_drop()
         await self._stop()
+
+    def _report_drop(self) -> None:
+        """Latch ``dropped`` once, whether the client was dropped or the supervision failed."""
+        if not self._drop_reported:
+            self._drop_reported = True
+            self._failures.attempt(
+                FailedPart.SUPERVISION, lambda: self._wire.client_lost(ClientLoss.DROPPED)
+            )
 
     async def _wait_for(self, trigger: Coroutine[object, object, object], deadline: float) -> None:
         tasks = [
@@ -534,19 +582,10 @@ class SupervisedRun:
             task.result()
 
     async def _stop(self) -> None:
-        """Stop the runner once and raise what ``_ending`` says ends the stop.
-
-        A cleanup failure that a cancellation outranks is not logged here: it
-        stays on the cleanup task, where ``__aexit__`` retrieves and logs it.
-        """
-        interrupted = await self._reaped()
-        ending = _ending(
-            cancellation=interrupted,
-            body_failure=None,
-            cleanup_failure=_failure_of(self._cleanup),
-        )
-        if ending.raised is not None:
-            raise ending.raised
+        """Stop the runner once, then raise what ``_exit_of`` says ends the stop."""
+        raised = self._failures.raised(await self._reaped())
+        if raised is not None:
+            raise raised
 
     async def _reaped(self) -> asyncio.CancelledError | None:
         if self._cleanup is None:
@@ -560,4 +599,4 @@ class SupervisedRun:
         closing_failure = None if self._pump.cancelled() else self._pump.exception()
         if closing_failure is not None:
             log_failure(log, f"Closing the runner of run {self._run_id} failed", closing_failure)
-        self._wire.run_over()
+        self._failures.attempt(FailedPart.CLEANUP, self._wire.run_over)

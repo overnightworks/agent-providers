@@ -472,10 +472,19 @@ def in_loop(scenario: Callable[..., Coroutine[Any, Any, None]]) -> Callable[...,
 
 
 class BrokenClock(StepClock):
-    """A clock whose wait fails, which makes the run's supervision fail."""
+    """A clock whose wait fails, which makes the run's supervision fail.
+
+    Each wait raises a new failure from ``breaks_with``.
+    """
+
+    def __init__(
+        self, breaks_with: Callable[[], Exception] = lambda: RuntimeError("the clock broke")
+    ) -> None:
+        super().__init__()
+        self._breaks_with = breaks_with
 
     async def wait_until(self, deadline: float) -> None:
-        raise RuntimeError("the clock broke")
+        raise self._breaks_with()
 
 
 class ClientSocket:

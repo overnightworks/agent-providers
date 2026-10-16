@@ -2700,11 +2700,14 @@ def test_a_credential_copy_that_re_raises_the_callers_exception_leaves_it_untouc
     def copy_that_re_raises(source_document: bytes) -> bytes:
         raise
 
+    auth_file = current_config().codex_cli_auth_file
+    destination = Path(".codex/auth.json")
+
     def enter_with_the_re_raising_copy(handled: BaseException):
         with pytest.raises(RuntimeError) as raised:
             PrivateCredentialHome(
-                current_config().codex_cli_auth_file,
-                Path(".codex/auth.json"),
+                auth_file,
+                destination,
                 prefix="private-home-",
                 missing_credential_is_error=True,
                 credential_copy=copy_that_re_raises,

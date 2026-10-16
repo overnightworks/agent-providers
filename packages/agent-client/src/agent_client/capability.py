@@ -30,12 +30,12 @@ _DEFAULT_HTTPS_PORT: Final = 443
 _HIGHEST_PORT: Final = 65535
 _LONGEST_HOST: Final = 253
 _LONGEST_LABEL: Final = 63
-_STRICT_ORIGIN: Final = re.compile(r"https://(?P<host>[a-z0-9.-]+)(?::(?P<port>[0-9]+))?", re.ASCII)
+_STRICT_ORIGIN: Final = re.compile(r"https://(?P<host>[a-z0-9.-]+)(?::(?P<port>\d+))?", re.ASCII)
 _LOOSE_ORIGIN: Final = re.compile(
-    r"https://(?P<host>[a-z0-9.-]+?)\.?(?::(?P<port>[0-9]+))?/?", re.ASCII | re.IGNORECASE
+    r"https://(?P<host>[a-z0-9.-]+)(?::(?P<port>\d+))?/?", re.ASCII | re.IGNORECASE
 )
 _DNS_LABEL: Final = re.compile(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", re.ASCII)
-_NUMERIC_LABEL: Final = re.compile(r"[0-9]+|0x[0-9a-f]*", re.ASCII)
+_NUMERIC_LABEL: Final = re.compile(r"\d+|0x[0-9a-f]*", re.ASCII)
 
 
 def _refusal_of_strict_origin(text: str) -> str | None:
@@ -72,7 +72,9 @@ def _is_written_non_default_port(port: str) -> bool:
 def _canonical_form_that_loads(text: str) -> str | None:
     if (parts := _LOOSE_ORIGIN.fullmatch(text)) is None:
         return None
-    candidate = f"{_HTTPS_SCHEME}{parts['host'].lower()}{_shown_port(parts['port'])}"
+    candidate = (
+        f"{_HTTPS_SCHEME}{parts['host'].removesuffix('.').lower()}{_shown_port(parts['port'])}"
+    )
     return candidate if _refusal_of_strict_origin(candidate) is None else None
 
 

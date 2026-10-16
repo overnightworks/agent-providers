@@ -268,15 +268,28 @@ def _run_codex_image_cli(
     reservation = get_codex_process_pool().reserve(CodexProcessKind.IMAGE)
 
     def run() -> None:
-        result = run_reserved_codex_cli(
-            reservation,
-            child,
-            stdin_payload=prompt.encode("utf-8"),
-            read="all",
-            deadline=deadline,
-            output_read_limit_bytes=CODEX_CLI_TURN_OUTPUT_READ_LIMIT_BYTES,
-            stdout_line_channel=channel,
-        )
+        try:
+            result = run_reserved_codex_cli(
+                reservation,
+                child,
+                stdin_payload=prompt.encode("utf-8"),
+                read="all",
+                deadline=deadline,
+                output_read_limit_bytes=CODEX_CLI_TURN_OUTPUT_READ_LIMIT_BYTES,
+                stdout_line_channel=channel,
+            )
+        except Exception:
+            get_codex_process_pool().abandon_unspawned(reservation)
+            result = CliRunOutcome(
+                started=False,
+                spawn_error=None,
+                returncode=None,
+                stdout="",
+                stderr="",
+                complete=False,
+                became_zombie=False,
+                reason=CliRunReason.IO_ERROR,
+            )
         channel._close(result)
 
     runner = threading.Thread(target=run, daemon=True)

@@ -770,6 +770,41 @@ def test_codex_cover_image_names_terminal_cli_failures_without_logging_the_gate(
         assert raised.value.retry_at == expected_retry_at
 
 
+_A_RUNNER_FAILURE_CANARY = "runner-failure-canary"
+_RUNNER_FAILURE_BOUND_SECONDS = 20
+
+
+def test_a_runner_that_raises_ends_the_image_turn_with_a_named_failure(
+    monkeypatch, caplog, tmp_path,
+) -> None:
+    def raising_runner(child, **kwargs):
+        raise OSError(_A_RUNNER_FAILURE_CANARY)
+
+    monkeypatch.setattr(codex_protocol, "run_cli_bounded", raising_runner)
+    working_root = tmp_path / "turn-homes"
+    working_root.mkdir()
+    override_provider_runtime(cli_working_directory_root=working_root)
+    caplog.set_level(logging.DEBUG)
+    failures: list[BaseException] = []
+
+    def drive() -> None:
+        try:
+            _generate_cover()
+        except BaseException as error:
+            failures.append(error)
+
+    turn = threading.Thread(target=drive, daemon=True)
+    turn.start()
+    turn.join(timeout=_RUNNER_FAILURE_BOUND_SECONDS)
+
+    assert not turn.is_alive(), "the image turn hung on a failed runner"
+    (failure,) = failures
+    assert type(failure) is codex_image.CodexImageCliError
+    assert _A_RUNNER_FAILURE_CANARY not in str(failure) + repr(failure)
+    assert _A_RUNNER_FAILURE_CANARY not in formatted_log_text(caplog.records)
+    assert list(working_root.iterdir()) == []
+
+
 _A_PRIVATE_EVENT_MARKER = "private-event-marker"
 _A_PRIVATE_PROMPT_MARKER = "private-prompt-marker"
 _THREAD_OPENING = [{"type": "thread.started", "thread_id": "thread"}, {"type": "turn.started"}]

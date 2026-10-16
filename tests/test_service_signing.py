@@ -396,8 +396,11 @@ def test_a_signed_token_has_the_typed_header_and_verifies_with_its_claims_unchan
 
 
 def test_a_token_without_a_type_is_refused(tmp_path):
+    key = _signing_key(tmp_path)
+    claims = _claims()
+
     with pytest.raises(EmptyTokenType):
-        _signing_key(tmp_path).sign(_claims(), "")
+        key.sign(claims, "")
 
 
 def test_a_token_does_not_verify_under_another_key_published_with_the_same_id(tmp_path):

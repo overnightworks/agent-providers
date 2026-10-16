@@ -3,6 +3,6 @@ agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
 role = "builder"
 base = "4ec6aad3a082099253f1b23316c42b679e997b21"
 branch = "claude/issue-94-image-turn-runner-failure"
-scope = ["README.md", "src/agent_providers/claude/provider.py", "src/agent_providers/codex/image.py", "src/agent_providers/process.py", "tests/test_claude_provider.py", "tests/test_codex_cli_adapter.py", "tests/test_process.py"]
+scope = ["src/agent_providers/codex/image.py", "tests/test_codex_cli_adapter.py"]
 opened_commit = "3a60df0f53e0e5dcede40e406e612823d2fe6e4c"
 whole_reason = "The runner's terminal-channel and bounded-settle contract lives in process.py and every caller (image turn, tool turns, the Claude provider's outcome messages) is proven against it in one change."

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
 import time
+import traceback
 from collections.abc import Callable
 from io import BytesIO
 from pathlib import Path
@@ -13,8 +15,17 @@ from pathlib import Path
 import pytest
 from PIL import Image
 from provider_test_support import (
+    A_CALLER_CANARY,
+    CALLER_CONTEXTS,
     COWRITER_TOOL_CATALOG,
+    DEEPLY_NESTED_JSON,
+    CallerCanaryError,
+    a_call_nested_too_deeply_to_decode,
+    a_call_to_an_undeclared_tool_carrying,
     assert_a_multi_result_batch_is_rejected,
+    assert_the_canary_reaches_only_the_host,
+    drive_cowriter_turn,
+    formatted_log_text,
     override_provider_runtime,
     override_turn_runtime,
     use_codex_process_pool,
@@ -28,14 +39,18 @@ from agent_providers.errors import (
     CodexProcessPoolSaturatedError,
     ProviderUnavailableError,
     SafeRouteReasonCode,
+    TextToolCallRejectedError,
 )
 from agent_providers.events import AssistantTextEvent, FinalEvent, ToolCallEvent
 from agent_providers.images import ImagePolicy
 from agent_providers.process import CliRunOutcome, CliRunReason
+from agent_providers.text_tool_protocol import TextToolRejectionRule
 from agent_providers.tool_loop import (
     InitialTurn,
     ToolCallBatch,
     ToolOutcome,
+    ToolResult,
+    ToolResultBatch,
     stream_tool_loop,
 )
 
@@ -176,6 +191,16 @@ def _runner(lines: list[bytes], outcome: CliRunOutcome, calls: list) -> object:
         return outcome
 
     return run_cli_bounded
+
+
+def _tool_round_lines(text: str) -> list[bytes]:
+    return [
+        b'{"type":"thread.started","thread_id":"52700000-0000-4000-8000-000000000000"}\n',
+        json.dumps({"type": "item.completed", "item": {
+            "type": "agent_message", "text": text,
+        }}).encode() + b"\n",
+        b'{"type":"turn.completed","usage":{}}\n',
+    ]
 
 
 def _fixture_lines(name: str) -> list[bytes]:
@@ -360,7 +385,9 @@ def test_codex_tool_transport_rejects_non_uuid_thread_ids(thread_id: str) -> Non
         codex_transport._thread_started_id({"thread_id": thread_id})
 
 
-def test_codex_tool_transport_rejects_a_multi_result_batch_without_a_resume(monkeypatch) -> None:
+def test_codex_tool_transport_rejects_a_multi_result_batch_without_a_resume(
+    monkeypatch, caplog,
+) -> None:
     calls: list = []
     monkeypatch.setattr(codex_protocol, "run_cli_bounded", _runner([
         b'{"type":"thread.started","thread_id":"52700000-0000-4000-8000-000000000000"}\n',
@@ -369,8 +396,10 @@ def test_codex_tool_transport_rejects_a_multi_result_batch_without_a_resume(monk
     ], _outcome(), calls))
     transport = _transport()
 
-    assert_a_multi_result_batch_is_rejected(transport)
+    error = assert_a_multi_result_batch_is_rejected(transport)
+    assert not isinstance(error, TextToolCallRejectedError)
     assert len(calls) == 1
+    assert caplog.records == []
 
 
 @pytest.mark.parametrize("fixture_name", (
@@ -922,3 +951,151 @@ def test_codex_public_adapters_reject_unusable_login_mirrors(
         _transport()
 
     assert raised.value.reason.code is SafeRouteReasonCode.CLI_AUTH_REJECTED
+
+
+@CALLER_CONTEXTS
+def test_a_refused_codex_call_hands_its_text_only_to_the_host(
+    monkeypatch, caplog, while_the_caller_handles_an_exception,
+) -> None:
+    monkeypatch.setattr(
+        codex_protocol,
+        "run_cli_bounded",
+        _runner(_tool_round_lines(a_call_to_an_undeclared_tool_carrying()), _outcome(), []),
+    )
+    caplog.set_level(logging.DEBUG)
+
+    turn = drive_cowriter_turn(
+        "codex",
+        correlation_id="job-41",
+        while_the_caller_handles_an_exception=while_the_caller_handles_an_exception,
+    )
+
+    assert_the_canary_reaches_only_the_host(
+        turn,
+        caplog.records,
+        provider="codex",
+        rule=TextToolRejectionRule.UNKNOWN_TOOL,
+        correlation_id="job-41",
+    )
+
+
+@CALLER_CONTEXTS
+def test_a_codex_call_nested_too_deeply_is_refused_not_a_failed_route(
+    monkeypatch, caplog, while_the_caller_handles_an_exception,
+) -> None:
+    monkeypatch.setattr(
+        codex_protocol,
+        "run_cli_bounded",
+        _runner(_tool_round_lines(a_call_nested_too_deeply_to_decode()), _outcome(), []),
+    )
+    caplog.set_level(logging.DEBUG)
+
+    turn = drive_cowriter_turn(
+        "codex",
+        while_the_caller_handles_an_exception=while_the_caller_handles_an_exception,
+    )
+
+    assert isinstance(turn.error, TextToolCallRejectedError)
+    assert turn.error.reason.code is SafeRouteReasonCode.TOOL_PROTOCOL_ERROR
+    assert turn.error.rejection.rule is TextToolRejectionRule.CALL_NOT_JSON
+    assert "RecursionError" not in formatted_log_text(caplog.records)
+
+
+async def _drain_first_round(transport) -> None:
+    async for _ in transport.stream(InitialTurn("system", [])):
+        pass
+
+
+def test_a_codex_event_line_nested_too_deeply_is_refused_as_a_cli_protocol_error(
+    monkeypatch,
+) -> None:
+    calls: list = []
+    lines = [DEEPLY_NESTED_JSON.encode() + b"\n"]
+    monkeypatch.setattr(codex_protocol, "run_cli_bounded", _runner(lines, _outcome(), calls))
+    transport = _transport()
+
+    async def collect() -> None:
+        with pytest.raises(ProviderUnavailableError) as raised:
+            await _drain_first_round(transport)
+        assert raised.value.reason.code is SafeRouteReasonCode.CLI_PROTOCOL_ERROR
+        await transport.aclose()
+
+    asyncio.run(collect())
+
+    assert len(calls) == 1
+
+
+def test_a_codex_tool_result_nested_too_deeply_is_passed_on_in_the_next_prompt(
+    monkeypatch,
+) -> None:
+    calls: list = []
+    lines = _tool_round_lines('<songmaker_tool_call>\n{"name":"list_songs","arguments":{}}\n'
+                              "</songmaker_tool_call>")
+    monkeypatch.setattr(codex_protocol, "run_cli_bounded", _runner(lines, _outcome(), calls))
+    transport = _transport()
+
+    async def collect() -> None:
+        await _drain_first_round(transport)
+        nested_result = ToolResultBatch((ToolResult("one", DEEPLY_NESTED_JSON, False),))
+        assert [item async for item in transport.stream(nested_result)]
+        await transport.aclose()
+
+    asyncio.run(collect())
+
+    assert DEEPLY_NESTED_JSON.encode() in calls[1][1]["stdin_payload"]
+
+
+_UNDECODABLE_EVENT_LINES = pytest.mark.parametrize(
+    "event_line",
+    [
+        pytest.param(b'{"type":"item.completed","text":"event-line-canary\n', id="malformed-json"),
+        pytest.param(b"\xff\xfe event-line-canary\n", id="invalid-utf-8"),
+    ],
+)
+
+
+@_UNDECODABLE_EVENT_LINES
+def test_the_codex_line_reader_refuses_an_undecodable_line_without_chaining_it(event_line):
+    with pytest.raises(codex_protocol.CodexCliStreamFailure) as raised:
+        codex_protocol.parse_codex_line(event_line)
+
+    assert raised.value.code == "codex_cli_stream_protocol_error"
+    assert raised.value.__context__ is None
+    assert raised.value.__cause__ is None
+
+
+@_UNDECODABLE_EVENT_LINES
+@CALLER_CONTEXTS
+def test_a_codex_event_line_the_cli_cannot_decode_leaves_no_chain_to_its_text(
+    monkeypatch, event_line, while_the_caller_handles_an_exception,
+) -> None:
+    monkeypatch.setattr(codex_protocol, "run_cli_bounded", _runner([event_line], _outcome(), []))
+    transport = _transport()
+
+    async def stream_the_turn() -> BaseException:
+        try:
+            async for _ in transport.stream(InitialTurn("system", [])):
+                pass
+        except ProviderUnavailableError as error:
+            return error
+        raise AssertionError("the undecodable line was accepted")
+
+    async def stream_while_handling_an_exception() -> BaseException:
+        try:
+            raise CallerCanaryError(A_CALLER_CANARY)
+        except CallerCanaryError:
+            return await stream_the_turn()
+
+    stream = (
+        stream_while_handling_an_exception
+        if while_the_caller_handles_an_exception
+        else stream_the_turn
+    )
+    error = asyncio.run(stream())
+
+    assert isinstance(error, ProviderUnavailableError)
+    assert error.reason.code is SafeRouteReasonCode.CLI_PROTOCOL_ERROR
+    assert str(error) == "CLI returned an invalid response."
+    assert error.__context__ is None
+    assert error.__cause__ is None
+    assert "event-line-canary" not in "".join(traceback.format_exception(error))

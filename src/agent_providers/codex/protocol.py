@@ -193,8 +193,8 @@ def copy_codex_login_mirror(codex_home: Path) -> None:
 def parse_codex_line(line: bytes) -> tuple[str, dict[str, object]]:
     try:
         event = json.loads(line.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise CodexCliStreamFailure("codex_cli_stream_protocol_error") from exc
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+        event = None
     if not isinstance(event, dict):
         raise CodexCliStreamFailure("codex_cli_stream_protocol_error")
     event_type = event.get("type")

@@ -9,7 +9,7 @@ every deployment holds the same value and none of them belongs in
 
 Everything that *does* differ per deployment — binaries, credential mirrors,
 mounted directories, models, keys, process caps — arrives through that
-configuration instead, and product vocabulary (a host's defaults, its cover and
+configuration instead, and product vocabulary (a host's defaults, its image and
 history rules, its user-facing texts) stays with the host. The rule is simply
 the split: a value stays here when it is the same in every deployment, and goes
 to the config or the host when it is not.
@@ -31,7 +31,7 @@ PROBE_TIMEOUT_SECONDS = 15
 CLAUDE_API_MAX_TOKENS = 4_096
 GROK_CLI_LINE_CHANNEL_CAPACITY = 64
 
-# The real init event measured 0.34s (see docs/security.md); these budgets
+# The real init event measured 0.34s; these budgets
 # keep a wide margin over that without letting a stuck probe block a request
 # for anywhere near as long as the old 30s did.
 CLAUDE_CLI_TOOL_SURFACE_TIMEOUT_SECONDS = 10

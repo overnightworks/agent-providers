@@ -1,4 +1,4 @@
-"""Named co-writer route failures. No adapter exposes upstream error text."""
+"""Named route failures. No adapter exposes upstream error text."""
 
 from __future__ import annotations
 

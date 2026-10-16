@@ -1,13 +1,10 @@
 """The Codex CLI's shared plumbing: its isolation, its login, its events.
 
-Both Codex routes — the co-writer tool transport and the album-cover image
+Both Codex routes — the tool transport and the image
 turn — drive the same binary: they install the same redacted login into a
 private home, spawn through the same admission-bound runner, and read the
 same JSON event grammar. That common ground lives here so neither route
 owns the other's internals.
-
-Self-contained by design: no application import, so the package can be
-released on its own (issue #825).
 """
 
 from __future__ import annotations

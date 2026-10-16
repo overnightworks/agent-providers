@@ -1,4 +1,4 @@
-"""Grok subscription CLI transport for one co-writer tool-loop turn."""
+"""Grok subscription CLI transport for one tool-loop turn."""
 
 from __future__ import annotations
 
@@ -63,7 +63,7 @@ from agent_providers.tools import ToolCatalog
 
 _AUTH_FAILURE_MARKERS: Final = ("401", "oidc", "unauthenticated")
 # "usage" is dropped with the rest: this transport reports no token deltas
-# yet. Surfacing them as a `UsageEvent` is named follow-up work on #825
+# yet. Surfacing them as a `UsageEvent` is named follow-up work
 # (planner gap 7, atelier-2 port requirement 7) and starts here.
 _IGNORED_EVENT_TYPES: Final = frozenset({"thought", "usage", "available_commands", "plan"})
 _PROMPT_FILE_ARGUMENT_INDEX: Final = 1
@@ -362,7 +362,7 @@ def _log_tool_round(
 ) -> None:
     duration_ms = round((time.monotonic() - started_at) * 1000)
     log.info(
-        "Co-writer Grok CLI provider=grok route=cli round=%s session=%s "
+        "Grok CLI tool round provider=grok route=cli round=%s session=%s "
         "duration_ms=%s tool=%s is_error=%s",
         round_index,
         session_id,
@@ -374,7 +374,7 @@ def _log_tool_round(
 
 def _log_tool_protocol_rejection(code: ToolProtocolRejectionCode) -> None:
     log.warning(
-        "Co-writer tool protocol rejection provider=grok route=cli code=%s",
+        "Tool protocol rejection provider=grok route=cli code=%s",
         code,
     )
 

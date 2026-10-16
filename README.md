@@ -64,6 +64,24 @@ Import-linter contracts forbid either package reaching back into
 the core above the client; only the service verifies tokens, so only it imports
 `webauth`. `lint-imports` proves them in CI.
 
+## Terms
+
+| Term | Meaning |
+|---|---|
+| turn | One exchange: a system prompt and messages in, a stream of events out (`stream_turn`). |
+| tool | A capability the host declares in its `ToolCatalog`. |
+| tool call, tool result, tool round | One requested invocation, its outcome, and one provider response's batch of calls. |
+| tool executor | The host's port that runs one tool call (`ToolExecutor`). |
+| host | The application that embeds the library. |
+| host data | Anything a host supplies or a host tool returns: system prompt, messages, tool arguments and results, an exception raised by host code. The library forwards it where its contract says and never logs it. |
+| provider | `claude`, `grok` or `codex` (`ProviderName`). |
+| route | `cli` or `api` (`ProviderRoute`); a *provider route* is one provider on one route. |
+| one-shot completion | A tool-free single request bounded by a caller-owned deadline (`call_provider_once`). |
+| image turn | A Codex CLI turn that produces one image under an `ImagePolicy`. |
+| tool markup | The tag namespace and product name a host's text-protocol tools wear (`ToolProtocolMarkup`). |
+| user | The person a turn runs for (`user_id`). |
+| working root | The host's private directory below which the library creates every private directory and file (`cli_working_directory_root`). |
+
 ## Install
 
 No distribution is published on PyPI, and PyPI is not planned: wheels pinned by

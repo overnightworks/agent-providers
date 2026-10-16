@@ -39,6 +39,33 @@ def test_stream_turn_refuses_an_unknown_provider_before_any_route_runs(monkeypat
     assert routes_started == []
 
 
+def test_a_failing_route_logs_the_failed_turn_by_provider_route_and_class(monkeypatch, caplog):
+    def fail_route(**_arguments):
+        raise RuntimeError("synthetic-confidential-detail")
+
+    monkeypatch.setattr(dispatch, "_stream_for_route", fail_route)
+    caplog.set_level("WARNING", logger="agent_providers.dispatch")
+
+    drive_cowriter_turn("grok")
+
+    assert "Turn failed provider=grok route=cli class=RuntimeError" in caplog.text
+    assert "synthetic-confidential-detail" not in caplog.text
+
+
+def test_a_failing_one_shot_completion_logs_its_provider_and_class(monkeypatch, caplog):
+    def fail_connection(_provider):
+        raise RuntimeError("synthetic-confidential-detail")
+
+    monkeypatch.setattr(dispatch, "_api_connection", fail_connection)
+    caplog.set_level("WARNING", logger="agent_providers.dispatch")
+
+    with pytest.raises(ProviderUnavailableError):
+        call_provider_once(provider="grok", model="any-model", prompt="hi", timeout=1)
+
+    assert "One-shot completion failed provider=grok class=RuntimeError" in caplog.text
+    assert "synthetic-confidential-detail" not in caplog.text
+
+
 def test_call_provider_once_refuses_an_unknown_provider():
     with pytest.raises(ProviderUnavailableError) as refusal:
         call_provider_once(provider="bob", model="any-model", prompt="hi", timeout=1)

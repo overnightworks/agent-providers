@@ -1,4 +1,4 @@
-"""The Codex subscription CLI transport for one co-writer tool-loop turn."""
+"""The Codex subscription CLI transport for one tool-loop turn."""
 
 from __future__ import annotations
 
@@ -487,7 +487,7 @@ def _log_codex_tool_round(
 ) -> None:
     duration_ms = round((time.monotonic() - started_at) * 1000)
     log.info(
-        "Co-writer Codex CLI provider=codex route=cli round=%s duration_ms=%s tool=%s is_error=%s",
+        "Codex CLI tool round provider=codex route=cli round=%s duration_ms=%s tool=%s is_error=%s",
         round_index,
         duration_ms,
         tool_name or "none",

@@ -1,0 +1,7 @@
+claim_id = "7bb9542f07c3495ca4b682d3a168fcd6"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "ef30edf72341ce48176640181317d386fc8999d6"
+branch = "claude/issue-53-codeql-permissions"
+scope = [".github/workflows/ci.yml"]
+opened_commit = "9d8713f95900e356e4039fc040a9066c101e61e6"

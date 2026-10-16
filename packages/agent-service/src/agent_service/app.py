@@ -10,7 +10,8 @@ checked in a fixed order, and the first failure answers:
 4. the route (``agent_service.routing``).
 
 An admitted run answers ``200 text/event-stream`` with its frames
-(``agent_service.run_events``). Every refusal is a typed ``RunRejection``
+(``agent_service.run_events``), and its response closes those frames whenever it
+ends, however it ends. Every refusal is a typed ``RunRejection``
 that is never cached. No answer echoes a token. A ``GET`` answers the run's
 ``RunStatus`` to its owner, and one ``not_found`` to everyone else: for an id
 nobody began, an expired or evicted run, another app's or user's run, and a
@@ -21,13 +22,15 @@ from __future__ import annotations
 
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import AsyncGenerator, Mapping
+from contextlib import aclosing
 from http import HTTPStatus
 from typing import Final
 from uuid import UUID
 
 from fastapi import FastAPI, Request
 from fastapi.responses import Response, StreamingResponse
+from starlette.types import Receive, Scope, Send
 from webauth.jwt_verification import KeySetFetch, MonotonicClock, fetch_key_set_over_https
 
 from agent_client.wire import PROTOCOL_VERSION, RejectionCode, RunRejection, RunRequest
@@ -90,7 +93,7 @@ def create_app(
         run_request = RejectionCode.INVALID_REQUEST if body is None else parse_run_request(body)
         if isinstance(run_request, RejectionCode):
             return rejection(run_request)
-        return _admitted(config, installed_runners, caller, run_request)
+        return _admitted(config, installed_runners, installed_records, caller, run_request)
 
     @app.get("/runs/{run_id}")
     async def run_status(request: Request, run_id: str) -> Response:
@@ -114,8 +117,29 @@ def create_app(
     return app
 
 
+class _RunResponse(StreamingResponse):
+    """A run's response, which closes the run's frames itself whenever it ends.
+
+    Starlette never closes the generator it streams, and a generator left
+    paused behind a blocked send is only finalized by the garbage collector.
+    """
+
+    def __init__(self, frames: AsyncGenerator[bytes, None]) -> None:
+        super().__init__(
+            frames, media_type="text/event-stream", headers={"Cache-Control": "no-store"}
+        )
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        async with aclosing(self.body_iterator):
+            await super().__call__(scope, receive, send)
+
+
 def _admitted(
-    config: ServiceConfig, runners: Runners, caller: Caller, run_request: RunRequest
+    config: ServiceConfig,
+    runners: Runners,
+    records: RunRecords,
+    caller: Caller,
+    run_request: RunRequest,
 ) -> Response:
     app_config = config.apps[caller.app]
     if run_request.purpose not in app_config.purposes:
@@ -136,12 +160,10 @@ def _admitted(
         request=run_request,
         route=served,
     )
-    return StreamingResponse(
+    return _RunResponse(
         run_frames(
-            admitted, runners.for_route(served), app_config, config.runs, LoopClock()
-        ),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-store"},
+            admitted, runners.for_route(served), app_config, config.runs, LoopClock(), records
+        )
     )
 
 

@@ -164,7 +164,7 @@ class RunStream:
             raise RuntimeError("a run that never started cannot be cancelled")
         if self._terminal is not None:
             raise RuntimeError(f"the run already ended as {self._terminal.type}")
-        if self._side_effect_emitted:
+        if self._cut_short_means_interrupted():
             return Failed(
                 v=PROTOCOL_VERSION,
                 run_id=self._run_id,
@@ -177,6 +177,9 @@ class RunStream:
     @property
     def _side_effect_emitted(self) -> bool:
         return ToolEffect.SIDE_EFFECTING in self._tool_effects.values()
+
+    def _cut_short_means_interrupted(self) -> bool:
+        return self._side_effect_emitted
 
     def _broken_rule(self, event: RunEvent) -> StreamViolation | None:
         if self._terminal is not None:
@@ -220,7 +223,7 @@ class RunStream:
         return self._broken_ending_rule(event)
 
     def _broken_ending_rule(self, event: RunEvent) -> StreamViolation | None:
-        if isinstance(event, Cancelled) and self._side_effect_emitted:
+        if isinstance(event, Cancelled) and self._cut_short_means_interrupted():
             return StreamViolation(
                 kind=ViolationKind.CANCELLED_AFTER_SIDE_EFFECT,
                 detail="cancelled after a side-effecting call; the run must fail as interrupted",
@@ -228,7 +231,7 @@ class RunStream:
         if (
             isinstance(event, Failed)
             and event.code is FailureCode.INTERRUPTED
-            and not self._side_effect_emitted
+            and not self._cut_short_means_interrupted()
         ):
             return StreamViolation(
                 kind=ViolationKind.INTERRUPTED_WITHOUT_SIDE_EFFECT,

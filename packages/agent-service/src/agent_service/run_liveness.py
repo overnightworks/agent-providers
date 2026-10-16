@@ -33,7 +33,7 @@ from uuid import UUID
 
 import anyio
 
-from agent_client.wire import FailureCode
+from agent_client.wire import ClientLoss, FailureCode
 from agent_providers.events import StreamEvent
 from agent_service.config import RunConfig
 
@@ -80,7 +80,7 @@ RunnerOutcome = RunnerYielded | RunnerExhausted | RunnerRaised
 
 
 class FrameWriter(Protocol):
-    """The one writer of a run's frames; ``run_events`` implements it."""
+    """The one writer of a run's frames and of its record; ``run_events`` implements it."""
 
     ended: bool
 
@@ -91,6 +91,10 @@ class FrameWriter(Protocol):
     def frame_of(self, outcome: RunnerOutcome) -> bytes | None:
         """The frame of a runner outcome, or nothing for an event that says nothing."""
         ...
+
+    def run_over(self) -> None: ...
+
+    def client_lost(self, loss: ClientLoss) -> None: ...
 
 
 class Action(Enum):
@@ -279,6 +283,9 @@ class SupervisedRun:
     async def _supervise(self) -> None:
         try:
             await self._drive()
+        except Exception:
+            self._wire.client_lost(ClientLoss.DROPPED)
+            raise
         finally:
             try:
                 await self._stop()
@@ -409,6 +416,7 @@ class SupervisedRun:
 
     async def _drop(self) -> None:
         log.warning("The client of run %s stopped taking frames and was dropped", self._run_id)
+        self._wire.client_lost(ClientLoss.DROPPED)
         await self._stop()
 
     async def _wait_for(self, trigger: Coroutine[object, object, object], deadline: float) -> None:
@@ -427,6 +435,7 @@ class SupervisedRun:
         if self._cleanup is None:
             self._cleanup = asyncio.create_task(self._reap())
         await _finished(self._cleanup)
+        self._cleanup.result()
 
     async def _reap(self) -> None:
         self._stopping = True
@@ -435,3 +444,4 @@ class SupervisedRun:
         closing_failure = None if self._pump.cancelled() else self._pump.exception()
         if closing_failure is not None:
             log.error("Closing the runner of run %s failed", self._run_id, exc_info=closing_failure)
+        self._wire.run_over()

@@ -2,7 +2,7 @@
 
 Decision record 0001, A1a2 ruling, items 4 to 6. The store is seeded before the
 server starts, so the endpoint's answers are those of the real token checks and
-the real store, with nothing recorded by a run yet.
+the real store.
 """
 
 from __future__ import annotations
@@ -78,9 +78,7 @@ def _seed() -> Seeded:
     other_app, _ = begin("presentator", ALICE)
     other_subject, _ = begin("songmaker", BOB)
     other_issuer, _ = begin("songmaker", ALICE_ELSEWHERE)
-    return Seeded(
-        records, running, owned, expired, evicted, other_app, other_subject, other_issuer
-    )
+    return Seeded(records, running, owned, expired, evicted, other_app, other_subject, other_issuer)
 
 
 @pytest.fixture(scope="module")
@@ -260,16 +258,3 @@ def test_a_second_app_over_the_same_configuration_remembers_nothing(seeded: Seed
         response = get_run(base_url, _alice(), str(seeded.owned))
 
     assert_rejected(response, RejectionCode.NOT_FOUND, 404)
-
-
-def test_a_run_started_through_the_entrance_is_not_recorded_until_recording_is_connected(
-    service,
-):
-    streamed = post_run(service, _alice())
-    run_id = json.loads(streamed.text.split("data: ", 1)[1].split("\n", 1)[0])["run_id"]
-
-    response = get_run(service, _alice(), run_id)
-
-    assert_rejected(response, RejectionCode.NOT_FOUND, 404)
-
-

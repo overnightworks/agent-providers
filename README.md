@@ -41,15 +41,15 @@ It owns the machinery that is the same in every deployment:
 | `agent_providers.process` | `run_cli_bounded`: the bounded runner over a `ChildProcess` (start, stdin, first line, deadline, process-group cleanup) |
 | `agent_providers.images` | The `ImagePolicy` an image turn is held to |
 | `agent_providers.sandbox` | The directory-name prefix constants a host's kernel sandbox profile must permit |
-| `agent_service.app` | `POST /runs` and `GET /runs/{id}`: the order of checks, the typed rejections, the admitted run's event stream, and the run status that only the app and user that started a run may read |
+| `agent_service.app` | `POST /runs` and `GET /runs/{id}`: the order of checks, the typed rejections, the admitted run's event stream (`_RunResponse`, which closes the run whenever its response ends), and the run status that only the app and user that started a run may read |
 | `agent_service.identity` | The two-token check: the workload token bound to one registered app, the user token to one principal |
 | `agent_service.run_request` | The strict read of a `RunRequest` body: strict JSON, then its version, then its shape |
 | `agent_service.config` | The service's TOML: identity, listener, run pacing and limits, subscription profiles, purposes and apps |
 | `agent_service.routing` | `route`: the one H5 decider between the CLI route, the API route and `not_enabled` |
-| `agent_service.run_events` | The mapping of the core's turn events onto the wire frames, ending every run with exactly one terminal; also the run's tool-call and byte budget |
+| `agent_service.run_events` | The mapping of the core's turn events onto the wire frames, ending every run with exactly one terminal, except the cut stream of a dropped client (H6); also the run's tool-call and byte budget |
 | `agent_service.run_liveness` | When frames go out: the heartbeat, the idle timeout and the maximum duration, enforced by a supervisor that does not depend on the client reading, and drops a client that stops taking frames |
 | `agent_service.runners` | The `Runner` port a route's provider plugs into; production installs none yet |
-| `agent_service.run_records` | The in-memory record of each run (owner, instants, events accepted, ending, client lost; never event text): readable by its own app and user up to one hour after the run ended, evicted earlier once 10,000 ended records are held, gone after a restart. Nothing records a run yet: recording arrives with A1a2-2, so every authenticated `GET /runs/{id}` answers `not_found` until then |
+| `agent_service.run_records` | The in-memory record of each run (owner, instants, events accepted, ending, client lost; never event text): readable by its own app and user up to one hour after the run ended, evicted earlier once 10,000 ended records are held, gone after a restart. The record is written as the run's events are accepted and ended when its runner is closed |
 
 It leaves the application everything the library cannot know: the MCP tool set
 and its execution, the prompts, where settings are stored, and domain

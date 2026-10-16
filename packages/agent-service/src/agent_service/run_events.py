@@ -2,13 +2,16 @@
 
 This module owns the mapping from the provider core's turn events
 (``agent_providers.events``) onto the run events of ``agent_client.wire``. A
-run opens with ``run_started`` and ends with exactly one terminal event.
+run opens with ``run_started`` and ends with exactly one terminal event, except
+the cut stream of a dropped client (decision record 0001, H6).
 Nothing reaches the wire that ``encode_event`` cannot write or that the
 service's own ``RunStream`` refuses: the run ends as ``failed:
 provider_error`` instead, before the offending event is sent. The run's
 budget of tool calls and bytes (``RunConfig``) is charged at the same place:
 the event that passes it is not sent and the run ends as ``failed:
-limit_exceeded``. When frames go out, and when a silent or overlong run is
+limit_exceeded``. Each accepted event is also recorded
+(``agent_service.run_records``), and the run is recorded over once its runner is
+closed. When frames go out, and when a silent or overlong run is
 ended, ``run_liveness`` decides.
 
 A tool call's input is deep-copied into its wire event, so the event never
@@ -18,12 +21,12 @@ the app's tool list, where an unlisted tool counts as side-effecting.
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import logging
-from collections.abc import AsyncIterator
-from contextlib import aclosing
+from collections.abc import AsyncGenerator, Iterator
+from contextlib import aclosing, contextmanager
 from typing import Final
-from uuid import UUID
 
 from pydantic import ValidationError
 from pydantic_core import PydanticSerializationError
@@ -33,6 +36,7 @@ from agent_client.sse import EventTooLarge, encode_event
 from agent_client.wire import (
     PROTOCOL_VERSION,
     AssistantText,
+    ClientLoss,
     Failed,
     FailureCode,
     Heartbeat,
@@ -59,6 +63,7 @@ from agent_service.run_liveness import (
     RunnerYielded,
     SupervisedRun,
 )
+from agent_service.run_records import RunRecorder, RunRecords
 from agent_service.runners import AdmittedRun, Runner
 
 log = logging.getLogger(__name__)
@@ -87,29 +92,49 @@ async def run_frames(
     app: AppConfig,
     runs: RunConfig,
     clock: RunClock,
-) -> AsyncIterator[bytes]:
-    wire = _WireRun(admitted.run_id, app, runs)
+    records: RunRecords,
+) -> AsyncGenerator[bytes, None]:
+    wire = _WireRun(admitted, app, runs, records)
     started = wire.started()
     started_at = clock()
     if runner is None:
-        yield started
-        yield wire.failed(FailureCode.PROVIDER_UNAVAILABLE, NO_RUNNER_MESSAGE)
+        failed = wire.failed(FailureCode.PROVIDER_UNAVAILABLE, NO_RUNNER_MESSAGE)
+        wire.run_over()
+        with _client_lost_when_closed(wire):
+            yield started
+            yield failed
         return
     events = runner.run(admitted)
     async with (
         SupervisedRun(admitted.run_id, wire, events, runs, clock, started_at) as supervised,
         aclosing(supervised.frames()) as frames,
     ):
-        yield started
-        async for frame in frames:
-            yield frame
+        with _client_lost_when_closed(wire):
+            yield started
+            async for frame in frames:
+                yield frame
+
+
+@contextmanager
+def _client_lost_when_closed(wire: _WireRun) -> Iterator[None]:
+    """Latch the loss before any cleanup runs, when the response cancels or closes the stream."""
+    try:
+        yield
+    except (asyncio.CancelledError, GeneratorExit):
+        wire.client_lost(ClientLoss.DISCONNECTED)
+        raise
 
 
 class _WireRun:
-    def __init__(self, run_id: UUID, app: AppConfig, runs: RunConfig) -> None:
-        self._run_id = run_id
+    def __init__(
+        self, admitted: AdmittedRun, app: AppConfig, runs: RunConfig, records: RunRecords
+    ) -> None:
+        self._admitted = admitted
+        self._run_id = admitted.run_id
         self._app = app
         self._runs = runs
+        self._records = records
+        self._recorder: RunRecorder | None = None
         self._stream = RunStream()
         self._seq = 0
         self._tool_calls = 0
@@ -125,6 +150,14 @@ class _WireRun:
                 heartbeat_interval_s=self._runs.heartbeat_interval_s,
             )
         )
+
+    def run_over(self) -> None:
+        self._recorder_of_started_run().over(
+            None if self.ended else self._stream.cancellation_terminal()
+        )
+
+    def client_lost(self, loss: ClientLoss) -> None:
+        self._recorder_of_started_run().lost(loss)
 
     def heartbeat(self) -> bytes:
         return self._sent(Heartbeat(v=PROTOCOL_VERSION, run_id=self._run_id, seq=self._seq))
@@ -200,7 +233,20 @@ class _WireRun:
             raise _Unsendable(f"The provider broke the run's stream rules: {violation.kind}.")
         self._seq += 1
         self.ended = isinstance(event, TerminalEvent)
+        self._record(event)
         return frame
+
+    def _record(self, event: RunEvent) -> None:
+        if isinstance(event, RunStarted):
+            self._recorder = self._records.begin(
+                event, self._admitted.app, self._admitted.principal
+            )
+        else:
+            self._recorder_of_started_run().accepted(event)
+
+    def _recorder_of_started_run(self) -> RunRecorder:
+        assert self._recorder is not None
+        return self._recorder
 
     def _charge(self, event: RunEvent, frame_bytes: int) -> None:
         """Count a runner-caused frame against the budget.

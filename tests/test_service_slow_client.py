@@ -11,10 +11,19 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+import uuid
 
 import pytest
-from service_support import QUIET, Drive, GatedRunner, StepClock, driven, in_loop
-from starlette.responses import StreamingResponse
+from service_support import (
+    QUIET,
+    ClientSocket,
+    Drive,
+    GatedRunner,
+    StepClock,
+    driven,
+    in_loop,
+    respond_through_the_app,
+)
 
 from agent_client.run_stream import ViolationKind
 from agent_client.sse import RunStreamDecoder
@@ -29,11 +38,13 @@ ENDINGS_WITH_A_STALL_WINDOW_OF_THEIR_OWN = RunConfig(
 )
 
 
-def _warnings_naming(caplog: pytest.LogCaptureFixture, drive: Drive) -> list[logging.LogRecord]:
+def _warnings_naming(
+    caplog: pytest.LogCaptureFixture, run_id: uuid.UUID
+) -> list[logging.LogRecord]:
     return [
         record
         for record in caplog.records
-        if record.levelno == logging.WARNING and str(drive.run_id) in record.getMessage()
+        if record.levelno == logging.WARNING and str(run_id) in record.getMessage()
     ]
 
 
@@ -84,7 +95,7 @@ async def test_a_dropped_client_gets_the_frame_in_the_slot_and_nothing_queued_af
     assert drive.types == ["run_started", "assistant_text"]
     assert drive.seqs == [0, 1]
     assert drive.end_of_stream() == [ViolationKind.TRUNCATED]
-    assert len(_warnings_naming(caplog, drive)) == 1
+    assert len(_warnings_naming(caplog, drive.run_id)) == 1
 
 
 @pytest.mark.parametrize(
@@ -252,52 +263,24 @@ async def test_the_pump_and_supervisor_are_gone_once_the_dropped_runner_is_close
     drive.assert_nothing_left()
 
 
-class _SendBlockedOnTheSecondChunk:
-    """An ASGI ``send`` that waits on the second body chunk, as uvicorn's drain does."""
-
-    def __init__(self) -> None:
-        self.messages: list[dict] = []
-        self.released = asyncio.Event()
-
-    async def __call__(self, message: dict) -> None:
-        if message["type"] == "http.response.body" and self._bodies() == 1:
-            await self.released.wait()
-        self.messages.append(message)
-
-    def _bodies(self) -> int:
-        return sum(m["type"] == "http.response.body" for m in self.messages)
-
-    @property
-    def body(self) -> bytes:
-        return b"".join(m["body"] for m in self.messages if m["type"] == "http.response.body")
-
-
-async def _never_disconnects() -> dict:
-    await asyncio.Event().wait()
-    raise AssertionError("unreachable")
-
-
 @in_loop
-async def test_a_run_behind_a_blocked_starlette_send_is_dropped_at_the_stall_deadline(caplog):
-    scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.3"}}
-    send = _SendBlockedOnTheSecondChunk()
+async def test_a_run_behind_a_blocked_starlette_send_is_dropped_at_the_stall_deadline(
+    caplog, monkeypatch
+):
+    client = ClientSocket(blocks_the_second_chunk=True)
     async with driven(read=False) as drive:
-        response = asyncio.create_task(
-            StreamingResponse(drive.frames, media_type="text/event-stream")(
-                scope, _never_disconnects, send
-            )
-        )
+        response = await respond_through_the_app(drive, client, monkeypatch)
         await drive.run_to(59)
         assert drive.runner.closes == 0
         await drive.run_to(60)
         assert drive.runner.closes == 1
-        assert len(_warnings_naming(caplog, drive)) == 1
-        send.released.set()
+        assert len(_warnings_naming(caplog, client.run_id)) == 1
+        client.released.set()
         await response
 
-    assert send.messages[-1] == {"type": "http.response.body", "body": b"", "more_body": False}
+    assert client.messages[-1] == {"type": "http.response.body", "body": b"", "more_body": False}
     decoder = RunStreamDecoder()
-    assert [event.type for event in decoder.feed(send.body)] == [
+    assert [event.type for event in decoder.feed(client.body)] == [
         "run_started",
         "heartbeat",
         "heartbeat",

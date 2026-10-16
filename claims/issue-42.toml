@@ -1,8 +1,0 @@
-claim_id = "9a6e18cfc9964985a6844c8c94f7ceb2"
-agent = "Claude fe12493e-3d52-442e-b01b-4ee4336de2f0"
-role = "builder"
-base = "b2ad0879395f8320b32b3336cd7e3ca934cb2247"
-branch = "claude/issue-42-a1a3-nacharbeiten-vor-a1b-kein-runner-sc"
-scope = [".github/workflows/ci.yml", "docs/decisions/0001-agent-service.md", "packages/agent-service/src/agent_service/run_liveness.py", "tests/service_support.py", "tests/test_service_liveness.py", "tests/test_service_slow_client.py"]
-opened_commit = "7f7f29224b2474406231d695af39f1b76fbc8b11"
-whole_reason = "Four small follow-ups on the same supervisor, its test clock and CI land together before A1b."

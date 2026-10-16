@@ -1055,12 +1055,10 @@ def test_claude_surface_probe_keeps_its_home_until_late_runner_confirmation(
 
     monkeypatch.setattr(provider.process, "run_cli_bounded", run_cli_bounded)
 
+    binary = Path("/usr/bin/claude")
+    deadline = time.monotonic() + 1
     with pytest.raises(UnavailableError):
-        provider._probe_cli_surface_sync(
-            Path("/usr/bin/claude"),
-            mcp=None,
-            deadline=time.monotonic() + 1,
-        )
+        provider._probe_cli_surface_sync(binary, mcp=None, deadline=deadline)
 
     home = captured["home"]
     assert isinstance(home, Path)

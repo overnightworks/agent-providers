@@ -60,15 +60,16 @@ def test_terminal_tool_loop_rejection_logs_a_closed_code_without_input(caplog) -
             return None
 
     async def collect() -> None:
+        turn = dispatch._stream_cli_tool_turn(
+            provider="grok",
+            system=marker,
+            messages=[],
+            executor=lambda _name, _arguments: None,
+            transport=EmptyTransport(),
+            correlation_id=None,
+        )
         with pytest.raises(ProviderUnavailableError) as raised:
-            async for _ in dispatch._stream_cli_tool_turn(
-                provider="grok",
-                system=marker,
-                messages=[],
-                executor=lambda _name, _arguments: None,
-                transport=EmptyTransport(),
-                correlation_id=None,
-            ):
+            async for _ in turn:
                 pass
         assert raised.value.reason.code is SafeRouteReasonCode.TOOL_PROTOCOL_ERROR
 

@@ -238,7 +238,7 @@ class GrokCliToolTransport:
         if self._closed:
             return
         self._closed = True
-        self._home.close()
+        await asyncio.to_thread(self._home.close)
 
 
 def _tool_transport_prompt(

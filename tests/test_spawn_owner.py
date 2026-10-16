@@ -137,21 +137,24 @@ def _passes_explicit(call: ast.Call, keyword: str) -> bool:
 
 
 def test_a_child_needs_an_absolute_binary(tmp_path: Path) -> None:
+    environment = closed_environment(tmp_path)
     with pytest.raises(ChildProcessSpecificationError, match="absolute binary"):
         ChildProcess(
             binary=Path("claude"),
             arguments=(),
-            environment=closed_environment(tmp_path),
+            environment=environment,
             working_directory=tmp_path,
         )
 
 
 def test_a_child_needs_an_absolute_working_directory(tmp_path: Path) -> None:
+    environment = closed_environment(tmp_path)
+    binary = Path("/usr/bin/claude")
     with pytest.raises(ChildProcessSpecificationError, match="absolute working directory"):
         ChildProcess(
-            binary=Path("/usr/bin/claude"),
+            binary=binary,
             arguments=(),
-            environment=closed_environment(tmp_path),
+            environment=environment,
             working_directory=Path("work"),
         )
 

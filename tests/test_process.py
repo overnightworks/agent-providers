@@ -2177,3 +2177,31 @@ def test_credential_probe_names_malformed_mounted_credentials(
 
     with pytest.raises(AgentCliUnavailableError, match=detail):
         function()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (None, "not json", "[]", '{"tokens": []}', '{"auth_mode": "chatgpt", "tokens": {}}'),
+    ids=("missing", "not-json", "not-an-object", "tokens-not-an-object", "no-access-token"),
+)
+def test_codex_login_probe_starts_the_child_without_a_login_when_the_file_is_unusable(
+    tmp_path, monkeypatch, payload: str | None,
+) -> None:
+    auth_file = tmp_path / "codex-auth.json"
+    if payload is not None:
+        auth_file.write_text(payload)
+    override_provider_runtime(codex_cli_auth_file=auth_file)
+    monkeypatch.setattr(process, "resolve_cli_binary", lambda _binary: Path(sys.executable))
+    monkeypatch.setattr(
+        process,
+        "CODEX_CLI_STATUS_ARGS",
+        (
+            "-c",
+            "import os, sys; "
+            "sys.stdout.write('Logged in using ChatGPT' "
+            "if os.path.exists(os.path.join(os.environ['CODEX_HOME'], 'auth.json')) "
+            "else 'Not logged in')",
+        ),
+    )
+
+    assert codex_cli_login().logged_in is False

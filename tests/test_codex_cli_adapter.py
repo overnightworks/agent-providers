@@ -43,7 +43,8 @@ from agent_providers.errors import (
 )
 from agent_providers.events import AssistantTextEvent, FinalEvent, ToolCallEvent
 from agent_providers.images import ImagePolicy
-from agent_providers.process import CliRunOutcome, CliRunReason
+from agent_providers import process
+from agent_providers.process import CliRunOutcome, CliRunReason, clear_agent_cli_caches
 from agent_providers.text_tool_protocol import TextToolRejectionRule
 from agent_providers.tool_loop import (
     InitialTurn,
@@ -1316,3 +1317,84 @@ def test_a_codex_event_line_the_cli_cannot_decode_leaves_no_chain_to_its_text(
     assert error.__context__ is None
     assert error.__cause__ is None
     assert "event-line-canary" not in "".join(traceback.format_exception(error))
+
+
+_CANARY_REFRESH_TOKEN = "canary-refresh-token-of-the-operator"
+_OPERATORS_LIVE_LOGIN = {
+    **_REDACTED_CODEX_LOGIN,
+    "tokens": {**_REDACTED_CODEX_LOGIN["tokens"], "refresh_token": _CANARY_REFRESH_TOKEN},
+}
+
+
+def _recording_runner(copies: list[tuple[tuple[str, ...], str]], runner) -> object:
+    def run_cli_bounded(child, **kwargs):
+        login_copy = Path(child.environment["CODEX_HOME"]) / "auth.json"
+        copies.append((child.command, login_copy.read_text()))
+        return runner(child, **kwargs)
+
+    return run_cli_bounded
+
+
+def _probe_runner(stdout: str) -> object:
+    def run_cli_bounded(_child, **_kwargs):
+        return _outcome(stdout=stdout)
+
+    return run_cli_bounded
+
+
+def _drive_the_catalog_probe(monkeypatch, copies) -> None:
+    monkeypatch.setattr(process, "run_cli_bounded", _recording_runner(copies, _probe_runner("[]")))
+    process.codex_cli_model_catalog()
+
+
+def _drive_the_login_probe(monkeypatch, copies) -> None:
+    monkeypatch.setattr(
+        process, "run_cli_bounded", _recording_runner(copies, _probe_runner("Logged in using ChatGPT")),
+    )
+    assert process.codex_cli_login().logged_in is True
+
+
+def _drive_the_tool_turn(monkeypatch, copies) -> None:
+    runner = _runner(_tool_round_lines("done"), _outcome(), [])
+    monkeypatch.setattr(codex_protocol, "run_cli_bounded", _recording_runner(copies, runner))
+    asyncio.run(_collect_tool_events(_codex_tool_events(
+        _transport(), lambda _name, _arguments: ToolOutcome("{}", False),
+    )))
+
+
+def _drive_the_image_turn(monkeypatch, copies) -> None:
+    monkeypatch.setattr(
+        codex_protocol, "run_cli_bounded", _recording_runner(copies, _generated_png_runner()),
+    )
+    codex_image.generate_codex_image("prompt", policy=A_COVER_POLICY, deadline=10_000_000)
+
+
+@pytest.mark.parametrize(
+    "drive",
+    (
+        _drive_the_catalog_probe,
+        _drive_the_login_probe,
+        _drive_the_tool_turn,
+        _drive_the_image_turn,
+    ),
+    ids=("catalog", "login-status", "tool-turn", "image-turn"),
+)
+def test_no_codex_child_is_handed_the_operators_live_refresh_token(
+    monkeypatch, caplog, codex_login_mirror: Path, drive,
+) -> None:
+    codex_login_mirror.write_text(json.dumps(_OPERATORS_LIVE_LOGIN))
+    operators_file = codex_login_mirror.read_bytes()
+    monkeypatch.setattr(process, "resolve_cli_binary", lambda _binary: Path("/usr/bin/codex"))
+    clear_agent_cli_caches()
+    caplog.set_level(logging.DEBUG)
+    copies: list[tuple[tuple[str, ...], str]] = []
+
+    drive(monkeypatch, copies)
+
+    (command, child_login), = copies
+    assert json.loads(child_login)["tokens"]["refresh_token"] == ""
+    assert json.loads(child_login)["tokens"]["access_token"] == "access-token"
+    assert codex_login_mirror.read_bytes() == operators_file
+    assert _CANARY_REFRESH_TOKEN not in child_login
+    assert not any(_CANARY_REFRESH_TOKEN in argument for argument in command)
+    assert _CANARY_REFRESH_TOKEN not in formatted_log_text(caplog.records)

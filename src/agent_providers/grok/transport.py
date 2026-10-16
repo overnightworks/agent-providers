@@ -63,8 +63,7 @@ from agent_providers.tools import ToolCatalog
 
 _AUTH_FAILURE_MARKERS: Final = ("401", "oidc", "unauthenticated")
 # "usage" is dropped with the rest: this transport reports no token deltas
-# yet. Surfacing them as a `UsageEvent` is named follow-up work
-# (planner gap 7, atelier-2 port requirement 7) and starts here.
+# yet; surfacing them as a `UsageEvent` would start here.
 _IGNORED_EVENT_TYPES: Final = frozenset({"thought", "usage", "available_commands", "plan"})
 _PROMPT_FILE_ARGUMENT_INDEX: Final = 1
 # Grok owns this larger bound because a 600-second streamed turn can include

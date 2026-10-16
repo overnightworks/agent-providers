@@ -78,7 +78,7 @@ def run_body(**overrides: object) -> dict[str, Any]:
     }
 
 
-SETTLE_TURNS: Final = 20
+SETTLE_TURN_LIMIT: Final = 10_000
 
 
 class StepClock:
@@ -117,10 +117,17 @@ class StepClock:
             self._waiters.remove(parked)
 
     async def parked(self) -> float | None:
-        """The deadline the run waits for next once everything else has settled."""
-        for _ in range(SETTLE_TURNS):
+        """The deadline the run waits for next, once no other task can run.
+
+        An empty ready queue means every other task waits on a future, a
+        parked deadline included. A run that never gets there fails loudly.
+        """
+        loop = asyncio.get_running_loop()
+        for _ in range(SETTLE_TURN_LIMIT):
             await asyncio.sleep(0)
-        return min((deadline for deadline, _ in self._waiters), default=None)
+            if not loop._ready:  # type: ignore[attr-defined]
+                return min((deadline for deadline, _ in self._waiters), default=None)
+        raise AssertionError("the run never settled")
 
 
 class TokenMint:

@@ -232,6 +232,21 @@ async def test_the_announced_cadence_is_the_configured_cadence():
 
 
 @in_loop
+async def test_the_stepped_clock_reports_a_deadline_however_many_turns_the_waiter_needs():
+    clock = StepClock()
+
+    async def waiter_that_takes_a_while() -> None:
+        for _ in range(500):
+            await asyncio.sleep(0)
+        await clock.wait_until(7)
+
+    waiting = asyncio.create_task(waiter_that_takes_a_while())
+    assert await clock.parked() == 7
+    clock.advance_to(7)
+    await waiting
+
+
+@in_loop
 async def test_the_deadlines_count_from_run_started_however_late_the_client_asks_for_more():
     async with driven(read=False) as drive:
         drive.took(await anext(drive.frames))

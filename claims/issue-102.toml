@@ -1,0 +1,8 @@
+claim_id = "90486ea3ceb14f448b3b13913c7f8411"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "3138523dad183d013b55dcdff370abe5e3b85a76"
+branch = "claude/issue-102-runner-contract"
+scope = ["README.md", "src/agent_providers/claude/provider.py", "src/agent_providers/process.py", "tests/provider_test_support.py", "tests/test_claude_provider.py", "tests/test_codex_cli_adapter.py", "tests/test_grok_cli_adapter.py", "tests/test_process.py"]
+opened_commit = "89ea5ea498f19158b2f143d0b899d1fb5178fcdc"
+whole_reason = "The terminal channel, the one settle instant and the contained steps are one runner contract: a first-wins channel without a settle on every return still lets the return disagree with the channel, and a settle instant without contained steps still leaves a raising step unpublished; the Claude probe and tool-turn cells prove that contract at its three callers."

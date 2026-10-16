@@ -294,9 +294,16 @@ class SupervisedRun:
     def _limit_exceeded(self) -> bytes:
         return self._wire.failed(FailureCode.LIMIT_EXCEEDED, LIMIT_EXCEEDED_MESSAGE)
 
+    @property
+    def _deadlines(self) -> Deadlines:
+        return Deadlines(self._heartbeat_due, self._maximum_due, self._idle_due)
+
+    def _maximum_reached(self) -> bool:
+        return decide(self._clock(), False, self._deadlines) is Action.LIMIT
+
     async def _next_action(self) -> Action:
         while True:
-            deadlines = Deadlines(self._heartbeat_due, self._maximum_due, self._idle_due)
+            deadlines = self._deadlines
             action = decide(self._clock(), self._outcome_ready.is_set(), deadlines)
             if action is not Action.WAIT:
                 return action
@@ -335,7 +342,7 @@ class SupervisedRun:
     async def _deliver(self, frame: bytes) -> bool:
         """Queue a frame once the client has taken the last one; False if the maximum came first."""
         while not self._slot.vacant:
-            if self._clock() >= self._maximum_due:
+            if self._maximum_reached():
                 await self._end(self._limit_exceeded(), pending=frame)
                 return False
             await self._wait_for(self._slot.wait_vacant(), self._maximum_due)

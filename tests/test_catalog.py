@@ -12,22 +12,22 @@ from pathlib import Path
 
 import httpx
 import pytest
-from pydantic import SecretStr
 from provider_test_support import (
     CLAUDE_MODEL_CATALOG_STDOUT,
     GROK_LOGGED_IN,
     fake_cli_executable,
     override_provider_runtime,
 )
+from pydantic import SecretStr
 
 from agent_providers.catalog import (
     ProviderReady,
-    ProviderSetupMethod,
-    provider_configuration,
     ProviderRoute,
     ProviderRouteReadinessState,
+    ProviderSetupMethod,
     list_provider_models,
     probe_provider_route,
+    provider_configuration,
 )
 from agent_providers.constants import ProviderName
 from agent_providers.errors import (

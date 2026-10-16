@@ -17,7 +17,6 @@ import sys
 import tempfile
 import threading
 import time
-import traceback
 import weakref
 from collections import deque
 from collections.abc import Callable, Iterator
@@ -25,6 +24,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from types import TracebackType
 from typing import Any, Final, Literal, NotRequired, Required, TypedDict, Unpack
 
 from agent_providers.codex_login import CodexLoginVerdict, assess_codex_login
@@ -1337,19 +1337,32 @@ def _run_without_credential_remains[T](step: Callable[[], T]) -> T:
     failure, cuts the links the step created off, and lets the same exception
     continue as if raised here, still chained to what the caller
     was handling. A refusal that deliberately carries no context keeps none, and
-    the caller's own exception passes through untouched.
+    the caller's own exception, re-raised by the step, keeps the frames it
+    already had and is not chained to itself.
     """
     handled_by_the_caller = sys.exception()
+    callers_traceback = (
+        handled_by_the_caller.__traceback__ if handled_by_the_caller is not None else None
+    )
     try:
         return step()
     except BaseException as failure:
-        if failure is handled_by_the_caller:
-            raise
-        traceback.clear_frames(failure.__traceback__.tb_next)
-        failure.__cause__ = None
-        if failure.__context__ is not None:
-            failure.__context__ = handled_by_the_caller
+        _clear_frames_until(failure.__traceback__.tb_next, callers_traceback)
+        if failure is not handled_by_the_caller:
+            failure.__cause__ = None
+            if failure.__context__ is not None:
+                failure.__context__ = handled_by_the_caller
         raise
+
+
+def _clear_frames_until(entry: TracebackType | None, stop: TracebackType | None) -> None:
+    """Clear the frame of each traceback entry from ``entry`` up to, not including, ``stop``."""
+    while entry is not None and entry is not stop:
+        try:
+            entry.tb_frame.clear()
+        except RuntimeError:
+            pass
+        entry = entry.tb_next
 
 
 def _read_credential_file(path: Path) -> bytes | None:

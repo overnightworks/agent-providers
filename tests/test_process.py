@@ -14,6 +14,8 @@ import sys
 import tempfile
 import threading
 import time
+import types
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
@@ -2693,32 +2695,74 @@ def test_a_memory_error_inside_the_malformed_handler_holds_no_credential_bytes(
     assert len(os.listdir("/proc/self/fd")) == open_descriptors
 
 
+def _enter_a_private_home_copying_with(credential_copy) -> None:
+    PrivateCredentialHome(
+        current_config().codex_cli_auth_file,
+        Path(".codex/auth.json"),
+        prefix="private-home-",
+        missing_credential_is_error=True,
+        credential_copy=credential_copy,
+    )
+
+
+def _bare_re_raise(source_document: bytes) -> bytes:
+    raise
+
+
+def _re_raise_the_handled_exception(source_document: bytes) -> bytes:
+    raise sys.exception()
+
+
+def _traceback_entries(error: BaseException) -> Iterator[types.TracebackType]:
+    entry = error.__traceback__
+    while entry is not None:
+        yield entry
+        entry = entry.tb_next
+
+
 @pytest.mark.usefixtures("a_stored_codex_login")
-def test_a_credential_copy_that_re_raises_the_callers_exception_leaves_it_untouched(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    "credential_copy", (_bare_re_raise, _re_raise_the_handled_exception),
+    ids=("bare-raise", "raise-sys-exception"),
+)
+def test_a_re_raising_credential_copy_keeps_the_callers_frames_and_drops_the_credential(
+    credential_copy,
 ) -> None:
-    def copy_that_re_raises(source_document: bytes) -> bytes:
-        raise
-
-    auth_file = current_config().codex_cli_auth_file
-    destination = Path(".codex/auth.json")
-
     def enter_with_the_re_raising_copy(handled: BaseException):
         with pytest.raises(RuntimeError) as raised:
-            PrivateCredentialHome(
-                auth_file,
-                destination,
-                prefix="private-home-",
-                missing_credential_is_error=True,
-                credential_copy=copy_that_re_raises,
-            )
+            _enter_a_private_home_copying_with(credential_copy)
         return raised.value, handled
 
     propagated, handled = _drive_in_the_caller(True, enter_with_the_re_raising_copy)
 
     assert propagated is handled
     assert propagated.__context__ is None
-    callers_traceback = propagated.__traceback__
-    while callers_traceback.tb_next is not None:
-        callers_traceback = callers_traceback.tb_next
+    _assert_no_link_holds_the_credential(propagated)
+    assert all("payload" not in entry.tb_frame.f_locals for entry in _traceback_entries(propagated))
+    callers_traceback = list(_traceback_entries(propagated))[-1]
     assert callers_traceback.tb_frame.f_locals == {"callers_own_state": "intact"}
+
+
+@pytest.mark.usefixtures("a_stored_codex_login")
+def test_a_credential_copy_failure_chained_from_a_decoder_error_drops_the_cause() -> None:
+    def copy_failing_from_a_decoder_error(source_document: bytes) -> bytes:
+        try:
+            json.loads(b"{" + source_document)
+        except ValueError as error:
+            raise RuntimeError("copy failed") from error
+        return source_document
+
+    gc.collect()
+    gc.disable()
+    try:
+        with pytest.raises(RuntimeError) as raised:
+            _enter_a_private_home_copying_with(copy_failing_from_a_decoder_error)
+        decoder_errors_left = [
+            item for item in gc.get_objects() if isinstance(item, json.JSONDecodeError)
+        ]
+    finally:
+        gc.enable()
+
+    assert raised.value.__cause__ is None
+    _assert_no_link_holds_the_credential(raised.value)
+    assert not decoder_errors_left

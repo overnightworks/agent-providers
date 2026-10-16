@@ -1,0 +1,8 @@
+claim_id = "821217fd0eb74a12a65950bda3315fdf"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "66b4e42873626e2279160900e7c89927f4f56d59"
+branch = "claude/issue-77-codex-image-gate-v01x"
+scope = [".github/workflows/release.yml", "README.md", "pyproject.toml", "src/agent_providers/__init__.py", "src/agent_providers/codex/image.py", "tests/fixtures/codex-imagegen-0.163.0-events.jsonl", "tests/test_codex_cli_adapter.py", "uv.lock"]
+opened_commit = "5b505814fcb7216848a0a47b145fe9ed41e0e077"
+whole_reason = "A hand-port of one landed fix onto the v0.1.x maintenance line with its version bump and release hardening; the files only make sense released together as v0.1.3."

@@ -38,6 +38,9 @@ class EmptyTokenType(ValueError):
     """A token must say what it is for; an empty ``typ`` would silently drop the header."""
 
 
+UNSHOWABLE_PATH = "contains a control or non-printing character; a path must not"
+
+
 def shown_path(path: str) -> str:
     """The path with control and non-printing characters escaped, so a message stays one line."""
     return "".join(map(_shown_character, path))
@@ -94,6 +97,8 @@ class SigningKey:
 def load_signing_key(path: Path) -> SigningKey:
     """Reads the file through one descriptor and raises ``UnsoundSigningKey`` for any refusal."""
     shown = shown_path(str(path))
+    if shown != str(path):
+        raise UnsoundSigningKey(f"{shown} {UNSHOWABLE_PATH}")
     try:
         return SigningKey.from_private_key(_parsed_private_key(_read_key_file(path)))
     except OSError as error:

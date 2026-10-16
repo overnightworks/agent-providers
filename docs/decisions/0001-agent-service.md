@@ -298,7 +298,7 @@ fetched key set for an hour. The holder of a compromised private key can mint ne
 tokens, so waiting until issued capabilities expire is not recovery. No previous
 private signing key is kept. This item keeps and publishes no previous public
 verification key; whether 24-hour tickets or a published key set need one after a
-planned rotation is decided by A1a5 and A1m (O2 (b)), and it never applies after a
+planned rotation is decided by A1a5 and A1m; such a grace period never applies after a
 compromise.
 
 **Decisions.**
@@ -319,7 +319,8 @@ compromise.
 **Items.**
 
 1. **Where the key comes from.** `[signing]` is optional and holds exactly one
-   member, `key_file`, an absolute path (`~` is not expanded). The key is read and
+   member, `key_file`, an absolute path (`~` is not expanded) without control or non-printing
+   characters. The key is read and
    checked once, at startup. The service never creates, writes, re-reads or reloads
    a key file; a missing file is a refusal, never a generated key.
 2. **What file is accepted.** The file is opened once with

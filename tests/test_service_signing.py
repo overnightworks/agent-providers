@@ -130,6 +130,11 @@ ABSOLUTE_PATH_REASON = "must be an absolute path to the signing key file; ~ is n
 NOT_REGULAR = "is not a regular file"
 NOT_A_PEM_KEY = "is not an unencrypted PEM private key"
 UNSHOWABLE = "contains a control or non-printing character; a path must not"
+CONTROL_PATHS_AS_SHOWN = {
+    "/virtual/line\nbreak.pem": "/virtual/line\\nbreak.pem",
+    "/virtual/nul\x00byte.pem": "/virtual/nul\\x00byte.pem",
+    "/virtual/escape\x1b[0m.pem": "/virtual/escape\\x1b[0m.pem",
+}
 BOUND_FOR_A_REFUSAL_SECONDS = 10
 
 
@@ -231,7 +236,7 @@ def test_an_unsound_key_file_stops_startup_with_one_line_naming_its_path_and_no_
 ):
     key_file = arrange(tmp_path)
     config_file = _written(tmp_path, _config_text(key_file))
-    shown_key_file = key_file.encode("unicode_escape").decode("ascii")
+    shown_key_file = CONTROL_PATHS_AS_SHOWN.get(key_file, key_file)
 
     exit_status = _main_within_bound(["--config", str(config_file)])
 
@@ -240,6 +245,14 @@ def test_an_unsound_key_file_stops_startup_with_one_line_naming_its_path_and_no_
         f"agent-service: refusing to start: {config_file}: signing.key_file: "
         f"{shown_key_file} {reason}\n"
     )
+
+
+@pytest.mark.parametrize(("path", "shown"), CONTROL_PATHS_AS_SHOWN.items())
+def test_loading_a_path_with_a_control_character_is_refused_naming_it_escaped(path, shown):
+    with pytest.raises(UnsoundSigningKey) as refusal:
+        load_signing_key(Path(path))
+
+    assert str(refusal.value) == f"{shown} {UNSHOWABLE}"
 
 
 def test_a_missing_key_file_is_not_created_by_the_service(tmp_path):

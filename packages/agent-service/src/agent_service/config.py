@@ -76,12 +76,10 @@ def _signing_key_in_file(key_file: object) -> SigningKey:
     """Loads the key the absolute path names; a refusal stops startup as a field error."""
     if not isinstance(key_file, str):
         raise ValueError("must be an absolute path to the signing key file; ~ is not expanded")
-    shown = shown_path(key_file)
-    if shown != key_file:
-        raise ValueError(f"{shown} contains a control or non-printing character; a path must not")
     if not Path(key_file).is_absolute():
         raise ValueError(
-            f"{shown} must be an absolute path to the signing key file; ~ is not expanded"
+            f"{shown_path(key_file)} must be an absolute path to the signing key file;"
+            " ~ is not expanded"
         )
     return load_signing_key(Path(key_file))
 

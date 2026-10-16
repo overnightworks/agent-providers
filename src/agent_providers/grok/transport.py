@@ -166,7 +166,7 @@ class GrokCliToolTransport:
             child = self._child_for(arguments)
             home_reservation = self._home.reserve()
         except BaseException:
-            self._home.close()
+            self._home.close_preserving_error()
             raise
         runner = asyncio.create_task(asyncio.to_thread(
             run_cli_bounded,

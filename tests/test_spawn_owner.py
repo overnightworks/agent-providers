@@ -1,17 +1,17 @@
 """Every child process in this library is created by one owner.
 
-The rule is checked at *call* level, not as an import contract. An import
-contract cannot see it: ``Popen(argv, env=None)`` inherits the whole host
-environment without naming ``os.environ`` once, and ``subprocess`` is a
-standard-library module every layer is free to import for its exception
-types. ``.importlinter`` therefore cannot express this, and neither can a
-grep for ``os.environ``.
+The rule is an import-and-name policy, not an import contract and not a call
+analysis. An import contract cannot see it: ``Popen(argv, env=None)`` inherits
+the whole host environment without naming ``os.environ`` once. A call analysis
+would have to rebuild Python's scoping. The policy needs neither: outside
+:mod:`agent_providers.spawn` nothing imports ``subprocess``, ``pty`` or
+``multiprocessing`` in any form or scope, nothing imports a spawn name from
+``os`` or ``asyncio``, and nothing reads a spawn name as an attribute. So every
+child is described by a :class:`ChildProcess` first, and that value refuses a
+relative binary, a missing working directory and an unset ``HOME``.
 
-What the call site does show is *who spawns*. If the only source line that
-reaches a spawn primitive lives in :mod:`agent_providers.spawn`, then every
-child in this library is described by a :class:`ChildProcess` first — and
-that value refuses a relative binary, a missing working directory and an
-unset ``HOME`` at construction, whatever the caller forgot.
+Accepted limit: dynamic indirection (``getattr``, ``importlib``,
+``__import__``) and a function-level alias of ``os`` are out of scope.
 """
 
 from __future__ import annotations
@@ -42,114 +42,71 @@ SOURCE_ROOTS = (
 )
 SPAWN_OWNER = Path(spawn.__file__)
 
-# Every way this interpreter can turn a command line into a running child,
-# named by the module that defines it.
-SPAWN_PRIMITIVES = frozenset(
-    {
-        "subprocess.Popen",
-        "subprocess.run",
-        "subprocess.call",
-        "subprocess.check_call",
-        "subprocess.check_output",
-        "subprocess.getoutput",
-        "subprocess.getstatusoutput",
-        "asyncio.create_subprocess_exec",
-        "asyncio.create_subprocess_shell",
-        "asyncio.subprocess.create_subprocess_exec",
-        "asyncio.subprocess.create_subprocess_shell",
-        "os.system",
-        "os.popen",
-        "os.fork",
-        "os.forkpty",
-        "pty.spawn",
-        "pty.fork",
-        "multiprocessing.Process",
-        "multiprocessing.Pool",
-    }
-)
-SPAWN_PRIMITIVE_PREFIXES = ("os.exec", "os.spawn", "os.posix_spawn")
-EVENT_LOOP_SPAWN_METHODS = frozenset({"subprocess_exec", "subprocess_shell"})
+SPAWNING_MODULES = frozenset({"subprocess", "pty", "multiprocessing"})
+SPAWNING_ASYNCIO_NAMES = frozenset({"create_subprocess_exec", "create_subprocess_shell"})
+SPAWNING_ATTRIBUTES = SPAWNING_ASYNCIO_NAMES | {"subprocess_exec", "subprocess_shell"}
+SPAWNING_OS_PREFIXES = ("exec", "spawn", "posix_spawn")
+SPAWNING_OS_NAMES = frozenset({"fork", "forkpty", "system", "popen"})
 
 
-_SCOPE_NODES = (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+def _is_spawning_os_name(name: str) -> bool:
+    return name in SPAWNING_OS_NAMES or name.startswith(SPAWNING_OS_PREFIXES)
 
 
-def _own_imports(scope: ast.AST) -> dict[str, str]:
-    """The qualified name each import in this scope, not its nested scopes, binds."""
-    bindings: dict[str, str] = {}
-    pending = list(reversed(list(ast.iter_child_nodes(scope))))
-    while pending:
-        node = pending.pop()
+def _module_level_os_names(tree: ast.Module) -> set[str]:
+    return {
+        alias.asname or alias.name
+        for node in tree.body
+        if isinstance(node, ast.Import)
+        for alias in node.names
+        if alias.name == "os"
+    } | {"os"}
+
+
+def _spawn_policy_violations(tree: ast.Module) -> list[str]:
+    """What in one module breaks the spawn policy, each as ``line: what``."""
+    os_names = _module_level_os_names(tree)
+    violations: list[str] = []
+    for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            for alias in node.names:
-                bound = alias.asname or alias.name.split(".")[0]
-                bindings[bound] = alias.name if alias.asname else bound
-        elif isinstance(node, ast.ImportFrom) and node.module is not None:
-            for alias in node.names:
-                bindings[alias.asname or alias.name] = f"{node.module}.{alias.name}"
-        if not isinstance(node, _SCOPE_NODES):
-            pending.extend(reversed(list(ast.iter_child_nodes(node))))
-    return bindings
-
-
-def _qualified_callee(callee: ast.expr, scopes: list[dict[str, str]]) -> str | None:
-    """Resolve ``alias.attr.attr`` through the innermost scope that binds the alias."""
-    attributes: list[str] = []
-    while isinstance(callee, ast.Attribute):
-        attributes.append(callee.attr)
-        callee = callee.value
-    if not isinstance(callee, ast.Name):
-        return None
-    bindings = next((scope for scope in reversed(scopes) if callee.id in scope), None)
-    if bindings is None:
-        return None
-    return ".".join([bindings[callee.id], *reversed(attributes)])
-
-
-def _is_spawn_primitive(qualified_name: str) -> bool:
-    return qualified_name in SPAWN_PRIMITIVES or qualified_name.startswith(
-        SPAWN_PRIMITIVE_PREFIXES,
-    )
-
-
-def _spawn_calls(tree: ast.Module) -> list[tuple[str, ast.Call]]:
-    """Every call in one module that reaches a process-creation primitive.
-
-    The owner module is the one place where the rule still has to hold, so a
-    bare ``Popen(command)`` there must not read as anything else.
-    """
-    calls: list[tuple[str, ast.Call]] = []
-
-    def visit(node: ast.AST, scopes: list[dict[str, str]]) -> None:
-        if isinstance(node, _SCOPE_NODES):
-            scopes = [*scopes, _own_imports(node)]
-        if isinstance(node, ast.Call):
-            qualified = _qualified_callee(node.func, scopes)
-            if qualified is not None and _is_spawn_primitive(qualified):
-                calls.append((qualified, node))
+            violations += [
+                f"{node.lineno}: import {alias.name}"
+                for alias in node.names
+                if alias.name.split(".")[0] in SPAWNING_MODULES
+            ]
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            violations += [
+                f"{node.lineno}: from {node.module} import {alias.name}"
+                for alias in node.names
+                if node.module.split(".")[0] in SPAWNING_MODULES
+                or (node.module == "os" and _is_spawning_os_name(alias.name))
+                or (node.module == "asyncio" and alias.name in SPAWNING_ASYNCIO_NAMES)
+            ]
+        elif isinstance(node, ast.Attribute):
+            if node.attr in SPAWNING_ATTRIBUTES:
+                violations.append(f"{node.lineno}: .{node.attr}")
             elif (
-                isinstance(node.func, ast.Attribute)
-                and node.func.attr in EVENT_LOOP_SPAWN_METHODS
+                isinstance(node.value, ast.Name)
+                and node.value.id in os_names
+                and _is_spawning_os_name(node.attr)
             ):
-                calls.append((node.func.attr, node))
-        for child in ast.iter_child_nodes(node):
-            visit(child, scopes)
-
-    visit(tree, [])
-    return calls
+                violations.append(f"{node.lineno}: os.{node.attr}")
+    return violations
 
 
 def test_only_the_spawn_owner_creates_a_child_process() -> None:
     trespassers = [
-        f"{module.relative_to(REPOSITORY_ROOT)}:{call.lineno} calls {name}"
+        f"{module.relative_to(REPOSITORY_ROOT)}:{violation}"
         for source_root in SOURCE_ROOTS
         for module in sorted(source_root.rglob("*.py"))
         if module != SPAWN_OWNER
-        for name, call in _spawn_calls(ast.parse(module.read_text(encoding="utf-8")))
+        for violation in _spawn_policy_violations(
+            ast.parse(module.read_text(encoding="utf-8")),
+        )
     ]
     assert trespassers == [], (
-        "These call sites start a child outside agent_providers.spawn, so nothing "
-        f"makes them describe a complete environment: {trespassers}"
+        "These sites reach a process-creation primitive outside agent_providers.spawn, "
+        f"so nothing makes them describe a complete environment: {trespassers}"
     )
 
 
@@ -160,45 +117,80 @@ def test_the_call_site_check_scans_the_client_and_the_service() -> None:
 
 
 @pytest.mark.parametrize(
-    ("source", "spawned"),
+    "source",
     [
-        ("import subprocess as sp\nsp.run(['x'])", "subprocess.run"),
-        ("from os import execv as replace_process\nreplace_process('x', [])", "os.execv"),
-        (
-            "import asyncio as aio\naio.create_subprocess_exec('x')",
-            "asyncio.create_subprocess_exec",
-        ),
-        ("from multiprocessing import Process as Worker\nWorker()", "multiprocessing.Process"),
-        ("import pty\npty.spawn(['x'])", "pty.spawn"),
-        ("import os\nos.posix_spawn('x', [], {})", "os.posix_spawn"),
-        (
-            "import subprocess as sp\n"
-            "def child():\n    sp.Popen(['x'])\n"
-            "def server():\n    import uvicorn as sp\n    sp.run(app)\n",
-            "subprocess.Popen",
-        ),
+        "import subprocess",
+        "import subprocess as sp",
+        "import subprocess.extra",
+        "from subprocess import Popen",
+        "from subprocess import TimeoutExpired as Expired",
+        "import pty",
+        "from pty import spawn",
+        "import multiprocessing",
+        "from multiprocessing.pool import Pool",
+        "def helper():\n    import subprocess",
+        "class Holder:\n    from subprocess import run",
+        "async def helper():\n    from multiprocessing import Process",
+        "from os import execv",
+        "from os import fork as split",
+        "from os import posix_spawnp",
+        "from asyncio import create_subprocess_exec",
+        "from asyncio import create_subprocess_shell as shell",
+        "import asyncio\nasyncio.create_subprocess_exec('x')",
+        "import asyncio as aio\naio.subprocess.create_subprocess_shell('x')",
+        "loop.subprocess_exec(factory, 'x')",
+        "loop.subprocess_shell(factory, 'x')",
+        "import os\nos.system('x')",
+        "import os\nos.popen('x')",
+        "import os\nos.fork()",
+        "import os\nos.forkpty()",
+        "import os\nos.execvp('x', [])",
+        "import os\nos.spawnl(0, 'x')",
+        "import os\nos.posix_spawn('x', [], {})",
+        "import os as operating\noperating.system('x')",
+        "def helper():\n    import os\n    os.fork()",
     ],
 )
-def test_the_call_site_check_finds_a_spawn_under_any_import_alias(
-    source: str, spawned: str,
-) -> None:
-    assert [name for name, _ in _spawn_calls(ast.parse(source))] == [spawned]
+def test_the_spawn_policy_flags_every_way_to_reach_a_process_primitive(source: str) -> None:
+    assert _spawn_policy_violations(ast.parse(source)) != []
 
 
-def test_the_call_site_check_ignores_run_calls_that_start_no_child() -> None:
-    source = "import uvicorn\nuvicorn.run(app)\nrunner.run()\n"
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import uvicorn\nuvicorn.run(app)",
+        "runner.run()",
+        "import platform\nplatform.system()",
+        "import asyncio\ndef f(p: asyncio.subprocess.Process) -> None: ...",
+        "import asyncio\nasyncio.run(main())",
+        "import os\nos.getpid()\nos.environ",
+        "from os import getpid",
+        "from agent_providers.spawn import PipedProcess",
+    ],
+)
+def test_the_spawn_policy_accepts_code_that_starts_no_child(source: str) -> None:
+    assert _spawn_policy_violations(ast.parse(source)) == []
 
-    assert _spawn_calls(ast.parse(source)) == []
+
+OWNER_SPAWN_CALLS = frozenset({"Popen", "run", "create_subprocess_exec"})
 
 
 def test_the_spawn_owner_hands_every_primitive_an_explicit_environment() -> None:
     """No spawn in the owner may fall back to the inherited environment."""
     tree = ast.parse(SPAWN_OWNER.read_text(encoding="utf-8"))
+    spawns = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in OWNER_SPAWN_CALLS
+    ]
     incomplete = [
-        f"{name} at line {call.lineno}"
-        for name, call in _spawn_calls(tree)
+        f"{call.func.attr} at line {call.lineno}"
+        for call in spawns
         if not _passes_explicit(call, "env") or not _passes_explicit(call, "cwd")
     ]
+    assert spawns
     assert incomplete == [], f"These spawns leave env or cwd to the host process: {incomplete}"
 
 

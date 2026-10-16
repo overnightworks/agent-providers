@@ -1194,6 +1194,28 @@ def test_private_credential_home_surfaces_a_failed_removal_and_retries_it(
     assert not home.path.exists()
 
 
+def test_private_credential_home_stays_open_when_only_a_descendant_vanished(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = _credential_home(tmp_path)
+    remove_tree = process.shutil.rmtree
+
+    def descendant_vanishes(_path) -> None:
+        raise FileNotFoundError(2, "gone", "descendant")
+
+    monkeypatch.setattr(process.shutil, "rmtree", descendant_vanishes)
+
+    with pytest.raises(PrivateCredentialHomeRemovalError):
+        home.close()
+
+    assert home.path.exists()
+
+    monkeypatch.setattr(process.shutil, "rmtree", remove_tree)
+    home.close()
+
+    assert not home.path.exists()
+
+
 def test_private_credential_home_removes_a_failed_setup(tmp_path: Path) -> None:
     with pytest.raises(AgentCliUnavailableError, match="configured CLI credential is missing"):
         PrivateCredentialHome(
@@ -1286,6 +1308,55 @@ def test_private_credential_home_is_removed_when_its_process_ends_with_cleanup_p
     )
 
     assert not Path(completed.stdout.strip()).exists()
+
+
+_FORKED_HOME_SCRIPT = """
+import os
+import sys
+from pathlib import Path
+
+from agent_providers.config import ProviderRuntimeConfig, configure
+from agent_providers.process import PrivateCredentialHome
+
+configure(ProviderRuntimeConfig.model_validate_json(sys.argv[1]))
+home = PrivateCredentialHome(
+    Path(sys.argv[2]),
+    Path(".claude/.credentials.json"),
+    prefix="private-home-",
+    missing_credential_is_error=True,
+)
+reservation = home.reserve()
+child = os.fork()
+if child == 0:
+    sys.exit(0)
+os.waitpid(child, 0)
+print(home.path.exists())
+reservation.release()
+home.close()
+print(home.path.exists())
+"""
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="needs os.fork")
+def test_private_credential_home_survives_the_exit_of_a_forked_child(tmp_path: Path) -> None:
+    source = tmp_path / "source.json"
+    source.write_text(_CATALOG_AUTH_PAYLOAD)
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _FORKED_HOME_SCRIPT,
+            current_config().model_dump_json(),
+            str(source),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=60,
+    )
+
+    assert completed.stdout.split() == ["True", "False"]
 
 
 @pytest.mark.parametrize(("credential_home_variable", "auth_field"), _CATALOG_PROVIDERS)

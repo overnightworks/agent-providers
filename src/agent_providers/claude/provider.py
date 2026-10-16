@@ -17,7 +17,6 @@ import json
 import logging
 import os
 import signal
-import subprocess
 import tempfile
 import threading
 import time
@@ -59,6 +58,7 @@ from agent_providers.process import (
 )
 from agent_providers.spawn import (
     ChildProcess,
+    PipedProcessTimeout,
     closed_environment,
     open_async_pipes,
     run_capturing,
@@ -1514,7 +1514,7 @@ def _probe_cli_surface_sync(
     reservation = _reserve_zombie_admission()
     if reservation is None:
         home_reservation.release()
-        home.close()
+        home.close_preserving_error()
         raise _ClaudeCliProcessPoolSaturated(_claude_cli_process_pool_limit_message())
 
     released = False
@@ -1939,14 +1939,14 @@ def _call_cli(
         child = _claude_child_process(binary, _cli_arguments(model), home.path)
         home_reservation = home.reserve()
     except BaseException:
-        home.close()
+        home.close_preserving_error()
         raise
 
     reservation = _reserve_zombie_admission()
     if reservation is None:
         if home_reservation is not None:
             home_reservation.release()
-        home.close()
+        home.close_preserving_error()
         raise _ClaudeCliProcessPoolSaturated(_claude_cli_process_pool_limit_message())
     try:
         try:
@@ -1959,7 +1959,7 @@ def _call_cli(
                     else CLAUDE_CLI_COMPLETION_TIMEOUT_SECONDS
                 ),
             )
-        except subprocess.TimeoutExpired as exc:
+        except PipedProcessTimeout as exc:
             if deadline is not None:
                 raise UnavailableError(JUDGE_FAILURE_TIMEOUT) from exc
             raise UnavailableError(

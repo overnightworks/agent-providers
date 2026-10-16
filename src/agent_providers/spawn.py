@@ -59,6 +59,9 @@ INHERITED_MACHINE_VARIABLES: Final[tuple[str, ...]] = (
 
 StderrPolicy = Literal["capture", "devnull"]
 
+PipedProcess = subprocess.Popen
+PipedProcessTimeout = subprocess.TimeoutExpired
+
 
 class ChildProcessSpecificationError(ValueError):
     """A child was described without an absolute binary, a cwd, or a HOME."""

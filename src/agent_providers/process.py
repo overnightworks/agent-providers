@@ -9,7 +9,6 @@ import os
 import selectors
 import shutil
 import signal
-import subprocess
 import tempfile
 import threading
 import time
@@ -43,6 +42,8 @@ from agent_providers.constants import (
 )
 from agent_providers.spawn import (
     ChildProcess,
+    PipedProcess,
+    PipedProcessTimeout,
     StderrPolicy,
     closed_environment,
     open_pipes,
@@ -544,7 +545,7 @@ def _start_bounded_cli(
     on_spawn_failed: Callable[[], None] | None,
     prompt_file_bytes: bytes | None,
     prompt_file_arg_index: int | None,
-) -> tuple[subprocess.Popen[bytes] | None, str | None, CliRunOutcome | None]:
+) -> tuple[PipedProcess[bytes] | None, str | None, CliRunOutcome | None]:
     prompt_file_path: str | None = None
     try:
         prompted_child, prompt_file_path = _with_private_prompt_file(
@@ -573,7 +574,7 @@ def _spawn_failure_outcome(error: BaseException) -> CliRunOutcome:
 
 
 def _finished_bounded_cli_run(
-    process: subprocess.Popen[bytes],
+    process: PipedProcess[bytes],
     output: _CliOutput,
     on_reaped: Callable[[int, bool], None] | None,
 ) -> CliRunOutcome:
@@ -694,7 +695,7 @@ def _notify_reaped(
 
 
 def _exchange_bounded(
-    process: subprocess.Popen[bytes],
+    process: PipedProcess[bytes],
     stdin_payload: bytes | None,
     read: Literal["all", "first_line"],
     deadline: float,
@@ -730,7 +731,7 @@ def _exchange_bounded(
 
 def _register_exchange_streams(
     selector: selectors.BaseSelector,
-    process: subprocess.Popen[bytes],
+    process: PipedProcess[bytes],
     exchange: _CliExchange,
 ) -> None:
     stdin = process.stdin
@@ -744,7 +745,7 @@ def _register_exchange_streams(
 
 def _register_output_streams(
     selector: selectors.BaseSelector,
-    process: subprocess.Popen[bytes],
+    process: PipedProcess[bytes],
 ) -> None:
     for stream, name in ((process.stdout, "stdout"), (process.stderr, "stderr")):
         if stream is not None:
@@ -973,7 +974,7 @@ def _output_limit_reached(exchange: _CliExchange) -> _CliOutput:
     )
 
 
-def _close_stdin(process: subprocess.Popen[bytes]) -> None:
+def _close_stdin(process: PipedProcess[bytes]) -> None:
     if process.stdin is not None:
         process.stdin.close()
 
@@ -1064,7 +1065,9 @@ class PrivateCredentialHome:
         self._cleanup_requested = False
         self._cleaned = False
         self._lock = threading.Lock()
-        self._finalizer = weakref.finalize(self, _remove_abandoned_tree, self._home)
+        self._finalizer = weakref.finalize(
+            self, _remove_abandoned_tree, self._home, os.getpid(),
+        )
         try:
             os.chmod(self._home, 0o700)
             _install_credential(
@@ -1098,6 +1101,17 @@ class PrivateCredentialHome:
         with self._lock:
             self._cleanup_requested = True
             self._remove_if_unused_locked()
+
+    def close_preserving_error(self) -> None:
+        """Close on a failure path without letting a removal failure hide the cause."""
+        try:
+            self.close()
+        except PrivateCredentialHomeRemovalError as error:
+            log.error(
+                "private credential home removal failed (%s); "
+                "removal is left to the finalizer",
+                type(error).__name__,
+            )
 
     def _release(self) -> None:
         with self._lock:
@@ -1139,7 +1153,9 @@ class _PrivateCredentialHomeReservation:
         self.release()
 
 
-def _remove_abandoned_tree(root: Path) -> None:
+def _remove_abandoned_tree(root: Path, creator_process_id: int) -> None:
+    if os.getpid() != creator_process_id:
+        return
     try:
         _remove_private_tree(root)
     except PrivateCredentialHomeRemovalError:
@@ -1147,20 +1163,19 @@ def _remove_abandoned_tree(root: Path) -> None:
 
 
 def _remove_private_tree(root: Path) -> None:
-    try:
-        shutil.rmtree(root)
-    except FileNotFoundError:
-        return
-    except OSError:
+    last_error: OSError = FileExistsError()
+    for make_removable in (False, True):
         try:
-            _make_tree_removable(root)
+            if make_removable:
+                _make_tree_removable(root)
             shutil.rmtree(root)
-        except FileNotFoundError:
-            return
         except OSError as error:
-            raise PrivateCredentialHomeRemovalError(
-                f"private credential home removal failed ({type(error).__name__})",
-            ) from None
+            last_error = error
+        if not os.path.lexists(root):
+            return
+    raise PrivateCredentialHomeRemovalError(
+        f"private credential home removal failed ({type(last_error).__name__})",
+    ) from None
 
 
 def _make_tree_removable(root: Path) -> None:
@@ -1258,7 +1273,7 @@ def _decode(collected: bytearray) -> str:
     return collected.decode(errors="replace")
 
 
-def _reap_process_group(process: subprocess.Popen[bytes]) -> bool:
+def _reap_process_group(process: PipedProcess[bytes]) -> bool:
     for stream in (process.stdin, process.stdout, process.stderr):
         if stream is not None:
             stream.close()
@@ -1273,7 +1288,7 @@ def _reap_process_group(process: subprocess.Popen[bytes]) -> bool:
 
 
 def _reap_in_background(
-    process: subprocess.Popen[bytes],
+    process: PipedProcess[bytes],
     on_reaped: Callable[[int, bool], None] | None,
 ) -> None:
     try:
@@ -1286,7 +1301,7 @@ def _reap_in_background(
         _notify_reaped(on_reaped, process.pid, became_zombie=True)
 
 
-def _wait_for_process_group_exit(process: subprocess.Popen[bytes], timeout: float) -> bool:
+def _wait_for_process_group_exit(process: PipedProcess[bytes], timeout: float) -> bool:
     """Wait until SIGKILL has made the whole group unaddressable.
 
     Waiting only for the direct child can return while one of its children
@@ -1321,11 +1336,11 @@ def _process_group_exists(process_id: int) -> bool:
     return True
 
 
-def _bounded_wait(process: subprocess.Popen[bytes], timeout: float) -> bool:
+def _bounded_wait(process: PipedProcess[bytes], timeout: float) -> bool:
     try:
         process.wait(timeout=timeout)
         return True
-    except subprocess.TimeoutExpired:
+    except PipedProcessTimeout:
         return False
 
 

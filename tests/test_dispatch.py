@@ -9,7 +9,7 @@ import re
 from pathlib import Path
 
 import pytest
-from provider_test_support import drive_cowriter_turn
+from provider_test_support import drive_turn
 
 import agent_providers
 from agent_providers import dispatch
@@ -30,7 +30,7 @@ def test_stream_turn_refuses_an_unknown_provider_before_any_route_runs(monkeypat
 
     monkeypatch.setattr(dispatch, "_stream_for_route", start_route)
 
-    turn = drive_cowriter_turn("bob")
+    turn = drive_turn("bob")
 
     assert isinstance(turn.error, ProviderUnavailableError)
     assert turn.error.reason.code is SafeRouteReasonCode.ROUTE_FAILED
@@ -46,7 +46,7 @@ def test_a_failing_route_logs_the_failed_turn_by_provider_route_and_class(monkey
     monkeypatch.setattr(dispatch, "_stream_for_route", fail_route)
     caplog.set_level("WARNING", logger="agent_providers.dispatch")
 
-    drive_cowriter_turn("grok")
+    drive_turn("grok")
 
     assert "Turn failed provider=grok route=cli class=RuntimeError" in caplog.text
     assert "synthetic-confidential-detail" not in caplog.text

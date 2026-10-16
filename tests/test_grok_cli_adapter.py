@@ -12,16 +12,19 @@ from pathlib import Path
 
 import pytest
 from provider_test_support import (
+    A_RUNNER_FAILURE_CANARY,
     CALLER_CONTEXTS,
-    COWRITER_TOOL_CATALOG,
     DEEPLY_NESTED_JSON,
     GROK_SESSION_ID,
+    SAMPLE_TOOL_CATALOG,
+    RunnerFailureWatch,
     a_call_nested_too_deeply_to_decode,
     a_call_to_an_undeclared_tool_carrying,
     assert_a_multi_result_batch_is_rejected,
     assert_private_credential_child,
     assert_the_canary_reaches_only_the_host,
-    drive_cowriter_turn,
+    drive_turn,
+    fail_to_start_the_runner_thread,
     formatted_log_text,
     grok_cli_outcome,
     grok_cli_runner,
@@ -29,6 +32,8 @@ from provider_test_support import (
     override_provider_runtime,
 )
 
+from agent_client.tools import ToolDeclaration
+from agent_providers import process
 from agent_providers.config import current_config, current_turn_config
 from agent_providers.errors import (
     ProviderUnavailableError,
@@ -47,6 +52,7 @@ from agent_providers.tool_loop import (
     ToolResultBatch,
     stream_tool_loop,
 )
+from agent_providers.tools import ToolCatalog, ToolProtocolMarkup
 
 A_TOOL_FAILURE_MESSAGE = "Co-Writer tool failed."
 
@@ -54,7 +60,7 @@ A_TOOL_FAILURE_MESSAGE = "Co-Writer tool failed."
 def _transport() -> grok_cli_adapter.GrokCliToolTransport:
     """Build the transport under test with songmaker's own tool catalog."""
     return grok_cli_adapter.GrokCliToolTransport(
-        model="grok-test", catalog=COWRITER_TOOL_CATALOG,
+        model="grok-test", catalog=SAMPLE_TOOL_CATALOG,
     )
 
 
@@ -114,9 +120,9 @@ def test_grok_credential_home_is_removed_when_aclose_is_cancelled_while_queued()
 
 def _tool_call_text() -> str:
     return (
-        '<songmaker_tool_call>\n'
-        '{"name":"list_songs","arguments":{}}\n'
-        '</songmaker_tool_call>'
+        '<notes_tool_call>\n'
+        '{"name":"list_notes","arguments":{}}\n'
+        '</notes_tool_call>'
     )
 
 
@@ -201,7 +207,7 @@ def test_grok_tool_transport_starts_then_resumes_in_one_private_credential_home(
     async def collect_and_close() -> list[object]:
         events = await _collect_tool_events(
             _tool_transport_events(
-                transport, lambda _name, _arguments: ToolOutcome('{"songs":[]}', False),
+                transport, lambda _name, _arguments: ToolOutcome('{"notes":[]}', False),
             ),
         )
         await transport.aclose()
@@ -235,7 +241,7 @@ def test_grok_tool_transport_starts_then_resumes_in_one_private_credential_home(
         )
     assert first_kwargs["prompt_file_bytes"] == b"system\n\nUser: hello"
     assert second_kwargs["prompt_file_bytes"] == (
-        b'<songmaker_tool_result>\n{"songs":[]}\n</songmaker_tool_result>'
+        b'<notes_tool_result>\n{"notes":[]}\n</notes_tool_result>'
     )
     assert first_kwargs["deadline"] == second_kwargs["deadline"]
     assert "GROK_HOME" not in first_child.environment
@@ -248,6 +254,53 @@ def test_grok_tool_transport_starts_then_resumes_in_one_private_credential_home(
     assert not first_child.working_directory.exists()
     assert not third_home.exists()
     assert source.read_text() == "{}"
+
+
+def _grok_runner_that_fails_by(failure: str, monkeypatch):
+    if failure == "the-runner-thread-cannot-start":
+        fail_to_start_the_runner_thread(monkeypatch, RuntimeError(A_RUNNER_FAILURE_CANARY))
+    else:
+        def spawn_that_raises(*_arguments, **_keywords):
+            raise BaseException(A_RUNNER_FAILURE_CANARY)
+
+        monkeypatch.setattr(process, "open_pipes", spawn_that_raises)
+
+
+@pytest.mark.parametrize(
+    ("failure", "reported_steps"),
+    [
+        ("the-runner-thread-cannot-start", ["start RuntimeError"]),
+        ("the-spawn-raises-a-base-exception", []),
+    ],
+)
+def test_a_grok_tool_turn_whose_runner_fails_ends_promptly_and_removes_its_home(
+    monkeypatch, caplog, capfd, failure, reported_steps,
+) -> None:
+    watch = RunnerFailureWatch(monkeypatch, caplog, capfd)
+    _grok_runner_that_fails_by(failure, monkeypatch)
+    children: list[object] = []
+    real_runner = grok_cli_adapter.run_cli_bounded
+
+    def run_and_record(child, **kwargs):
+        children.append(child)
+        return real_runner(child, **kwargs)
+
+    monkeypatch.setattr(grok_cli_adapter, "run_cli_bounded", run_and_record)
+    transport = _transport()
+
+    async def fail_and_close() -> ProviderUnavailableError:
+        responses = asyncio.wait_for(_collect_transport_responses(transport), timeout=1)
+        with pytest.raises(ProviderUnavailableError) as raised:
+            await responses
+        await transport.aclose()
+        return raised.value
+
+    failed = asyncio.run(fail_and_close())
+
+    assert failed.reason.code is SafeRouteReasonCode.CLI_PROTOCOL_ERROR
+    assert not Path(children[0].environment["HOME"]).exists()
+    assert watch.reported_steps() == reported_steps
+    watch.assert_nothing_leaked(failed)
 
 
 @pytest.mark.parametrize(
@@ -305,14 +358,31 @@ def test_grok_turn_keeps_its_private_home_until_late_runner_confirmation(
         captured[callback](2468, True)
     assert not home.exists()
 
+RECORDED_GROK_CATALOG = ToolCatalog(
+    tools=(
+        ToolDeclaration(
+            name="get_song",
+            description="Read the full state of a song.",
+            parameters={
+                "type": "object",
+                "properties": {"song_id": {"type": "string"}},
+                "required": ["song_id"],
+            },
+        ),
+    ),
+    markup=ToolProtocolMarkup(tag_namespace="songmaker", product_name="Songmaker"),
+)
+
+
 def test_recorded_grok_tool_stream_executes_then_resumes_without_streaming_protocol(
     monkeypatch,
 ) -> None:
+    """The recording is a real Grok capture parsed with the catalog it was recorded against."""
     calls = []
     rounds = iter([
         _recorded_grok_tool_round_lines(),
         grok_tool_round_lines(
-            "The fictional song is 68 BPM.", "01a06e35-a690-72b1-889d-804843d68226",
+            "The fictional note has 68 words.", "01a06e35-a690-72b1-889d-804843d68226",
         ),
     ])
 
@@ -325,12 +395,14 @@ def test_recorded_grok_tool_stream_executes_then_resumes_without_streaming_proto
         return outcome
 
     monkeypatch.setattr(grok_cli_adapter, "run_cli_bounded", run_cli_bounded)
-    transport = _transport()
+    transport = grok_cli_adapter.GrokCliToolTransport(
+        model="grok-test", catalog=RECORDED_GROK_CATALOG,
+    )
     executed: list[tuple[str, dict[str, object]]] = []
 
     def executor(name: str, arguments: dict[str, object]) -> ToolOutcome:
         executed.append((name, arguments))
-        return ToolOutcome('{"song_id":"fixture-song-527","bpm":68}', False)
+        return ToolOutcome('{"note_id":"fixture-note-527","bpm":68}', False)
 
     events = asyncio.run(_collect_tool_events(_tool_transport_events(transport, executor)))
 
@@ -339,7 +411,7 @@ def test_recorded_grok_tool_stream_executes_then_resumes_without_streaming_proto
     )
     assert executed == [("get_song", {"song_id": "fixture-song-527"})]
     assert "<songmaker_tool_call>" not in streamed_text
-    assert events[-1] == FinalEvent(text="The fictional song is 68 BPM.")
+    assert events[-1] == FinalEvent(text="The fictional note has 68 words.")
     assert calls[1][0][-2:] == ("--resume", "01a06e35-a690-72b1-889d-804843d68226")
 
 
@@ -349,10 +421,10 @@ def test_grok_tool_stream_executes_a_write_after_prose_and_exposes_its_result_ne
     calls = []
     state = {"bpm": 68}
     tool_call = (
-        "I'll change the fictional song now.\n"
-        "<songmaker_tool_call>\n"
-        '{"name":"update_song_style","arguments":{"song_id":"fixture-song-527","bpm":69}}\n'
-        "</songmaker_tool_call>"
+        "I'll change the fictional note now.\n"
+        "<notes_tool_call>\n"
+        '{"name":"update_note_tags","arguments":{"note_id":"fixture-note-527","bpm":69}}\n'
+        "</notes_tool_call>"
     )
 
     def run_cli_bounded(child, **kwargs):
@@ -360,7 +432,7 @@ def test_grok_tool_stream_executes_a_write_after_prose_and_exposes_its_result_ne
         lines = (
             grok_tool_round_lines(tool_call)
             if len(calls) == 1
-            else grok_tool_round_lines(f"The fictional song is now {state['bpm']} BPM.")
+            else grok_tool_round_lines(f"The fictional note now has {state['bpm']} words.")
         )
         for line in lines:
             assert kwargs["stdout_line_channel"]._send(line)
@@ -369,9 +441,9 @@ def test_grok_tool_stream_executes_a_write_after_prose_and_exposes_its_result_ne
         return outcome
 
     def executor(name: str, arguments: dict[str, object]) -> ToolOutcome:
-        assert name == "update_song_style"
+        assert name == "update_note_tags"
         state["bpm"] = arguments["bpm"]
-        return ToolOutcome('{"song_id":"fixture-song-527","bpm":69}', False)
+        return ToolOutcome('{"note_id":"fixture-note-527","bpm":69}', False)
 
     monkeypatch.setattr(grok_cli_adapter, "run_cli_bounded", run_cli_bounded)
     events = asyncio.run(_collect_tool_events(_tool_transport_events(
@@ -382,9 +454,9 @@ def test_grok_tool_stream_executes_a_write_after_prose_and_exposes_its_result_ne
         event.text for event in events if isinstance(event, AssistantTextEvent)
     )
     assert state == {"bpm": 69}
-    assert "<songmaker_tool_call>" not in streamed_text
+    assert "<notes_tool_call>" not in streamed_text
     assert events[-1] == FinalEvent(
-        text="I'll change the fictional song now.\nThe fictional song is now 69 BPM.",
+        text="I'll change the fictional note now.\nThe fictional note now has 69 words.",
     )
     assert calls[1][0][-2:] == ("--resume", GROK_SESSION_ID)
 
@@ -444,7 +516,7 @@ def test_grok_tool_transport_normalizes_malformed_json_without_its_document(
     monkeypatch,
     caplog,
 ) -> None:
-    document = '{"type":"text","data":"private lyrics"'
+    document = '{"type":"text","data":"private text"'
     calls = []
     monkeypatch.setattr(
         grok_cli_adapter,
@@ -475,9 +547,9 @@ def test_grok_text_tool_parser_rejection_carries_its_rule_and_writes_no_line(
 ) -> None:
     marker = "private-parser-marker"
     malformed_tool_call = (
-        "<songmaker_tool_call>\n"
-        f'{{"name":"list_songs","arguments":{{"value":"{marker}"}}\n'
-        "</songmaker_tool_call>"
+        "<notes_tool_call>\n"
+        f'{{"name":"list_notes","arguments":{{"value":"{marker}"}}\n'
+        "</notes_tool_call>"
     )
     calls = []
     monkeypatch.setattr(
@@ -515,7 +587,7 @@ def test_a_refused_grok_call_hands_its_text_only_to_the_host(
     )
     caplog.set_level(logging.DEBUG)
 
-    turn = drive_cowriter_turn(
+    turn = drive_turn(
         "grok",
         correlation_id="job-41",
         while_the_caller_handles_an_exception=while_the_caller_handles_an_exception,
@@ -543,7 +615,7 @@ def test_a_grok_call_nested_too_deeply_is_refused_not_a_failed_route(
     )
     caplog.set_level(logging.DEBUG)
 
-    turn = drive_cowriter_turn(
+    turn = drive_turn(
         "grok",
         while_the_caller_handles_an_exception=while_the_caller_handles_an_exception,
     )
@@ -860,21 +932,21 @@ def test_grok_tool_transport_removes_its_private_session_tree_and_redacts_logs(
     external_session.mkdir(parents=True)
     (external_session / "history.jsonl").write_text("leave me")
     calls = []
-    lyrics = "private lyrics"
-    song_id = "song-private"
-    call_json = f'{{"lyrics":"{lyrics}","song_id":"{song_id}"}}'
+    text = "private text"
+    note_id = "note-private"
+    call_json = f'{{"text":"{text}","note_id":"{note_id}"}}'
     stderr_document = "private stderr document"
     tool_call = (
-        f"<songmaker_tool_call>\n"
-        f'{{"name":"update_song_lyrics","arguments":{call_json}}}\n'
-        "</songmaker_tool_call>"
+        f"<notes_tool_call>\n"
+        f'{{"name":"update_note_text","arguments":{call_json}}}\n'
+        "</notes_tool_call>"
     )
 
     def run_cli_bounded(child, **kwargs):
         calls.append((child, kwargs))
         session_tree = child.working_directory / ".grok" / "sessions" / GROK_SESSION_ID
         session_tree.mkdir(parents=True)
-        (session_tree / "prompt_history.jsonl").write_text(f"{lyrics} {song_id}")
+        (session_tree / "prompt_history.jsonl").write_text(f"{text} {note_id}")
         for line in grok_tool_round_lines(tool_call):
             assert kwargs["stdout_line_channel"]._send(line)
         outcome = grok_cli_outcome(stderr=stderr_document)
@@ -898,7 +970,7 @@ def test_grok_tool_transport_removes_its_private_session_tree_and_redacts_logs(
     assert not Path(working_directory).exists()
     assert (external_session / "history.jsonl").read_text() == "leave me"
     assert "Grok CLI tool round provider=grok route=cli round=1 session=" in caplog.text
-    for forbidden in (lyrics, song_id, call_json, stderr_document, "prompt_history"):
+    for forbidden in (text, note_id, call_json, stderr_document, "prompt_history"):
         assert forbidden not in caplog.text
 
 

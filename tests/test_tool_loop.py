@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -82,11 +83,15 @@ def test_passes_the_complete_tool_result_batch_to_the_transport() -> None:
         ToolCall("call-2", "second", {"position": 2}),
     ))
     transport = _FakeTransport([[TextDelta("draft "), first], [FinalText("done")]])
+    executed: list[str] = []
 
-    events = asyncio.run(_events(
-        transport,
-        lambda name, arguments: ToolOutcome(f"{name}:{arguments['position']}", False),
-    ))
+    def executor(name: str, arguments: dict[str, Any]) -> ToolOutcome:
+        executed.append(name)
+        return ToolOutcome(f"{name}:{arguments['position']}", False)
+
+    events = asyncio.run(_events(transport, executor))
+
+    assert executed == ["first", "second"]
 
     assert transport.messages == [
         InitialTurn("system", [{"role": "user", "content": "hello"}]),
@@ -144,7 +149,7 @@ def test_rejects_a_ninth_tool_round_without_executing_it(monkeypatch) -> None:
 
 def test_executor_failure_returns_a_named_error_to_the_model(caplog) -> None:
     transport = _FakeTransport([
-        [ToolCallBatch((ToolCall("call-1", "write", {"lyrics": "secret"}),))],
+        [ToolCallBatch((ToolCall("call-1", "write", {"text": "secret"}),))],
         [FinalText()],
     ])
 
@@ -163,7 +168,7 @@ def test_executor_failure_returns_a_named_error_to_the_model(caplog) -> None:
     ] == ["ERROR"]
 
     assert events == [
-        ToolCallEvent(tool_use_id="call-1", name="write", input={"lyrics": "secret"}),
+        ToolCallEvent(tool_use_id="call-1", name="write", input={"text": "secret"}),
         ToolResultEvent(
             tool_use_id="call-1", content="Co-Writer tool failed.", is_error=True,
         ),
@@ -205,13 +210,13 @@ def test_aclose_stops_the_active_transport_without_a_follow_up_round() -> None:
 
 
 def test_logs_never_include_tool_input_or_result(caplog) -> None:
-    lyrics = "private lyrics"
-    song_id = "song-private"
-    call_json = '{"lyrics":"private lyrics","song_id":"song-private"}'
+    text = "private text"
+    note_id = "note-private"
+    call_json = '{"text":"private text","note_id":"note-private"}'
     transport = _FakeTransport([
-        [ToolCallBatch((ToolCall("safe-call", "update_song_lyrics", {
-            "lyrics": lyrics,
-            "song_id": song_id,
+        [ToolCallBatch((ToolCall("safe-call", "update_note_text", {
+            "text": text,
+            "note_id": note_id,
         }),))],
         [FinalText()],
     ])
@@ -223,8 +228,8 @@ def test_logs_never_include_tool_input_or_result(caplog) -> None:
 
     assert "provider=grok" in caplog.text
     assert "route=api" in caplog.text
-    assert "tool=update_song_lyrics" in caplog.text
-    for forbidden in (lyrics, song_id, call_json):
+    assert "tool=update_note_text" in caplog.text
+    for forbidden in (text, note_id, call_json):
         assert forbidden not in caplog.text
 
 
@@ -305,3 +310,72 @@ def test_a_refused_second_response_writes_one_line_with_its_round_and_correlatio
         "code=text_tool_response_invalid rule=unknown_tool offset=23 length=90"
     )
     assert A_CANARY not in formatted_log_text(caplog.records)
+
+
+def test_a_failed_tool_reaches_the_model_as_its_own_error_outcome(caplog) -> None:
+    transport = _FakeTransport([
+        [ToolCallBatch((ToolCall("call-1", "read", {}),))],
+        [FinalText()],
+    ])
+    caplog.set_level(logging.DEBUG)
+
+    events = asyncio.run(
+        _events(transport, lambda _name, _arguments: ToolOutcome("not found", True)),
+    )
+
+    assert events == [
+        ToolCallEvent(tool_use_id="call-1", name="read", input={}),
+        ToolResultEvent(tool_use_id="call-1", content="not found", is_error=True),
+        FinalEvent(text=""),
+    ]
+    assert transport.messages[1] == ToolResultBatch((
+        tool_loop.ToolResult("call-1", "not found", True),
+    ))
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+def test_the_executor_runs_on_the_thread_and_loop_driving_the_turn() -> None:
+    transport = _FakeTransport([
+        [ToolCallBatch((ToolCall("call-1", "read", {}),))],
+        [FinalText()],
+    ])
+    seen: list[tuple[int, asyncio.AbstractEventLoop]] = []
+
+    def executor(_name: str, _arguments: dict[str, Any]) -> ToolOutcome:
+        seen.append((threading.get_ident(), asyncio.get_running_loop()))
+        return ToolOutcome("ok", False)
+
+    async def turn() -> tuple[int, asyncio.AbstractEventLoop]:
+        await _events(transport, executor)
+        return threading.get_ident(), asyncio.get_running_loop()
+
+    assert asyncio.run(turn()) == seen[0]
+
+
+@pytest.mark.parametrize("is_error", [True, False])
+def test_the_per_call_record_carries_the_documented_fields(caplog, is_error) -> None:
+    transport = _FakeTransport([
+        [ToolCallBatch((ToolCall("call-7", "read", {}),))],
+        [FinalText()],
+    ])
+    caplog.set_level("INFO", logger="agent_providers.tool_loop")
+
+    asyncio.run(_events(
+        transport,
+        lambda _name, _arguments: ToolOutcome("content", is_error),
+        A_CORRELATION_ID,
+    ))
+
+    [record] = [r for r in caplog.records if "call_id=" in r.getMessage()]
+    fields = dict(part.split("=", 1) for part in record.getMessage().split()[2:])
+    assert fields | {"duration_ms": "0"} == {
+        "provider": "grok",
+        "route": "api",
+        "round": "1",
+        "call_id": "call-7",
+        "correlation_id": A_CORRELATION_ID,
+        "duration_ms": "0",
+        "tool": "read",
+        "is_error": str(is_error),
+    }
+    assert fields["duration_ms"].isdigit()

@@ -18,6 +18,8 @@ import itertools
 import logging
 import math
 import re
+import traceback
+import types
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine
 from contextlib import aclosing, asynccontextmanager
@@ -74,7 +76,13 @@ from agent_service.app import create_app
 from agent_service.config import RunConfig
 from agent_service.identity import Principal
 from agent_service.run_events import run_frames
-from agent_service.run_liveness import LoopClock, RunStepCancelled, log_failure
+from agent_service.run_liveness import (
+    FailedPart,
+    LoopClock,
+    RunFailures,
+    RunStepCancelled,
+    log_failure,
+)
 from agent_service.run_records import RunRecorder, RunRecords
 from agent_service.runners import Runners
 
@@ -1133,6 +1141,20 @@ async def _watched_loop() -> AsyncIterator[list[dict[str, object]]]:
     gc.collect()
 
 
+def test_the_ending_table_drives_a_reader_cut_in_the_body_of_every_run_its_clock_ended():
+    """Rule 14: the table leaves out no combination the harness can time."""
+    table = {param.values[0] for param in _every_ending()}
+    cut_readers = [
+        _Ending(
+            _Cancellation.IN_THE_BODY, _Closer.READS, holds_close, frozenset(others) | {_Step.CLOCK}
+        )
+        for holds_close in (False, True)
+        for size in range(len(_Step))
+        for others in itertools.combinations(set(_Step) - {_Step.CLOCK}, size)
+    ]
+    assert [ending for ending in cut_readers if ending not in table] == []
+
+
 @pytest.mark.parametrize("ending", _every_ending())
 @in_loop
 async def test_every_failure_of_a_run_s_ending_propagates_or_is_logged_once(caplog, ending):
@@ -1282,6 +1304,7 @@ async def _observed_ending(
             (_Step.DROP_REPORT, _Closer.READS, ()),
             (_Step.DISCONNECT_REPORT, _Closer.CLOSES, ()),
             (_Step.RECORD_END, _Closer.READS, ()),
+            (_Step.RECORD_END, _Closer.CLOSES, (_Step.DISCONNECT_REPORT,)),
         )
     ],
 )
@@ -1314,6 +1337,77 @@ async def test_a_stray_cancellation_of_a_step_ends_the_run_as_that_step_s_own_fa
 
 def _cancelled_unasked(step: _Step) -> asyncio.CancelledError:
     return asyncio.CancelledError(step.canary)
+
+
+def _frames_reachable_from(root: object) -> list[types.FrameType]:
+    """Every frame an observer of ``root`` can reach through its references."""
+    seen: set[int] = set()
+    pending = [root]
+    frames: list[types.FrameType] = []
+    while pending:
+        current = pending.pop()
+        if id(current) in seen or isinstance(current, type | types.ModuleType):
+            continue
+        seen.add(id(current))
+        if isinstance(current, types.FrameType):
+            frames.append(current)
+        else:
+            pending.extend(gc.get_referents(current))
+    return frames
+
+
+def _a_step_cancelled_unasked() -> None:
+    local_value = {"payload": _Step.RECORD_END.canary}
+    raise _cancelled_unasked(_Step.RECORD_END) from LookupError(local_value["payload"])
+
+
+@in_loop
+async def test_a_stray_cancellation_keeps_none_of_the_frames_it_passed():
+    """No frame local of the step a stray cancellation left is reachable from its failure."""
+    try:
+        _a_step_cancelled_unasked()
+    except asyncio.CancelledError as cancelled:
+        recorded = RunFailures(uuid.uuid4()).add(FailedPart.CLEANUP, cancelled)
+
+    assert type(recorded) is RunStepCancelled
+    assert _frames_reachable_from(recorded) == []
+
+
+@pytest.mark.parametrize("again", list(FailedPart))
+@in_loop
+async def test_a_stray_cancellation_recorded_again_stays_one_failure_of_its_first_part(
+    caplog, again
+):
+    failures = RunFailures(uuid.uuid4())
+    cancelled = _cancelled_unasked(_Step.CLOCK)
+    first = failures.add(FailedPart.SUPERVISION, cancelled)
+    second = failures.add(again, cancelled)
+
+    with pytest.raises(RunStepCancelled) as raised:
+        failures.leave(cancellation=None, body_failure=None)
+    assert second is first
+    assert raised.value is first
+    assert first.part is FailedPart.SUPERVISION
+    assert _failure_lines(caplog) == []
+
+
+@in_loop
+async def test_one_stray_cancellation_met_by_two_steps_of_a_close_propagates_once(caplog):
+    caplog.set_level(logging.DEBUG)
+    shared = _cancelled_unasked(_Step.DISCONNECT_REPORT)
+    records = _RecordsThatFail(
+        frozenset({_Step.DISCONNECT_REPORT, _Step.RECORD_END}), breaks=lambda _step: shared
+    )
+    async with _watched_loop() as unretrieved:
+        async with driven(GatedRunner(), records=records, read=False) as drive:
+            drive.took(await anext(drive.frames))
+            await drive.clock.parked()
+            closer = asyncio.create_task(drive.frames.aclose())
+            await asyncio.wait({closer})
+
+    assert type(closer.exception()) is RunStepCancelled
+    assert _failure_lines(caplog) == []
+    assert unretrieved == []
 
 
 @pytest.mark.parametrize("spec_version", ["2.3", "2.4"])
@@ -1364,6 +1458,8 @@ async def test_a_stray_cancellation_reaches_the_asgi_server_as_the_step_s_failur
 
     assert not response.cancelled()
     assert type(response.exception()) is RunStepCancelled
+    propagated = "".join(traceback.format_exception(response.exception()))
+    assert not [step for step in _Step if step.canary in propagated]
     assert _failure_lines(caplog) == []
     assert not [step for step in _Step if step.canary in caplog.text]
     status = drive.status(store.started[0].run_id)

@@ -19,7 +19,7 @@ import logging
 import math
 import re
 import uuid
-from collections.abc import AsyncGenerator, AsyncIterator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine
 from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -29,12 +29,14 @@ import pytest
 from service_support import (
     ALICE,
     SONGMAKER,
+    STRAY_CANCELLATION_CANARY,
     BrokenClock,
     ClientSocket,
     Drive,
     GatedRunner,
     ScriptedRunner,
     StepClock,
+    StrayCancelledRunner,
     TokenMint,
     alice_admitted_run,
     driven,
@@ -47,6 +49,7 @@ from service_support import (
     run_headers,
     served,
     service_config,
+    stray_cancellation,
 )
 from starlette.requests import ClientDisconnect
 
@@ -864,18 +867,21 @@ _CLEANUP = "The cleanup of run {} failed"
 
 
 class _RecorderThatFails:
-    """A run's recorder whose failing steps raise a new failure each time they are taken."""
+    """A run's recorder whose failing steps raise a new failure each time they are taken.
+
+    ``taking`` hears of each step just before it is taken.
+    """
 
     def __init__(
         self,
         recorder: RunRecorder,
         failing: frozenset[_Step],
-        before_over: Callable[[], None],
+        taking: Callable[[_Step], None],
         breaks: Callable[[_Step], BaseException],
     ) -> None:
         self._recorder = recorder
         self._failing = failing
-        self._before_over = before_over
+        self._taking = taking
         self._breaks = breaks
 
     def accepted(self, event) -> None:
@@ -886,10 +892,10 @@ class _RecorderThatFails:
         self._take(step, lambda: self._recorder.lost(reason))
 
     def over(self, fallback=None) -> None:
-        self._before_over()
         self._take(_Step.RECORD_END, lambda: self._recorder.over(fallback))
 
     def _take(self, step: _Step, record: Callable[[], None]) -> None:
+        self._taking(step)
         if step in self._failing:
             raise self._breaks(step)
         record()
@@ -899,19 +905,19 @@ class _RecordsThatFail(RunRecords):
     def __init__(
         self,
         failing: frozenset[_Step] = frozenset(),
-        before_over: Callable[[], None] = lambda: None,
+        taking: Callable[[_Step], None] = lambda _step: None,
         breaks: Callable[[_Step], BaseException] = _Step.fails,
     ) -> None:
         super().__init__()
         self._failing = failing
-        self._before_over = before_over
+        self._taking = taking
         self._breaks = breaks
         self.started: list[RunStarted] = []
 
     def begin(self, started, app, principal):
         self.started.append(started)
         return _RecorderThatFails(
-            super().begin(started, app, principal), self._failing, self._before_over, self._breaks
+            super().begin(started, app, principal), self._failing, self._taking, self._breaks
         )
 
 
@@ -968,9 +974,6 @@ class _Ending:
           stream paused at a ``yield``, where nothing awaits.
         * A reader is never cancelled in the teardown: its stream ends only
           once the runner's stop has finished, so it waits in the body.
-        * A run that ended by itself, without a held close, has stopped its
-          runner and ended its record before the closer acts, so the
-          closer's teardown never waits and no cancellation can reach it there.
         * A reader of a run that ended by itself, without a held close, finds
           its stream already over and never waits for a frame.
         * The disconnect report is made only when the stream is cut short: by
@@ -982,8 +985,6 @@ class _Ending:
             case _Cancellation.IN_THE_BODY if self.ends_by_itself and not self.holds_close:
                 return False
             case _Cancellation.DURING_TEARDOWN if self.closer is _Closer.READS:
-                return False
-            case _Cancellation.DURING_TEARDOWN if self.ends_by_itself and not self.holds_close:
                 return False
         cut_short = self.closer is _Closer.CLOSES or self.cancellation is _Cancellation.IN_THE_BODY
         return cut_short or _Step.DISCONNECT_REPORT not in self.failing
@@ -1029,14 +1030,21 @@ async def _end_a_run(
 
     The run ends by itself first when its clock breaks, or when a failing
     drop report needs a stall: the client takes nothing until it is dropped
-    at 45 s. A reader of a run that nothing else ends gets its answer.
+    at 45 s. A reader of a run that nothing else ends gets its answer. A
+    close cut in its teardown of a run that ended by itself, without a held
+    close, comes right after the drop report, while the runner's stop is
+    still under way.
     """
     closers: list[asyncio.Task[object]] = []
-    records = _RecordsThatFail(
-        ending.failing,
-        lambda: closers[0].cancel() if cancel_at_the_record_end else None,
-        ending.breaks,
-    )
+    dropped = asyncio.Event()
+
+    def taking(step: _Step) -> None:
+        if step is _Step.DROP_REPORT:
+            dropped.set()
+        if step is _Step.RECORD_END and cancel_at_the_record_end:
+            closers[0].cancel()
+
+    records = _RecordsThatFail(ending.failing, taking, ending.breaks)
     clock = (
         BrokenClock(lambda: ending.breaks(_Step.CLOCK))
         if _Step.CLOCK in ending.failing
@@ -1045,18 +1053,28 @@ async def _end_a_run(
     runner = GatedRunner()
     if ending.holds_close:
         runner.hold_close()
+    stalls = _Step.DROP_REPORT in ending.failing and _Step.CLOCK not in ending.failing
+    cut_in_the_teardown = (
+        ending.cancellation is _Cancellation.DURING_TEARDOWN and not ending.holds_close
+    )
     async with driven(runner, clock=clock, records=records, read=False) as drive:
         drive.took(await anext(drive.frames))
-        await drive.clock.parked()
-        if _Step.DROP_REPORT in ending.failing and _Step.CLOCK not in ending.failing:
-            await drive.run_to(45)
-        elif not ending.ends_by_itself and ending.cancellation is _Cancellation.NONE:
-            if ending.closer is _Closer.READS:
-                runner.release(FINAL)
+        if cut_in_the_teardown and ending.ends_by_itself:
+            if stalls:
+                await drive.run_to(44)
+                drive.clock.advance_to(45)
+            await dropped.wait()
+        else:
+            await drive.clock.parked()
+            if stalls:
+                await drive.run_to(45)
+            elif not ending.ends_by_itself and ending.cancellation is _Cancellation.NONE:
+                if ending.closer is _Closer.READS:
+                    runner.release(FINAL)
         closing = drive.frames.aclose() if ending.closer is _Closer.CLOSES else drive.drain()
         closers.append(asyncio.create_task(closing))
-        if ending.cancellation is _Cancellation.DURING_TEARDOWN and not ending.holds_close:
-            await asyncio.sleep(0)
+        if cut_in_the_teardown:
+            await _until_it_waits_in_the_stream(drive.frames, closers[0])
         else:
             await drive.clock.parked()
         delivered = ending.cancellation is not _Cancellation.NONE and closers[0].cancel()
@@ -1064,6 +1082,14 @@ async def _end_a_run(
         runner.release_close()
         await asyncio.wait(closers)
     return closers[0], delivered or cancel_at_the_record_end, drive
+
+
+async def _until_it_waits_in_the_stream(
+    frames: AsyncGenerator[bytes, None], closer: asyncio.Task[object]
+) -> None:
+    """Spin until ``closer`` awaits inside the stream, which a close does only in its teardown."""
+    while not (frames.ag_running or closer.done()):
+        await asyncio.sleep(0)
 
 
 def _propagated(closer: asyncio.Task[object], *, delivered: bool) -> str:
@@ -1261,6 +1287,232 @@ async def test_a_stray_cancellation_of_a_step_ends_the_run_as_that_step_s_own_fa
     renamed = (as_own(propagated), logged_as_own, frames, record)
     assert renamed == own
     assert [propagated, *(kind for _event, kind in logged)].count(RunStepCancelled.__name__) == 1
+    assert unretrieved == []
+    assert not [step for step in _Step if step.canary in caplog.text]
+
+
+def _cancelled_unasked(step: _Step) -> asyncio.CancelledError:
+    return asyncio.CancelledError(step.canary)
+
+
+@pytest.mark.parametrize("spec_version", ["2.3", "2.4"])
+@pytest.mark.parametrize(
+    ("records", "clock", "runners", "state", "lost"),
+    [
+        pytest.param(
+            lambda: _RecordsThatFail(frozenset({_Step.RECORD_END}), breaks=_cancelled_unasked),
+            StepClock,
+            None,
+            RunState.RUNNING,
+            None,
+            id="record_end",
+        ),
+        pytest.param(
+            _RecordsThatFail,
+            lambda: BrokenClock(lambda: _cancelled_unasked(_Step.CLOCK)),
+            None,
+            RunState.CANCELLED,
+            ClientLoss.DROPPED,
+            id="clock",
+        ),
+        pytest.param(
+            lambda: _RecordsThatFail(frozenset({_Step.RECORD_END}), breaks=_cancelled_unasked),
+            StepClock,
+            Runners,
+            RunState.RUNNING,
+            None,
+            id="no_runner-record_end",
+        ),
+    ],
+)
+@in_loop
+async def test_a_stray_cancellation_reaches_the_asgi_server_as_the_step_s_failure(
+    caplog, monkeypatch, spec_version, records, clock, runners, state, lost
+):
+    """A server below spec 2.4 swallows a ``CancelledError``; a stray one never travels as one."""
+    caplog.set_level(logging.DEBUG)
+    store = records()
+    async with driven(clock=clock(), records=store, read=False) as drive:
+        client = ClientSocket(spec_version=spec_version)
+        response = await respond_through_the_app(
+            drive, client, monkeypatch, runners=runners and runners()
+        )
+        await drive.clock.parked()
+        drive.runner.release(FINAL)
+        await asyncio.wait({response})
+
+    assert not response.cancelled()
+    assert type(response.exception()) is RunStepCancelled
+    assert _failure_lines(caplog) == []
+    assert not [step for step in _Step if step.canary in caplog.text]
+    status = drive.status(store.started[0].run_id)
+    assert status is not None
+    assert (status.state, status.client_lost) == (state, lost)
+
+
+def _cancelled_by_its_own_request(step: _Step) -> asyncio.CancelledError:
+    """The cancellation of a step that requested the cancellation of its own task."""
+    current = asyncio.current_task()
+    assert current is not None
+    current.cancel()
+    return asyncio.CancelledError(step.canary)
+
+
+async def _clock_cancelled_by_its_own_request() -> None:
+    raise _cancelled_by_its_own_request(_Step.CLOCK)
+
+
+class _ClockWhoseFirstWaitIsCancelled(StepClock):
+    def __init__(self, cancelled: Callable[[], Coroutine[object, object, None]]) -> None:
+        super().__init__()
+        self._cancelled: Callable[[], Coroutine[object, object, None]] | None = cancelled
+
+    async def wait_until(self, deadline: float) -> None:
+        if (cancelled := self._cancelled) is not None:
+            self._cancelled = None
+            await cancelled()
+        await super().wait_until(deadline)
+
+
+async def _answered_and_read(drive: Drive) -> None:
+    drive.took(await anext(drive.frames))
+    drive.runner.release(FINAL)
+    await drive.drain()
+
+
+async def _dropped_and_read(drive: Drive) -> None:
+    await _client_takes_nothing_until_dropped(drive)
+    await drive.drain()
+
+
+async def _closed_while_it_waits(drive: Drive) -> None:
+    drive.took(await anext(drive.frames))
+    await drive.clock.parked()
+    await drive.frames.aclose()
+
+
+_RUNNER_CLOSE = "Closing the runner of run {} failed"
+
+
+@pytest.mark.parametrize(
+    ("runner", "clock", "records", "client", "propagates", "logged"),
+    [
+        pytest.param(
+            GatedRunner,
+            lambda: _ClockWhoseFirstWaitIsCancelled(
+                lambda: stray_cancellation(after_its_stop=True)
+            ),
+            RunRecords,
+            _answered_and_read,
+            RunStepCancelled.__name__,
+            [],
+            id="a-clock-wait-that-withdraws-its-stop-fails",
+        ),
+        pytest.param(
+            GatedRunner,
+            lambda: _ClockWhoseFirstWaitIsCancelled(_clock_cancelled_by_its_own_request),
+            RunRecords,
+            _answered_and_read,
+            "returned",
+            [],
+            id="a-clock-wait-cancelled-at-its-own-request-is-shut-down",
+        ),
+        pytest.param(
+            GatedRunner,
+            StepClock,
+            lambda: _RecordsThatFail(
+                frozenset({_Step.DROP_REPORT}), breaks=_cancelled_by_its_own_request
+            ),
+            _dropped_and_read,
+            "returned",
+            [],
+            id="a-supervisor-cancelled-at-its-own-request-is-shut-down",
+        ),
+        pytest.param(
+            lambda: StrayCancelledRunner(after_its_stop=False),
+            StepClock,
+            RunRecords,
+            _closed_while_it_waits,
+            "returned",
+            [(_RUNNER_CLOSE, "CancelledError")],
+            id="a-runner-cancelled-unasked-is-logged",
+        ),
+        pytest.param(
+            lambda: StrayCancelledRunner(after_its_stop=True),
+            StepClock,
+            RunRecords,
+            _closed_while_it_waits,
+            "returned",
+            [(_RUNNER_CLOSE, "CancelledError")],
+            id="a-runner-that-withdraws-its-stop-is-logged",
+        ),
+    ],
+)
+@in_loop
+async def test_a_finished_task_of_a_run_is_shut_down_only_while_its_cancellation_request_stands(
+    caplog, runner, clock, records, client, propagates, logged
+):
+    """Rule 14: a task's own ``cancelling()`` decides, never whether ``cancel()`` once succeeded."""
+    caplog.set_level(logging.DEBUG)
+    async with _watched_loop() as unretrieved:
+        async with driven(runner(), clock=clock(), records=records(), read=False) as drive:
+            closer = asyncio.create_task(client(drive))
+            await asyncio.wait({closer})
+
+    assert _propagated(closer, delivered=False) == propagates
+    assert [(event, kind) for event, kind, _raiser in _failure_lines(caplog)] == [
+        (event.format(drive.run_id), kind) for event, kind in logged
+    ]
+    assert unretrieved == []
+    assert STRAY_CANCELLATION_CANARY not in caplog.text
+    assert not [step for step in _Step if step.canary in caplog.text]
+
+
+@pytest.mark.parametrize(
+    ("has_runner", "failing", "propagates", "logged"),
+    [
+        pytest.param(True, frozenset(), "CancelledError", [], id="nothing-failed"),
+        pytest.param(
+            True, frozenset({_Step.RECORD_END}), "_EndNotRecorded", [], id="the-record-end-failed"
+        ),
+        pytest.param(
+            True,
+            frozenset({_Step.DISCONNECT_REPORT, _Step.RECORD_END}),
+            "_DisconnectNotRecorded",
+            [(_CLEANUP, "_EndNotRecorded")],
+            id="both-cleanup-steps-failed",
+        ),
+        pytest.param(
+            False,
+            frozenset({_Step.DISCONNECT_REPORT}),
+            "_DisconnectNotRecorded",
+            [],
+            id="no-runner-the-disconnect-report-failed",
+        ),
+    ],
+)
+@in_loop
+async def test_a_cancellation_thrown_into_the_body_without_a_request_yields_to_a_failed_cleanup(
+    caplog, has_runner, failing, propagates, logged
+):
+    """Rule 14: the body's own ``CancelledError`` is its outcome; a cleanup failure outranks it."""
+    caplog.set_level(logging.DEBUG)
+    records = _RecordsThatFail(failing)
+    async with _watched_loop() as unretrieved, driven(records=records, read=False) as drive:
+        run_id, frames = (
+            (drive.run_id, drive.frames)
+            if has_runner
+            else _frames_of_a_run_without_a_runner(records)
+        )
+        drive.took(await anext(frames))
+        await drive.clock.parked()
+        closer = asyncio.create_task(frames.athrow(asyncio.CancelledError()))
+        await asyncio.wait({closer})
+
+    assert _propagated(closer, delivered=False) == propagates
+    assert [(event, kind) for event, kind, _raiser in _failure_lines(caplog)] == [
+        (event.format(run_id), kind) for event, kind in logged
+    ]
     assert unretrieved == []
     assert not [step for step in _Step if step.canary in caplog.text]
 

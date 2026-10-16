@@ -29,7 +29,7 @@ from collections.abc import (
 )
 from contextlib import asynccontextmanager, contextmanager
 from datetime import UTC, datetime, timedelta
-from typing import Any, Final
+from typing import Any, Final, NoReturn
 
 import httpx
 import jwt
@@ -443,6 +443,41 @@ class GatedRunner:
         if self.close_error is not None:
             raise self.close_error
         self.log.append("closed")
+
+
+STRAY_CANCELLATION_CANARY: Final = "CANARY_OF_A_STRAY_CANCELLATION"
+
+
+async def stray_cancellation(*, after_its_stop: bool) -> NoReturn:
+    """Raise a ``CancelledError`` while no cancellation request is on the task.
+
+    With ``after_its_stop`` it first waits until the task is cancelled and
+    then withdraws that request, as a step that swallows its stop would.
+    """
+    if after_its_stop:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            assert current is not None
+            current.uncancel()
+    raise asyncio.CancelledError(STRAY_CANCELLATION_CANARY)
+
+
+class StrayCancelledRunner(GatedRunner):
+    """A runner whose first step ends in a ``stray_cancellation``, then closes as a gated one."""
+
+    def __init__(self, *, after_its_stop: bool) -> None:
+        super().__init__()
+        self._after_its_stop = after_its_stop
+
+    async def run(self, admitted: AdmittedRun) -> AsyncGenerator[StreamEvent, None]:
+        try:
+            self.steps += 1
+            await stray_cancellation(after_its_stop=self._after_its_stop)
+            yield QUIET
+        finally:
+            await self._closed()
 
 
 SONGMAKER = service_config().apps["songmaker"]

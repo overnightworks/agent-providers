@@ -3099,9 +3099,10 @@ def test_a_later_failing_report_never_displaces_earlier_control_flow(
     process_logger = logging.getLogger("agent_providers.process")
     process_logger.addHandler(handler)
     callbacks["on_spawn_failed"] = _raising(RuntimeError(ANOTHER_RUNNER_FAILURE_CANARY))
+    channel = CliLineChannel(maximum_lines=1)
     try:
         with pytest.raises(SystemExit):
-            _run_pooled(":", callbacks, stdout_line_channel=CliLineChannel(maximum_lines=1))
+            _run_pooled(":", callbacks, stdout_line_channel=channel)
     finally:
         process_logger.removeHandler(handler)
 

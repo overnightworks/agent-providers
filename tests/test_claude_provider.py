@@ -19,8 +19,8 @@ import anyio
 import pytest
 from provider_test_support import (
     CLAUDE_MODEL_CATALOG_STDOUT,
-    COWRITER_TOOL_CATALOG,
     MCP_TOOL_NAMES,
+    SAMPLE_TOOL_CATALOG,
     SECRET_ENV_KEYS,
     assert_private_credential_child,
     fake_cli_process,
@@ -67,7 +67,7 @@ from agent_providers.tool_loop import ToolOutcome, stream_tool_loop
 
 # The exact string a co-writer command line must carry, written out rather
 # than derived from the code under test.
-SONGMAKER_ALLOWED_TOOLS = "mcp__songmaker__*"
+SAMPLE_ALLOWED_TOOLS = "mcp__notes__*"
 
 
 def _configured_mcp_server():
@@ -1174,7 +1174,7 @@ def _grok_tool_turn(fails: bool, monkeypatch: pytest.MonkeyPatch) -> object:
                 system="system",
                 messages=[{"role": "user", "content": "hello"}],
                 transport=grok_transport.GrokCliToolTransport(
-                    model="grok-test", catalog=COWRITER_TOOL_CATALOG,
+                    model="grok-test", catalog=SAMPLE_TOOL_CATALOG,
                 ),
                 executor=lambda _name, _arguments: ToolOutcome("unused", False),
                 tool_failure_message="tool failed",
@@ -1479,7 +1479,7 @@ def test_cowriter_command_offers_no_builtin_tool() -> None:
     cmd = _mcp_cli_arguments("opus", "/tmp/mcp.json", _configured_mcp_server())
 
     assert _flag_value(cmd, "--tools") == ""
-    assert _flag_value(cmd, "--allowedTools") == SONGMAKER_ALLOWED_TOOLS
+    assert _flag_value(cmd, "--allowedTools") == SAMPLE_ALLOWED_TOOLS
     assert "--disallowedTools" not in cmd
     assert "bypassPermissions" not in cmd
 
@@ -1522,7 +1522,7 @@ def test_the_written_mcp_config_is_the_json_the_cli_expects() -> None:
         },
         user_id_environment_variable="PROBE_USER_ID",
         config_file_prefix="probe-",
-        tool_names=frozenset({"get_song"}),
+        tool_names=frozenset({"get_note"}),
     )
 
     assert provider._build_mcp_config(spec, "u-1") == (
@@ -1635,7 +1635,7 @@ def _init_line(
                 "tools": tools,
                 "slash_commands": slash_commands or [],
                 "mcp_servers": [
-                    {"name": "songmaker", "status": "connected" if mcp_connected else "failed"},
+                    {"name": "notes", "status": "connected" if mcp_connected else "failed"},
                 ],
             }
         ).encode()
@@ -1668,14 +1668,14 @@ def _answer_with(monkeypatch, *lines: bytes) -> list[tuple[str, ...]]:
     return commands
 
 
-_ALL_SONGMAKER_TOOLS = sorted(f"mcp__songmaker__{name}" for name in MCP_TOOL_NAMES)
+_ALL_SAMPLE_TOOLS = sorted(f"mcp__notes__{name}" for name in MCP_TOOL_NAMES)
 
 
 def test_tool_surface_accepts_a_cli_offering_exactly_the_configured_mcp_tools(
     claude_binary,
     monkeypatch,
 ) -> None:
-    _answer_with(monkeypatch, _init_line(_ALL_SONGMAKER_TOOLS))
+    _answer_with(monkeypatch, _init_line(_ALL_SAMPLE_TOOLS))
 
     binary = asyncio.run(verify_cli_tool_surface())
 
@@ -1686,7 +1686,7 @@ def test_tool_surface_rejects_a_cli_offering_an_unlisted_tool(
     claude_binary,
     monkeypatch,
 ) -> None:
-    _answer_with(monkeypatch, _init_line([*_ALL_SONGMAKER_TOOLS, "Bash"]))
+    _answer_with(monkeypatch, _init_line([*_ALL_SAMPLE_TOOLS, "Bash"]))
 
     probe = verify_cli_tool_surface()
     with pytest.raises(CliToolSurfaceError) as exc:
@@ -1701,13 +1701,13 @@ def test_tool_surface_rejects_a_cli_offering_fewer_than_the_configured_tools(
     """A drift check that only flags additions would miss the songmaker
     server silently losing a registration too — #351 Finding 2 wants the
     reported set compared exactly, not just checked for extras."""
-    _answer_with(monkeypatch, _init_line(_ALL_SONGMAKER_TOOLS[:-1]))
+    _answer_with(monkeypatch, _init_line(_ALL_SAMPLE_TOOLS[:-1]))
 
     probe = verify_cli_tool_surface()
     with pytest.raises(CliToolSurfaceError) as exc:
         asyncio.run(probe)
     assert "missing tools" in str(exc.value)
-    assert _ALL_SONGMAKER_TOOLS[-1] in str(exc.value)
+    assert _ALL_SAMPLE_TOOLS[-1] in str(exc.value)
 
 
 def test_tool_surface_rejects_a_cli_that_still_advertises_slash_commands(
@@ -1716,7 +1716,7 @@ def test_tool_surface_rejects_a_cli_that_still_advertises_slash_commands(
 ) -> None:
     _answer_with(
         monkeypatch,
-        _init_line(_ALL_SONGMAKER_TOOLS, slash_commands=["/compact"]),
+        _init_line(_ALL_SAMPLE_TOOLS, slash_commands=["/compact"]),
     )
 
     probe = verify_cli_tool_surface()
@@ -1729,7 +1729,7 @@ def test_tool_surface_is_probed_with_the_cowriter_restrictions(
     claude_binary,
     monkeypatch,
 ) -> None:
-    commands = _answer_with(monkeypatch, _init_line(_ALL_SONGMAKER_TOOLS))
+    commands = _answer_with(monkeypatch, _init_line(_ALL_SAMPLE_TOOLS))
 
     asyncio.run(verify_cli_tool_surface())
 
@@ -1738,7 +1738,7 @@ def test_tool_surface_is_probed_with_the_cowriter_restrictions(
     assert _flag_value(probe, "--setting-sources") == ""
     assert "--strict-mcp-config" in probe
     assert "--disable-slash-commands" in probe
-    assert _flag_value(probe, "--allowedTools") == SONGMAKER_ALLOWED_TOOLS
+    assert _flag_value(probe, "--allowedTools") == SAMPLE_ALLOWED_TOOLS
     assert "--mcp-config" in probe
 
 
@@ -1796,7 +1796,7 @@ def test_the_cowriter_turn_runs_the_same_command_its_probe_verified(
 ) -> None:
     build = _mounted_build(tmp_path, monkeypatch)
     monkeypatch.setattr(provider, "verify_cli_tool_surface", verify_cli_tool_surface)
-    probe_commands = _answer_with(monkeypatch, _init_line(_ALL_SONGMAKER_TOOLS))
+    probe_commands = _answer_with(monkeypatch, _init_line(_ALL_SAMPLE_TOOLS))
     turn_commands: list[tuple[str, ...]] = []
     monkeypatch.setattr(
         "asyncio.create_subprocess_exec",
@@ -1822,7 +1822,7 @@ def test_the_streamed_cowriter_turn_runs_the_same_command_its_probe_verified(
     """
     build = _mounted_build(tmp_path, monkeypatch)
     monkeypatch.setattr(provider, "verify_cli_tool_surface", verify_cli_tool_surface)
-    probe_commands = _answer_with(monkeypatch, _init_line(_ALL_SONGMAKER_TOOLS))
+    probe_commands = _answer_with(monkeypatch, _init_line(_ALL_SAMPLE_TOOLS))
     turn_commands: list[tuple[str, ...]] = []
 
     async def fake_exec(*cmd, **_kw):
@@ -1940,7 +1940,7 @@ def test_tool_surface_probe_stops_the_session_it_started(
     killed: list[int] = []
 
     def fake_popen(*_cmd, **_kw):
-        return fake_cli_process(_init_line(_ALL_SONGMAKER_TOOLS), still_running=True)
+        return fake_cli_process(_init_line(_ALL_SAMPLE_TOOLS), still_running=True)
 
     monkeypatch.setattr(spawn.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(provider.os, "killpg", lambda pid, _sig: killed.append(pid))
@@ -2162,8 +2162,8 @@ def test_tool_surface_is_probed_again_after_the_cli_updates_itself(
 ) -> None:
     _answer_with(
         monkeypatch,
-        _init_line(_ALL_SONGMAKER_TOOLS),
-        _init_line([*_ALL_SONGMAKER_TOOLS, "FutureTool"]),
+        _init_line(_ALL_SAMPLE_TOOLS),
+        _init_line([*_ALL_SAMPLE_TOOLS, "FutureTool"]),
     )
 
     asyncio.run(verify_cli_tool_surface())
@@ -2183,7 +2183,7 @@ def test_tool_surface_is_probed_once_per_cli_build(
     see test_tool_surface_single_flight_serializes_concurrent_probes below
     for that (#351 round 3, Finding 2: a sequential-only stampede test
     proves nothing about two callers racing for a cold cache)."""
-    commands = _answer_with(monkeypatch, _init_line(_ALL_SONGMAKER_TOOLS))
+    commands = _answer_with(monkeypatch, _init_line(_ALL_SAMPLE_TOOLS))
 
     asyncio.run(verify_cli_tool_surface())
     asyncio.run(verify_cli_tool_surface())
@@ -2210,7 +2210,7 @@ def test_tool_surface_single_flight_shares_one_successful_probe(
         calls += 1
         probe_started.set()
         release_probe.wait()
-        return fake_cli_process(_init_line(_ALL_SONGMAKER_TOOLS))
+        return fake_cli_process(_init_line(_ALL_SAMPLE_TOOLS))
 
     monkeypatch.setattr(spawn.subprocess, "Popen", fake_popen)
 
@@ -2406,7 +2406,7 @@ def test_tool_surface_failure_cache_expires_so_a_repair_takes_effect(
     claude_binary,
     monkeypatch,
 ) -> None:
-    commands = _answer_with(monkeypatch, b"not json\n", _init_line(_ALL_SONGMAKER_TOOLS))
+    commands = _answer_with(monkeypatch, b"not json\n", _init_line(_ALL_SAMPLE_TOOLS))
     clock = {"now": time.monotonic()}
     monkeypatch.setattr(provider, "time", SimpleNamespace(monotonic=lambda: clock["now"]))
 
@@ -2433,7 +2433,7 @@ def test_tool_surface_treats_a_failed_mcp_connection_as_a_failure_not_a_permanen
     commands = _answer_with(
         monkeypatch,
         _init_line([], mcp_connected=False),
-        _init_line(_ALL_SONGMAKER_TOOLS),
+        _init_line(_ALL_SAMPLE_TOOLS),
     )
     clock = {"now": time.monotonic()}
     monkeypatch.setattr(provider, "time", SimpleNamespace(monotonic=lambda: clock["now"]))
@@ -2461,7 +2461,7 @@ def test_claude_cli_tool_surface_health_transitions_from_unverified_to_ok(
     co-writer probe (e.g. the CLI was briefly unreachable at boot but is
     fine by the time someone actually opens a chat) must clear an
     earlier "unverified"."""
-    commands = _answer_with(monkeypatch, b"not json\n", _init_line(_ALL_SONGMAKER_TOOLS))
+    commands = _answer_with(monkeypatch, b"not json\n", _init_line(_ALL_SAMPLE_TOOLS))
     clock = {"now": time.monotonic()}
     monkeypatch.setattr(provider, "time", SimpleNamespace(monotonic=lambda: clock["now"]))
 
@@ -2486,8 +2486,8 @@ def test_claude_cli_tool_surface_health_transitions_from_ok_to_drift_after_a_bui
     because the boot-time check once found it so."""
     commands = _answer_with(
         monkeypatch,
-        _init_line(_ALL_SONGMAKER_TOOLS),
-        _init_line([*_ALL_SONGMAKER_TOOLS, "FutureTool"]),
+        _init_line(_ALL_SAMPLE_TOOLS),
+        _init_line([*_ALL_SAMPLE_TOOLS, "FutureTool"]),
     )
 
     asyncio.run(verify_cli_tool_surface())
@@ -2506,7 +2506,7 @@ def test_claude_cli_tool_surface_health_becomes_unverified_when_a_cached_binary_
     claude_binary,
     monkeypatch,
 ) -> None:
-    commands = _answer_with(monkeypatch, _init_line(_ALL_SONGMAKER_TOOLS))
+    commands = _answer_with(monkeypatch, _init_line(_ALL_SAMPLE_TOOLS))
 
     asyncio.run(verify_cli_tool_surface())
     assert provider.claude_cli_tool_surface_health() == "ok"
@@ -2528,7 +2528,7 @@ def test_claude_cli_tool_surface_health_becomes_unverified_when_a_cached_binary_
     claude_binary,
     monkeypatch,
 ) -> None:
-    commands = _answer_with(monkeypatch, _init_line(_ALL_SONGMAKER_TOOLS))
+    commands = _answer_with(monkeypatch, _init_line(_ALL_SAMPLE_TOOLS))
 
     asyncio.run(verify_cli_tool_surface())
     assert provider.claude_cli_tool_surface_health() == "ok"
@@ -2603,7 +2603,7 @@ def test_tool_surface_permanent_mismatch_outlives_the_zombie_failure_ttl(
     """A genuine verdict is not just "longer than ten seconds" — it never
     expires. Advancing the clock past even the zombie TTL (the longest one
     this module has) must not trigger a fresh probe."""
-    commands = _answer_with(monkeypatch, _init_line([*_ALL_SONGMAKER_TOOLS, "Bash"]))
+    commands = _answer_with(monkeypatch, _init_line([*_ALL_SAMPLE_TOOLS, "Bash"]))
     clock = {"now": time.monotonic()}
     monkeypatch.setattr(provider, "time", SimpleNamespace(monotonic=lambda: clock["now"]))
 
@@ -2640,8 +2640,8 @@ def test_tool_surface_is_reprobed_after_a_genuine_symlink_retarget(
     ):
         commands = _answer_with(
             monkeypatch,
-            _init_line(_ALL_SONGMAKER_TOOLS),
-            _init_line([*_ALL_SONGMAKER_TOOLS, "FutureTool"]),
+            _init_line(_ALL_SAMPLE_TOOLS),
+            _init_line([*_ALL_SAMPLE_TOOLS, "FutureTool"]),
         )
 
         asyncio.run(verify_cli_tool_surface())
@@ -2668,7 +2668,7 @@ def test_tool_surface_a_clean_read_followed_by_a_zombie_is_not_trusted(
     outliving SIGKILL, produced an unbounded *clean* verdict and turn
     approval. A zombie always wins, regardless of what was read, and
     before parsing, the MCP check, or the verdict ever run."""
-    _answer_with(monkeypatch, _init_line(_ALL_SONGMAKER_TOOLS))
+    _answer_with(monkeypatch, _init_line(_ALL_SAMPLE_TOOLS))
     monkeypatch.setattr(provider.process, "_reap_process_group", lambda _proc: True)
 
     probe = verify_cli_tool_surface()
@@ -2721,8 +2721,8 @@ def test_tool_surface_a_clean_read_followed_by_a_zombie_gets_the_zombie_ttl(
 ) -> None:
     commands = _answer_with(
         monkeypatch,
-        _init_line(_ALL_SONGMAKER_TOOLS),
-        _init_line(_ALL_SONGMAKER_TOOLS),
+        _init_line(_ALL_SAMPLE_TOOLS),
+        _init_line(_ALL_SAMPLE_TOOLS),
     )
     monkeypatch.setattr(provider.process, "_reap_process_group", lambda _proc: True)
     clock = {"now": time.monotonic()}
@@ -2754,7 +2754,7 @@ def test_zombie_failure_uses_the_event_loop_clock_when_the_loop_is_offset(
     claude_binary,
     monkeypatch,
 ) -> None:
-    commands = _answer_with(monkeypatch, _init_line(_ALL_SONGMAKER_TOOLS))
+    commands = _answer_with(monkeypatch, _init_line(_ALL_SAMPLE_TOOLS))
     monkeypatch.setattr(provider.process, "_reap_process_group", lambda _proc: True)
     loop = asyncio.new_event_loop()
     monotonic = time.monotonic
@@ -2865,7 +2865,7 @@ def test_probe_runner_task_cancellation_gives_waiters_a_normal_error(
     def fake_popen(*_cmd, **_kw):
         probe_started.set()
         threading.Event().wait(999)  # never returns on its own
-        return fake_cli_process(_init_line(_ALL_SONGMAKER_TOOLS))
+        return fake_cli_process(_init_line(_ALL_SAMPLE_TOOLS))
 
     monkeypatch.setattr(spawn.subprocess, "Popen", fake_popen)
 
@@ -2908,7 +2908,7 @@ def test_tool_surface_a_cancelled_leader_does_not_reopen_single_flight(
         calls += 1
         probe_started.set()
         release_probe.wait()
-        return fake_cli_process(_init_line(_ALL_SONGMAKER_TOOLS))
+        return fake_cli_process(_init_line(_ALL_SAMPLE_TOOLS))
 
     monkeypatch.setattr(spawn.subprocess, "Popen", fake_popen)
 
@@ -2948,7 +2948,7 @@ def test_tool_surface_inflight_future_is_resolved_even_when_evaluation_itself_ra
     (_follower_safe_exception), not the raw RuntimeError; the dict cleanup
     is what this test is really about.
     """
-    _answer_with(monkeypatch, _init_line(_ALL_SONGMAKER_TOOLS))
+    _answer_with(monkeypatch, _init_line(_ALL_SAMPLE_TOOLS))
     monkeypatch.setattr(
         provider,
         "_evaluate_tool_surface",
@@ -3928,7 +3928,7 @@ def test_no_builtin_gate_and_mcp_gate_cache_independently(
     and vice versa; they check different command shapes."""
     commands = _answer_with(
         monkeypatch,
-        _init_line(_ALL_SONGMAKER_TOOLS),
+        _init_line(_ALL_SAMPLE_TOOLS),
         _init_line([]),
     )
 

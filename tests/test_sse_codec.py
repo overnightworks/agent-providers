@@ -35,7 +35,7 @@ from agent_client.wire import (
 A_RUN: list[RunEvent] = [
     started(),
     text(1, "Ein erster Vers – über Grün."),
-    call(2, "call-1", name="write_lyrics", tool_input={"verse": 1}),
+    call(2, "call-1", name="write_text", tool_input={"line": 1}),
     result(3, "call-1", content="saved\nline two"),
     heartbeat(4),
     succeeded(5),

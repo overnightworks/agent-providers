@@ -29,11 +29,11 @@ from agent_providers.config import (
 _SAMPLE_ROOT = Path("/tmp/agent-providers-tests")
 
 _SAMPLE_MCP_SERVER = McpServerSpec(
-    name="songmaker",
+    name="notes",
     command="/usr/bin/python3",
-    args=("-m", "songmaker_mcp_server"),
-    user_id_environment_variable="SONGMAKER_MCP_USER_ID",
-    config_file_prefix="songmaker-mcp-",
+    args=("-m", "notes_mcp_server"),
+    user_id_environment_variable="NOTES_MCP_USER_ID",
+    config_file_prefix="notes-mcp-",
     tool_names=MCP_TOOL_NAMES,
 )
 
@@ -43,8 +43,8 @@ _SAMPLE_TURNS = TurnRuntimeConfig(
     codex_resources_directory=_SAMPLE_ROOT / "codex" / "resources",
     codex_max_concurrent_processes=4,
     codex_max_concurrent_image_runs=2,
-    cli_prompt_file_prefix="songmaker-cli-prompt-",
-    cli_prompt_file_placeholder="<songmaker-private-prompt>",
+    cli_prompt_file_prefix="notes-cli-prompt-",
+    cli_prompt_file_placeholder="<notes-private-prompt>",
     mcp_server=_SAMPLE_MCP_SERVER,
 )
 

@@ -17,7 +17,7 @@ import pytest
 from provider_test_support import (
     A_CANARY,
     a_call_to_an_undeclared_tool_carrying,
-    drive_cowriter_turn,
+    drive_turn,
     formatted_log_text,
     grok_cli_outcome,
     grok_cli_runner,
@@ -251,7 +251,7 @@ def test_a_refused_tool_call_reaches_neither_the_frames_nor_the_service_log(monk
             [],
         ),
     )
-    refused = drive_cowriter_turn("grok").error
+    refused = drive_turn("grok").error
     assert isinstance(refused, TextToolCallRejectedError)
     caplog.set_level(logging.DEBUG)
 

@@ -23,8 +23,9 @@ import os
 import shlex
 import stat
 import tempfile
+import threading
 import traceback
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
@@ -177,6 +178,31 @@ def override_provider_runtime(**deployment_facts: Any) -> None:
     )
     reset_config()
     configure(replacement)
+
+
+def call_within_deadline(
+    function: Callable[..., Any], *arguments: Any, seconds: float = 5.0,
+) -> Any:
+    """Return what ``function`` returns or raise what it raises; fail if it blocks.
+
+    A call that waits on a FIFO would hang the suite, so it runs in a thread
+    joined with a timeout, and a regression fails the test instead.
+    """
+    outcome: dict[str, Any] = {}
+
+    def run() -> None:
+        try:
+            outcome["value"] = function(*arguments)
+        except BaseException as error:
+            outcome["error"] = error
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(seconds)
+    assert not thread.is_alive(), "the call was still blocked at its deadline"
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["value"]
 
 
 def shell_child(

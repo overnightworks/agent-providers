@@ -46,7 +46,7 @@ from agent_providers.openai_adapter import (
 )
 from agent_providers.process import (
     AgentCliUnavailableError,
-    codex_cli_access_token_is_present,
+    codex_cli_login_is_usable,
 )
 from agent_providers.tool_loop import (
     ToolExecutor,
@@ -351,7 +351,7 @@ def _codex_cli_image_route_failure() -> SafeRouteReason | None:
     if not codex_image_turn_is_available():
         return normalize_route_failure(SafeRouteReasonCode.CLI_BINARY_UNAVAILABLE)
     try:
-        signed_in = codex_cli_access_token_is_present()
+        signed_in = codex_cli_login_is_usable()
     except AgentCliUnavailableError:
         return normalize_route_failure(SafeRouteReasonCode.CLI_BINARY_UNAVAILABLE)
     if not signed_in:

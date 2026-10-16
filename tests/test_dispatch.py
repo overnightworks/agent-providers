@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import json
+import os
 import pkgutil
 import re
 from pathlib import Path
 
 import pytest
-from provider_test_support import drive_cowriter_turn
+from provider_test_support import (
+    call_within_deadline,
+    drive_cowriter_turn,
+    override_provider_runtime,
+)
 
 import agent_providers
 from agent_providers import dispatch
@@ -85,6 +91,59 @@ def test_image_capability_says_a_grok_cli_route_carries_no_image_tool():
     assert isinstance(capability, ImageCapability)
     assert capability.carries_image_tool is False
     assert capability.failure.code is SafeRouteReasonCode.NO_IMAGE_TOOL
+
+
+
+def _a_codex_login(**tokens: object) -> bytes:
+    return json.dumps({
+        "auth_mode": "chatgpt",
+        "last_refresh": "2026-09-04T19:20:00Z",
+        "tokens": {"access_token": "a", "id_token": "i", "account_id": "account", **tokens},
+    }).encode()
+
+
+def _codex_image_failure(monkeypatch, auth_file: Path):
+    monkeypatch.setattr(dispatch, "codex_image_turn_is_available", lambda: True)
+    override_provider_runtime(codex_cli_auth_file=auth_file)
+    return call_within_deadline(image_capability, "codex", ProviderRoute.CLI).failure
+
+
+@pytest.mark.parametrize(
+    ("document", "failure_code"),
+    [
+        pytest.param(_a_codex_login(), None, id="complete"),
+        pytest.param(
+            b'{"auth_mode":"chatgpt","tokens":{"access_token":"a"}}',
+            SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED, id="only-an-access-token",
+        ),
+        pytest.param(b"{}", SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED, id="tokens-absent"),
+        pytest.param(
+            _a_codex_login(account_id=7),
+            SafeRouteReasonCode.CLI_BINARY_UNAVAILABLE, id="numeric-account-id",
+        ),
+        pytest.param(
+            b"\xff\xfe", SafeRouteReasonCode.CLI_BINARY_UNAVAILABLE, id="invalid-encoding",
+        ),
+    ],
+)
+def test_codex_image_preflight_needs_a_usable_login(
+    monkeypatch, tmp_path: Path, document: bytes, failure_code: SafeRouteReasonCode | None,
+):
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_bytes(document)
+
+    failure = _codex_image_failure(monkeypatch, auth_file)
+
+    assert (failure.code if failure else None) is failure_code
+
+
+def test_codex_image_preflight_refuses_a_fifo_login_without_waiting(monkeypatch, tmp_path: Path):
+    auth_file = tmp_path / "auth.json"
+    os.mkfifo(auth_file)
+
+    failure = _codex_image_failure(monkeypatch, auth_file)
+
+    assert failure.code is SafeRouteReasonCode.CLI_BINARY_UNAVAILABLE
 
 
 README = Path(__file__).resolve().parents[1] / "README.md"

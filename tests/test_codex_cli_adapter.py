@@ -32,19 +32,26 @@ from provider_test_support import (
 )
 
 from agent_providers import process
+from agent_providers.catalog import ProviderRoute, list_provider_models
 from agent_providers.codex import image as codex_image
 from agent_providers.codex import protocol as codex_protocol
 from agent_providers.codex import transport as codex_transport
 from agent_providers.codex.pool import CodexProcessKind, CodexProcessPool
 from agent_providers.errors import (
     CodexProcessPoolSaturatedError,
+    ProviderModelCatalogUnavailableError,
     ProviderUnavailableError,
     SafeRouteReasonCode,
     TextToolCallRejectedError,
 )
 from agent_providers.events import AssistantTextEvent, FinalEvent, ToolCallEvent
 from agent_providers.images import ImagePolicy
-from agent_providers.process import CliRunOutcome, CliRunReason, clear_agent_cli_caches
+from agent_providers.process import (
+    AgentCliUnavailableError,
+    CliRunOutcome,
+    CliRunReason,
+    clear_agent_cli_caches,
+)
 from agent_providers.text_tool_protocol import TextToolRejectionRule
 from agent_providers.tool_loop import (
     InitialTurn,
@@ -1152,8 +1159,12 @@ def test_a_deviating_transcript_raises_the_blocked_error_with_its_tokens(tmp_pat
     (
         None,
         {**_REDACTED_CODEX_LOGIN, "tokens": {"id_token": "id-token"}},
+        {
+            **_REDACTED_CODEX_LOGIN,
+            "tokens": {**_REDACTED_CODEX_LOGIN["tokens"], "account_id": 7},
+        },
     ),
-    ids=("missing", "incomplete"),
+    ids=("missing", "incomplete", "wrong-typed"),
 )
 def test_codex_public_adapters_reject_unusable_login_mirrors(
     tmp_path: Path,
@@ -1448,6 +1459,15 @@ def _drive_the_probe_path(_codex_login_mirror: Path) -> BaseException:
 _MALFORMED_LOGIN_WITH_CANARY = f'{{"refresh_token": "{_CANARY_REFRESH_TOKEN}", '.encode()
 
 
+def _drive_the_reader_with_an_oversize_source(codex_login_mirror: Path) -> BaseException:
+    codex_login_mirror.write_bytes(
+        _CANARY_REFRESH_TOKEN.encode() + b" " * (256 * 1024),
+    )
+    with pytest.raises(AgentCliUnavailableError) as raised:
+        process._read_credential_file(codex_login_mirror)
+    return raised.value
+
+
 def _drive_the_credential_seam(codex_login_mirror: Path) -> BaseException:
     with pytest.raises(process.CliCredentialNotConfiguredError) as raised:
         process.PrivateCredentialHome(
@@ -1462,8 +1482,13 @@ def _drive_the_credential_seam(codex_login_mirror: Path) -> BaseException:
 
 @pytest.mark.parametrize(
     "drive",
-    (_drive_the_probe_path, _drive_the_image_path, _drive_the_credential_seam),
-    ids=("probe", "image", "seam"),
+    (
+        _drive_the_probe_path,
+        _drive_the_image_path,
+        _drive_the_credential_seam,
+        _drive_the_reader_with_an_oversize_source,
+    ),
+    ids=("probe", "image", "seam", "reader-oversize"),
 )
 def test_a_malformed_login_leaves_no_credential_content_in_the_error_chain(
     monkeypatch, codex_login_mirror: Path, drive,
@@ -1482,3 +1507,67 @@ def test_a_malformed_login_leaves_no_credential_content_in_the_error_chain(
         _CANARY_REFRESH_TOKEN in (value.decode() if isinstance(value, bytes) else str(value))
         for value in _values_held_by_the_traceback_frames(error)
     )
+
+
+def _a_refused_symbolic_link(codex_login_mirror: Path) -> BaseException:
+    link = codex_login_mirror.with_name("link.json")
+    link.symlink_to(codex_login_mirror)
+    with pytest.raises(AgentCliUnavailableError) as raised:
+        process._read_credential_file(link)
+    return raised.value
+
+
+def _a_malformed_login_judged_usable_or_not(codex_login_mirror: Path) -> BaseException:
+    codex_login_mirror.write_bytes(_MALFORMED_LOGIN_WITH_CANARY)
+    with pytest.raises(AgentCliUnavailableError) as raised:
+        process.codex_cli_login_is_usable()
+    return raised.value
+
+
+@pytest.mark.parametrize(
+    "refuse",
+    (_a_refused_symbolic_link, _a_malformed_login_judged_usable_or_not),
+    ids=("reader-symlink", "decider-malformed"),
+)
+def test_a_credential_refusal_carries_no_chain_inside_a_handler(
+    codex_login_mirror: Path, refuse,
+) -> None:
+    try:
+        raise RuntimeError("the caller's own failure")
+    except RuntimeError:
+        refusal = refuse(codex_login_mirror)
+
+    assert refusal.__cause__ is None
+    assert refusal.__context__ is None
+    assert not any(
+        _CANARY_REFRESH_TOKEN in (value.decode() if isinstance(value, bytes) else str(value))
+        for value in _values_held_by_the_traceback_frames(refusal)
+    )
+
+
+@pytest.mark.parametrize(
+    "document",
+    (
+        {**_REDACTED_CODEX_LOGIN, "tokens": {"access_token": "access-token"}},
+        {**_REDACTED_CODEX_LOGIN, "tokens": {**_REDACTED_CODEX_LOGIN["tokens"], "account_id": 7}},
+    ),
+    ids=("incomplete", "wrong-typed"),
+)
+def test_the_codex_catalog_probe_starts_without_an_unusable_login(
+    monkeypatch, codex_login_mirror: Path, document: dict,
+) -> None:
+    codex_login_mirror.write_text(json.dumps(document))
+    monkeypatch.setattr(process, "resolve_cli_binary", lambda _binary: Path("/usr/bin/codex"))
+    clear_agent_cli_caches()
+    copies: list[tuple[tuple[str, ...], str]] = []
+    failing_child = _recording_runner(
+        copies, lambda _child, **_kwargs: _outcome(returncode=1), [],
+    )
+    monkeypatch.setattr(process, "run_cli_bounded", failing_child)
+
+    with pytest.raises(ProviderModelCatalogUnavailableError) as raised:
+        list_provider_models("codex", ProviderRoute.CLI)
+
+    (_command, child_login), = copies
+    assert child_login == ""
+    assert raised.value.reason.code is SafeRouteReasonCode.CATALOGUE_PROTOCOL_ERROR

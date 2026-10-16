@@ -19,6 +19,7 @@ import pytest
 from provider_test_support import (
     GROK_LOGGED_IN,
     SECRET_ENV_KEYS,
+    call_within_deadline,
     override_provider_runtime,
     shell_child,
 )
@@ -2177,6 +2178,8 @@ def test_cancelling_a_line_channel_discards_unread_output() -> None:
         ("codex", "[]", CODEX_CLI_CREDENTIALS_INVALID_DETAIL),
         ("codex", '{"tokens": []}', CODEX_CLI_CREDENTIALS_INVALID_DETAIL),
         ("codex", '{"tokens": {"access_token": 3}}', CODEX_CLI_CREDENTIALS_INVALID_DETAIL),
+        ("codex", '{"tokens": {"account_id": 7}}', CODEX_CLI_CREDENTIALS_INVALID_DETAIL),
+        ("codex", '{"tokens": null}', CODEX_CLI_CREDENTIALS_INVALID_DETAIL),
     ],
 )
 def test_credential_probe_names_malformed_mounted_credentials(
@@ -2187,13 +2190,43 @@ def test_credential_probe_names_malformed_mounted_credentials(
     function = (
         process.grok_cli_token_is_present
         if checker == "grok"
-        else process.codex_cli_access_token_is_present
+        else process.codex_cli_login_is_usable
     )
     field = "grok_cli_auth_file" if checker == "grok" else "codex_cli_auth_file"
     override_provider_runtime(**{field: credential_file})
 
     with pytest.raises(AgentCliUnavailableError, match=detail):
         function()
+
+
+_A_COMPLETE_CODEX_LOGIN = {
+    "auth_mode": "chatgpt",
+    "last_refresh": "2026-09-04T19:20:00Z",
+    "tokens": {"access_token": "a", "id_token": "i", "account_id": "account"},
+}
+
+
+@pytest.mark.parametrize(
+    ("document", "usable"),
+    [
+        pytest.param(None, False, id="missing"),
+        pytest.param(_A_COMPLETE_CODEX_LOGIN, True, id="complete"),
+        pytest.param({"tokens": {"access_token": "a"}}, False, id="only-an-access-token"),
+        pytest.param({"tokens": {}}, False, id="no-access-token"),
+        pytest.param(
+            {"auth_mode": "apikey", "OPENAI_API_KEY": "sk-synthetic"}, False, id="api-key",
+        ),
+    ],
+)
+def test_a_codex_login_is_usable_only_when_a_child_can_start_with_it(
+    tmp_path, document: dict | None, usable: bool,
+) -> None:
+    auth_file = tmp_path / "codex-auth.json"
+    if document is not None:
+        auth_file.write_text(json.dumps(document))
+    override_provider_runtime(codex_cli_auth_file=auth_file)
+
+    assert process.codex_cli_login_is_usable() is usable
 
 
 @pytest.mark.parametrize(
@@ -2205,10 +2238,13 @@ def test_credential_probe_names_malformed_mounted_credentials(
         '{"tokens": []}',
         '{"auth_mode": "chatgpt", "tokens": {}}',
         '{"auth_mode": "apikey", "OPENAI_API_KEY": "sk-synthetic"}',
+        json.dumps({**_A_COMPLETE_CODEX_LOGIN, "tokens": {
+            **_A_COMPLETE_CODEX_LOGIN["tokens"], "account_id": 7,
+        }}),
     ),
     ids=(
         "missing", "not-json", "not-an-object", "tokens-not-an-object", "no-access-token",
-        "api-key-only",
+        "api-key-only", "numeric-account-id",
     ),
 )
 def test_an_unusable_codex_login_makes_the_probe_answer_logged_out(
@@ -2253,3 +2289,84 @@ def test_the_grok_probe_hands_its_child_the_login_byte_for_byte(tmp_path, monkey
 
     assert grok_cli_status().login.logged_in is True
     assert copies == [auth_file.read_bytes()]
+
+
+_CREDENTIAL_BOUND = 256 * 1024
+
+
+def _a_fifo(directory: Path) -> Path:
+    path = directory / "source"
+    os.mkfifo(path)
+    return path
+
+
+def _a_directory(directory: Path) -> Path:
+    path = directory / "source"
+    path.mkdir()
+    return path
+
+
+def _a_symlink_to_a_login(directory: Path) -> Path:
+    target = directory / "target"
+    target.write_text(json.dumps(_A_COMPLETE_CODEX_LOGIN))
+    link = directory / "source"
+    link.symlink_to(target)
+    return link
+
+
+def _a_dangling_symlink(directory: Path) -> Path:
+    link = directory / "source"
+    link.symlink_to(directory / "gone")
+    return link
+
+
+def _a_file_over_the_bound(directory: Path) -> Path:
+    path = directory / "source"
+    path.write_bytes(b"x" * (_CREDENTIAL_BOUND + 1))
+    return path
+
+
+def _a_path_through_a_regular_file(directory: Path) -> Path:
+    (directory / "file").write_text("{}")
+    return directory / "file" / "auth.json"
+
+
+_NOT_A_PLAIN_FILE = [
+    pytest.param(_a_fifo, "CLI credential is not a regular file", id="fifo"),
+    pytest.param(_a_directory, "CLI credential is not a regular file", id="directory"),
+    pytest.param(lambda _: Path("/dev/null"), "CLI credential is not a regular file", id="device"),
+    pytest.param(_a_symlink_to_a_login, "CLI credential is a symbolic link", id="symlink"),
+    pytest.param(_a_dangling_symlink, "CLI credential is a symbolic link", id="dangling-symlink"),
+    pytest.param(
+        _a_file_over_the_bound, "CLI credentials exceed the copy bound", id="over-the-bound",
+    ),
+    pytest.param(
+        _a_path_through_a_regular_file, "could not read CLI credentials", id="enotdir",
+    ),
+]
+
+
+@pytest.mark.parametrize(("make_source", "detail"), _NOT_A_PLAIN_FILE)
+def test_the_credential_reader_refuses_what_is_not_a_plain_file(
+    tmp_path: Path, make_source, detail: str,
+) -> None:
+    source = make_source(tmp_path)
+
+    with pytest.raises(AgentCliUnavailableError) as refusal:
+        call_within_deadline(process._read_credential_file, source)
+
+    assert str(refusal.value) == detail
+
+
+@pytest.mark.parametrize("size", (0, _CREDENTIAL_BOUND), ids=("empty", "exactly-the-bound"))
+def test_the_credential_reader_returns_a_plain_file_within_the_bound(
+    tmp_path: Path, size: int,
+) -> None:
+    source = tmp_path / "source"
+    source.write_bytes(b"x" * size)
+
+    assert process._read_credential_file(source) == b"x" * size
+
+
+def test_the_credential_reader_reports_a_missing_file_as_absent(tmp_path: Path) -> None:
+    assert process._read_credential_file(tmp_path / "missing") is None

@@ -2987,6 +2987,7 @@ def test_whichever_thread_settles_first_decides_the_return_and_the_channel(
     if runner_thread_first:
         assert outcome.stdout == "hello\n"
         assert channel.receive(timeout=0) == b"hello\n"
+        assert not channel.abort_requested()
     assert channel.receive(timeout=0) is outcome
     assert process_pool.reservation_count() == 0
     failure_watch.assert_nothing_leaked()
@@ -3082,6 +3083,7 @@ def test_control_flow_raised_by_the_channel_close_on_the_callers_thread_propagat
     [
         pytest.param([SystemExit, RuntimeError], id="control-flow-first"),
         pytest.param([RuntimeError, SystemExit], id="exception-first"),
+        pytest.param([SystemExit, KeyboardInterrupt], id="first-control-flow-wins"),
     ],
 )
 def test_a_later_failing_report_never_displaces_earlier_control_flow(
@@ -3105,6 +3107,7 @@ def test_a_later_failing_report_never_displaces_earlier_control_flow(
             _run_pooled(":", callbacks, stdout_line_channel=channel)
     finally:
         process_logger.removeHandler(handler)
+    failure_watch.assert_nothing_leaked()
 
 
 def test_control_flow_raised_by_the_log_handler_while_reporting_propagates_after_publishing(

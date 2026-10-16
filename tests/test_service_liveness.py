@@ -19,6 +19,7 @@ import pytest
 from service_support import (
     GatedRunner,
     ScriptedRunner,
+    SteppedLoop,
     StepClock,
     TokenMint,
     decoded_events,
@@ -63,7 +64,8 @@ FINAL = FinalEvent(text="Done.")
 def in_loop(scenario: Callable[..., Coroutine[Any, Any, None]]) -> Callable[..., None]:
     @functools.wraps(scenario)
     def run(*args: Any, **kwargs: Any) -> None:
-        asyncio.run(scenario(*args, **kwargs))
+        with asyncio.Runner(loop_factory=SteppedLoop) as runner:
+            runner.run(scenario(*args, **kwargs))
 
     return run
 
@@ -236,12 +238,13 @@ async def test_the_announced_cadence_is_the_configured_cadence():
 async def test_the_stepped_clock_reports_a_deadline_however_many_turns_the_waiter_needs():
     clock = StepClock()
 
-    async def waiter_that_takes_a_while() -> None:
-        for _ in range(500):
-            await asyncio.sleep(0)
-        await clock.wait_until(7)
+    async def waiter_behind(hops: int) -> None:
+        if hops:
+            await asyncio.create_task(waiter_behind(hops - 1))
+        else:
+            await clock.wait_until(7)
 
-    waiting = asyncio.create_task(waiter_that_takes_a_while())
+    waiting = asyncio.create_task(waiter_behind(50))
     assert await clock.parked() == 7
     clock.advance_to(7)
     await waiting

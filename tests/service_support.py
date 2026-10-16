@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import selectors
 import socket
 import threading
 import time
@@ -78,7 +79,38 @@ def run_body(**overrides: object) -> dict[str, Any]:
     }
 
 
-SETTLE_TURN_LIMIT: Final = 10_000
+class _IdleSelector(selectors.DefaultSelector):
+    """A selector that tells when the loop has nothing left to run and is about to block."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._idle_watchers: list[asyncio.Future[None]] = []
+
+    def idle(self) -> asyncio.Future[None]:
+        watcher = asyncio.get_running_loop().create_future()
+        self._idle_watchers.append(watcher)
+        return watcher
+
+    def select(self, timeout: float | None = None) -> list[tuple[selectors.SelectorKey, int]]:
+        if timeout == 0 or not self._idle_watchers:  # a ready callback keeps the loop busy
+            return super().select(timeout)
+        watchers, self._idle_watchers = self._idle_watchers, []
+        for watcher in watchers:
+            if not watcher.done():
+                watcher.set_result(None)
+        return super().select(0)  # the watchers' owners are ready now, so do not block
+
+
+class SteppedLoop(asyncio.SelectorEventLoop):
+    """An event loop that can wait until every task is parked on a future."""
+
+    def __init__(self) -> None:
+        selector = _IdleSelector()
+        super().__init__(selector)
+        self.idle_selector = selector
+
+    async def settled(self) -> None:
+        await self.idle_selector.idle()
 
 
 class StepClock:
@@ -87,7 +119,7 @@ class StepClock:
     It is also the run's ``RunClock``: ``wait_until`` parks the waiter until
     an advance reaches its deadline, and ``parked`` says which deadline the
     run waits for next, so a test steps from one deadline to the next without
-    sleeping.
+    sleeping. It needs the ``SteppedLoop``.
     """
 
     def __init__(self) -> None:
@@ -117,17 +149,11 @@ class StepClock:
             self._waiters.remove(parked)
 
     async def parked(self) -> float | None:
-        """The deadline the run waits for next, once no other task can run.
-
-        An empty ready queue means every other task waits on a future, a
-        parked deadline included. A run that never gets there fails loudly.
-        """
+        """The deadline the run waits for next, once every other task waits on a future."""
         loop = asyncio.get_running_loop()
-        for _ in range(SETTLE_TURN_LIMIT):
-            await asyncio.sleep(0)
-            if not loop._ready:  # type: ignore[attr-defined]
-                return min((deadline for deadline, _ in self._waiters), default=None)
-        raise AssertionError("the run never settled")
+        assert isinstance(loop, SteppedLoop), "run the scenario in a SteppedLoop"
+        await loop.settled()
+        return min((deadline for deadline, _ in self._waiters), default=None)
 
 
 class TokenMint:

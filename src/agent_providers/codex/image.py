@@ -16,7 +16,6 @@ import os
 import re
 import tempfile
 import threading
-import time
 from collections import deque
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -52,7 +51,6 @@ from agent_providers.codex.protocol import (
     top_level_error_message,
 )
 from agent_providers.config import current_config, current_turn_config
-from agent_providers.constants import CLI_TERMINATION_GRACE_SECONDS
 from agent_providers.errors import SafeRouteReasonCode
 from agent_providers.images import ImagePolicy
 from agent_providers.process import (
@@ -60,6 +58,7 @@ from agent_providers.process import (
     CliLineChannel,
     CliRunOutcome,
     CliRunReason,
+    cli_settle_deadline,
     resolve_cli_binary,
 )
 from agent_providers.sandbox.paths import (
@@ -71,9 +70,7 @@ from agent_providers.spawn import ChildProcess
 _IMAGE_ENCODER_PACKAGE: Final = "PIL"
 log = logging.getLogger(__name__)
 
-# The runner reaps its child within two termination graces after the deadline;
-# a consumer still waiting past that has lost its runner.
-_RUNNER_OUTCOME_GRACE_SECONDS: Final = 2 * CLI_TERMINATION_GRACE_SECONDS
+_CHANNEL_POLL_SECONDS: Final = 0.05
 _IMAGE_ENCODER_MISSING_DETAIL: Final = (
     "This deployment cannot encode an image: install the 'image' extra."
 )
@@ -265,8 +262,6 @@ def _run_codex_image_cli(
     """Reap the CLI promptly when its streamed events leave the image gate."""
     channel = CliLineChannel(CODEX_CLI_LINE_CHANNEL_CAPACITY)
     event_gate = _CodexImageEventGate(codex_home=codex_home)
-    # Described before the runner thread exists: a thread that raises here
-    # would leave the channel unclosed and the loop below waiting forever.
     try:
         child = codex_child_process(
             _codex_image_arguments(model),
@@ -276,94 +271,91 @@ def _run_codex_image_cli(
         )
     except AgentCliUnavailableError as exc:
         raise CodexImageCliError() from exc
+    try:
+        stdin_payload = prompt.encode("utf-8")
+    except UnicodeEncodeError:
+        raise CodexImageCliError() from None
     reservation = get_codex_process_pool().reserve(CodexProcessKind.IMAGE)
-
     runner = threading.Thread(
         target=_run_codex_image_runner,
         kwargs={
             "reservation": reservation,
             "child": child,
-            "prompt": prompt,
+            "stdin_payload": stdin_payload,
             "deadline": deadline,
             "channel": channel,
         },
         daemon=True,
     )
-    runner.start()
+    try:
+        runner.start()
+    except BaseException as exc:
+        start_failure = exc
+    else:
+        start_failure = None
+    if start_failure is not None:
+        get_codex_process_pool().abandon_unspawned(reservation)
+        if not isinstance(start_failure, Exception):
+            raise start_failure
+        raise CodexImageCliError()
+
+    settle_by = cli_settle_deadline(deadline)
     try:
         while True:
             if abort_signal is not None and abort_signal.is_set():
                 channel.request_abort()
-            try:
-                line_or_outcome = channel.receive(timeout=0.05)
-            except TimeoutError:
-                if time.monotonic() >= deadline + _RUNNER_OUTCOME_GRACE_SECONDS:
-                    return _failed_runner_outcome(CliRunReason.DEADLINE_WHILE_READING)
+            line_or_outcome = _receive_within(channel, settle_by)
+            if line_or_outcome is None:
                 continue
             if isinstance(line_or_outcome, CliRunOutcome):
                 return line_or_outcome
             try:
                 event_gate.accept(line_or_outcome)
-            except ImageToolBlockedError:
-                channel.request_abort()
-                runner.join()
-                raise
             except CodexImageCliError:
                 # A valid partial stream has no completed turn yet. Its full
                 # transcript is checked below after the child has been reaped.
                 continue
     finally:
-        if runner.is_alive():
-            channel.request_abort()
-            runner.join()
+        channel.request_abort()
+        while not isinstance(_receive_within(channel, settle_by), CliRunOutcome):
+            pass
+
+
+def _receive_within(channel: CliLineChannel, settle_by: float) -> bytes | CliRunOutcome | None:
+    try:
+        return channel.receive(timeout=_CHANNEL_POLL_SECONDS, settle_by=settle_by)
+    except TimeoutError:
+        return None
 
 
 def _run_codex_image_runner(
     *,
     reservation: CodexProcessReservation,
     child: ChildProcess,
-    prompt: str,
+    stdin_payload: bytes,
     deadline: float,
     channel: CliLineChannel,
 ) -> None:
-    """Close the channel with the child's outcome, or with a failed one if the runner raises."""
-    result = _failed_runner_outcome(CliRunReason.IO_ERROR)
+    """Publish a failed outcome when the one runner step raises, then name its class."""
+    failure: str | None = None
     try:
-        result = run_reserved_codex_cli(
+        run_reserved_codex_cli(
             reservation,
             child,
-            stdin_payload=prompt.encode("utf-8"),
+            stdin_payload=stdin_payload,
             read="all",
             deadline=deadline,
             output_read_limit_bytes=CODEX_CLI_TURN_OUTPUT_READ_LIMIT_BYTES,
             stdout_line_channel=channel,
         )
     except BaseException as exc:
-        _log_runner_step_failure("run", exc)
-        _abandon_unspawned_reservation(reservation)
-    finally:
-        _publish_runner_outcome(channel, result)
+        failure = type(exc).__name__
+        channel._close(_failed_runner_outcome())
+    if failure is not None:
+        log.error("Codex image runner step failed route=cli step=run error=%s", failure)
 
 
-def _abandon_unspawned_reservation(reservation: CodexProcessReservation) -> None:
-    try:
-        get_codex_process_pool().abandon_unspawned(reservation)
-    except BaseException as exc:
-        _log_runner_step_failure("abandon", exc)
-
-
-def _publish_runner_outcome(channel: CliLineChannel, outcome: CliRunOutcome) -> None:
-    try:
-        channel._close(outcome)
-    except BaseException as exc:
-        _log_runner_step_failure("publish", exc)
-
-
-def _log_runner_step_failure(step: str, exc: BaseException) -> None:
-    log.error("Codex image runner step failed route=cli step=%s error=%s", step, type(exc).__name__)
-
-
-def _failed_runner_outcome(reason: CliRunReason) -> CliRunOutcome:
+def _failed_runner_outcome() -> CliRunOutcome:
     return CliRunOutcome(
         started=False,
         spawn_error=None,
@@ -372,7 +364,7 @@ def _failed_runner_outcome(reason: CliRunReason) -> CliRunOutcome:
         stderr="",
         complete=False,
         became_zombie=False,
-        reason=reason,
+        reason=CliRunReason.IO_ERROR,
     )
 
 

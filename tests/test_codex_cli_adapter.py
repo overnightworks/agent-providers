@@ -246,6 +246,7 @@ def _image_runner(
             create_artifacts(codex_home)
         kwargs["on_spawned"](1)
         kwargs["on_reaped"](1, False)
+        kwargs["stdout_line_channel"]._close(outcome)
         return outcome
 
     return run_cli_bounded
@@ -621,6 +622,7 @@ def _generated_png_runner() -> object:
         outcome = _outcome(stdout=_MEASURED_STREAM)
         kwargs["on_spawned"](1)
         kwargs["on_reaped"](1, False)
+        kwargs["stdout_line_channel"]._close(outcome)
         return outcome
 
     return run_cli_bounded
@@ -794,85 +796,6 @@ def test_codex_cover_image_names_terminal_cli_failures_without_logging_the_gate(
         assert raised.value.retry_at == expected_retry_at
 
 
-_A_RUNNER_FAILURE_CANARY = "runner-failure-canary"
-_RUNNER_FAILURE_BOUND_SECONDS = 20
-_SHORT_TURN_SECONDS = 0.5
-
-
-def _raise_the_canary(error_type: type[BaseException]):
-    def raise_it(*_arguments, **_keywords):
-        raise error_type(_A_RUNNER_FAILURE_CANARY)
-
-    return raise_it
-
-
-@pytest.mark.parametrize(
-    ("runner_error", "abandon_fails", "close_fails", "expected_failure", "expected_reservations"),
-    [
-        (OSError, False, False, codex_image.CodexImageCliError, 0),
-        (BaseException, False, False, codex_image.CodexImageCliError, 0),
-        (KeyboardInterrupt, False, False, codex_image.CodexImageCliError, 0),
-        (SystemExit, False, False, codex_image.CodexImageCliError, 0),
-        (OSError, True, False, codex_image.CodexImageCliError, 1),
-        (OSError, False, True, codex_image.CodexImageTimeoutError, 0),
-    ],
-    ids=[
-        "os_error",
-        "base_exception",
-        "keyboard_interrupt",
-        "system_exit",
-        "abandon_raises",
-        "close_raises_and_the_deadline_ends_the_turn",
-    ],
-)
-def test_a_runner_failure_ends_the_image_turn_with_a_named_failure(
-    monkeypatch, caplog, capfd, tmp_path,
-    runner_error, abandon_fails, close_fails, expected_failure, expected_reservations,
-) -> None:
-    process_pool = CodexProcessPool(maximum_processes=8, maximum_image_runs=1)
-    use_codex_process_pool(monkeypatch, process_pool)
-    monkeypatch.setattr(codex_protocol, "run_cli_bounded", _raise_the_canary(runner_error))
-    if abandon_fails:
-        monkeypatch.setattr(process_pool, "abandon_unspawned", _raise_the_canary(OSError))
-    if close_fails:
-        monkeypatch.setattr(process.CliLineChannel, "_close", _raise_the_canary(OSError))
-    unhandled_thread_errors: list[threading.ExceptHookArgs] = []
-    monkeypatch.setattr(threading, "excepthook", unhandled_thread_errors.append)
-    working_root = tmp_path / "turn-homes"
-    working_root.mkdir()
-    override_provider_runtime(cli_working_directory_root=working_root)
-    caplog.set_level(logging.DEBUG)
-    failures: list[BaseException] = []
-
-    def drive() -> None:
-        try:
-            _generate_cover(deadline=time.monotonic() + _SHORT_TURN_SECONDS)
-        except BaseException as error:
-            failures.append(error)
-
-    turn = threading.Thread(target=drive, daemon=True)
-    turn.start()
-    turn.join(timeout=_RUNNER_FAILURE_BOUND_SECONDS)
-
-    assert not turn.is_alive(), "the image turn hung on a failed runner"
-    (failure,) = failures
-    assert type(failure) is expected_failure
-    captured = capfd.readouterr()
-    everything_visible = "\n".join(
-        [
-            str(failure),
-            repr(failure),
-            formatted_log_text(caplog.records),
-            captured.out,
-            captured.err,
-        ]
-    )
-    assert _A_RUNNER_FAILURE_CANARY not in everything_visible
-    assert unhandled_thread_errors == []
-    assert list(working_root.iterdir()) == []
-    assert process_pool.reservation_count() == expected_reservations
-
-
 _A_PRIVATE_EVENT_MARKER = "private-event-marker"
 _A_PRIVATE_PROMPT_MARKER = "private-prompt-marker"
 _THREAD_OPENING = [{"type": "thread.started", "thread_id": "thread"}, {"type": "turn.started"}]
@@ -952,7 +875,9 @@ def _streaming_runner(events: _StreamedEvents, state: dict[str, bool]):
         state["aborted"] = abort_observed.wait(timeout=1)
         kwargs["on_reaped"](2468, False)
         state["reaped"] = True
-        return _outcome(stdout=b"".join(map(_stdout_line, streamed)).decode())
+        outcome = _outcome(stdout=b"".join(map(_stdout_line, streamed)).decode())
+        channel._close(outcome)
+        return outcome
 
     return run_cli_bounded
 

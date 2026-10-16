@@ -276,6 +276,30 @@ def _run_codex_image_cli(
     except UnicodeEncodeError:
         raise CodexImageCliError() from None
     reservation = get_codex_process_pool().reserve(CodexProcessKind.IMAGE)
+    _start_codex_image_runner(
+        reservation=reservation,
+        child=child,
+        stdin_payload=stdin_payload,
+        deadline=deadline,
+        channel=channel,
+    )
+    settle_by = cli_settle_deadline(deadline)
+    try:
+        return _read_codex_image_events(channel, event_gate, abort_signal, settle_by)
+    finally:
+        channel.request_abort()
+        while not isinstance(_receive_within(channel, settle_by), CliRunOutcome):
+            pass
+
+
+def _start_codex_image_runner(
+    *,
+    reservation: CodexProcessReservation,
+    child: ChildProcess,
+    stdin_payload: bytes,
+    deadline: float,
+    channel: CliLineChannel,
+) -> None:
     runner = threading.Thread(
         target=_run_codex_image_runner,
         kwargs={
@@ -292,33 +316,33 @@ def _run_codex_image_cli(
     except BaseException as exc:
         start_failure = exc
     else:
-        start_failure = None
-    if start_failure is not None:
-        get_codex_process_pool().abandon_unspawned(reservation)
-        if not isinstance(start_failure, Exception):
-            raise start_failure
-        raise CodexImageCliError()
+        return
+    get_codex_process_pool().abandon_unspawned(reservation)
+    if not isinstance(start_failure, Exception):
+        raise start_failure
+    raise CodexImageCliError()
 
-    settle_by = cli_settle_deadline(deadline)
-    try:
-        while True:
-            if abort_signal is not None and abort_signal.is_set():
-                channel.request_abort()
-            line_or_outcome = _receive_within(channel, settle_by)
-            if line_or_outcome is None:
-                continue
-            if isinstance(line_or_outcome, CliRunOutcome):
-                return line_or_outcome
-            try:
-                event_gate.accept(line_or_outcome)
-            except CodexImageCliError:
-                # A valid partial stream has no completed turn yet. Its full
-                # transcript is checked below after the child has been reaped.
-                continue
-    finally:
-        channel.request_abort()
-        while not isinstance(_receive_within(channel, settle_by), CliRunOutcome):
-            pass
+
+def _read_codex_image_events(
+    channel: CliLineChannel,
+    event_gate: _CodexImageEventGate,
+    abort_signal: threading.Event | None,
+    settle_by: float,
+) -> CliRunOutcome:
+    while True:
+        if abort_signal is not None and abort_signal.is_set():
+            channel.request_abort()
+        line_or_outcome = _receive_within(channel, settle_by)
+        if line_or_outcome is None:
+            continue
+        if isinstance(line_or_outcome, CliRunOutcome):
+            return line_or_outcome
+        try:
+            event_gate.accept(line_or_outcome)
+        except CodexImageCliError:
+            # A valid partial stream has no completed turn yet. Its full
+            # transcript is checked below after the child has been reaped.
+            continue
 
 
 def _receive_within(channel: CliLineChannel, settle_by: float) -> bytes | CliRunOutcome | None:

@@ -2865,10 +2865,11 @@ def test_probe_runner_task_cancellation_gives_waiters_a_normal_error(
     cancelled too. Every waiter gets a normal, catchable UnavailableError.
     """
     probe_started = threading.Event()
+    release_runner = threading.Event()
 
     def fake_popen(*_cmd, **_kw):
         probe_started.set()
-        threading.Event().wait(999)  # never returns on its own
+        release_runner.wait(999)
         return fake_cli_process(_init_line(_ALL_SAMPLE_TOOLS))
 
     monkeypatch.setattr(spawn.subprocess, "Popen", fake_popen)
@@ -2886,7 +2887,10 @@ def test_probe_runner_task_cancellation_gives_waiters_a_normal_error(
             await waiter
         return exc.value
 
-    error = asyncio.run(asyncio.wait_for(_race(), timeout=5))
+    try:
+        error = asyncio.run(asyncio.wait_for(_race(), timeout=5))
+    finally:
+        release_runner.set()
 
     assert not isinstance(error, asyncio.CancelledError)
 
@@ -3560,8 +3564,9 @@ def test_a_probe_failure_message_carries_no_runner_exception_text(
 
 
 def test_a_probe_whose_cleanup_overruns_fails_at_the_settle_instant_not_the_async_budget(
-    claude_binary, monkeypatch,
+    claude_binary, monkeypatch, caplog, capfd,
 ) -> None:
+    watch = RunnerFailureWatch(monkeypatch, caplog, capfd)
     monkeypatch.setattr(provider, "CLAUDE_CLI_MAX_CONCURRENT_PROCESSES", 1)
     monkeypatch.setattr(process, "CLI_TERMINATION_GRACE_SECONDS", 0.01)
     monkeypatch.setattr(process, "CLI_PROBE_CALLER_TIMEOUT_MARGIN_SECONDS", 0.01)
@@ -3597,6 +3602,7 @@ def test_a_probe_whose_cleanup_overruns_fails_at_the_settle_instant_not_the_asyn
     reservation = provider._reserve_zombie_admission()
     assert reservation is not None
     provider._release_zombie_reservation(reservation)
+    watch.assert_nothing_leaked()
 
 
 # ── #351 round 6, Finding 8: the non-streaming MCP entry point ───────

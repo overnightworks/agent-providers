@@ -569,11 +569,14 @@ class RunnerFailureWatch:
         self._capfd = capfd
         self._threads_of_earlier_tests = set(threading.enumerate()) - {threading.current_thread()}
         self.unhandled_thread_errors: list[threading.ExceptHookArgs] = []
+        self._previous_excepthook = threading.excepthook
         monkeypatch.setattr(threading, "excepthook", self._record_unhandled_thread_error)
         caplog.set_level(logging.DEBUG)
 
     def _record_unhandled_thread_error(self, error: threading.ExceptHookArgs) -> None:
-        if error.thread not in self._threads_of_earlier_tests:
+        if error.thread in self._threads_of_earlier_tests:
+            self._previous_excepthook(error)
+        else:
             self.unhandled_thread_errors.append(error)
 
     def _wait_for_the_runner_threads_to_end(self) -> None:
@@ -591,11 +594,11 @@ class RunnerFailureWatch:
             record.getMessage().removeprefix(RUNNER_STEP_FAILURE_PREFIX)
             for record in self._caplog.records
             if record.getMessage().startswith(RUNNER_STEP_FAILURE_PREFIX)
-            and record.thread not in self._idents_of_earlier_threads()
+            and record.threadName not in self._names_of_earlier_threads()
         ]
 
-    def _idents_of_earlier_threads(self) -> set[int | None]:
-        return {thread.ident for thread in self._threads_of_earlier_tests}
+    def _names_of_earlier_threads(self) -> set[str]:
+        return {thread.name for thread in self._threads_of_earlier_tests}
 
     def assert_nothing_leaked(self, *surfaces: BaseException | str) -> None:
         self._wait_for_the_runner_threads_to_end()

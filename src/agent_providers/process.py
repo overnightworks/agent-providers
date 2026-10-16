@@ -222,8 +222,7 @@ class _BoundedRunState:
 class _StepFailures:
     """The steps of a run that raised, kept by name and exception class only."""
 
-    def __init__(self, *, catching: type[BaseException] = BaseException) -> None:
-        self._catching = catching
+    def __init__(self) -> None:
         self._failed: list[str] = []
         self._errors: dict[str, BaseException] = {}
 
@@ -231,7 +230,8 @@ class _StepFailures:
     def contained(self, step: str, *, reported: bool = True) -> Iterator[None]:
         try:
             yield
-        except self._catching as error:
+        # NOSONAR S5754 below: the worker publishes every exit; the caller re-raises control flow.
+        except BaseException as error:  # NOSONAR
             self._errors[step] = error
             if reported:
                 self._failed.append(f"{step} {type(error).__name__}")
@@ -244,7 +244,14 @@ class _StepFailures:
 
     def report(self) -> None:
         for failure in self._failed:
-            log.error("agent CLI runner step failed: %s", failure)
+            with self.contained("report", reported=False):
+                log.error("agent CLI runner step failed: %s", failure)
+
+    def raise_control_flow(self) -> None:
+        """Re-raise the first failure that is not an ``Exception`` (caller thread only)."""
+        for error in self._errors.values():
+            if not isinstance(error, Exception):
+                raise error
 
 
 LOGGED_OUT = CliLogin(logged_in=False, auth_method=None)
@@ -545,8 +552,7 @@ def _settle_unstarted_run(
         failures,
     )
     failures.report()
-    if not isinstance(start_failure, Exception):
-        raise start_failure
+    failures.raise_control_flow()
     return outcome
 
 
@@ -561,11 +567,12 @@ def _settle_from_caller(
     outcome: CliRunOutcome,
 ) -> CliRunOutcome:
     channel = request.stdout_line_channel
-    if channel is not None:
-        channel.request_abort()
-    failures = _StepFailures(catching=Exception)
+    failures = _StepFailures()
     settled = _settle(state, channel, outcome, failures)
+    if channel is not None and settled.reason is outcome.reason:
+        channel.request_abort()
     failures.report()
+    failures.raise_control_flow()
     return settled
 
 
@@ -724,6 +731,10 @@ def _reap_or_hand_off(process: PipedProcess, failures: _StepFailures) -> bool:
         return _reap_process_group(process)
     with failures.contained("hand-off"):
         _signal_process_group(process.pid, signal.SIGKILL)
+    for stream in (process.stdin, process.stdout, process.stderr):
+        if stream is not None:
+            with failures.contained("hand-off close", reported=False):
+                stream.close()
     return True
 
 
@@ -740,6 +751,7 @@ def _outcome_after_prompt_file_cleanup(
         prompt_file_removed = True
     if prompt_file_removed:
         return outcome
+    prompt_file_error = failures.error_raised_by("prompt_file")
     return CliRunOutcome(
         started=outcome.started,
         spawn_error=outcome.spawn_error,
@@ -749,6 +761,7 @@ def _outcome_after_prompt_file_cleanup(
         complete=False,
         became_zombie=outcome.became_zombie,
         reason=CliRunReason.IO_ERROR,
+        io_error=prompt_file_error if isinstance(prompt_file_error, OSError) else None,
     )
 
 

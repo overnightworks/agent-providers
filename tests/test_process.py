@@ -117,6 +117,12 @@ def test_claude_without_a_parseable_status_is_logged_out(output: str | None) -> 
     assert login.auth_method is None
 
 
+def test_the_probe_caller_budget_is_the_probe_timeout_plus_the_settle_margin() -> None:
+    assert process.CLI_PROBE_CALLER_TIMEOUT_SECONDS == (
+        process.PROBE_TIMEOUT_SECONDS + cli_settle_deadline(0.0)
+    )
+
+
 def test_a_claude_probe_that_exceeds_its_caller_budget_is_logged_out(monkeypatch) -> None:
     started = threading.Event()
     release = threading.Event()
@@ -411,7 +417,9 @@ def test_a_follower_waits_only_its_own_single_flight_budget(monkeypatch) -> None
     assert cached.get() == "answer"
 
 
-def test_run_cli_returns_after_its_answer_budget_and_cleanup_grace(monkeypatch) -> None:
+def test_run_cli_returns_after_its_answer_budget_and_cleanup_grace(
+    monkeypatch, failure_watch,
+) -> None:
     answer_budget = 0.05
     cleanup_grace = 0.05
     monkeypatch.setattr("agent_providers.process.PROBE_TIMEOUT_SECONDS", answer_budget)
@@ -424,6 +432,7 @@ def test_run_cli_returns_after_its_answer_budget_and_cleanup_grace(monkeypatch) 
     assert run is not None
     assert run.complete is False
     assert elapsed < answer_budget + (2 * cleanup_grace) + 0.15
+    failure_watch.assert_nothing_leaked()
 
 
 def test_clearing_a_probe_does_not_restore_its_pre_clear_result() -> None:
@@ -696,7 +705,7 @@ def test_bounded_runner_reports_a_stdin_close_error_after_spawning(monkeypatch) 
 
 
 def test_bounded_runner_returns_at_the_settle_instant_when_its_cleanup_overruns(
-    monkeypatch,
+    monkeypatch, failure_watch,
 ) -> None:
     monkeypatch.setattr("agent_providers.process.CLI_TERMINATION_GRACE_SECONDS", 0.01)
     monkeypatch.setattr("agent_providers.process.CLI_PROBE_CALLER_TIMEOUT_MARGIN_SECONDS", 0.01)
@@ -725,12 +734,13 @@ def test_bounded_runner_returns_at_the_settle_instant_when_its_cleanup_overruns(
     assert cli_settle_deadline(deadline) <= returned_at < cli_settle_deadline(deadline) + 0.5
     release_cleanup.set()
     assert reaped.wait(timeout=1)
+    failure_watch.assert_nothing_leaked()
 
 
 class _LateWakingEvent(threading.Event):
     """An event whose first timed-out wait wakes late, as a loaded scheduler would."""
 
-    lateness_seconds = 0.15
+    lateness_seconds = 0.6
 
     def __init__(self) -> None:
         super().__init__()
@@ -762,18 +772,21 @@ def test_the_second_wait_ends_at_the_settle_instant_however_late_the_first_one_w
         lambda child: (release_cleanup.wait(timeout=2), real_reap(child))[1],
     )
     deadline = time.monotonic() + 0.05
+    reaped = threading.Event()
 
     outcome = run_cli_bounded(
         shell_child("-c", "exec sleep 10"),
         stdin_payload=None,
         read="all",
         deadline=deadline,
+        on_reaped=lambda _process_id, _became_zombie: reaped.set(),
     )
     returned_at = time.monotonic()
     release_cleanup.set()
 
     assert outcome.reason is CliRunReason.CLEANUP_OVERRAN
     assert returned_at < cli_settle_deadline(deadline) + _LateWakingEvent.lateness_seconds / 2
+    assert reaped.wait(timeout=5)
 
 
 def test_bounded_runner_notifies_a_zombie_reap_only_after_background_confirmation(
@@ -2156,7 +2169,7 @@ def test_bounded_runner_publishes_prompt_unlink_errors_to_waiting_consumers(monk
     assert not consumer.is_alive()
     assert outcome.reason is CliRunReason.IO_ERROR
     assert outcome.complete is False
-    assert outcome.io_error is None
+    assert isinstance(outcome.io_error, OSError)
     assert received == [outcome]
 
 
@@ -2383,7 +2396,9 @@ def test_a_closed_channel_refuses_further_lines() -> None:
 def test_a_channel_publishes_its_own_overrun_when_the_settle_instant_passes() -> None:
     channel = CliLineChannel(maximum_lines=1)
     settle_by = time.monotonic() + 0.1
+    give_up_at = settle_by + 1
     while True:
+        assert time.monotonic() < give_up_at, "the channel never published its overrun"
         try:
             received = channel.receive(timeout=0.05, settle_by=settle_by)
         except TimeoutError:
@@ -2653,6 +2668,41 @@ def test_a_report_made_while_the_log_handler_fails_never_prints_the_failure_text
     failure_watch.assert_nothing_leaked()
 
 
+def test_a_log_handler_that_raises_does_not_strand_the_hand_off_or_the_background_reap(
+    monkeypatch, failure_watch, pooled_run,
+) -> None:
+    process_pool, callbacks = pooled_run
+    released = threading.Event()
+    release_reservation = callbacks["on_reaped"]
+
+    def release_and_signal(process_id: int, became_zombie: bool) -> None:
+        release_reservation(process_id, became_zombie)
+        released.set()
+
+    callbacks["on_reaped"] = release_and_signal
+
+    class RaisingHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            raise OSError("log handler cannot write")
+
+    handler = RaisingHandler()
+    process_logger = logging.getLogger("agent_providers.process")
+    process_logger.addHandler(handler)
+    monkeypatch.setattr(process, "_reap_process_group", _raising(
+        PermissionError(A_RUNNER_FAILURE_CANARY),
+    ))
+    try:
+        outcome = _run_pooled(":", callbacks)
+        assert released.wait(timeout=5)
+    finally:
+        process_logger.removeHandler(handler)
+
+    assert outcome.reason is CliRunReason.COMPLETE
+    assert outcome.became_zombie is True
+    assert process_pool.reservation_count() == 0
+    failure_watch.assert_nothing_leaked()
+
+
 def test_a_cleanup_that_outlasts_the_settle_instant_is_published_by_the_channel_itself(
     monkeypatch, failure_watch, pooled_run,
 ) -> None:
@@ -2814,6 +2864,26 @@ def test_a_runner_thread_stopped_by_system_exit_publishes_before_the_exit_propag
     failure_watch.assert_nothing_leaked()
 
 
+def test_control_flow_raised_while_settling_an_unstarted_run_propagates_after_publishing(
+    monkeypatch, failure_watch, pooled_run,
+) -> None:
+    process_pool, callbacks = pooled_run
+    fail_to_start_the_runner_thread(monkeypatch, RuntimeError(A_RUNNER_FAILURE_CANARY))
+    callbacks["on_spawn_failed"] = _raising(KeyboardInterrupt())
+    channel = CliLineChannel(maximum_lines=1)
+
+    with pytest.raises(KeyboardInterrupt):
+        _run_pooled(":", callbacks, stdout_line_channel=channel)
+
+    published = channel.receive(timeout=0)
+    assert isinstance(published, CliRunOutcome)
+    assert published.reason is CliRunReason.SPAWN_FAILED
+    assert failure_watch.reported_steps() == [
+        "start RuntimeError", "on_spawn_failed KeyboardInterrupt",
+    ]
+    failure_watch.assert_nothing_leaked()
+
+
 def _settle_in_order(monkeypatch, *, runner_thread_first: bool):
     """Hold the two settling threads so that one provably settles before the other."""
     caller = threading.current_thread()
@@ -2864,13 +2934,19 @@ def test_whichever_thread_settles_first_decides_the_return_and_the_channel(
     channel = CliLineChannel(maximum_lines=1)
 
     outcome = _run_pooled(
-        ":", callbacks, deadline=time.monotonic() + 0.05, stdout_line_channel=channel,
+        "printf 'hello\\n'",
+        callbacks,
+        deadline=time.monotonic() + 0.05,
+        stdout_line_channel=channel,
     )
     assert runner_settled.wait(timeout=2)
 
     assert outcome.reason is expected_reason
     assert returned["caller"] is outcome
     assert returned["runner"] is outcome
+    if runner_thread_first:
+        assert outcome.stdout == "hello\n"
+        assert channel.receive(timeout=0) == b"hello\n"
     assert channel.receive(timeout=0) is outcome
     assert process_pool.reservation_count() == 0
     failure_watch.assert_nothing_leaked()

@@ -571,6 +571,7 @@ def test_a_codex_tool_turn_whose_spawn_raises_a_base_exception_ends_with_a_named
         asyncio.run(turn)
 
     assert process_pool.reservation_count() == 0
+    assert watch.reported_steps() == []
     watch.assert_nothing_leaked(failure.value)
 
 

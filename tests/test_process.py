@@ -1504,6 +1504,75 @@ def test_private_credential_home_survives_the_exit_of_a_forked_child(tmp_path: P
     assert completed.stdout.split() == ["True", "False"]
 
 
+_FORK_WHILE_REGISTRY_LOCKED_SCRIPT = """
+import os
+import signal
+import sys
+import threading
+from pathlib import Path
+
+from agent_providers import process
+from agent_providers.config import ProviderRuntimeConfig, configure
+from agent_providers.process import PrivateCredentialHome
+
+configure(ProviderRuntimeConfig.model_validate_json(sys.argv[1]))
+lock_held = threading.Event()
+release_lock = threading.Event()
+
+
+def hold_registry_lock():
+    with process._live_homes_lock:
+        lock_held.set()
+        release_lock.wait()
+
+
+worker = threading.Thread(target=hold_registry_lock)
+worker.start()
+lock_held.wait()
+child = os.fork()
+if child == 0:
+    home = PrivateCredentialHome(
+        Path(sys.argv[2]),
+        Path(".claude/.credentials.json"),
+        prefix="private-home-",
+        missing_credential_is_error=True,
+    )
+    process._sweep_failed_homes_at_exit()
+    os._exit(0)
+failure_guard = threading.Timer(15, os.kill, (child, signal.SIGKILL))
+failure_guard.start()
+_, status = os.waitpid(child, 0)
+failure_guard.cancel()
+release_lock.set()
+worker.join()
+print(os.waitstatus_to_exitcode(status))
+"""
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="needs os.fork")
+def test_forked_child_creates_and_sweeps_homes_while_the_parent_holds_the_registry_lock(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.json"
+    source.write_text(_CATALOG_AUTH_PAYLOAD)
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _FORK_WHILE_REGISTRY_LOCKED_SCRIPT,
+            current_config().model_dump_json(),
+            str(source),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=60,
+    )
+
+    assert completed.stdout.split() == ["0"]
+
+
 @pytest.mark.parametrize(("credential_home_variable", "auth_field"), _CATALOG_PROVIDERS)
 def test_catalog_child_sees_only_the_closed_environment_variables(
     tmp_path, monkeypatch, credential_home_variable: str, auth_field: str,

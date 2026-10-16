@@ -1173,6 +1173,15 @@ def _sweep_failed_homes_at_exit() -> None:
 # and weakref's exit hooks atexit runs first; a finalizer runs at most once.
 _live_homes: weakref.WeakSet["PrivateCredentialHome"] = weakref.WeakSet()
 _live_homes_lock = threading.Lock()
+
+
+def _replace_live_homes_lock_in_child() -> None:
+    global _live_homes_lock
+    _live_homes_lock = threading.Lock()
+
+
+# A forked child inherits a lock whose holding thread does not exist there.
+os.register_at_fork(after_in_child=_replace_live_homes_lock_in_child)
 _homes_awaiting_exit_sweep: set[tuple[Path, int]] = set()
 atexit.register(_sweep_failed_homes_at_exit)
 

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import pkgutil
 import re
 from pathlib import Path
 
 import pytest
 from provider_test_support import drive_cowriter_turn
 
+import agent_providers
 from agent_providers import dispatch
 from agent_providers.catalog import ProviderRoute
 from agent_providers.dispatch import ImageCapability, image_capability
@@ -55,20 +57,44 @@ README = Path(__file__).resolve().parents[1] / "README.md"
 DOTTED_NAME = re.compile(r"`((?:[a-z_]+\.)+[A-Za-z_]+)`")
 
 
-def renamed_public_names() -> list[str]:
+def names_table_rows() -> list[tuple[str, str]]:
     names_section = README.read_text().split("### Names and values", 1)[1].split("\n## ", 1)[0]
-    rows = [line.split("|")[1:3] for line in names_section.splitlines() if line.startswith("| `")]
+    table_lines = [line for line in names_section.splitlines() if line.startswith("|")]
+    rows = []
+    for line in table_lines[2:]:
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) < 3 or not DOTTED_NAME.search(cells[0]):
+            raise ValueError(f"Malformed Names-table row: {line!r}")
+        rows.append((cells[0], cells[1]))
+    return rows
+
+
+def renamed_public_names() -> list[str]:
     return sorted({
         old
-        for before, now in rows
+        for before, now in names_table_rows()
         for old in DOTTED_NAME.findall(before)
         if old not in DOTTED_NAME.findall(now)
     })
 
 
-@pytest.mark.parametrize("old_name", renamed_public_names())
-def test_a_renamed_public_name_is_gone_without_an_alias(old_name: str):
-    module_path, _, attribute = old_name.rpartition(".")
-    module = importlib.import_module(f"agent_providers.{module_path}")
+def package_modules() -> list[object]:
+    return [
+        importlib.import_module(module_info.name)
+        for module_info in pkgutil.walk_packages(agent_providers.__path__, "agent_providers.")
+    ] + [agent_providers]
 
-    assert not hasattr(module, attribute)
+
+def test_the_names_table_lists_the_renames_this_release_made():
+    assert "dispatch.stream_cowriter_turn" in renamed_public_names()
+
+
+@pytest.mark.parametrize("old_name", renamed_public_names())
+def test_a_renamed_public_name_is_gone_from_every_module_without_an_alias(old_name: str):
+    attribute = old_name.rpartition(".")[2]
+
+    modules_still_naming_it = [
+        module.__name__ for module in package_modules() if hasattr(module, attribute)
+    ]
+
+    assert modules_still_naming_it == []

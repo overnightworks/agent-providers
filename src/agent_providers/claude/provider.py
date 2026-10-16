@@ -154,7 +154,7 @@ class _ZombieProbeError(UnavailableError):
 
 
 class _DeadlineExhausted(UnavailableError):
-    """The caller-owned deadline elapsed before the CLI was probed."""
+    """The caller-owned deadline elapsed before the one-shot completion started."""
 
 
 class _ClaudeCliProcessPoolSaturated(UnavailableError):

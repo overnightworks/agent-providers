@@ -605,6 +605,32 @@ def test_call_cli_timeout_names_the_deadline_only_under_a_caller_deadline(
     assert str(exc.value) == reason
 
 
+@pytest.mark.parametrize("backend", ["api", "cli"])
+def test_an_already_elapsed_deadline_refuses_the_completion_before_it_starts(
+    _no_tool_gate_open,
+    monkeypatch: pytest.MonkeyPatch,
+    backend: str,
+) -> None:
+    completions_started: list[str] = []
+    mock_client = MagicMock()
+    mock_client.with_options.side_effect = lambda **_kwargs: completions_started.append("api")
+    mock_anthropic = MagicMock(Anthropic=MagicMock(return_value=mock_client))
+    monkeypatch.setitem(sys.modules, "anthropic", mock_anthropic)
+    monkeypatch.setattr(provider.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(
+        provider, "run_capturing", lambda *_a, **_k: completions_started.append("cli")
+    )
+
+    with pytest.raises(provider._DeadlineExhausted) as exc:
+        if backend == "api":
+            _call_api("hello", "sk-elapsed", None, "claude-sonnet-4-6", 1024, deadline=99.0)
+        else:
+            _call_cli("hello", deadline=99.0)
+
+    assert str(exc.value) == "deadline_exceeded"
+    assert completions_started == []
+
+
 def test_call_cli_strips_secrets_from_child_env(
     _no_tool_gate_open,
     monkeypatch: pytest.MonkeyPatch,

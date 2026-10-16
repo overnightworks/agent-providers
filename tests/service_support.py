@@ -29,11 +29,13 @@ from collections.abc import (
 )
 from contextlib import asynccontextmanager, contextmanager
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, Final
 
 import httpx
 import jwt
 import uvicorn
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import FastAPI
 from jwt.algorithms import RSAAlgorithm
@@ -285,6 +287,27 @@ def _merged(claims: dict[str, object], overrides: Mapping[str, object]) -> dict[
     """Overrides replace claims; an override of ``None`` removes the claim."""
     merged = {**claims, **overrides}
     return {name: value for name, value in merged.items() if value is not None}
+
+
+@functools.cache
+def generated_rsa_key(bits: int = 3072, exponent: int = 65537) -> rsa.RSAPrivateKey:
+    """One throwaway key per shape for the whole session; no private key is ever committed."""
+    return rsa.generate_private_key(public_exponent=exponent, key_size=bits)
+
+
+def pem_of(private_key: Any) -> bytes:
+    return private_key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    )
+
+
+def written_key_file(directory: Path, key: Any, mode: int = 0o600) -> Path:
+    path = directory / "signing-key.pem"
+    path.write_bytes(pem_of(key))
+    path.chmod(mode)
+    return path
 
 
 def run_headers(workload_token: str | None, user_token: str | None) -> dict[str, str]:

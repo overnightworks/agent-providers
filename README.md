@@ -44,7 +44,8 @@ It owns the machinery that is the same in every deployment:
 | `agent_service.app` | `POST /runs` and `GET /runs/{id}`: the order of checks, the typed rejections, the admitted run's event stream, and the run status that only the app and user that started a run may read |
 | `agent_service.identity` | The two-token check: the workload token bound to one registered app, the user token to one principal |
 | `agent_service.run_request` | The strict read of a `RunRequest` body: strict JSON, then its version, then its shape |
-| `agent_service.config` | The service's TOML: identity, listener, run pacing and limits, subscription profiles, purposes and apps |
+| `agent_service.config` | The service's TOML: identity, listener, run pacing and limits, subscription profiles, purposes and apps, and the optional `[signing] key_file` the signing key is read from |
+| `agent_service.signing` | The service's one signing key: an RSA-3072 PEM (exponent 65537) read once at startup and never made by the service, refused when unsound; its `kid` is the RFC 7638 thumbprint, and `SigningKey.sign(claims, token_type)` writes a typed RS256 token. No capability is minted until A1a4-2b. Generation and rotation: see the A1a4 ruling in `docs/decisions/0001-agent-service.md` |
 | `agent_service.routing` | `route`: the one H5 decider between the CLI route, the API route and `not_enabled` |
 | `agent_service.run_events` | The mapping of the core's turn events onto the wire frames, ending every run with exactly one terminal; also the run's tool-call and byte budget |
 | `agent_service.run_liveness` | When frames go out: the heartbeat, the idle timeout and the maximum duration, enforced by a supervisor that does not depend on the client reading, and drops a client that stops taking frames |

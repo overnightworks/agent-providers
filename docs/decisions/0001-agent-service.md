@@ -245,6 +245,105 @@ a request that names its own tools or MCP endpoint could reach anything.
 **Consequence.** Tool reach is decided once, server-side, per app; a leaked
 capability is useful only for one run, one app and one allowlist.
 
+### A1a4 ruling (operator and head, 16.10.2026)
+
+A1a4-1 settles the signing key. A1a4-2a (capability format, size preflight) and
+A1a4-2b (minting at admission) extend this ruling; the rule numbers continue there.
+
+**O1 Key generation and custody (operator, 16.10.2026).** The operator creates the
+key by hand, never the service. The procedure creates a new file exclusively with
+mode 0600 in an operator-controlled directory, refuses any existing destination
+including a symlink, and generates rotation candidates at a distinct path before an
+explicit replacement of the active key (bash, OpenSSL 3, GNU coreutils):
+
+```bash
+(
+  set -eu
+  umask 077
+  dir="$HOME/.secrets/agent-service"
+  dest="$dir/signing-key.pem"
+  mkdir -p "$dir"
+  chmod 700 "$dir"
+  tmp="$(mktemp "$dir/.new-signing-key.XXXXXX")"
+  trap 'rm -f "$tmp"' EXIT
+  openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -pkeyopt rsa_keygen_pubexp:65537 -out "$tmp"
+  ln -T "$tmp" "$dest"
+)
+```
+
+`mktemp` creates the candidate exclusively, with mode 0600, inside the 0700
+directory. `ln -T` (`link(2)`) publishes it under `dest` only when no entry of that
+name exists, a dangling or live symlink included, and never follows one. The trap
+removes the temporary name in every case. A rotation candidate is the same block
+with `dest="$dir/signing-key.next.pem"`. The key is an unencrypted PEM private key
+(the procedure writes PKCS#8), RSA-3072 with exponent 65537. `[signing] key_file`
+names the absolute path the service sees; the service reads it once at startup and
+never creates, rewrites or reloads a key.
+
+**O2 Rotation and compromise (operator, 16.10.2026).** One key exists at a time.
+Rotate on a suspected compromise or whenever the operator chooses; there is no
+schedule. To rotate:
+
+1. create a candidate at the distinct path (O1);
+2. replace the active key with
+   `mv -T "$HOME/.secrets/agent-service/signing-key.next.pem" "$HOME/.secrets/agent-service/signing-key.pem"`;
+3. restart the service.
+
+The `kid` changes with the key. Restarting stops the service's runs but does not
+revoke their capabilities: tokens issued earlier stay acceptable until expiry
+wherever the old public key remains trusted (webauth keeps a fetched key set for an
+hour). Compromise recovery therefore also means removing the old public key from
+every verifier and invalidating its cached trust; the executable procedure is owned
+by A1m and A1d before live use. The holder of a compromised private key can mint new
+tokens, so waiting for issued capabilities to expire is not recovery. No previous
+private signing key is kept, and no previous public verification key is kept or
+published here; A1a5 decides whether 24-hour tickets need one after a planned
+rotation.
+
+**Decisions.**
+
+- **D1 the cut.** The signing key first, then the capability in two items: A1a4-2a
+  (format, `mcp_origin`, size preflight) and A1a4-2b (admission, hand-over, log boundary).
+- **D2 where the key enters.** `[signing] key_file`, read and checked while the
+  configuration validates, into `config.signing.key`: one read and one refusal path
+  (exit 2), and `cli.py` is unchanged.
+- **D3 the `kid`.** The RFC 7638 SHA-256 thumbprint of the public key; never configurable.
+- **D4 direct dependencies.** `agent_service.signing` imports PyJWT and
+  `cryptography`, so the service declares both rather than relying on webauth's extra.
+- **D5 publishing.** Nothing is published in A1a4; A1m and A1a5 choose an endpoint or a file.
+- **D15 explicit token types.** `SigningKey.sign(claims, token_type)` has no default
+  type (RFC 8725 section 3.11). The capability uses `agent-capability+jwt`; A1a5 picks
+  its own. webauth and PyJWT do not check `typ`, so a verifier must check it itself.
+
+**Items.**
+
+1. **Where the key comes from.** `[signing]` is optional and holds exactly one
+   member, `key_file`, an absolute path (`~` is not expanded). The key is read and
+   checked once, at startup. The service never creates, writes, re-reads or reloads
+   a key file; a missing file is a refusal, never a generated key.
+2. **What file is accepted.** The file is opened once with
+   `O_RDONLY | O_NONBLOCK | O_CLOEXEC`; a symlink is followed. Type, mode, size and
+   bytes all come from that descriptor; the path is never opened again. It must be a
+   regular file granting nothing to group or others (`st_mode & 0o077 == 0`), at most
+   16 KiB, holding exactly one unencrypted PEM private key that is RSA with 3072 bits
+   and exponent 65537. Every refusal, including `OSError`, `ValueError`, `TypeError`
+   and `UnsupportedAlgorithm`, stops startup with exit 2 and one line holding
+   `signing.key_file`, the path and the service's own reason, never key bytes or a
+   library message. Not covered: an owner who rewrites the opened file, and whether
+   the directory holding it is trustworthy (operator and A1d).
+3. **The key id.** The RFC 7638 SHA-256 thumbprint of the public key (members `e`,
+   `kty`, `n`, sorted, no whitespace, unpadded base64url), 43 characters.
+4. **Signing.** `SigningKey.sign(claims, token_type)` returns a compact RS256 JWS
+   whose header is exactly `{"alg":"RS256","kid":<kid>,"typ":<token_type>}`; webauth's
+   `JwtVerifier` accepts it.
+5. **Secrecy.** No `repr`, `str` or log line of `SigningKey`, `SigningConfig` or
+   `ServiceConfig` shows key material; a `repr` names only the `kid`. Tests generate
+   keys at run time; no private key is committed.
+6. **Generation and rotation** are those of O1 and O2 above: one key at a time, a
+   restart is required, and a restart does not revoke issued capabilities.
+7. **Interim.** Until A1a4-2b lands, the service mints no capability for a run;
+   `[signing]` is optional.
+
 ## H4 MCP is optional per app
 
 **Context.** Not every app has tools.

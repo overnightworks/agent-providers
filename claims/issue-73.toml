@@ -1,8 +1,0 @@
-claim_id = "a763f90a99154a25b6f88f9eeb87a5ae"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "dc6d9e8042147951988ba7101f0be63c0bd90db5"
-branch = "claude/issue-73-codex-image-gate-measured"
-scope = ["README.md", "src/agent_providers/codex/image.py", "tests/fixtures/codex-imagegen-0.163.0-events.jsonl", "tests/test_codex_cli_adapter.py"]
-opened_commit = "b6ecf7920fb421852f7aeb28d96b333b8a6d9c9b"
-whole_reason = "The gate change, its tests, the measured fixture and the README paragraphs that state the gate's contract must land together so code and documented security argument never disagree."

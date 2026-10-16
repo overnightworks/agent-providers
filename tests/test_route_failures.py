@@ -13,7 +13,7 @@ from dataclasses import asdict, dataclass
 import pytest
 from provider_test_support import (
     A_CANARY,
-    COWRITER_TOOL_CATALOG,
+    SAMPLE_TOOL_CATALOG,
     a_call_to_an_undeclared_tool_carrying,
 )
 from pydantic import BaseModel, SecretStr
@@ -115,7 +115,7 @@ class _HostRecord:
 
 
 def _the_parser_refuses_the_canary_call() -> TextToolProtocolError:
-    parser = TextToolStreamParser(COWRITER_TOOL_CATALOG)
+    parser = TextToolStreamParser(SAMPLE_TOOL_CATALOG)
     parser.feed(a_call_to_an_undeclared_tool_carrying())
     try:
         parser.finish()

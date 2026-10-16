@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+from provider_test_support import SAMPLE_TOOL_MARKUP
 from pydantic import ValidationError
 from wire_builders import (
     OTHER_RUN_ID,
@@ -45,7 +46,6 @@ from agent_client.wire import (
 from agent_providers.text_tool_protocol import render_tool_catalog
 from agent_providers.tools import (
     ToolCatalog,
-    ToolProtocolMarkup,
     anthropic_tool_schemas,
     openai_tool_schemas,
 )
@@ -61,7 +61,7 @@ def _declaration(name: str, **fields: object) -> ToolDeclaration:
 
 
 def test_a_tool_declared_without_an_effect_counts_as_side_effecting() -> None:
-    assert _declaration("write_lyrics").effect is ToolEffect.SIDE_EFFECTING
+    assert _declaration("write_text").effect is ToolEffect.SIDE_EFFECTING
 
 
 @pytest.mark.parametrize(
@@ -70,10 +70,10 @@ def test_a_tool_declared_without_an_effect_counts_as_side_effecting() -> None:
 def test_the_effect_class_never_reaches_a_model(project) -> None:
     catalog = ToolCatalog(
         tools=(
-            _declaration("read_song", effect=ToolEffect.READ_ONLY),
-            _declaration("write_lyrics", effect=ToolEffect.SIDE_EFFECTING),
+            _declaration("read_note", effect=ToolEffect.READ_ONLY),
+            _declaration("write_text", effect=ToolEffect.SIDE_EFFECTING),
         ),
-        markup=ToolProtocolMarkup(tag_namespace="notes", product_name="Notes"),
+        markup=SAMPLE_TOOL_MARKUP,
     )
 
     seen_by_the_model = json.dumps(project(catalog))
@@ -84,13 +84,13 @@ def test_the_effect_class_never_reaches_a_model(project) -> None:
 
 WIRE_VARIANTS = {
     "run_started": wire("run_started", 0, heartbeat_interval_s=15),
-    "assistant_text": wire("assistant_text", 1, text="A first verse."),
+    "assistant_text": wire("assistant_text", 1, text="A first line."),
     "tool_call": wire(
         "tool_call",
         2,
         tool_use_id="call-1",
-        name="write_lyrics",
-        input={"verse": 1},
+        name="write_text",
+        input={"line": 1},
         effect="side_effecting",
     ),
     "tool_result": wire("tool_result", 3, tool_use_id="call-1", content="saved", is_error=False),
@@ -237,7 +237,7 @@ def test_tool_input_that_is_not_json_is_refused(value: object) -> None:
 
 def test_nested_json_tool_input_is_accepted_unchanged() -> None:
     nested = {
-        "verse": 1,
+        "line": 1,
         "tempo": 92.5,
         "draft": True,
         "note": None,
@@ -378,11 +378,11 @@ def test_a_status_body_off_the_contract_is_refused(body: dict[str, object]) -> N
 
 REQUEST = {
     "v": PROTOCOL_VERSION,
-    "purpose": "cowriter",
+    "purpose": "assistant",
     "turn": {
-        "system": "You are a co-writer.",
+        "system": "You are a helpful assistant.",
         "messages": [
-            {"role": "user", "text": "Write a first verse."},
+            {"role": "user", "text": "Write a first line."},
             {"role": "assistant", "text": "Ein erster Vers."},
             {"role": "user", "text": "Now a chorus."},
         ],

@@ -1352,7 +1352,7 @@ class _ExceptionLinks:
         restored = self.exception
         restored.__traceback__ = self.traceback
         restored.__context__ = self.context
-        restored.__cause__ = self.cause if isinstance(self.cause, BaseException) else None
+        restored.__cause__ = self.cause  # NOSONAR(S5707) restores the snapshot of a real __cause__
         restored.__suppress_context__ = self.suppress_context
 
 

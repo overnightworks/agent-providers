@@ -255,7 +255,10 @@ class SupervisedRun:
             while not self._stopping:
                 await self._step_wanted.wait()
                 self._step_wanted.clear()
-                self._outcome = await _one_step(self._events)
+                outcome = await _one_step(self._events)
+                if isinstance(outcome, RunnerRaised) and self._stopping:
+                    raise outcome.error
+                self._outcome = outcome
                 self._outcome_ready.set()
         finally:
             await self._events.aclose()
@@ -353,9 +356,11 @@ class SupervisedRun:
             asyncio.create_task(self._clock.wait_until(deadline)),
         ]
         try:
-            await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         finally:
             await _cancelled(tasks)
+        for task in done:
+            task.result()
 
     async def _stop(self) -> None:
         if self._cleanup is None:

@@ -8,6 +8,7 @@ fetch serves; the Keycloak suite uses the real issuer's tokens instead.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import socket
 import threading
@@ -44,9 +45,12 @@ COWRITER_ALIAS: Final = "cowriter"
 RUN_ID_PLACEHOLDER: Final = "00000000-0000-4000-8000-000000000000"
 
 
-def service_config(issuer: str = TEST_ISSUER) -> ServiceConfig:
+def service_config(
+    issuer: str = TEST_ISSUER, runs: Mapping[str, object] | None = None
+) -> ServiceConfig:
     return ServiceConfig.model_validate(
         {
+            **({} if runs is None else {"runs": runs}),
             "identity": {"issuer": issuer, "jwks_url": TEST_JWKS_URL},
             "profiles": {CLI_PROFILE: {"provider": "claude"}},
             "purposes": {
@@ -74,17 +78,49 @@ def run_body(**overrides: object) -> dict[str, Any]:
     }
 
 
+SETTLE_TURNS: Final = 20
+
+
 class StepClock:
-    """A monotonic clock that moves only when a test advances it."""
+    """A monotonic clock that moves only when a test advances it.
+
+    It is also the run's ``RunClock``: ``wait_until`` parks the waiter until
+    an advance reaches its deadline, and ``parked`` says which deadline the
+    run waits for next, so a test steps from one deadline to the next without
+    sleeping.
+    """
 
     def __init__(self) -> None:
         self.now = 0.0
+        self._waiters: list[tuple[float, asyncio.Future[None]]] = []
 
     def __call__(self) -> float:
         return self.now
 
     def advance(self, seconds: float) -> None:
-        self.now += seconds
+        self.advance_to(self.now + seconds)
+
+    def advance_to(self, instant: float) -> None:
+        self.now = instant
+        for deadline, waiter in sorted(self._waiters, key=lambda parked: parked[0]):
+            if deadline <= instant and not waiter.done():
+                waiter.set_result(None)
+
+    async def wait_until(self, deadline: float) -> None:
+        if deadline <= self.now:
+            return
+        parked = (deadline, asyncio.get_running_loop().create_future())
+        self._waiters.append(parked)
+        try:
+            await parked[1]
+        finally:
+            self._waiters.remove(parked)
+
+    async def parked(self) -> float | None:
+        """The deadline the run waits for next once everything else has settled."""
+        for _ in range(SETTLE_TURNS):
+            await asyncio.sleep(0)
+        return min((deadline for deadline, _ in self._waiters), default=None)
 
 
 class TokenMint:
@@ -227,3 +263,55 @@ def with_placeholder_run_id(raw: bytes) -> bytes:
     run_id = json.loads(raw.split(b"data: ", 1)[1].split(b"\n", 1)[0])["run_id"]
     uuid.UUID(run_id)
     return raw.replace(run_id.encode(), RUN_ID_PLACEHOLDER.encode())
+
+
+class GatedRunner:
+    """A runner that yields what a test releases, and records how it was stopped.
+
+    ``log`` holds "closing" and "closed" as the runner's close goes through,
+    so a test can order them against what the client took. ``hold_close``
+    keeps the close open until ``release_close``.
+    """
+
+    def __init__(self) -> None:
+        self._inbox: asyncio.Queue[StreamEvent | Exception] = asyncio.Queue()
+        self._close_gate: asyncio.Event | None = None
+        self.close_error: Exception | None = None
+        self.steps = 0
+        self.cancellations = 0
+        self.closes = 0
+        self.log: list[str] = []
+
+    def release(self, event: StreamEvent | Exception) -> None:
+        self._inbox.put_nowait(event)
+
+    def hold_close(self) -> None:
+        self._close_gate = asyncio.Event()
+
+    def release_close(self) -> None:
+        if self._close_gate is not None:
+            self._close_gate.set()
+
+    async def run(self, admitted: AdmittedRun) -> AsyncGenerator[StreamEvent, None]:
+        try:
+            while True:
+                self.steps += 1
+                try:
+                    event = await self._inbox.get()
+                except asyncio.CancelledError:
+                    self.cancellations += 1
+                    raise
+                if isinstance(event, Exception):
+                    raise event
+                yield event
+        finally:
+            await self._closed()
+
+    async def _closed(self) -> None:
+        self.closes += 1
+        self.log.append("closing")
+        if self._close_gate is not None:
+            await self._close_gate.wait()
+        if self.close_error is not None:
+            raise self.close_error
+        self.log.append("closed")

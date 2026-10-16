@@ -184,8 +184,10 @@ def test_a_broken_frame_is_named_and_nothing_is_decoded_after_it(
 
 
 def test_feeding_text_instead_of_bytes_is_a_type_error_naming_feed() -> None:
+    decoder = RunStreamDecoder()
+
     with pytest.raises(TypeError, match="feed takes bytes"):
-        RunStreamDecoder().feed("id: 1\n\n")  # type: ignore[arg-type]
+        decoder.feed("id: 1\n\n")  # type: ignore[arg-type]
 
 
 def _tool_input_nested(depth: int) -> dict[str, Any]:

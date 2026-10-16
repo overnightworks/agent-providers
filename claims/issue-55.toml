@@ -1,8 +1,0 @@
-claim_id = "587b10fe1b9342f6979cfcbdf0fb278f"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "6d54a3649d42aa2e276510cbd3b490948d005e97"
-branch = "claude/issue-55-run-records-store"
-scope = ["README.md", "docs/decisions/0001-agent-service.md", "packages/agent-client/src/agent_client/wire.py", "packages/agent-service/src/agent_service/app.py", "packages/agent-service/src/agent_service/run_records.py", "tests/service_support.py", "tests/test_service_keycloak.py", "tests/test_service_run_records.py", "tests/test_service_run_status.py", "tests/test_wire_protocol.py", "tests/wire_builders.py"]
-opened_commit = "367cfd67e0ab26f8987cd914d02e87fa3a3fcb46"
-whole_reason = "A new store, its public status body and the one endpoint that reads it land together; each without the others proves nothing."

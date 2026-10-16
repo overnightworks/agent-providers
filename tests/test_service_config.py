@@ -48,6 +48,7 @@ def test_a_valid_file_loads_with_the_documented_defaults(tmp_path):
     assert config.profiles["claude-main"].provider is Provider.CLAUDE
     assert (config.runs.heartbeat_interval_s, config.runs.idle_timeout_s) == (15, 120.0)
     assert config.runs.max_duration_s == 600.0
+    assert config.runs.stall_timeout_s == 30.0
     assert (config.runs.max_tool_calls, config.runs.max_bytes) == (30, 4194304)
     assert config.app_of_workload_client("songmaker-test") == "songmaker"
 
@@ -80,6 +81,15 @@ REFUSED_RUN_SETTINGS = (
     "heartbeat_interval_s = 0",
     "heartbeat_interval_s = 301",
     "idle_timeout_s = 10",
+    "idle_timeout_s = 20",
+    "stall_timeout_s = 15",
+    "stall_timeout_s = 10",
+    "stall_timeout_s = 121",
+    "stall_timeout_s = 0",
+    "stall_timeout_s = -1",
+    "stall_timeout_s = true",
+    "stall_timeout_s = inf",
+    "stall_timeout_s = nan",
     "idle_timeout_s = 0",
     "idle_timeout_s = true",
     "max_duration_s = inf",
@@ -182,6 +192,15 @@ def test_run_limits_given_as_integers_or_floats_load(tmp_path):
     runs = load_config(_written(tmp_path, text)).runs
 
     assert (runs.heartbeat_interval_s, runs.idle_timeout_s, runs.max_duration_s) == (20, 90, 300.5)
+
+
+@pytest.mark.parametrize("stall_timeout_s", [16, 120])
+def test_a_stall_timeout_between_heartbeat_and_idle_loads(tmp_path, stall_timeout_s):
+    text = _with_runs(f"stall_timeout_s = {stall_timeout_s}")
+
+    runs = load_config(_written(tmp_path, text)).runs
+
+    assert runs.stall_timeout_s == stall_timeout_s
 
 
 def test_run_budgets_given_in_the_file_load(tmp_path):

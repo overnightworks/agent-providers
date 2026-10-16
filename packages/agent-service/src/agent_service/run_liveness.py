@@ -11,7 +11,9 @@ cooperate, each a task created with ``asyncio.create_task``:
 * the stream (``SupervisedRun.frames``) forwards the queued frames.
 
 The supervisor never waits for the client without also watching the maximum
-duration, so a client that stops reading cannot keep a runner alive. Every
+duration, so a client that stops reading cannot keep a runner alive. A client
+which takes no frame for ``stall_timeout_s`` is dropped sooner: the runner is
+stopped once and the stream ends without a terminal. Every
 ending stops the runner first and queues the terminal only after the
 runner's close has finished. The shielded wait for that close mirrors the
 provider core's reap of a streaming process
@@ -22,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from collections.abc import AsyncGenerator, AsyncIterator, Coroutine
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -95,24 +98,33 @@ class Action(Enum):
     LIMIT = auto()
     IDLE = auto()
     HEARTBEAT = auto()
+    DROP = auto()
     WAIT = auto()
 
 
 @dataclass(frozen=True)
 class Deadlines:
-    """The instants a run is waiting for; ``idle`` is None while no step waits on the runner."""
+    """The instants a run is waiting for.
+
+    ``idle`` is None while no step waits on the runner, ``stall`` while the
+    client's slot is vacant.
+    """
 
     heartbeat: float
     maximum: float
     idle: float | None = None
+    stall: float | None = None
 
     @property
     def next(self) -> float:
-        return min(due for due in (self.heartbeat, self.maximum, self.idle) if due is not None)
+        dues = (self.heartbeat, self.maximum, self.idle, self.stall)
+        return min(due for due in dues if due is not None)
 
 
 def decide(now: float, event_ready: bool, deadlines: Deadlines) -> Action:
-    """What to do at ``now``: a runner event first, then the maximum, idle, the heartbeat."""
+    """What to do at ``now``: drop a stalled client, else an event, the maximum, idle, the beat."""
+    if deadlines.stall is not None and now >= deadlines.stall:
+        return Action.DROP
     if event_ready:
         return Action.EVENT
     if now >= deadlines.maximum:
@@ -224,6 +236,7 @@ class SupervisedRun:
         self._maximum_due = started_at + runs.max_duration_s
         self._heartbeat_due = started_at + runs.heartbeat_interval_s
         self._idle_due: float | None = None
+        self._stall_due: float | None = None
         self._pump: asyncio.Task[None]
         self._supervisor: asyncio.Task[None]
         self._cleanup: asyncio.Task[None] | None = None
@@ -281,6 +294,9 @@ class SupervisedRun:
                         return
                 case Action.HEARTBEAT:
                     self._beat()
+                case Action.DROP:
+                    await self._drop()
+                    return
                 case Action.IDLE:
                     await self._end(self._idle_timeout())
                     return
@@ -296,7 +312,18 @@ class SupervisedRun:
 
     @property
     def _deadlines(self) -> Deadlines:
-        return Deadlines(self._heartbeat_due, self._maximum_due, self._idle_due)
+        stall = None if self._slot.vacant else self._stall_due
+        return Deadlines(self._heartbeat_due, self._maximum_due, self._idle_due, stall)
+
+    @property
+    def _blocked_deadlines(self) -> Deadlines:
+        """What a supervisor waiting for a vacant slot watches: the maximum and the stall."""
+        return Deadlines(math.inf, self._maximum_due, None, self._deadlines.stall)
+
+    @property
+    def _ending_deadlines(self) -> Deadlines:
+        """What a supervisor queuing an ending watches: the stall alone, the rest is past."""
+        return Deadlines(math.inf, math.inf, None, self._deadlines.stall)
 
     def _maximum_reached(self) -> bool:
         return decide(self._clock(), False, self._deadlines) is Action.LIMIT
@@ -338,17 +365,26 @@ class SupervisedRun:
         else:
             self._heartbeat_due = self._clock() + self._runs.heartbeat_interval_s
 
-    def _queue(self, frame: bytes) -> None:
+    def _fill(self, frame: bytes) -> None:
         self._slot.fill(frame)
+        self._stall_due = self._clock() + self._runs.stall_timeout_s
+
+    def _queue(self, frame: bytes) -> None:
+        self._fill(frame)
         self._heartbeat_due = self._clock() + self._runs.heartbeat_interval_s
 
     async def _deliver(self, frame: bytes) -> bool:
-        """Queue a frame once the client has taken the last one; False if the maximum came first."""
+        """Queue a frame once the client has taken the last one; False if the run ended first."""
         while not self._slot.vacant:
-            if self._maximum_reached():
-                await self._end(self._limit_exceeded(), pending=frame)
-                return False
-            await self._wait_for(self._slot.wait_vacant(), self._maximum_due)
+            deadlines = self._blocked_deadlines
+            match decide(self._clock(), False, deadlines):
+                case Action.DROP:
+                    await self._drop()
+                    return False
+                case Action.LIMIT:
+                    await self._end(self._limit_exceeded(), pending=frame)
+                    return False
+            await self._wait_for(self._slot.wait_vacant(), deadlines.next)
         self._queue(frame)
         return True
 
@@ -356,9 +392,23 @@ class SupervisedRun:
         """Stop the runner, then queue the frame already encoded before the terminal, then it."""
         await self._stop()
         for frame in (pending, terminal):
-            if frame is not None:
-                await self._slot.wait_vacant()
-                self._slot.fill(frame)
+            if frame is not None and not await self._fill_when_vacant(frame):
+                return
+
+    async def _fill_when_vacant(self, frame: bytes) -> bool:
+        """Fill the slot once the client took the last frame; False if it was dropped."""
+        while not self._slot.vacant:
+            deadlines = self._ending_deadlines
+            if decide(self._clock(), False, deadlines) is Action.DROP:
+                await self._drop()
+                return False
+            await self._wait_for(self._slot.wait_vacant(), deadlines.next)
+        self._fill(frame)
+        return True
+
+    async def _drop(self) -> None:
+        log.warning("The client of run %s stopped taking frames and was dropped", self._run_id)
+        await self._stop()
 
     async def _wait_for(self, trigger: Coroutine[object, object, object], deadline: float) -> None:
         tasks = [

@@ -35,7 +35,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import FastAPI
 from jwt.algorithms import RSAAlgorithm
 
-from agent_client.run_stream import StreamViolation
+from agent_client.run_stream import StreamViolation, ViolationKind
 from agent_client.sse import RunStreamDecoder
 from agent_client.wire import RejectionCode, RunEvent, RunRejection, RunRequest
 from agent_providers.events import AssistantTextEvent, StreamEvent
@@ -419,6 +419,15 @@ class Drive:
             assert not isinstance(item, StreamViolation), item
             self.events.append((self.clock.now, item))
             self.runner.log.append(f"taken:{item.type}")
+
+    async def drain(self) -> None:
+        """Take every frame the stream still holds, until it ends."""
+        async for frame in self.frames:
+            self.took(frame)
+
+    def end_of_stream(self) -> list[ViolationKind]:
+        """What the client's decoder reports about the stream's end: nothing for a clean one."""
+        return [violation.kind for violation in self._decoder.close()]
 
     def stall(self) -> None:
         self._may_read.clear()

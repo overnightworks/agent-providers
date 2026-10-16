@@ -83,17 +83,25 @@ class RunConfig(_Section):
     """
 
     heartbeat_interval_s: StrictInt = Field(default=15, ge=1, le=300)
+    stall_timeout_s: StrictFloat = Field(default=30.0, gt=0, allow_inf_nan=False)
     idle_timeout_s: StrictFloat = Field(default=120.0, gt=0, allow_inf_nan=False)
     max_duration_s: StrictFloat = Field(default=600.0, gt=0, allow_inf_nan=False)
     max_tool_calls: StrictInt = Field(default=30, ge=1)
     max_bytes: StrictInt = Field(default=4 * MAX_EVENT_BYTES, ge=1)
 
     @model_validator(mode="after")
-    def _heartbeat_before_idle_before_maximum(self) -> Self:
-        if not self.heartbeat_interval_s < self.idle_timeout_s < self.max_duration_s:
+    def _heartbeat_before_stall_before_idle_before_maximum(self) -> Self:
+        if not (
+            self.heartbeat_interval_s
+            < self.stall_timeout_s
+            <= self.idle_timeout_s
+            < self.max_duration_s
+        ):
             raise ValueError(
-                "must satisfy heartbeat_interval_s < idle_timeout_s < max_duration_s"
-                f" (got {self.heartbeat_interval_s}, {self.idle_timeout_s}, {self.max_duration_s})"
+                "must satisfy heartbeat_interval_s < stall_timeout_s <= idle_timeout_s"
+                " < max_duration_s (got"
+                f" {self.heartbeat_interval_s}, {self.stall_timeout_s},"
+                f" {self.idle_timeout_s}, {self.max_duration_s})"
             )
         return self
 

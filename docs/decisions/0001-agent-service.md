@@ -153,8 +153,9 @@ body rules be fixed before the build.
   `[identity]` names issuer, key-set URL (https), audience, subscription group,
   group claim and the clock leeway `leeway_seconds` (0 to 300, default 0);
   `[runs]` the run's pace and limits: `heartbeat_interval_s` (an integer, 1 to
-  300, default 15), `idle_timeout_s` (default 120) and `max_duration_s`
-  (default 600), which must satisfy heartbeat < idle < maximum, and the
+  300, default 15), `stall_timeout_s` (default 30), `idle_timeout_s`
+  (default 120) and `max_duration_s` (default 600), which must satisfy
+  heartbeat < stall <= idle < maximum, and the
   budget `max_tool_calls` (default 30) and `max_bytes` (default 4 MiB,
   4194304), both positive integers outside that ordering;
   `[profiles.<name>]` one profile per provider;
@@ -282,7 +283,8 @@ leave the client guessing whether side effects happened.
 **Decision.** A versioned, discriminated SSE union. Every event carries a
 protocol version, a run id and a monotonic sequence. Every run ends with exactly
 one terminal event: `succeeded`, `failed` (a typed code and a safe message) or
-`cancelled`.
+`cancelled`, except that the stream of a dropped client is cut without one; the
+run's ending is in its record (A1a2).
 
 - A heartbeat runs while idle, and an idle timeout applies.
 - Limits for bytes, time and tool calls are enforced.
@@ -369,8 +371,8 @@ second wire owner cannot appear without contradicting this ruling.
 
 ### A1a3 liveness ruling (head, 16.10.2026)
 
-The numbers 15 s heartbeat, 120 s idle, 600 s maximum, 30 tool calls and
-4 MiB are provisional defaults of `[runs]`; A1b's live proof may retune them.
+The numbers 15 s heartbeat, 30 s stall, 120 s idle, 600 s maximum, 30 tool
+calls and 4 MiB are provisional defaults of `[runs]`; A1b's live proof may retune them.
 Piece 1 of A1a3 (`agent_service.run_liveness`):
 
 1. One injected clock; the origin t0 is the reading when `run_started` is
@@ -386,13 +388,15 @@ Piece 1 of A1a3 (`agent_service.run_liveness`):
    idle_timeout`.
 6. At the maximum the decision `failed: limit_exceeded` is taken and the
    runner's cancellation starts at once, even when the client does not read.
-   The terminal is queued after the runner's close has finished.
+   The terminal is queued after the runner's close has finished, to a client
+   that has not been dropped.
 7. One step is outstanding at a time; a heartbeat never cancels or restarts it.
-8. At one instant: a runner event already yielded, then the maximum, then
-   idle, then the heartbeat.
+8. At one instant: a client past its stall deadline is dropped first, then a
+   runner event already yielded, then the maximum, then idle, then the
+   heartbeat.
 9. Every ending closes the runner and waits for the close before the terminal
    is queued; nothing but frames already encoded and the terminal follows the
-   decision.
+   decision. A dropped client gets no terminal and no new frame.
 10. Closing the stream stops the runner the same way, once, and returns only
     after the close has finished, however often the closer is cancelled.
 11. A close that raises is logged at ERROR with the run id and changes
@@ -403,7 +407,7 @@ Piece 1 of A1a3 (`agent_service.run_liveness`):
 13. A cut-short run says the service's own fixed text and keeps its code even
     after a side-effecting `tool_call` (ruling (c) holds).
 14. Bad numbers stop startup: strict types (no `true`, `15.5` or `inf`),
-    heartbeat 1 to 300, and heartbeat < idle < maximum.
+    heartbeat 1 to 300, and heartbeat < stall <= idle < maximum.
 
 Piece 2 of A1a3 (`agent_service.run_events`, the budget beside `seq`):
 
@@ -415,21 +419,23 @@ Piece 2 of A1a3 (`agent_service.run_events`, the budget beside `seq`):
     frame `encode_event` returns, the unit of `MAX_EVENT_BYTES`. A total equal
     to the limit is sent, one byte more is refused, a refused final answer
     ends the run `limit_exceeded`. `run_started`, heartbeats and `failed` are
-    not counted, so the terminal always goes out. The per-frame cap stays
+    not counted, so the byte budget never keeps a terminal from being queued;
+    a dropped client gets none. The per-frame cap stays
     `provider_error` and may exceed a small `max_bytes`.
 17. A refused event is charged nothing, takes no `seq` and is never recorded by
     `RunStream`; the limit terminal takes the `seq` it would have had. The
     order is encode, budget (calls before bytes), stream rules, send.
-18. A limit hit is returned as a terminal, so it uses piece 1's stop path
+18. A limit hit is returned as a terminal to a client that takes frames, so it uses piece 1's stop path
     (rule 9): the runner is stopped before the terminal is queued, even with
     the slot full. A run stalled behind a pending frame does not reach the
-    breaching event until the client reads or the maximum ends the run.
+    breaching event until the client reads, is dropped, or the maximum ends
+    the run.
     A yielded event is handled before the maximum (rule 8); at a double
     breach the tool-call text wins.
 19. The texts are the service's own: "The run made too many tool calls." and
     "The run sent too much data."; the code survives a side-effecting call
     (rule 13). `max_tool_calls` and `max_bytes` are strict integers of at least
-    1, outside the heartbeat < idle < maximum ordering.
+    1, outside the heartbeat < stall <= idle < maximum ordering.
 20. A runner executes a tool only after the service has accepted its
     `tool_call`; a refused call (limit, stream rules, unsendable) is never
     executed, and stopping the runner at once is not an execution barrier.
@@ -439,6 +445,44 @@ Piece 2 of A1a3 (`agent_service.run_events`, the budget beside `seq`):
 
 A runner must end when its step is cancelled or closed, and its close must
 finish in bounded time (`runners.py`).
+
+Piece 3 of A1a3 (`agent_service.run_liveness`, the slow client):
+
+21. A frame that enters the one-slot queue must be taken within
+    `stall_timeout_s` (default 30) of that instant. The deadline exists only
+    while the slot is full; each new frame, including the held frame and the
+    terminal an ending queues, starts its own. A heartbeat is a frame;
+    `run_started` never enters the slot. A silent run's client is dropped at
+    most `heartbeat_interval_s + stall_timeout_s` after its last take. The
+    drop is proven in CI with the fake clock and a Starlette response whose
+    `send` blocks; no socket test is in CI because when a real `send` blocks
+    and the wall-clock pacing of a reader are not deterministic. The durable
+    socket proof is A1b's live proof (epic #18, A1b row).
+22. At the stall deadline the runner's stop starts at once through piece 1's
+    stop path, exactly once, and one WARNING names the run id. No frame is
+    queued afterwards: no heartbeat, no held frame, no terminal. The frame
+    already in the slot may still be taken; then the stream ends without a
+    terminal and the client's decoder reports `truncated`.
+23. An ending already decided (`succeeded`, `provider_error`, `idle_timeout`,
+    `limit_exceeded`) waits behind a stalled client under the stall deadline
+    alone: the maximum, idle and heartbeat instants are past and ignored. The
+    held frame and the terminal are queued one after the other, each with its
+    own window; at the deadline what is not queued is discarded.
+24. At one instant the drop comes before piece 1's order (rule 8): anything
+    handled after the stall deadline could only become a frame nobody takes,
+    and a handled event would charge the budget for a call the client never
+    gets.
+25. A client that takes each frame within its window is never dropped and sees
+    no change; after every queued frame the heartbeat falls due before that
+    frame's stall deadline.
+26. Closing the stream during or after a drop stops nothing twice and returns
+    only after the runner's close has finished (rule 10).
+27. After the drop's cleanup the pump and the supervisor are gone; only the
+    client's consumer remains. Residuals: the dropped client's connection
+    stays open until it reads or leaves, because ASGI has no abort and
+    asyncio flushes before it closes (owner: A1d, edge); a frame the
+    supervisor had already encoded is accepted but never received (owner:
+    A1a2). `stall_timeout_s` is a provisional default.
 
 ## H7 CLI isolation and admission
 

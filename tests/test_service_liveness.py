@@ -72,6 +72,11 @@ def _failed_at(drive: Drive, instant: float, code: FailureCode) -> Failed:
         pytest.param(15, False, Deadlines(15, 600, 120), Action.HEARTBEAT, id="heartbeat-due"),
         pytest.param(120, False, Deadlines(120, 600), Action.HEARTBEAT, id="no-idle-no-step"),
         pytest.param(14, False, Deadlines(15, 600, 120), Action.WAIT, id="nothing-due"),
+        pytest.param(45, True, Deadlines(60, 600, 120, 45), Action.DROP, id="stall-beats-event"),
+        pytest.param(600, False, Deadlines(615, 600, 600, 600), Action.DROP, id="stall-beats-max"),
+        pytest.param(120, False, Deadlines(615, 600, 120, 120), Action.DROP, id="stall-beats-idle"),
+        pytest.param(45, False, Deadlines(45, 600, 120, 45), Action.DROP, id="stall-beats-beat"),
+        pytest.param(44, True, Deadlines(60, 600, 120, 45), Action.EVENT, id="stall-not-yet-due"),
     ],
 )
 def test_what_falls_due_at_one_instant_is_handled_in_a_fixed_order(
@@ -202,7 +207,7 @@ async def test_a_run_that_streams_text_often_enough_gets_no_heartbeat_and_succee
 
 @in_loop
 async def test_a_client_that_stopped_reading_finds_no_pile_of_heartbeats():
-    async with driven() as drive:
+    async with driven(runs=RunConfig(stall_timeout_s=90)) as drive:
         await drive.run_to(0)
         drive.stall()
         await drive.run_to(75)
@@ -244,7 +249,7 @@ async def test_a_runner_that_speaks_within_the_idle_window_is_not_idle(spoken):
 
 @in_loop
 async def test_a_client_that_stalls_does_not_make_a_busy_runner_idle():
-    async with driven() as drive:
+    async with driven(runs=RunConfig(idle_timeout_s=300, stall_timeout_s=250)) as drive:
         await drive.run_to(0)
         drive.stall()
         for index in range(5):
@@ -256,12 +261,12 @@ async def test_a_client_that_stalls_does_not_make_a_busy_runner_idle():
         await drive.finished()
 
     assert drive.types.count("assistant_text") == 5
-    _failed_at(drive, 320, FailureCode.IDLE_TIMEOUT)
+    _failed_at(drive, 500, FailureCode.IDLE_TIMEOUT)
 
 
 @in_loop
 async def test_a_runner_cancelled_at_the_maximum_is_stopped_even_when_the_client_does_not_read():
-    async with driven() as drive:
+    async with driven(runs=RunConfig(idle_timeout_s=590, stall_timeout_s=590)) as drive:
         await drive.run_to(0)
         drive.stall()
         await drive.speak_quietly_every(100, 500)
@@ -279,7 +284,7 @@ async def test_a_runner_cancelled_at_the_maximum_is_stopped_even_when_the_client
 
 @in_loop
 async def test_a_frame_waiting_for_a_stalled_client_goes_out_before_the_limit_terminal():
-    async with driven() as drive:
+    async with driven(runs=RunConfig(idle_timeout_s=590, stall_timeout_s=590)) as drive:
         await drive.run_to(0)
         drive.stall()
         await drive.speak_quietly_every(100, 400)
@@ -435,7 +440,7 @@ async def test_a_consumer_cancelled_while_the_close_runs_returns_only_after_the_
 async def test_closing_the_stream_returns_only_after_the_runners_close_has_finished(close_at):
     runner = GatedRunner()
     runner.hold_close()
-    async with driven(runner, read=False) as drive:
+    async with driven(runner, RunConfig(stall_timeout_s=100), read=False) as drive:
         drive.took(await anext(drive.frames))
         first_beat = asyncio.create_task(anext(drive.frames))
         await drive.run_to(15)

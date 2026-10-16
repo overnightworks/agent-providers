@@ -282,6 +282,9 @@ def test_stream_parser_forwards_ordinary_text_and_keeps_only_whitespace_until_fi
         "<songmaker_tool_call>\n{\"name\":\"list_songs\",\"arguments\":{}",
         _call("not json"),
         _call("[]"),
+        _call('{"name":"list_songs","arguments":{"limit":NaN}}'),
+        _call('{"name":"list_songs","arguments":{"limit":Infinity}}'),
+        _call('{"name":"list_songs","arguments":{"limit":-Infinity}}'),
         "<songmaker_tool_call>\n"
         '{"name":"list_songs","arguments":{}}</songmaker_tool_call>\nDone!',
         "<songmaker_tool_call>\n"

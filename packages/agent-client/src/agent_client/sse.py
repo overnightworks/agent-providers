@@ -83,6 +83,8 @@ class RunStreamDecoder:
         self._fields: dict[str, str] = {}
 
     def feed(self, chunk: bytes) -> list[Decoded]:
+        if isinstance(chunk, str):
+            raise TypeError("feed takes bytes, not str")
         self._refuse_if_closed()
         decoded: list[Decoded] = []
         position = self._skip_line_feed_of_split_crlf(chunk)
@@ -204,7 +206,7 @@ def _json_object(data: str) -> dict[str, Any] | StreamViolation:
     # A frame within the size limit can still nest deeper than the parser's
     # recursion limit; that is the sender's broken JSON, not the client's fault.
     try:
-        value = json.loads(data, parse_constant=_refuse_non_json_constant)
+        value = json.loads(data, parse_constant=refuse_non_json_constant)
     except (ValueError, RecursionError) as error:
         return StreamViolation(kind=ViolationKind.INVALID_JSON, detail=f"data is not JSON: {error}")
     if not isinstance(value, dict):
@@ -212,7 +214,8 @@ def _json_object(data: str) -> dict[str, Any] | StreamViolation:
     return value
 
 
-def _refuse_non_json_constant(constant: str) -> object:
+def refuse_non_json_constant(constant: str) -> object:
+    """The one decider of NaN and Infinity: JSON has no word for them, so no reader takes them."""
     raise ValueError(f"{constant} is not a JSON value")
 
 

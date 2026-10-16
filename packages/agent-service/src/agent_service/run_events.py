@@ -8,8 +8,8 @@ service's own ``RunStream`` refuses: the run ends as ``failed:
 provider_error`` instead, before the offending event is sent. The run's
 budget of tool calls and bytes (``RunConfig``) is charged at the same place:
 the event that passes it is not sent and the run ends as ``failed:
-limit_exceeded``. When frames go
-out, and when a silent or overlong run is ended, ``run_liveness`` decides.
+limit_exceeded``. When frames go out, and when a silent or overlong run is
+ended, ``run_liveness`` decides.
 
 A tool call's input is deep-copied into its wire event, so the event never
 shares a list or dict with the runner that built it, and its effect comes from
@@ -203,7 +203,10 @@ class _WireRun:
         return frame
 
     def _charge(self, event: RunEvent, frame_bytes: int) -> None:
-        """Count a runner-caused frame against the budget; a refused event charges nothing."""
+        """Count a runner-caused frame against the budget.
+
+        An event the budget refuses is charged nothing.
+        """
         if isinstance(event, _SERVICE_WRITTEN):
             return
         is_call = isinstance(event, ToolCall)

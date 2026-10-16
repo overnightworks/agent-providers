@@ -131,6 +131,11 @@ def test_a_run_decodes_the_same_wherever_its_bytes_split(spelled: bytes) -> None
             HEARTBEAT.replace(b"data: {", b"data: {{"), ViolationKind.INVALID_JSON, id="not JSON"
         ),
         pytest.param(
+            b"id: 1\nevent: heartbeat\ndata: Infinity\n\n",
+            ViolationKind.INVALID_JSON,
+            id="Infinity, which JSON has no word for",
+        ),
+        pytest.param(
             b"id: 1\nevent: heartbeat\ndata: NaN\n\n",
             ViolationKind.INVALID_JSON,
             id="NaN, which JSON has no word for",
@@ -176,6 +181,11 @@ def test_a_broken_frame_is_named_and_nothing_is_decoded_after_it(
         decoder.feed(HEARTBEAT)
     assert decoder.close() == []
     assert decoder.close() == []
+
+
+def test_feeding_text_instead_of_bytes_is_a_type_error_naming_feed() -> None:
+    with pytest.raises(TypeError, match="feed takes bytes"):
+        RunStreamDecoder().feed("id: 1\n\n")  # type: ignore[arg-type]
 
 
 def _tool_input_nested(depth: int) -> dict[str, Any]:

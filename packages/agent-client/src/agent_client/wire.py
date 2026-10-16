@@ -66,10 +66,6 @@ def _json_integer(value: object) -> object:
 ProtocolVersion = Annotated[Literal[1], BeforeValidator(_json_integer)]
 """The one decider of whether a ``v`` is the version this package speaks."""
 
-ToolUseId = Annotated[str, Field(min_length=1)]
-"""The one decider of a valid call id, so a call and its result accept the same ids."""
-
-
 def _refuse_non_json_object(value: dict[Any, Any]) -> dict[str, Any]:
     # The depth limit means depth never stops a built input from encoding:
     # pydantic's serializer refuses a value nested about 255 levels deep.
@@ -142,7 +138,10 @@ def _refuse_non_unicode_text(text: str) -> str:
 
 
 UnicodeText = Annotated[str, AfterValidator(_refuse_non_unicode_text)]
-"""Free text a client writes: valid Unicode, so the body it lands in encodes as JSON."""
+"""The one type of wire text: valid Unicode, so the body or frame it lands in encodes as JSON."""
+
+ToolUseId = Annotated[UnicodeText, Field(min_length=1)]
+"""The one decider of a valid call id, so a call and its result accept the same ids."""
 
 
 class _StrictModel(BaseModel):
@@ -168,7 +167,7 @@ class RunStarted(_RunEvent):
 
 class AssistantText(_RunEvent):
     type: Literal["assistant_text"] = "assistant_text"
-    text: str = Field(min_length=1)
+    text: Annotated[UnicodeText, Field(min_length=1)]
 
 
 class ToolCall(_RunEvent):
@@ -176,7 +175,7 @@ class ToolCall(_RunEvent):
 
     type: Literal["tool_call"] = "tool_call"
     tool_use_id: ToolUseId
-    name: str
+    name: UnicodeText
     input: JsonObject
     effect: Annotated[ToolEffect, Field(strict=False)]
 
@@ -184,7 +183,7 @@ class ToolCall(_RunEvent):
 class ToolResult(_RunEvent):
     type: Literal["tool_result"] = "tool_result"
     tool_use_id: ToolUseId
-    content: str
+    content: UnicodeText
     is_error: bool
 
 
@@ -196,7 +195,7 @@ class Heartbeat(_RunEvent):
 
 class Succeeded(_RunEvent):
     type: Literal["succeeded"] = "succeeded"
-    text: str = Field(min_length=1)
+    text: Annotated[UnicodeText, Field(min_length=1)]
 
 
 class Failed(_RunEvent):
@@ -207,7 +206,7 @@ class Failed(_RunEvent):
 
     type: Literal["failed"] = "failed"
     code: Annotated[FailureCode, Field(strict=False)]
-    message: str = Field(max_length=MAX_MESSAGE_LENGTH)
+    message: Annotated[UnicodeText, Field(max_length=MAX_MESSAGE_LENGTH)]
 
 
 class Cancelled(_RunEvent):
@@ -235,7 +234,7 @@ class RunRejection(_WireModel):
     """The HTTP body of a request the service refused."""
 
     code: Annotated[RejectionCode, Field(strict=False)]
-    message: str = Field(max_length=MAX_MESSAGE_LENGTH)
+    message: Annotated[UnicodeText, Field(max_length=MAX_MESSAGE_LENGTH)]
 
 
 class TurnRole(StrEnum):
@@ -262,5 +261,5 @@ class Turn(_StrictModel):
 class RunRequest(_WireModel):
     """The HTTP body a client sends to start a run."""
 
-    purpose: str = Field(min_length=1)
+    purpose: Annotated[UnicodeText, Field(min_length=1)]
     turn: Turn

@@ -322,6 +322,71 @@ def test_a_run_request_with_a_lone_surrogate_in_its_turn_is_refused(turn: dict[s
         RunRequest.model_validate({**REQUEST, "turn": turn})
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param(wire("t" * 100_000, 1), id="unknown type"),
+        pytest.param({**wire("heartbeat", 1), "f" * 100_000: 1}, id="unknown field"),
+    ],
+)
+def test_a_violation_detail_shows_at_most_a_bounded_slice_of_untrusted_text(
+    raw: dict[str, object],
+) -> None:
+    violation = parse_event(raw)
+
+    assert isinstance(violation, StreamViolation)
+    # One problem shows its location and its message, each bounded by 200
+    # characters; 1,000 leaves room for their separator and a few problems and
+    # sits far below the 100,000 characters an unbounded detail would copy.
+    assert len(violation.detail) < 1_000
+
+
+@pytest.mark.parametrize(
+    ("event_type", "fields"),
+    [
+        pytest.param("assistant_text", {"text": "\ud800"}, id="assistant text"),
+        pytest.param("succeeded", {"text": "\ud800"}, id="final text"),
+        pytest.param(
+            "tool_call",
+            {"tool_use_id": "c", "name": "\ud800", "input": {}, "effect": "read_only"},
+            id="tool name",
+        ),
+        pytest.param(
+            "tool_call",
+            {"tool_use_id": "\ud800", "name": "t", "input": {}, "effect": "read_only"},
+            id="call id",
+        ),
+        pytest.param(
+            "tool_result",
+            {"tool_use_id": "c", "content": "\ud800", "is_error": False},
+            id="tool result content",
+        ),
+        pytest.param(
+            "failed", {"code": "provider_error", "message": "\ud800"}, id="failure message"
+        ),
+    ],
+)
+def test_an_event_with_a_lone_surrogate_in_its_text_is_refused(
+    event_type: str, fields: dict[str, object]
+) -> None:
+    violation = parse_event(wire(event_type, 1, **fields))
+
+    assert isinstance(violation, StreamViolation)
+    assert violation.kind is ViolationKind.SCHEMA_MISMATCH
+
+
+def test_a_run_request_with_a_lone_surrogate_in_its_purpose_is_refused() -> None:
+    with pytest.raises(ValidationError):
+        RunRequest.model_validate({**REQUEST, "purpose": "\ud800"})
+
+
+def test_a_rejection_with_a_lone_surrogate_in_its_message_is_refused() -> None:
+    with pytest.raises(ValidationError):
+        RunRejection.model_validate(
+            {"v": PROTOCOL_VERSION, "code": RejectionCode.INVALID_REQUEST, "message": "\ud800"}
+        )
+
+
 _SHORT_DETAIL_LENGTH = 80
 
 

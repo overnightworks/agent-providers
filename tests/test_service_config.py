@@ -46,6 +46,8 @@ def test_a_valid_file_loads_with_the_documented_defaults(tmp_path):
     assert config.identity.subscription_group == "/ki-abo"
     assert config.identity.group_claim == "groups"
     assert config.profiles["claude-main"].provider is Provider.CLAUDE
+    assert (config.runs.heartbeat_interval_s, config.runs.idle_timeout_s) == (15, 120.0)
+    assert config.runs.max_duration_s == 600.0
     assert config.app_of_workload_client("songmaker-test") == "songmaker"
 
 
@@ -68,6 +70,27 @@ SECOND_APP_WITH_SAME_CLIENT = (
 def _with(old: str, new: str) -> str:
     assert old in VALID_CONFIG
     return VALID_CONFIG.replace(old, new)
+
+
+REFUSED_RUN_SETTINGS = (
+    "heartbeat_interval_s = true",
+    "heartbeat_interval_s = 15.5",
+    "heartbeat_interval_s = 15.0",
+    "heartbeat_interval_s = 0",
+    "heartbeat_interval_s = 301",
+    "idle_timeout_s = 10",
+    "idle_timeout_s = 0",
+    "idle_timeout_s = true",
+    "max_duration_s = inf",
+    "max_duration_s = nan",
+    "max_duration_s = 0",
+    "max_duration_s = -1",
+    "max_duration_s = 100",
+)
+
+
+def _with_runs(setting: str) -> str:
+    return VALID_CONFIG + f"\n[runs]\n{setting}\n"
 
 
 def _with_key_set_url(url: str) -> str:
@@ -132,6 +155,10 @@ def _with_key_set_url(url: str) -> str:
             id="missing-issuer",
         ),
         pytest.param("[identity\n", "not TOML", id="not-toml"),
+        *[
+            pytest.param(_with_runs(setting), "runs", id=f"runs-{setting.replace(' ', '')}")
+            for setting in REFUSED_RUN_SETTINGS
+        ],
     ],
 )
 def test_a_refused_file_stops_startup_naming_the_field(tmp_path, capsys, text, named_field):
@@ -139,6 +166,14 @@ def test_a_refused_file_stops_startup_naming_the_field(tmp_path, capsys, text, n
 
     assert exit_status == EXIT_BAD_CONFIG
     assert named_field in capsys.readouterr().err
+
+
+def test_run_limits_given_as_integers_or_floats_load(tmp_path):
+    text = _with_runs("heartbeat_interval_s = 20\nidle_timeout_s = 90\nmax_duration_s = 300.5")
+
+    runs = load_config(_written(tmp_path, text)).runs
+
+    assert (runs.heartbeat_interval_s, runs.idle_timeout_s, runs.max_duration_s) == (20, 90, 300.5)
 
 
 def test_a_missing_file_stops_startup(tmp_path, capsys):

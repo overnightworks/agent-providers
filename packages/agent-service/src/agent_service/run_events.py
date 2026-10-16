@@ -5,7 +5,8 @@ This module owns the mapping from the provider core's turn events
 run opens with ``run_started`` and ends with exactly one terminal event.
 Nothing reaches the wire that ``encode_event`` cannot write or that the
 service's own ``RunStream`` refuses: the run ends as ``failed:
-provider_error`` instead, before the offending event is sent.
+provider_error`` instead, before the offending event is sent. When frames go
+out, and when a silent or overlong run is ended, ``run_liveness`` decides.
 
 A tool call's input is deep-copied into its wire event, so the event never
 shares a list or dict with the runner that built it, and its effect comes from
@@ -16,7 +17,7 @@ from __future__ import annotations
 
 import copy
 import logging
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncIterator
 from contextlib import aclosing
 from typing import Final
 from uuid import UUID
@@ -31,6 +32,7 @@ from agent_client.wire import (
     AssistantText,
     Failed,
     FailureCode,
+    Heartbeat,
     RunEvent,
     RunStarted,
     Succeeded,
@@ -45,13 +47,18 @@ from agent_providers.events import (
     ToolCallEvent,
     ToolResultEvent,
 )
-from agent_service.config import AppConfig
+from agent_service.config import AppConfig, RunConfig
+from agent_service.run_liveness import (
+    RunClock,
+    RunnerExhausted,
+    RunnerOutcome,
+    RunnerRaised,
+    RunnerYielded,
+    SupervisedRun,
+)
 from agent_service.runners import AdmittedRun, Runner
 
 log = logging.getLogger(__name__)
-
-# The heartbeat itself arrives with the run's liveness limits (slice A1a3).
-HEARTBEAT_INTERVAL_S: Final = 15
 
 NO_RUNNER_MESSAGE: Final = "No provider can serve this route yet."
 RUNNER_FAILED_MESSAGE: Final = "The provider failed during the run."
@@ -65,24 +72,34 @@ class _Unsendable(Exception):
 
 
 async def run_frames(
-    admitted: AdmittedRun, runner: Runner | None, app: AppConfig
+    admitted: AdmittedRun,
+    runner: Runner | None,
+    app: AppConfig,
+    runs: RunConfig,
+    clock: RunClock,
 ) -> AsyncIterator[bytes]:
-    wire = _WireRun(admitted.run_id, app)
-    yield wire.started()
+    wire = _WireRun(admitted.run_id, app, runs)
+    started = wire.started()
+    started_at = clock()
     if runner is None:
+        yield started
         yield wire.failed(FailureCode.PROVIDER_UNAVAILABLE, NO_RUNNER_MESSAGE)
         return
-    async with aclosing(runner.run(admitted)) as events:
-        while not wire.ended:
-            frame = await wire.next_frame(events)
-            if frame is not None:
-                yield frame
+    events = runner.run(admitted)
+    async with (
+        SupervisedRun(admitted.run_id, wire, events, runs, clock, started_at) as supervised,
+        aclosing(supervised.frames()) as frames,
+    ):
+        yield started
+        async for frame in frames:
+            yield frame
 
 
 class _WireRun:
-    def __init__(self, run_id: UUID, app: AppConfig) -> None:
+    def __init__(self, run_id: UUID, app: AppConfig, runs: RunConfig) -> None:
         self._run_id = run_id
         self._app = app
+        self._runs = runs
         self._stream = RunStream()
         self._seq = 0
         self.ended = False
@@ -93,9 +110,12 @@ class _WireRun:
                 v=PROTOCOL_VERSION,
                 run_id=self._run_id,
                 seq=self._seq,
-                heartbeat_interval_s=HEARTBEAT_INTERVAL_S,
+                heartbeat_interval_s=self._runs.heartbeat_interval_s,
             )
         )
+
+    def heartbeat(self) -> bytes:
+        return self._sent(Heartbeat(v=PROTOCOL_VERSION, run_id=self._run_id, seq=self._seq))
 
     def failed(self, code: FailureCode, message: str) -> bytes:
         return self._sent(
@@ -104,15 +124,18 @@ class _WireRun:
             )
         )
 
-    async def next_frame(self, events: AsyncGenerator[StreamEvent, None]) -> bytes | None:
-        """The frame of the runner's next event, the run's failure, or nothing for an empty text."""
-        try:
-            core_event = await anext(events)
-        except StopAsyncIteration:
-            return self.failed(FailureCode.PROVIDER_ERROR, NO_ANSWER_MESSAGE)
-        except Exception:
-            log.exception("The runner of run %s failed", self._run_id)
-            return self.failed(FailureCode.PROVIDER_ERROR, RUNNER_FAILED_MESSAGE)
+    def frame_of(self, outcome: RunnerOutcome) -> bytes | None:
+        """The frame of the runner's outcome, the run's failure, or nothing for an empty text."""
+        match outcome:
+            case RunnerExhausted():
+                return self.failed(FailureCode.PROVIDER_ERROR, NO_ANSWER_MESSAGE)
+            case RunnerRaised(error=error):
+                log.error("The runner of run %s failed", self._run_id, exc_info=error)
+                return self.failed(FailureCode.PROVIDER_ERROR, RUNNER_FAILED_MESSAGE)
+            case RunnerYielded(event=core_event):
+                return self._frame_of_event(core_event)
+
+    def _frame_of_event(self, core_event: StreamEvent) -> bytes | None:
         try:
             event = self._wire_event(core_event)
             return None if event is None else self._sent(event)

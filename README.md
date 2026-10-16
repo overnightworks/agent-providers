@@ -43,9 +43,10 @@ It owns the machinery that is the same in every deployment:
 | `agent_service.app` | `POST /runs`: the order of checks, the typed rejections, and the admitted run's event stream |
 | `agent_service.identity` | The two-token check: the workload token bound to one registered app, the user token to one principal |
 | `agent_service.run_request` | The strict read of a `RunRequest` body: strict JSON, then its version, then its shape |
-| `agent_service.config` | The service's TOML: identity, listener, subscription profiles, purposes and apps |
+| `agent_service.config` | The service's TOML: identity, listener, run pacing and limits, subscription profiles, purposes and apps |
 | `agent_service.routing` | `route`: the one H5 decider between the CLI route, the API route and `not_enabled` |
-| `agent_service.run_events` | The mapping of the core's turn events onto the wire, ending every run with exactly one terminal |
+| `agent_service.run_events` | The mapping of the core's turn events onto the wire frames, ending every run with exactly one terminal |
+| `agent_service.run_liveness` | When frames go out: the heartbeat, the idle timeout and the maximum duration, enforced by a supervisor that does not depend on the client reading |
 | `agent_service.runners` | The `Runner` port a route's provider plugs into; production installs none yet |
 
 It leaves the application everything the library cannot know: the MCP tool set

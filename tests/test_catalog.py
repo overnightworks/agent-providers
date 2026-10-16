@@ -13,14 +13,19 @@ from pathlib import Path
 import httpx
 import pytest
 from provider_test_support import (
+    A_CODEX_LOGIN_WITH_INVALID_UTF8,
     CLAUDE_MODEL_CATALOG_STDOUT,
     GROK_LOGGED_IN,
+    a_codex_login,
+    a_fifo,
+    call_within_deadline,
     fake_cli_executable,
     override_provider_runtime,
 )
 from pydantic import SecretStr
 
 from agent_providers.catalog import (
+    ProviderNotLoggedIn,
     ProviderReady,
     ProviderRoute,
     ProviderRouteReadinessState,
@@ -307,3 +312,85 @@ def test_a_cli_route_whose_private_home_cannot_be_made_is_disturbed(
 
     assert snapshot.readiness is ProviderRouteReadinessState.DISTURBED
     assert snapshot.reason.code is SafeRouteReasonCode.CLI_BINARY_UNAVAILABLE
+
+
+A_CODEX_LOGIN_WITHOUT_ITS_ID_TOKEN = b'{"auth_mode":"chatgpt","tokens":{"access_token":"a"}}'
+
+
+def _codex_setup(tmp_path: Path, document: bytes) -> object:
+    auth_file = tmp_path / "codex-auth.json"
+    auth_file.write_bytes(document)
+    override_provider_runtime(codex_cli_auth_file=auth_file)
+    return provider_configuration("codex", frozenset({ProviderSetupMethod.CODEX_CLI}))
+
+
+def test_codex_setup_is_ready_through_a_complete_login(tmp_path: Path) -> None:
+    configuration = _codex_setup(tmp_path, a_codex_login())
+
+    assert isinstance(configuration, ProviderReady)
+    assert configuration.method is ProviderSetupMethod.CODEX_CLI
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        pytest.param(A_CODEX_LOGIN_WITHOUT_ITS_ID_TOKEN, id="only-an-access-token"),
+        pytest.param(a_codex_login(tokens={"account_id": 7}), id="numeric-account-id"),
+        pytest.param(A_CODEX_LOGIN_WITH_INVALID_UTF8, id="invalid-encoding"),
+    ],
+)
+def test_codex_setup_needs_a_usable_login(tmp_path: Path, document: bytes) -> None:
+    assert isinstance(_codex_setup(tmp_path, document), ProviderNotLoggedIn)
+
+
+def test_an_unreadable_codex_login_leaves_the_api_key_in_charge(tmp_path: Path) -> None:
+    override_provider_runtime(openai_api_key=SecretStr("a-key"))
+
+    configuration = _codex_setup(tmp_path, A_CODEX_LOGIN_WITH_INVALID_UTF8)
+
+    assert isinstance(configuration, ProviderReady)
+    assert configuration.method is ProviderSetupMethod.API_KEY
+
+
+def test_a_wrong_typed_codex_login_is_named_in_the_setup_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("WARNING", logger="agent_providers.catalog")
+
+    _codex_setup(tmp_path, a_codex_login(tokens={"account_id": 7}))
+
+    assert "codex CLI probe unavailable: AgentCliUnavailableError" in caplog.text
+
+
+def test_codex_setup_does_not_follow_a_link_to_a_complete_login(tmp_path: Path) -> None:
+    target = tmp_path / "target.json"
+    target.write_bytes(a_codex_login())
+    link = tmp_path / "codex-auth.json"
+    link.symlink_to(target)
+    override_provider_runtime(codex_cli_auth_file=link)
+
+    configuration = provider_configuration("codex", frozenset({ProviderSetupMethod.CODEX_CLI}))
+
+    assert isinstance(configuration, ProviderNotLoggedIn)
+
+
+@pytest.mark.parametrize(
+    "make_source",
+    [a_fifo, lambda _directory: Path("/dev/null")],
+    ids=("fifo", "device"),
+)
+def test_the_codex_login_probe_refuses_a_source_that_is_not_a_plain_file(
+    tmp_path: Path, make_source,
+) -> None:
+    calls_log = tmp_path / "calls"
+    fake_cli_executable(tmp_path, {("login", "status"): CODEX_LOGGED_IN}, calls_log=calls_log)
+    override_provider_runtime(
+        cli_binary_search_path=(tmp_path,), codex_cli_binary="fake-cli",
+        codex_cli_auth_file=make_source(tmp_path),
+    )
+
+    snapshot = call_within_deadline(probe_provider_route, "codex", ProviderRoute.CLI)
+
+    assert snapshot.readiness is ProviderRouteReadinessState.DISTURBED
+    assert snapshot.reason.code is SafeRouteReasonCode.CLI_BINARY_UNAVAILABLE
+    assert not calls_log.exists()

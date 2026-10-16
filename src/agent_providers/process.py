@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import atexit
 import concurrent.futures
+import errno
+import functools
 import json
 import logging
 import os
 import selectors
 import shutil
 import signal
+import stat
+import sys
 import tempfile
 import threading
 import time
@@ -20,8 +24,10 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from types import TracebackType
 from typing import Any, Final, Literal, NotRequired, Required, TypedDict, Unpack, cast
 
+from agent_providers.codex_login import CodexLoginVerdict, assess_codex_login
 from agent_providers.config import current_config, current_turn_config
 from agent_providers.constants import (
     CLAUDE_CLI_AUTH_METHOD_FIELD,
@@ -292,7 +298,11 @@ CredentialCopy = Callable[[bytes], bytes]
 # Measured on claude 2.1.266: the CLI reports its subscription login from
 # this file below HOME alone, without a network call.
 _CLAUDE_CATALOG_CREDENTIAL_PATH: Final = Path(".claude/.credentials.json")
-_CATALOG_CREDENTIAL_READ_LIMIT_BYTES: Final = 256 * 1024
+_CREDENTIAL_FILE_READ_LIMIT_BYTES: Final = 256 * 1024
+_CREDENTIAL_SYMLINK_DETAIL: Final = "CLI credential is a symbolic link"
+_CREDENTIAL_NOT_REGULAR_DETAIL: Final = "CLI credential is not a regular file"
+_CREDENTIAL_OVERSIZE_DETAIL: Final = "CLI credentials exceed the copy bound"
+_CREDENTIAL_UNREADABLE_DETAIL: Final = "could not read CLI credentials"
 _GROK_CREDENTIAL_HOME_VARIABLE: Final = "GROK_HOME"
 _CODEX_CREDENTIAL_HOME_VARIABLE: Final = "CODEX_HOME"
 
@@ -1227,12 +1237,15 @@ class PrivateCredentialHome:
             _live_homes.add(self)
         try:
             os.chmod(self._home, 0o700)
-            _install_credential(
-                self._home,
-                auth_file,
-                relative_destination,
-                missing_credential_is_error=missing_credential_is_error,
-                credential_copy=credential_copy,
+            _run_without_credential_remains(
+                functools.partial(
+                    _install_credential,
+                    self._home,
+                    auth_file,
+                    relative_destination,
+                    missing_credential_is_error=missing_credential_is_error,
+                    credential_copy=credential_copy,
+                ),
             )
         except OSError:
             self._discard_failed_setup()
@@ -1395,47 +1408,13 @@ def blank_codex_refresh_token(source_document: bytes) -> bytes:
     break the stored login, so every Codex child receives this copy instead of
     the operator's file.
     """
-    blanked = _blanked_codex_login(source_document)
-    # The traceback keeps this frame alive, so the document must not stay in it.
+    blanked = assess_codex_login(source_document).blanked_document
+    # The Codex turn mirror calls this outside the credential boundary, and the
+    # traceback keeps this frame alive, so the document must not stay in it.
     del source_document
     if blanked is None:
         raise_without_chain(CodexLoginMirrorError())
     return blanked
-
-
-def _blanked_codex_login(source_document: bytes) -> bytes | None:
-    try:
-        document = json.loads(source_document)
-    except (ValueError, RecursionError):
-        return None
-    if not isinstance(document, dict):
-        return None
-    tokens = document.get("tokens")
-    if not isinstance(tokens, dict):
-        return None
-    access_token = tokens.get("access_token")
-    auth_mode = document.get("auth_mode")
-    id_token = tokens.get("id_token")
-    account_id = tokens.get("account_id")
-    last_refresh = document.get("last_refresh")
-    if not all(
-        isinstance(value, str) and value
-        for value in (auth_mode, access_token, id_token, account_id, last_refresh)
-    ):
-        return None
-    return json.dumps(
-        {
-            "auth_mode": auth_mode,
-            "OPENAI_API_KEY": None,
-            "last_refresh": last_refresh,
-            "tokens": {
-                "id_token": id_token,
-                "access_token": access_token,
-                "account_id": account_id,
-                "refresh_token": "",
-            },
-        }
-    ).encode()
 
 
 def _install_credential(
@@ -1446,12 +1425,8 @@ def _install_credential(
     missing_credential_is_error: bool,
     credential_copy: CredentialCopy | None = None,
 ) -> None:
-    flags = os.O_RDONLY
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    try:
-        source = os.open(auth_file, flags)
-    except FileNotFoundError:
+    payload = _read_credential_file(auth_file)
+    if payload is None:
         if missing_credential_is_error:
             raise CliCredentialNotConfiguredError("configured CLI credential is missing") from None
         # A probe with no credential answers "logged out", which is
@@ -1463,53 +1438,188 @@ def _install_credential(
             auth_file,
         )
         return
-    except OSError as exc:
-        raise AgentCliUnavailableError("could not read CLI credentials") from exc
-    try:
-        payload = _read_credential(source)
-        if credential_copy is not None:
-            login_is_usable = True
-            try:
-                payload = credential_copy(payload)
-            except CodexLoginMirrorError:
-                payload = b""
-                login_is_usable = False
-            if not login_is_usable:
-                if missing_credential_is_error:
-                    raise_without_chain(
-                        CliCredentialNotConfiguredError("configured CLI credential is unusable")
-                    )
-                log.warning(
-                    "the credential at the configured path %s is not a usable login; "
-                    "this probe will report a logged-out provider",
-                    auth_file,
-                )
-                return
-        destination_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        if hasattr(os, "O_NOFOLLOW"):
-            destination_flags |= os.O_NOFOLLOW
-        destination_path = home / relative_destination
-        destination_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        destination = os.open(destination_path, destination_flags, 0o400)
+    if credential_copy is not None:
+        login_is_usable = True
         try:
-            _write_credential(destination, payload)
-            os.fchmod(destination, 0o400)
-        finally:
-            os.close(destination)
+            payload = credential_copy(payload)
+        except CodexLoginMirrorError:
+            payload = b""
+            login_is_usable = False
+        if not login_is_usable:
+            if missing_credential_is_error:
+                raise_without_chain(
+                    CliCredentialNotConfiguredError("configured CLI credential is unusable")
+                )
+            log.warning(
+                "the credential at the configured path %s is not a usable login; "
+                "this probe will report a logged-out provider",
+                auth_file,
+            )
+            return
+    destination_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        destination_flags |= os.O_NOFOLLOW
+    destination_path = home / relative_destination
+    destination_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    destination = os.open(destination_path, destination_flags, 0o400)
+    try:
+        _write_credential(destination, payload)
+        os.fchmod(destination, 0o400)
     finally:
-        os.close(source)
+        os.close(destination)
 
 
-def _read_credential(descriptor: int) -> bytes:
+@dataclass(frozen=True)
+class _ExceptionLinks:
+    """What an exception points at: its traceback and its three chain attributes."""
+
+    exception: BaseException
+    traceback: TracebackType | None
+    context: BaseException | None
+    cause: BaseException | None
+    suppress_context: bool
+
+    @classmethod
+    def of(cls, exception: BaseException) -> "_ExceptionLinks":
+        return cls(
+            exception,
+            exception.__traceback__,
+            exception.__context__,
+            exception.__cause__,
+            exception.__suppress_context__,
+        )
+
+    def restore(self) -> None:
+        restored = self.exception
+        restored.__traceback__ = self.traceback
+        restored.__context__ = self.context
+        restored.__cause__ = self.cause  # NOSONAR(S5707) restores the snapshot of a real __cause__
+        restored.__suppress_context__ = self.suppress_context
+
+
+def _run_without_credential_remains[T](step: Callable[[], T]) -> T:
+    """Run a step that touches credential bytes; no exception leaves it holding them.
+
+    A traceback keeps every frame it passed through alive, locals included, and
+    so does every exception chained beneath it: the decoder's error holds the
+    document itself. This frame holds no bytes, so it clears the frames of the
+    failure, cuts the links the step created off, and lets the same exception
+    continue as if raised here, still chained to what the caller was handling.
+    A refusal that deliberately carries no context keeps none. The caller's own
+    exception is restored to exactly what it was at entry on every outcome, so
+    the step can neither leave links in it nor clear the frames it already had.
+    """
+    handled_by_the_caller = sys.exception()
+    callers_links = (
+        _ExceptionLinks.of(handled_by_the_caller) if handled_by_the_caller is not None else None
+    )
+    callers_traceback = _traceback_entries_of(handled_by_the_caller)
+    try:
+        return step()
+    except BaseException as failure:
+        _clear_frames_and_cut_links(
+            failure, failure.__traceback__.tb_next, callers_traceback, handled_by_the_caller,
+        )
+        raise
+    finally:
+        if callers_links is not None:
+            callers_links.restore()
+
+
+def _traceback_entries_of(exception: BaseException | None) -> list[TracebackType]:
+    entries = []
+    entry = exception.__traceback__ if exception is not None else None
+    while entry is not None:
+        entries.append(entry)
+        entry = entry.tb_next
+    return entries
+
+
+def _clear_frames_and_cut_links(
+    failure: BaseException,
+    first_entry: TracebackType | None,
+    callers_traceback: list[TracebackType],
+    handled_by_the_caller: BaseException | None,
+) -> None:
+    """Clear the failure's finished frames and cut its inner links, group members included."""
+    entry = first_entry
+    while entry is not None and not any(entry is kept for kept in callers_traceback):
+        try:
+            entry.tb_frame.clear()
+        except RuntimeError:
+            break  # a frame still executing belongs to the caller; below it is the earlier raise
+        entry = entry.tb_next
+    failure.__cause__ = None
+    if failure.__context__ is not None:
+        failure.__context__ = handled_by_the_caller
+    if isinstance(failure, BaseExceptionGroup):
+        for member in failure.exceptions:
+            _clear_frames_and_cut_links(
+                member, member.__traceback__, callers_traceback, handled_by_the_caller,
+            )
+
+
+def _read_credential_file(path: Path) -> bytes | None:
+    """Read a credential source: ``None`` when absent, an error when not a plain file.
+
+    The open never follows a link and never waits on a FIFO; the kind is judged
+    on the opened descriptor, so nothing can swap the file in between. No buffer
+    is held in this frame while a refusal is raised.
+    """
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        refusal = (
+            _CREDENTIAL_SYMLINK_DETAIL
+            if exc.errno == errno.ELOOP
+            else _CREDENTIAL_UNREADABLE_DETAIL
+        )
+        raise_without_chain(AgentCliUnavailableError(refusal))
+    try:
+        content, refusal = _read_regular_file(descriptor)
+    finally:
+        closed = _close_descriptor(descriptor)
+    if not closed:
+        content, refusal = None, _CREDENTIAL_UNREADABLE_DETAIL
+    if refusal is not None:
+        raise_without_chain(AgentCliUnavailableError(refusal))
+    return content
+
+
+def _close_descriptor(descriptor: int) -> bool:
+    try:
+        os.close(descriptor)
+    except OSError:
+        return False
+    return True
+
+
+def _read_regular_file(descriptor: int) -> tuple[bytes | None, str | None]:
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            return None, _CREDENTIAL_NOT_REGULAR_DETAIL
+        content = _read_within_bound(descriptor)
+    except OSError:
+        return None, _CREDENTIAL_UNREADABLE_DETAIL
+    if content is None:
+        return None, _CREDENTIAL_OVERSIZE_DETAIL
+    return content, None
+
+
+def _read_within_bound(descriptor: int) -> bytes | None:
     chunks: list[bytes] = []
     size = 0
     while True:
-        chunk = os.read(descriptor, 65_536)
+        chunk = os.read(
+            descriptor, min(65_536, _CREDENTIAL_FILE_READ_LIMIT_BYTES + 1 - size),
+        )
         if not chunk:
             return b"".join(chunks)
         size += len(chunk)
-        if size > _CATALOG_CREDENTIAL_READ_LIMIT_BYTES:
-            raise AgentCliUnavailableError("CLI credentials exceed the copy bound")
+        if size > _CREDENTIAL_FILE_READ_LIMIT_BYTES:
+            return None
         chunks.append(chunk)
 
 
@@ -1661,31 +1771,19 @@ def grok_cli_token_is_present() -> bool:
     return False
 
 
-def codex_cli_access_token_is_present() -> bool:
-    """Whether the Codex CLI credential mirror contains a non-empty access token."""
-    try:
-        raw_auth = current_config().codex_cli_auth_file.read_text()
-    except FileNotFoundError:
+def codex_cli_login_is_usable() -> bool:
+    """Whether the Codex CLI credential mirror holds a login that can start a child."""
+    return _run_without_credential_remains(_codex_login_in_the_mirror_is_usable)
+
+
+def _codex_login_in_the_mirror_is_usable() -> bool:
+    document = _read_credential_file(current_config().codex_cli_auth_file)
+    if document is None:
         return False
-    except OSError as exc:
-        raise AgentCliUnavailableError("could not read Codex CLI credentials") from exc
-    try:
-        document = json.loads(raw_auth)
-    except json.JSONDecodeError as exc:
-        raise AgentCliUnavailableError(CODEX_CLI_CREDENTIALS_INVALID_DETAIL) from exc
-    if not isinstance(document, dict):
-        raise AgentCliUnavailableError(CODEX_CLI_CREDENTIALS_INVALID_DETAIL)
-    if "tokens" not in document:
-        return False
-    tokens = document["tokens"]
-    if not isinstance(tokens, dict):
-        raise AgentCliUnavailableError(CODEX_CLI_CREDENTIALS_INVALID_DETAIL)
-    if "access_token" not in tokens:
-        return False
-    access_token = tokens["access_token"]
-    if not isinstance(access_token, str):
-        raise AgentCliUnavailableError(CODEX_CLI_CREDENTIALS_INVALID_DETAIL)
-    return bool(access_token)
+    verdict = assess_codex_login(document).verdict
+    if verdict is CodexLoginVerdict.MALFORMED:
+        raise_without_chain(AgentCliUnavailableError(CODEX_CLI_CREDENTIALS_INVALID_DETAIL))
+    return verdict is CodexLoginVerdict.USABLE
 
 
 def _parse_grok_login(output: str) -> CliLogin:

@@ -27,9 +27,11 @@ from provider_test_support import (
     assert_a_multi_result_batch_is_rejected,
     assert_the_canary_reaches_only_the_host,
     drive_cowriter_turn,
+    exception_chain,
     formatted_log_text,
     override_provider_runtime,
     override_turn_runtime,
+    traceback_frames_hold,
     use_codex_process_pool,
 )
 
@@ -80,7 +82,7 @@ def _transport() -> codex_transport.CodexCliToolTransport:
         model="codex-test", catalog=COWRITER_TOOL_CATALOG,
     )
 
-_REDACTED_CODEX_LOGIN = json.loads(a_codex_login())
+_A_CODEX_LOGIN = json.loads(a_codex_login())
 _FIXTURES = Path(__file__).parent / "fixtures"
 
 
@@ -156,7 +158,7 @@ def test_a_deployment_without_the_image_encoder_refuses_before_it_spawns(
 @pytest.fixture(autouse=True)
 def codex_login_mirror(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     mirror = tmp_path / "auth.json"
-    mirror.write_text(json.dumps(_REDACTED_CODEX_LOGIN))
+    mirror.write_text(json.dumps(_A_CODEX_LOGIN))
     override_provider_runtime(codex_cli_auth_file=mirror)
     process_pool = CodexProcessPool(maximum_processes=8, maximum_image_runs=1)
     use_codex_process_pool(monkeypatch, process_pool)
@@ -1150,10 +1152,10 @@ def test_a_deviating_transcript_raises_the_blocked_error_with_its_tokens(tmp_pat
     "document",
     (
         None,
-        {**_REDACTED_CODEX_LOGIN, "tokens": {"id_token": "id-token"}},
+        {**_A_CODEX_LOGIN, "tokens": {"id_token": "id-token"}},
         {
-            **_REDACTED_CODEX_LOGIN,
-            "tokens": {**_REDACTED_CODEX_LOGIN["tokens"], "account_id": 7},
+            **_A_CODEX_LOGIN,
+            "tokens": {**_A_CODEX_LOGIN["tokens"], "account_id": 7},
         },
     ),
     ids=("missing", "incomplete", "wrong-typed"),
@@ -1325,9 +1327,9 @@ def test_a_codex_event_line_the_cli_cannot_decode_leaves_no_chain_to_its_text(
 
 _CANARY_REFRESH_TOKEN = "canary-refresh-token-of-the-operator"
 _OPERATORS_LIVE_LOGIN = {
-    **_REDACTED_CODEX_LOGIN,
+    **_A_CODEX_LOGIN,
     "tokens": {
-        **_REDACTED_CODEX_LOGIN["tokens"],
+        **_A_CODEX_LOGIN["tokens"],
         "refresh_token": _CANARY_REFRESH_TOKEN,
         "session_token": _CANARY_REFRESH_TOKEN,
     },
@@ -1415,27 +1417,6 @@ def test_no_codex_child_is_handed_the_operators_live_refresh_token(
     assert _CANARY_REFRESH_TOKEN not in formatted_log_text(caplog.records)
 
 
-def _exception_chain(error: BaseException) -> list[BaseException]:
-    chain, pending = [], [error]
-    while pending:
-        current = pending.pop()
-        if current in chain:
-            continue
-        chain.append(current)
-        pending.extend(link for link in (current.__cause__, current.__context__) if link)
-    return chain
-
-
-def _values_held_by_the_traceback_frames(error: BaseException) -> list[object]:
-    held = []
-    for link in _exception_chain(error):
-        frame_holder = link.__traceback__
-        while frame_holder is not None:
-            held.extend(frame_holder.tb_frame.f_locals.values())
-            frame_holder = frame_holder.tb_next
-    return held
-
-
 def _drive_the_image_path(_codex_login_mirror: Path) -> BaseException:
     with pytest.raises(codex_image.CodexImageLoginError) as raised:
         codex_image.generate_codex_image("prompt", policy=A_COVER_POLICY, deadline=10_000_000)
@@ -1490,15 +1471,12 @@ def test_a_malformed_login_leaves_no_credential_content_in_the_error_chain(
 
     error = drive(codex_login_mirror)
 
-    chain = _exception_chain(error)
+    chain = exception_chain(error)
     assert not any(
         _CANARY_REFRESH_TOKEN in "".join(traceback.format_exception(link)) for link in chain
     )
     assert all(not isinstance(link, ValueError) for link in chain)
-    assert not any(
-        _CANARY_REFRESH_TOKEN in (value.decode() if isinstance(value, bytes) else str(value))
-        for value in _values_held_by_the_traceback_frames(error)
-    )
+    assert not traceback_frames_hold(error, _CANARY_REFRESH_TOKEN)
 
 
 def _a_refused_symbolic_link(codex_login_mirror: Path) -> BaseException:
@@ -1531,17 +1509,14 @@ def test_a_credential_refusal_carries_no_chain_inside_a_handler(
 
     assert refusal.__cause__ is None
     assert refusal.__context__ is None
-    assert not any(
-        _CANARY_REFRESH_TOKEN in (value.decode() if isinstance(value, bytes) else str(value))
-        for value in _values_held_by_the_traceback_frames(refusal)
-    )
+    assert not traceback_frames_hold(refusal, _CANARY_REFRESH_TOKEN)
 
 
 @pytest.mark.parametrize(
     "document",
     (
-        {**_REDACTED_CODEX_LOGIN, "tokens": {"access_token": "access-token"}},
-        {**_REDACTED_CODEX_LOGIN, "tokens": {**_REDACTED_CODEX_LOGIN["tokens"], "account_id": 7}},
+        {**_A_CODEX_LOGIN, "tokens": {"access_token": "access-token"}},
+        {**_A_CODEX_LOGIN, "tokens": {**_A_CODEX_LOGIN["tokens"], "account_id": 7}},
     ),
     ids=("incomplete", "wrong-typed"),
 )

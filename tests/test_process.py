@@ -26,6 +26,7 @@ from provider_test_support import (
     call_within_deadline,
     override_provider_runtime,
     shell_child,
+    traceback_frames_hold,
 )
 
 from agent_providers import process
@@ -2389,7 +2390,7 @@ def test_the_credential_reader_discards_the_content_when_the_close_fails(
     assert str(refusal) == "could not read CLI credentials"
     assert refusal.__context__ is None
     assert refusal.__cause__ is None
-    assert "synthetic-credential-canary" not in "".join(traceback.format_exception(refusal))
+    assert not traceback_frames_hold(refusal, "synthetic-credential-canary")
     assert len(os.listdir("/proc/self/fd")) == open_descriptors
 
 
@@ -2423,3 +2424,64 @@ def test_the_credential_reader_returns_a_plain_file_within_the_bound(
 
 def test_the_credential_reader_reports_a_missing_file_as_absent(tmp_path: Path) -> None:
     assert process._read_credential_file(tmp_path / "missing") is None
+
+
+def _assert_no_frame_holds_the_credential(error: BaseException) -> None:
+    assert not traceback_frames_hold(error, "synthetic-credential-canary")
+
+
+def _interruption_from_the_read(canary: bytes):
+    pending_reads = [canary]
+
+    def read_then_interrupt(descriptor: int, length: int) -> bytes:
+        if pending_reads:
+            return pending_reads.pop()
+        raise KeyboardInterrupt
+
+    return process.os, "read", read_then_interrupt
+
+
+def _interruption_from_the_close(_canary: bytes):
+    real_close = os.close
+
+    def close_then_interrupt(descriptor: int) -> None:
+        real_close(descriptor)
+        raise SystemExit
+
+    return process.os, "close", close_then_interrupt
+
+
+@pytest.mark.parametrize(
+    ("interrupt", "interruption"),
+    (
+        (_interruption_from_the_read, KeyboardInterrupt),
+        (_interruption_from_the_close, SystemExit),
+    ),
+    ids=("read", "close"),
+)
+@pytest.mark.parametrize("inside_a_handler", (False, True), ids=("plain-call", "inside-a-handler"))
+def test_the_credential_reader_lets_an_interruption_through_holding_no_credential_bytes(
+    tmp_path: Path, interrupt, interruption, inside_a_handler: bool,
+) -> None:
+    source = tmp_path / "source"
+    source.write_text("synthetic-credential-canary")
+    open_descriptors = len(os.listdir("/proc/self/fd"))
+    target, name, replacement = interrupt(b"synthetic-credential-canary")
+
+    def read_the_credential() -> BaseException:
+        with patch.object(target, name, replacement):
+            with pytest.raises(interruption) as raised:
+                process._read_credential_file(source)
+        return raised.value
+
+    if inside_a_handler:
+        try:
+            raise RuntimeError("an error the caller is already handling")
+        except RuntimeError as handled:
+            caught = read_the_credential()
+            assert caught.__context__ is handled
+    else:
+        caught = read_the_credential()
+
+    _assert_no_frame_holds_the_credential(caught)
+    assert len(os.listdir("/proc/self/fd")) == open_descriptors

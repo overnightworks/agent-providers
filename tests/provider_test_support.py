@@ -600,3 +600,26 @@ def assert_the_canary_reaches_only_the_host(
         f"code={ToolProtocolRejectionCode.TEXT_TOOL_RESPONSE_INVALID} "
         f"rule={rule} offset={rejection.offset} length={rejection.length}"
     )
+
+
+def exception_chain(error: BaseException) -> list[BaseException]:
+    chain, pending = [], [error]
+    while pending:
+        current = pending.pop()
+        if current in chain:
+            continue
+        chain.append(current)
+        pending.extend(link for link in (current.__cause__, current.__context__) if link)
+    return chain
+
+
+def traceback_frames_hold(error: BaseException, text: str) -> bool:
+    for link in exception_chain(error):
+        frame_holder = link.__traceback__
+        while frame_holder is not None:
+            for value in frame_holder.tb_frame.f_locals.values():
+                shown = value.decode(errors="replace") if isinstance(value, bytes) else str(value)
+                if text in shown:
+                    return True
+            frame_holder = frame_holder.tb_next
+    return False

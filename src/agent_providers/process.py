@@ -1340,9 +1340,13 @@ def _read_credential_file(path: Path) -> bytes | None:
         )
         raise_without_chain(AgentCliUnavailableError(refusal))
     try:
-        content, refusal = _read_regular_file(descriptor)
-    finally:
-        closed = _close_descriptor(descriptor)
+        try:
+            content, refusal = _read_regular_file(descriptor)
+        finally:
+            closed = _close_descriptor(descriptor)
+    except BaseException:
+        content = None
+        raise
     if not closed:
         content, refusal = None, _CREDENTIAL_UNREADABLE_DETAIL
     if refusal is not None:
@@ -1373,16 +1377,21 @@ def _read_regular_file(descriptor: int) -> tuple[bytes | None, str | None]:
 def _read_within_bound(descriptor: int) -> bytes | None:
     chunks: list[bytes] = []
     size = 0
-    while True:
-        chunk = os.read(
-            descriptor, min(65_536, _CREDENTIAL_FILE_READ_LIMIT_BYTES + 1 - size),
-        )
-        if not chunk:
-            return b"".join(chunks)
-        size += len(chunk)
-        if size > _CREDENTIAL_FILE_READ_LIMIT_BYTES:
-            return None
-        chunks.append(chunk)
+    try:
+        while True:
+            chunk = os.read(
+                descriptor, min(65_536, _CREDENTIAL_FILE_READ_LIMIT_BYTES + 1 - size),
+            )
+            if not chunk:
+                return b"".join(chunks)
+            size += len(chunk)
+            if size > _CREDENTIAL_FILE_READ_LIMIT_BYTES:
+                return None
+            chunks.append(chunk)
+    except BaseException:
+        chunks.clear()
+        chunk = b""
+        raise
 
 
 def _write_credential(descriptor: int, payload: bytes) -> None:

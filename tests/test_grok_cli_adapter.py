@@ -82,6 +82,7 @@ def test_grok_credential_home_is_removed_when_aclose_is_cancelled_and_retried(
 
     assert not any(home.exists() for home in homes)
 
+
 def _outcome(*, returncode: int = 0, complete: bool = True, stderr: str = "") -> CliRunOutcome:
     return CliRunOutcome(
         started=True,

@@ -17,8 +17,10 @@ unset ``HOME`` at construction, whatever the caller forgot.
 from __future__ import annotations
 
 import ast
+import asyncio
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -28,6 +30,8 @@ from agent_providers.spawn import (
     ChildProcess,
     ChildProcessSpecificationError,
     closed_environment,
+    open_async_pipes,
+    open_pipes,
     run_capturing,
 )
 
@@ -67,10 +71,15 @@ SPAWN_PRIMITIVE_PREFIXES = ("os.exec", "os.spawn", "os.posix_spawn")
 EVENT_LOOP_SPAWN_METHODS = frozenset({"subprocess_exec", "subprocess_shell"})
 
 
-def _import_bindings(tree: ast.Module) -> dict[str, str]:
-    """The qualified name each locally bound import name stands for."""
+_SCOPE_NODES = (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+
+
+def _own_imports(scope: ast.AST) -> dict[str, str]:
+    """The qualified name each import in this scope, not its nested scopes, binds."""
     bindings: dict[str, str] = {}
-    for node in ast.walk(tree):
+    pending = list(reversed(list(ast.iter_child_nodes(scope))))
+    while pending:
+        node = pending.pop()
         if isinstance(node, ast.Import):
             for alias in node.names:
                 bound = alias.asname or alias.name.split(".")[0]
@@ -78,16 +87,21 @@ def _import_bindings(tree: ast.Module) -> dict[str, str]:
         elif isinstance(node, ast.ImportFrom) and node.module is not None:
             for alias in node.names:
                 bindings[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+        if not isinstance(node, _SCOPE_NODES):
+            pending.extend(reversed(list(ast.iter_child_nodes(node))))
     return bindings
 
 
-def _qualified_callee(callee: ast.expr, bindings: dict[str, str]) -> str | None:
-    """Resolve ``alias.attr.attr`` through the imports; None for anything else."""
+def _qualified_callee(callee: ast.expr, scopes: list[dict[str, str]]) -> str | None:
+    """Resolve ``alias.attr.attr`` through the innermost scope that binds the alias."""
     attributes: list[str] = []
     while isinstance(callee, ast.Attribute):
         attributes.append(callee.attr)
         callee = callee.value
-    if not isinstance(callee, ast.Name) or callee.id not in bindings:
+    if not isinstance(callee, ast.Name):
+        return None
+    bindings = next((scope for scope in reversed(scopes) if callee.id in scope), None)
+    if bindings is None:
         return None
     return ".".join([bindings[callee.id], *reversed(attributes)])
 
@@ -104,19 +118,24 @@ def _spawn_calls(tree: ast.Module) -> list[tuple[str, ast.Call]]:
     The owner module is the one place where the rule still has to hold, so a
     bare ``Popen(command)`` there must not read as anything else.
     """
-    bindings = _import_bindings(tree)
     calls: list[tuple[str, ast.Call]] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        qualified = _qualified_callee(node.func, bindings)
-        if qualified is not None and _is_spawn_primitive(qualified):
-            calls.append((qualified, node))
-        elif (
-            isinstance(node.func, ast.Attribute)
-            and node.func.attr in EVENT_LOOP_SPAWN_METHODS
-        ):
-            calls.append((node.func.attr, node))
+
+    def visit(node: ast.AST, scopes: list[dict[str, str]]) -> None:
+        if isinstance(node, _SCOPE_NODES):
+            scopes = [*scopes, _own_imports(node)]
+        if isinstance(node, ast.Call):
+            qualified = _qualified_callee(node.func, scopes)
+            if qualified is not None and _is_spawn_primitive(qualified):
+                calls.append((qualified, node))
+            elif (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr in EVENT_LOOP_SPAWN_METHODS
+            ):
+                calls.append((node.func.attr, node))
+        for child in ast.iter_child_nodes(node):
+            visit(child, scopes)
+
+    visit(tree, [])
     return calls
 
 
@@ -152,6 +171,12 @@ def test_the_call_site_check_scans_the_client_and_the_service() -> None:
         ("from multiprocessing import Process as Worker\nWorker()", "multiprocessing.Process"),
         ("import pty\npty.spawn(['x'])", "pty.spawn"),
         ("import os\nos.posix_spawn('x', [], {})", "os.posix_spawn"),
+        (
+            "import subprocess as sp\n"
+            "def child():\n    sp.Popen(['x'])\n"
+            "def server():\n    import uvicorn as sp\n    sp.run(app)\n",
+            "subprocess.Popen",
+        ),
     ],
 )
 def test_the_call_site_check_finds_a_spawn_under_any_import_alias(
@@ -267,8 +292,34 @@ def test_a_closed_environment_carries_the_machine_settings_a_cli_needs(
     assert environment["PATH"]
 
 
+def _stdout_of_run_capturing(child: ChildProcess) -> str:
+    return run_capturing(child, stdin_text="", timeout_seconds=30).stdout
+
+
+def _stdout_of_open_pipes(child: ChildProcess) -> str:
+    process = open_pipes(child, stderr="devnull")
+    stdout, _ = process.communicate(b"")
+    return stdout.decode()
+
+
+def _stdout_of_open_async_pipes(child: ChildProcess) -> str:
+    async def run() -> str:
+        process = await open_async_pipes(child)
+        stdout, _ = await process.communicate(b"")
+        return stdout.decode()
+
+    return asyncio.run(run())
+
+
 @pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="needs /proc/self/fd")
-def test_a_child_inherits_no_descriptor_the_parent_holds_open(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "stdout_of",
+    [_stdout_of_run_capturing, _stdout_of_open_pipes, _stdout_of_open_async_pipes],
+    ids=["run_capturing", "open_pipes", "open_async_pipes"],
+)
+def test_a_child_inherits_no_descriptor_the_parent_holds_open(
+    tmp_path: Path, stdout_of: Callable[[ChildProcess], str],
+) -> None:
     probe = (
         "import os, sys\n"
         "print(os.path.exists(f'/proc/self/fd/{sys.argv[1]}'))\n"
@@ -276,18 +327,16 @@ def test_a_child_inherits_no_descriptor_the_parent_holds_open(tmp_path: Path) ->
     read_end, write_end = os.pipe()
     os.set_inheritable(read_end, True)
     try:
-        completed = run_capturing(
+        output = stdout_of(
             ChildProcess(
                 binary=Path(sys.executable),
                 arguments=("-c", probe, str(read_end)),
                 environment=closed_environment(tmp_path),
                 working_directory=tmp_path,
             ),
-            stdin_text="",
-            timeout_seconds=30,
         )
     finally:
         os.close(read_end)
         os.close(write_end)
 
-    assert completed.stdout.strip() == "False"
+    assert output.strip() == "False"

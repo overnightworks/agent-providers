@@ -1935,8 +1935,12 @@ def _call_cli(
     flat_prompt = flatten_messages(prompt, messages)
     stdin_body = stdin_prompt(system, flat_prompt)
     home = _claude_private_home()
-    child = _claude_child_process(binary, _cli_arguments(model), home.path)
-    home_reservation = home.reserve()
+    try:
+        child = _claude_child_process(binary, _cli_arguments(model), home.path)
+        home_reservation = home.reserve()
+    except BaseException:
+        home.close()
+        raise
 
     reservation = _reserve_zombie_admission()
     if reservation is None:

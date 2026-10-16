@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import weakref
 from collections import deque
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -1063,6 +1064,7 @@ class PrivateCredentialHome:
         self._cleanup_requested = False
         self._cleaned = False
         self._lock = threading.Lock()
+        self._finalizer = weakref.finalize(self, _remove_abandoned_tree, self._home)
         try:
             os.chmod(self._home, 0o700)
             _install_credential(
@@ -1072,7 +1074,13 @@ class PrivateCredentialHome:
                 missing_credential_is_error=missing_credential_is_error,
             )
         except BaseException:
-            _remove_private_tree(self._home)
+            try:
+                _remove_private_tree(self._home)
+            except PrivateCredentialHomeRemovalError:
+                log.exception(
+                    "private credential home setup cleanup failed; "
+                    "removal is left to the finalizer",
+                )
             raise
 
     @property
@@ -1102,6 +1110,7 @@ class PrivateCredentialHome:
         if self._cleanup_requested and not self._reservations and not self._cleaned:
             _remove_private_tree(self._home)
             self._cleaned = True
+            self._finalizer.detach()
 
 
 class _PrivateCredentialHomeReservation:
@@ -1118,7 +1127,10 @@ class _PrivateCredentialHomeReservation:
         try:
             self._home._release()
         except PrivateCredentialHomeRemovalError:
-            log.exception("private credential home stays until a later close retries")
+            log.exception(
+                "private credential home removal failed; "
+                "it is retried when the home is collected or the process exits",
+            )
 
     def on_spawn_failed(self) -> None:
         self.release()
@@ -1127,13 +1139,24 @@ class _PrivateCredentialHomeReservation:
         self.release()
 
 
+def _remove_abandoned_tree(root: Path) -> None:
+    try:
+        _remove_private_tree(root)
+    except PrivateCredentialHomeRemovalError:
+        log.exception("abandoned private credential home could not be removed")
+
+
 def _remove_private_tree(root: Path) -> None:
     try:
         shutil.rmtree(root)
+    except FileNotFoundError:
+        return
     except OSError:
         try:
             _make_tree_removable(root)
             shutil.rmtree(root)
+        except FileNotFoundError:
+            return
         except OSError as error:
             raise PrivateCredentialHomeRemovalError(
                 f"private credential home removal failed ({type(error).__name__})",

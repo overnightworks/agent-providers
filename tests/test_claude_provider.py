@@ -916,6 +916,23 @@ def test_sync_claude_call_owns_a_private_credential_home_until_completion(
     assert source.read_text() == "{}"
 
 
+def test_sync_claude_call_removes_its_credential_home_when_the_arguments_fail(
+    _no_tool_gate_open,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def refuse_arguments(_model):
+        raise RuntimeError("no arguments")
+
+    monkeypatch.setattr(provider, "_cli_arguments", refuse_arguments)
+    before = set(tmp_path.iterdir())
+
+    with pytest.raises(RuntimeError, match="no arguments"):
+        call_claude("hello")
+
+    assert set(tmp_path.iterdir()) == before
+
+
 @pytest.mark.parametrize(
     "entrypoint",
     ("async", "mcp", "stream"),

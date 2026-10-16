@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import json
 import os
 import stat
@@ -1203,6 +1204,88 @@ def test_private_credential_home_removes_a_failed_setup(tmp_path: Path) -> None:
         )
 
     assert not list(tmp_path.glob("private-home-*"))
+
+
+def test_private_credential_home_treats_an_already_removed_home_as_closed(
+    tmp_path: Path,
+) -> None:
+    home = _credential_home(tmp_path)
+    process.shutil.rmtree(home.path)
+
+    home.close()
+    home.close()
+
+    assert not home.path.exists()
+
+
+def test_private_credential_home_keeps_the_setup_error_when_its_cleanup_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def refuse_removal(_path) -> None:
+        raise PermissionError(13, "denied", "secret-looking-name")
+
+    monkeypatch.setattr(process.shutil, "rmtree", refuse_removal)
+
+    with pytest.raises(AgentCliUnavailableError, match="configured CLI credential is missing"):
+        PrivateCredentialHome(
+            tmp_path / "missing.json",
+            Path(".grok/auth.json"),
+            prefix="private-home-",
+            missing_credential_is_error=True,
+        )
+
+
+def test_private_credential_home_is_removed_when_collected_unclosed(tmp_path: Path) -> None:
+    home = _credential_home(tmp_path)
+    home_path = home.path
+
+    del home
+    gc.collect()
+
+    assert not home_path.exists()
+
+
+_ABANDONED_HOME_SCRIPT = """
+import sys
+from pathlib import Path
+
+from agent_providers.config import ProviderRuntimeConfig, configure
+from agent_providers.process import PrivateCredentialHome
+
+configure(ProviderRuntimeConfig.model_validate_json(sys.argv[1]))
+home = PrivateCredentialHome(
+    Path(sys.argv[2]),
+    Path(".claude/.credentials.json"),
+    prefix="private-home-",
+    missing_credential_is_error=True,
+)
+child_still_running = home.reserve()
+home.close()
+print(home.path)
+"""
+
+
+def test_private_credential_home_is_removed_when_its_process_ends_with_cleanup_pending(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.json"
+    source.write_text(_CATALOG_AUTH_PAYLOAD)
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _ABANDONED_HOME_SCRIPT,
+            current_config().model_dump_json(),
+            str(source),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=60,
+    )
+
+    assert not Path(completed.stdout.strip()).exists()
 
 
 @pytest.mark.parametrize(("credential_home_variable", "auth_field"), _CATALOG_PROVIDERS)

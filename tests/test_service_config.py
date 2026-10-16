@@ -183,6 +183,11 @@ def _with_key_set_url(url: str) -> str:
             "signing.key: Extra inputs are not permitted",
             id="signing-with-a-key-member",
         ),
+        pytest.param(
+            VALID_CONFIG + '\n[signing]\nkey = "/run/secrets/key.pem"\n',
+            "signing.key: Extra inputs are not permitted",
+            id="signing-with-only-a-key-member",
+        ),
         *[
             pytest.param(_with_runs(setting), "runs", id=f"runs-{setting.replace(' ', '')}")
             for setting in REFUSED_RUN_SETTINGS

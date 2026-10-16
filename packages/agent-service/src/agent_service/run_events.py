@@ -5,7 +5,10 @@ This module owns the mapping from the provider core's turn events
 run opens with ``run_started`` and ends with exactly one terminal event.
 Nothing reaches the wire that ``encode_event`` cannot write or that the
 service's own ``RunStream`` refuses: the run ends as ``failed:
-provider_error`` instead, before the offending event is sent. When frames go
+provider_error`` instead, before the offending event is sent. The run's
+budget of tool calls and bytes (``RunConfig``) is charged at the same place:
+the event that passes it is not sent and the run ends as ``failed:
+limit_exceeded``. When frames go
 out, and when a silent or overlong run is ended, ``run_liveness`` decides.
 
 A tool call's input is deep-copied into its wire event, so the event never
@@ -65,10 +68,17 @@ RUNNER_FAILED_MESSAGE: Final = "The provider failed during the run."
 NO_ANSWER_MESSAGE: Final = "The provider ended the run without an answer."
 UNMAPPABLE_EVENT_MESSAGE: Final = "The provider sent an event the service cannot map."
 INVALID_EVENT_MESSAGE: Final = "The provider sent an event that is not valid."
+TOO_MANY_TOOL_CALLS_MESSAGE: Final = "The run made too many tool calls."
+TOO_MUCH_DATA_MESSAGE: Final = "The run sent too much data."
+_SERVICE_WRITTEN: Final = (RunStarted, Heartbeat, Failed)
 
 
 class _Unsendable(Exception):
     """A provider event the run cannot put on the wire; the message is the service's own."""
+
+
+class _OverBudget(Exception):
+    """A provider event past the run's budget; the message is the service's own."""
 
 
 async def run_frames(
@@ -102,6 +112,8 @@ class _WireRun:
         self._runs = runs
         self._stream = RunStream()
         self._seq = 0
+        self._tool_calls = 0
+        self._bytes = 0
         self.ended = False
 
     def started(self) -> bytes:
@@ -141,6 +153,8 @@ class _WireRun:
             return None if event is None else self._sent(event)
         except _Unsendable as unsendable:
             return self.failed(FailureCode.PROVIDER_ERROR, str(unsendable))
+        except _OverBudget as over_budget:
+            return self.failed(FailureCode.LIMIT_EXCEEDED, str(over_budget))
 
     def _wire_event(self, core_event: StreamEvent) -> RunEvent | None:
         try:
@@ -180,9 +194,22 @@ class _WireRun:
             frame = encode_event(event)
         except (EventTooLarge, PydanticSerializationError) as error:
             raise _Unsendable(f"The provider's {event.type} cannot be sent.") from error
+        self._charge(event, len(frame))
         violation = self._stream.accept(event)
         if violation is not None:
             raise _Unsendable(f"The provider broke the run's stream rules: {violation.kind}.")
         self._seq += 1
         self.ended = isinstance(event, TerminalEvent)
         return frame
+
+    def _charge(self, event: RunEvent, frame_bytes: int) -> None:
+        """Count a runner-caused frame against the budget; a refused event charges nothing."""
+        if isinstance(event, _SERVICE_WRITTEN):
+            return
+        is_call = isinstance(event, ToolCall)
+        if is_call and self._tool_calls >= self._runs.max_tool_calls:
+            raise _OverBudget(TOO_MANY_TOOL_CALLS_MESSAGE)
+        if self._bytes + frame_bytes > self._runs.max_bytes:
+            raise _OverBudget(TOO_MUCH_DATA_MESSAGE)
+        self._tool_calls += is_call
+        self._bytes += frame_bytes

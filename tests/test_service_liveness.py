@@ -8,175 +8,45 @@ a ``GatedRunner`` whose events the test releases, so nothing sleeps.
 from __future__ import annotations
 
 import asyncio
-import functools
 import logging
-import uuid
-from collections.abc import AsyncIterator, Callable, Coroutine
-from contextlib import asynccontextmanager
-from typing import Any
 
 import pytest
 from service_support import (
+    QUIET,
+    Drive,
     GatedRunner,
     ScriptedRunner,
     StepClock,
-    SteppedLoop,
     TokenMint,
     decoded_events,
+    driven,
+    in_loop,
     post_run,
-    run_body,
     run_headers,
     served,
     service_config,
 )
 
-from agent_client.run_stream import StreamViolation
-from agent_client.sse import RunStreamDecoder
 from agent_client.wire import (
     Failed,
     FailureCode,
     Heartbeat,
-    RunEvent,
-    RunRequest,
     RunStarted,
     Succeeded,
 )
 from agent_providers.events import AssistantTextEvent, FinalEvent, ToolCallEvent
 from agent_service.app import create_app
 from agent_service.config import RunConfig
-from agent_service.identity import Principal
-from agent_service.routing import Cli
-from agent_service.run_events import run_frames
 from agent_service.run_liveness import (
     IDLE_TIMEOUT_MESSAGE,
     Action,
     Deadlines,
     decide,
 )
-from agent_service.runners import AdmittedRun, Runners
+from agent_service.runners import Runners
 
-SONGMAKER = service_config().apps["songmaker"]
-QUIET = AssistantTextEvent(text="")
 TEXT = AssistantTextEvent(text="Still here.")
 FINAL = FinalEvent(text="Done.")
-
-
-def in_loop(scenario: Callable[..., Coroutine[Any, Any, None]]) -> Callable[..., None]:
-    @functools.wraps(scenario)
-    def run(*args: Any, **kwargs: Any) -> None:
-        with asyncio.Runner(loop_factory=SteppedLoop) as runner:
-            runner.run(scenario(*args, **kwargs))
-
-    return run
-
-
-class Drive:
-    """One run read by a client task that a test can stall, on a clock the test moves."""
-
-    def __init__(
-        self,
-        runner: GatedRunner,
-        runs: RunConfig,
-        clock: StepClock,
-        *,
-        read: bool = True,
-    ) -> None:
-        self.runner = runner
-        self.clock = clock
-        self.run_id = uuid.uuid4()
-        admitted = AdmittedRun(
-            run_id=self.run_id,
-            app="songmaker",
-            principal=Principal("https://keycloak.test/realms/agent-test", "user-alice"),
-            request=RunRequest.model_validate(run_body()),
-            route=Cli("claude-main"),
-        )
-        self.frames = run_frames(admitted, runner, SONGMAKER, runs, clock)
-        self.events: list[tuple[float, RunEvent]] = []
-        self._decoder = RunStreamDecoder()
-        self._may_read = asyncio.Event()
-        self._may_read.set()
-        self.reader = asyncio.create_task(self._read()) if read else None
-
-    async def _read(self) -> None:
-        while True:
-            await self._may_read.wait()
-            try:
-                frame = await anext(self.frames)
-            except StopAsyncIteration:
-                return
-            self.took(frame)
-
-    def took(self, frame: bytes) -> None:
-        for item in self._decoder.feed(frame):
-            assert not isinstance(item, StreamViolation), item
-            self.events.append((self.clock.now, item))
-            self.runner.log.append(f"taken:{item.type}")
-
-    def stall(self) -> None:
-        self._may_read.clear()
-
-    def resume(self) -> None:
-        self._may_read.set()
-
-    @property
-    def types(self) -> list[str]:
-        return [event.type for _, event in self.events]
-
-    @property
-    def seqs(self) -> list[int]:
-        return [event.seq for _, event in self.events]
-
-    @property
-    def terminal(self) -> tuple[float, RunEvent]:
-        return self.events[-1]
-
-    async def run_to(self, instant: float) -> None:
-        while (deadline := await self.clock.parked()) is not None and deadline <= instant:
-            self.clock.advance_to(deadline)
-        self.clock.advance_to(instant)
-        await self.clock.parked()
-
-    async def run_to_end(self) -> list[float]:
-        """Step from deadline to deadline until the run is over; the deadlines it waited for."""
-        deadlines = []
-        while (deadline := await self.clock.parked()) is not None:
-            deadlines.append(deadline)
-            self.clock.advance_to(deadline)
-        return deadlines
-
-    async def speak_quietly_every(self, seconds: int, until: int) -> None:
-        for instant in range(seconds, until + 1, seconds):
-            await self.run_to(instant)
-            self.runner.release(QUIET)
-
-    async def finished(self) -> None:
-        assert self.reader is not None
-        await self.reader
-        self.assert_nothing_left()
-
-    def assert_nothing_left(self) -> None:
-        assert asyncio.all_tasks() == {asyncio.current_task()}
-        assert self.runner.closes == 1
-
-
-@asynccontextmanager
-async def driven(
-    runner: GatedRunner | None = None,
-    runs: RunConfig | None = None,
-    clock: StepClock | None = None,
-    *,
-    read: bool = True,
-) -> AsyncIterator[Drive]:
-    drive = Drive(runner or GatedRunner(), runs or RunConfig(), clock or StepClock(), read=read)
-    try:
-        yield drive
-    finally:
-        drive.runner.release_close()
-        if drive.reader is not None:
-            drive.reader.cancel()
-        await asyncio.gather(*([drive.reader] if drive.reader else []), return_exceptions=True)
-        await drive.frames.aclose()
 
 
 def _close_steps(runner: GatedRunner) -> list[str]:

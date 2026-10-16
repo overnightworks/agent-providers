@@ -26,6 +26,7 @@ from pydantic import (
 from webauth.https_client import is_https_url
 
 from agent_client.tools import ToolEffect
+from agent_client.wire import MAX_EVENT_BYTES
 
 NonEmptyText = Annotated[str, Field(min_length=1)]
 
@@ -74,7 +75,7 @@ class ServerConfig(_Section):
 
 
 class RunConfig(_Section):
-    """How a run's pace and length are limited (decision record 0001, H6).
+    """How a run's pace, length and volume are limited (decision record 0001, H6).
 
     Strict numbers: TOML ``true`` is not a heartbeat of 1 second and ``15.5``
     is not a heartbeat of 15. The heartbeat is announced on the wire, whose
@@ -84,6 +85,8 @@ class RunConfig(_Section):
     heartbeat_interval_s: StrictInt = Field(default=15, ge=1, le=300)
     idle_timeout_s: StrictFloat = Field(default=120.0, gt=0, allow_inf_nan=False)
     max_duration_s: StrictFloat = Field(default=600.0, gt=0, allow_inf_nan=False)
+    max_tool_calls: StrictInt = Field(default=30, ge=1)
+    max_bytes: StrictInt = Field(default=4 * MAX_EVENT_BYTES, ge=1)
 
     @model_validator(mode="after")
     def _heartbeat_before_idle_before_maximum(self) -> Self:

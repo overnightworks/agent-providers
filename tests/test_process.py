@@ -2891,13 +2891,6 @@ def _raise_a_group_whose_member_frame_holds_the_document(source_document: bytes)
     return source_document
 
 
-def _the_running_frame_of(function) -> types.FrameType:
-    frame = sys._getframe()
-    while frame.f_code is not function.__code__:
-        frame = frame.f_back
-    return frame
-
-
 def _fail_holding_the_callers_earlier_state() -> None:
     callers_earlier_state = "intact"
     raise ValueError(callers_earlier_state)

@@ -6,7 +6,9 @@ import asyncio
 import concurrent.futures
 import gc
 import json
+import logging
 import stat
+import sys
 import threading
 import time
 from pathlib import Path
@@ -16,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import anyio
 import pytest
 from provider_test_support import (
+    COWRITER_TOOL_CATALOG,
     MCP_TOOL_NAMES,
     SECRET_ENV_KEYS,
     assert_private_credential_child,
@@ -56,8 +59,11 @@ from agent_providers.constants import (
     CLAUDE_CLI_COMPLETION_TIMEOUT_SECONDS,
     JUDGE_FAILURE_TIMEOUT,
 )
+from agent_providers.errors import ProviderUnavailableError
 from agent_providers.events import AssistantTextEvent, FinalEvent, StreamEvent
+from agent_providers.grok import transport as grok_transport
 from agent_providers.process import CliRun, CliRunOutcome, CliRunReason
+from agent_providers.tool_loop import ToolOutcome, stream_tool_loop
 
 # The exact string a co-writer command line must carry, written out rather
 # than derived from the code under test.
@@ -936,30 +942,250 @@ def test_sync_claude_call_removes_its_credential_home_when_the_arguments_fail(
     assert set(tmp_path.iterdir()) == before
 
 
-def test_sync_claude_call_reports_the_original_error_when_its_credential_home_stays(
-    _no_tool_gate_open,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
+class _RefusedHomeRemoval:
+    """Refuse every removal below the CLI root until lifted, recording what it refused."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.refused: set[Path] = set()
+        self._root = current_config().cli_working_directory_root
+        self._remove_tree = process.shutil.rmtree
+        self._lifted = False
+        monkeypatch.setattr(process.shutil, "rmtree", self._rmtree)
+
+    def _rmtree(self, path) -> None:
+        home = Path(path)
+        if self._lifted or home.parent != self._root:
+            self._remove_tree(path)
+            return
+        self.refused.add(home)
+        raise PermissionError(13, "denied", str(home))
+
+    def lift(self) -> None:
+        self._lifted = True
+
+
+def _removal_failure_records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [
+        record
+        for record in caplog.records
+        if record.levelno == logging.ERROR and record.name == process.__name__
+    ]
+
+
+def _assert_logged_by_class_alone(
+    caplog: pytest.LogCaptureFixture, homes: set[Path],
 ) -> None:
-    def refuse_arguments(_model):
-        raise RuntimeError("no arguments")
+    records = _removal_failure_records(caplog)
+    assert records
+    for record in records:
+        message = record.getMessage()
+        assert "PermissionError" in message
+        assert record.exc_info is None
+        assert not any(str(home) in message for home in homes)
 
-    def refuse_removal(_path) -> None:
-        raise PermissionError(13, "denied", "secret-looking-name")
 
-    monkeypatch.setattr(provider, "_cli_arguments", refuse_arguments)
-    before = set(tmp_path.iterdir())
+def _sync_claude_call(fails: bool, monkeypatch: pytest.MonkeyPatch) -> object:
+    def run_capturing(child, **_kwargs):
+        if fails:
+            raise spawn.PipedProcessTimeout(list(child.command), 1)
+        return MagicMock(returncode=0, stdout='{"result":"ok"}', stderr="")
 
-    with monkeypatch.context() as removal_refused:
-        removal_refused.setattr(process.shutil, "rmtree", refuse_removal)
-        with pytest.raises(RuntimeError, match="no arguments") as held:
-            call_claude("hello")
+    monkeypatch.setattr(provider, "run_capturing", run_capturing)
+    return call_claude("hello").text
 
-    assert len(set(tmp_path.iterdir()) - before) == 1
-    held.value.__traceback__ = None
-    del held
+
+def _finished_async_process(stdout: bytes, *, returncode: int = 0) -> MagicMock:
+    proc = MagicMock(pid=2468, returncode=returncode)
+    proc.communicate = AsyncMock(return_value=(stdout, b""))
+    proc.wait = AsyncMock(return_value=returncode)
+    return proc
+
+
+def _cancelled_async_claude_call(fails: bool, monkeypatch: pytest.MonkeyPatch) -> object:
+    async def run() -> str:
+        communicating = asyncio.Event()
+        proc = _finished_async_process(b'{"result":"ok"}')
+        if fails:
+            async def communicate_until_cancelled(_stdin: bytes) -> tuple[bytes, bytes]:
+                communicating.set()
+                await asyncio.Event().wait()
+                raise AssertionError("the turn must be cancelled")
+
+            proc.communicate = communicate_until_cancelled
+
+        async def open_async_pipes(_child, **_kwargs):
+            return proc
+
+        monkeypatch.setattr(provider, "open_async_pipes", open_async_pipes)
+        turn = asyncio.create_task(acall_claude("hello"))
+        if fails:
+            await communicating.wait()
+            turn.cancel()
+        return (await turn).text
+
+    return asyncio.run(run())
+
+
+def _mcp_claude_call(fails: bool, monkeypatch: pytest.MonkeyPatch) -> object:
+    async def open_async_pipes(_child, **_kwargs):
+        return _finished_async_process(b'{"result":"ok"}', returncode=1 if fails else 0)
+
+    monkeypatch.setattr(provider, "open_async_pipes", open_async_pipes)
+    return asyncio.run(provider.acall_claude_with_mcp("hello", user_id="user-1")).text
+
+
+def _mcp_claude_stream(fails: bool, monkeypatch: pytest.MonkeyPatch) -> object:
+    async def open_async_pipes(_child, **_kwargs):
+        return _streaming_cli_process(
+            [b'{"type":"result","result":"ok"}\n'], returncode=1 if fails else 0,
+        )
+
+    monkeypatch.setattr(provider, "open_async_pipes", open_async_pipes)
+    stream = acall_claude_with_mcp_stream("hello", user_id="user-1")
+    return asyncio.run(_collect_stream_events(stream))[-1].text
+
+
+def _claude_surface_probe(fails: bool, monkeypatch: pytest.MonkeyPatch) -> object:
+    def run_cli_bounded(_child, **kwargs):
+        if fails:
+            kwargs["on_spawn_failed"]()
+            return CliRunOutcome(
+                started=False,
+                spawn_error="spawn refused",
+                returncode=None,
+                stdout="",
+                stderr="",
+                complete=False,
+                became_zombie=False,
+                reason=CliRunReason.SPAWN_FAILED,
+            )
+        kwargs["on_spawned"](2468)
+        kwargs["on_reaped"](2468, False)
+        return CliRunOutcome(
+            started=True,
+            spawn_error=None,
+            returncode=0,
+            stdout=json.dumps({
+                "type": "system", "subtype": "init", "tools": [], "slash_commands": [],
+            }) + "\n",
+            stderr="",
+            complete=True,
+            became_zombie=False,
+            reason=CliRunReason.COMPLETE,
+        )
+
+    monkeypatch.setattr(provider.process, "run_cli_bounded", run_cli_bounded)
+    return provider._probe_cli_surface_sync(
+        Path("/usr/bin/claude"), mcp=None, deadline=time.monotonic() + 5,
+    ).tools
+
+
+def _claude_catalog_probe(fails: bool, monkeypatch: pytest.MonkeyPatch) -> object:
+    if fails:
+        def broken_probe(*_args, **_kwargs):
+            raise RuntimeError("catalog probe broke")
+
+        monkeypatch.setattr(process, "run_catalog_cli", broken_probe)
+    run = process.run_claude_catalog_cli(Path(sys.executable), ("-c", "print('ok')"))
+    assert run is not None
+    return run.stdout.strip()
+
+
+def _grok_tool_turn(fails: bool, monkeypatch: pytest.MonkeyPatch) -> object:
+    def run_cli_bounded(_child, **kwargs):
+        channel = kwargs["stdout_line_channel"]
+        for event in (
+            {"type": "text", "data": "ok"},
+            {"type": "end", "stopReason": "stop", "sessionId": _GROK_SESSION_ID},
+        ):
+            assert channel._send(json.dumps(event).encode() + b"\n")
+        kwargs["on_reaped"](2468, False)
+        outcome = CliRunOutcome(
+            started=True,
+            spawn_error=None,
+            returncode=1 if fails else 0,
+            stdout="",
+            stderr="",
+            complete=True,
+            became_zombie=False,
+            reason=CliRunReason.COMPLETE,
+        )
+        channel._close(outcome)
+        return outcome
+
+    monkeypatch.setattr(grok_transport, "run_cli_bounded", run_cli_bounded)
+
+    async def turn() -> str:
+        events = [
+            event
+            async for event in stream_tool_loop(
+                provider="grok",
+                route="cli",
+                system="system",
+                messages=[{"role": "user", "content": "hello"}],
+                transport=grok_transport.GrokCliToolTransport(
+                    model="grok-test", catalog=COWRITER_TOOL_CATALOG,
+                ),
+                executor=lambda _name, _arguments: ToolOutcome("unused", False),
+                tool_failure_message="tool failed",
+            )
+        ]
+        return events[-1].text
+
+    return asyncio.run(turn())
+
+
+_GROK_SESSION_ID = "3e04bf5b-4e1c-4f26-8e1e-2f17c5f6d9cf"
+
+_HOME_ENTRYPOINTS = {
+    "claude-sync": (_sync_claude_call, UnavailableError, "ok"),
+    "claude-async-cancelled": (_cancelled_async_claude_call, asyncio.CancelledError, "ok"),
+    "claude-mcp": (_mcp_claude_call, UnavailableError, "ok"),
+    "claude-mcp-stream": (_mcp_claude_stream, UnavailableError, "ok"),
+    "claude-surface-probe": (_claude_surface_probe, UnavailableError, ()),
+    "claude-catalog-probe": (_claude_catalog_probe, RuntimeError, "ok"),
+    "grok-turn": (_grok_tool_turn, ProviderUnavailableError, "ok"),
+}
+
+
+@pytest.mark.parametrize("entrypoint", _HOME_ENTRYPOINTS)
+def test_a_refused_home_removal_never_replaces_a_failed_calls_error(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    entrypoint: str,
+) -> None:
+    run, failure, _result = _HOME_ENTRYPOINTS[entrypoint]
+    removal = _RefusedHomeRemoval(monkeypatch)
+    caplog.set_level(logging.ERROR, logger=process.__name__)
+
+    with pytest.raises(failure) as raised:
+        run(True, monkeypatch)
+
+    assert removal.refused
+    assert all(home.exists() for home in removal.refused)
+    _assert_logged_by_class_alone(caplog, removal.refused)
+    removal.lift()
+    raised.value.__traceback__ = None
+    del raised
     gc.collect()
-    assert set(tmp_path.iterdir()) == before
+    assert not any(home.exists() for home in removal.refused)
+
+
+@pytest.mark.parametrize("entrypoint", _HOME_ENTRYPOINTS)
+def test_a_refused_home_removal_returns_a_successful_calls_result(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    entrypoint: str,
+) -> None:
+    run, _failure, result = _HOME_ENTRYPOINTS[entrypoint]
+    removal = _RefusedHomeRemoval(monkeypatch)
+    caplog.set_level(logging.ERROR, logger=process.__name__)
+
+    assert run(False, monkeypatch) == result
+
+    assert removal.refused
+    assert all(home.exists() for home in removal.refused)
+    _assert_logged_by_class_alone(caplog, removal.refused)
 
 
 @pytest.mark.parametrize(

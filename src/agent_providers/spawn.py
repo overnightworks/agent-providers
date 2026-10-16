@@ -59,7 +59,7 @@ INHERITED_MACHINE_VARIABLES: Final[tuple[str, ...]] = (
 
 StderrPolicy = Literal["capture", "devnull"]
 
-PipedProcess = subprocess.Popen
+type PipedProcess = subprocess.Popen[bytes]
 PipedProcessTimeout = subprocess.TimeoutExpired
 
 

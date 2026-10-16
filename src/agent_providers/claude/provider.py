@@ -1514,7 +1514,7 @@ def _probe_cli_surface_sync(
     reservation = _reserve_zombie_admission()
     if reservation is None:
         home_reservation.release()
-        home.close_preserving_error()
+        home.close()
         raise _ClaudeCliProcessPoolSaturated(_claude_cli_process_pool_limit_message())
 
     released = False
@@ -1939,14 +1939,13 @@ def _call_cli(
         child = _claude_child_process(binary, _cli_arguments(model), home.path)
         home_reservation = home.reserve()
     except BaseException:
-        home.close_preserving_error()
+        home.close()
         raise
 
     reservation = _reserve_zombie_admission()
     if reservation is None:
-        if home_reservation is not None:
-            home_reservation.release()
-        home.close_preserving_error()
+        home_reservation.release()
+        home.close()
         raise _ClaudeCliProcessPoolSaturated(_claude_cli_process_pool_limit_message())
     try:
         try:

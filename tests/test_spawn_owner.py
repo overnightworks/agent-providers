@@ -4,9 +4,12 @@ The rule is an import-and-name policy, not an import contract and not a call
 analysis. An import contract cannot see it: ``Popen(argv, env=None)`` inherits
 the whole host environment without naming ``os.environ`` once. A call analysis
 would have to rebuild Python's scoping. The policy needs neither: outside
-:mod:`agent_providers.spawn` nothing imports ``subprocess``, ``pty`` or
-``multiprocessing`` in any form or scope, nothing imports a spawn name from
-``os`` or ``asyncio``, and nothing reads a spawn name as an attribute. So every
+:mod:`agent_providers.spawn` nothing imports a spawning module (``subprocess``,
+``pty``, ``multiprocessing``, ``posix``, ``_posixsubprocess``,
+``concurrent.futures.process``) in any form or scope, nothing re-imports one
+under its name from elsewhere, nothing star-imports from a module that exposes a
+spawn name, nothing imports a spawn name from ``os`` or ``asyncio``, and nothing
+reads a spawn name as an attribute. So every
 child is described by a :class:`ChildProcess` first, and that value refuses a
 relative binary, a missing working directory and an unset ``HOME``.
 
@@ -42,9 +45,24 @@ SOURCE_ROOTS = (
 )
 SPAWN_OWNER = Path(spawn.__file__)
 
-SPAWNING_MODULES = frozenset({"subprocess", "pty", "multiprocessing"})
+SPAWNING_MODULES = frozenset({
+    "subprocess",
+    "pty",
+    "multiprocessing",
+    "posix",
+    "_posixsubprocess",
+    "concurrent.futures.process",
+})
+SPAWNING_MODULE_NAMES = frozenset({
+    "subprocess", "pty", "multiprocessing", "posix", "_posixsubprocess",
+})
+STAR_IMPORT_GUARDED_MODULES = SPAWNING_MODULES | {"os", "asyncio", "concurrent.futures"}
+SPAWNING_NAMES = frozenset({"ProcessPoolExecutor"})
 SPAWNING_ASYNCIO_NAMES = frozenset({"create_subprocess_exec", "create_subprocess_shell"})
-SPAWNING_ATTRIBUTES = SPAWNING_ASYNCIO_NAMES | {"subprocess_exec", "subprocess_shell"}
+SPAWNING_ATTRIBUTES = SPAWNING_ASYNCIO_NAMES | SPAWNING_NAMES | {
+    "subprocess_exec",
+    "subprocess_shell",
+}
 SPAWNING_OS_PREFIXES = ("exec", "spawn", "posix_spawn")
 SPAWNING_OS_NAMES = frozenset({"fork", "forkpty", "system", "popen"})
 
@@ -53,11 +71,30 @@ def _is_spawning_os_name(name: str) -> bool:
     return name in SPAWNING_OS_NAMES or name.startswith(SPAWNING_OS_PREFIXES)
 
 
-def _module_level_os_names(tree: ast.Module) -> set[str]:
+def _is_within(module: str, packages: frozenset[str]) -> bool:
+    return any(module == package or module.startswith(f"{package}.") for package in packages)
+
+
+def _imports_a_spawn_route(node: ast.ImportFrom, name: str) -> bool:
+    if name in SPAWNING_MODULE_NAMES or name in SPAWNING_NAMES:
+        return True
+    if node.level or not node.module:
+        return False
+    module = node.module
+    if _is_within(module, SPAWNING_MODULES) or _is_within(f"{module}.{name}", SPAWNING_MODULES):
+        return True
+    if name == "*":
+        return _is_within(module, STAR_IMPORT_GUARDED_MODULES)
+    if module == "os":
+        return _is_spawning_os_name(name)
+    return module.split(".")[0] == "asyncio" and name in SPAWNING_ASYNCIO_NAMES
+
+
+def _os_names(tree: ast.Module) -> set[str]:
     return {
         alias.asname or alias.name
-        for node in tree.body
-        if isinstance(node, ast.Import)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import | ast.ImportFrom)
         for alias in node.names
         if alias.name == "os"
     } | {"os"}
@@ -65,22 +102,20 @@ def _module_level_os_names(tree: ast.Module) -> set[str]:
 
 def _spawn_policy_violations(tree: ast.Module) -> list[str]:
     """What in one module breaks the spawn policy, each as ``line: what``."""
-    os_names = _module_level_os_names(tree)
+    os_names = _os_names(tree)
     violations: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             violations += [
                 f"{node.lineno}: import {alias.name}"
                 for alias in node.names
-                if alias.name.split(".")[0] in SPAWNING_MODULES
+                if _is_within(alias.name, SPAWNING_MODULES)
             ]
-        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+        elif isinstance(node, ast.ImportFrom):
             violations += [
                 f"{node.lineno}: from {node.module} import {alias.name}"
                 for alias in node.names
-                if node.module.split(".")[0] in SPAWNING_MODULES
-                or (node.module == "os" and _is_spawning_os_name(alias.name))
-                or (node.module == "asyncio" and alias.name in SPAWNING_ASYNCIO_NAMES)
+                if _imports_a_spawn_route(node, alias.name)
             ]
         elif isinstance(node, ast.Attribute):
             if node.attr in SPAWNING_ATTRIBUTES:
@@ -149,6 +184,28 @@ def test_the_call_site_check_scans_the_client_and_the_service() -> None:
         "import os\nos.posix_spawn('x', [], {})",
         "import os as operating\noperating.system('x')",
         "def helper():\n    import os\n    os.fork()",
+        "from os import *\nsystem('x')",
+        "from asyncio import *",
+        "from subprocess import *",
+        "from posix import *",
+        "from multiprocessing import *",
+        "from concurrent.futures import *",
+        "from asyncio.subprocess import create_subprocess_exec",
+        "from asyncio.subprocess import create_subprocess_shell as shell",
+        "import concurrent.futures\nconcurrent.futures.ProcessPoolExecutor()",
+        "from concurrent.futures import ProcessPoolExecutor",
+        "import concurrent.futures.process",
+        "from concurrent.futures import process",
+        "from concurrent.futures.process import _ExecutorManagerThread",
+        "from agent_providers.spawn import subprocess",
+        "from asyncio import subprocess",
+        "from . import subprocess",
+        "import posix",
+        "from posix import fork",
+        "import _posixsubprocess",
+        "if True:\n    import os as operating\noperating.system('x')",
+        "try:\n    import os as operating\nexcept ImportError:\n    pass\noperating.fork()",
+        "from agent_providers import os as operating\noperating.execv('x', [])",
     ],
 )
 def test_the_spawn_policy_flags_every_way_to_reach_a_process_primitive(source: str) -> None:
@@ -166,10 +223,18 @@ def test_the_spawn_policy_flags_every_way_to_reach_a_process_primitive(source: s
         "import os\nos.getpid()\nos.environ",
         "from os import getpid",
         "from agent_providers.spawn import PipedProcess",
+        "from concurrent.futures import ThreadPoolExecutor",
+        "import concurrent.futures\nconcurrent.futures.Future()",
+        "import os.path\nos.path.join('a', 'b')",
     ],
 )
 def test_the_spawn_policy_accepts_code_that_starts_no_child(source: str) -> None:
     assert _spawn_policy_violations(ast.parse(source)) == []
+
+
+def test_the_spawn_owners_process_type_starts_nothing() -> None:
+    with pytest.raises(TypeError):
+        spawn.PipedProcess(["/bin/true"])
 
 
 OWNER_SPAWN_CALLS = frozenset({"Popen", "run", "create_subprocess_exec"})

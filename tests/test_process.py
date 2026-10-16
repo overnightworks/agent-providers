@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gc
 import json
+import logging
 import os
 import stat
 import subprocess
@@ -35,7 +36,6 @@ from agent_providers.process import (
     CliRunOutcome,
     CliRunReason,
     PrivateCredentialHome,
-    PrivateCredentialHomeRemovalError,
     _run_credentialed_catalog_cli,
     claude_cli_login,
     clear_agent_cli_caches,
@@ -1171,8 +1171,8 @@ def test_private_credential_home_removes_a_read_only_directory_a_child_left(
     assert not home.path.exists()
 
 
-def test_private_credential_home_surfaces_a_failed_removal_and_retries_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+def test_private_credential_home_logs_a_failed_removal_by_class_and_retries_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
 ) -> None:
     home = _credential_home(tmp_path)
     remove_tree = process.shutil.rmtree
@@ -1181,12 +1181,16 @@ def test_private_credential_home_surfaces_a_failed_removal_and_retries_it(
         raise PermissionError(13, "denied", "secret-looking-name")
 
     monkeypatch.setattr(process.shutil, "rmtree", refuse_removal)
+    caplog.set_level(logging.ERROR, logger=process.__name__)
 
-    with pytest.raises(PrivateCredentialHomeRemovalError) as raised:
-        home.close()
+    home.close()
 
-    assert "secret-looking-name" not in str(raised.value)
     assert home.path.exists()
+    [record] = caplog.records
+    assert record.levelno == logging.ERROR
+    assert "PermissionError" in record.getMessage()
+    assert "secret-looking-name" not in record.getMessage()
+    assert str(home.path) not in record.getMessage()
 
     monkeypatch.setattr(process.shutil, "rmtree", remove_tree)
     home.close()
@@ -1205,8 +1209,7 @@ def test_private_credential_home_stays_open_when_only_a_descendant_vanished(
 
     monkeypatch.setattr(process.shutil, "rmtree", descendant_vanishes)
 
-    with pytest.raises(PrivateCredentialHomeRemovalError):
-        home.close()
+    home.close()
 
     assert home.path.exists()
 
@@ -1226,6 +1229,69 @@ def test_private_credential_home_removes_a_failed_setup(tmp_path: Path) -> None:
         )
 
     assert not list(tmp_path.glob("private-home-*"))
+
+
+def test_private_credential_home_forgets_a_failed_setup_it_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created: list[Path] = []
+    make_directory = process.tempfile.mkdtemp
+
+    def record_directory(**kwargs) -> str:
+        created.append(Path(make_directory(**kwargs)))
+        return str(created[-1])
+
+    monkeypatch.setattr(process.tempfile, "mkdtemp", record_directory)
+    with pytest.raises(AgentCliUnavailableError) as raised:
+        PrivateCredentialHome(
+            tmp_path / "missing.json",
+            Path(".grok/auth.json"),
+            prefix="private-home-",
+            missing_credential_is_error=True,
+        )
+    reused_name = created[0]
+    reused_name.mkdir()
+    raised.value.__traceback__ = None
+    del raised
+    gc.collect()
+
+    assert reused_name.exists()
+
+
+def test_private_credential_home_reports_a_failed_copy_without_its_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.json"
+    source.write_text(_CATALOG_AUTH_PAYLOAD)
+    created: list[Path] = []
+    make_directory = process.tempfile.mkdtemp
+
+    def directory_with_a_blocking_file(**kwargs) -> str:
+        home = Path(make_directory(**kwargs))
+        (home / ".claude").write_text("not a directory")
+        created.append(home)
+        return str(home)
+
+    monkeypatch.setattr(process.tempfile, "mkdtemp", directory_with_a_blocking_file)
+
+    with pytest.raises(AgentCliUnavailableError) as raised:
+        PrivateCredentialHome(
+            source,
+            Path(".claude/.credentials.json"),
+            prefix="private-home-",
+            missing_credential_is_error=True,
+        )
+
+    assert str(created[0]) not in _exception_chain_text(raised.value)
+    assert not created[0].exists()
+
+
+def _exception_chain_text(error: BaseException | None) -> str:
+    texts: list[str] = []
+    while error is not None:
+        texts.append(f"{error!r} {error}")
+        error = error.__cause__ or (None if error.__suppress_context__ else error.__context__)
+    return " ".join(texts)
 
 
 def test_private_credential_home_treats_an_already_removed_home_as_closed(

@@ -60,10 +60,6 @@ class CliCredentialNotConfiguredError(AgentCliUnavailableError):
     """Raised when a turn cannot copy its configured credential source."""
 
 
-class PrivateCredentialHomeRemovalError(RuntimeError):
-    """Raised when a private credential home could not be removed; it stays owned for a retry."""
-
-
 class CliProbeBudgetExceeded(AgentCliUnavailableError):
     """Raised when one caller outwaits a still-running cached probe."""
 
@@ -545,7 +541,7 @@ def _start_bounded_cli(
     on_spawn_failed: Callable[[], None] | None,
     prompt_file_bytes: bytes | None,
     prompt_file_arg_index: int | None,
-) -> tuple[PipedProcess[bytes] | None, str | None, CliRunOutcome | None]:
+) -> tuple[PipedProcess | None, str | None, CliRunOutcome | None]:
     prompt_file_path: str | None = None
     try:
         prompted_child, prompt_file_path = _with_private_prompt_file(
@@ -574,7 +570,7 @@ def _spawn_failure_outcome(error: BaseException) -> CliRunOutcome:
 
 
 def _finished_bounded_cli_run(
-    process: PipedProcess[bytes],
+    process: PipedProcess,
     output: _CliOutput,
     on_reaped: Callable[[int, bool], None] | None,
 ) -> CliRunOutcome:
@@ -695,7 +691,7 @@ def _notify_reaped(
 
 
 def _exchange_bounded(
-    process: PipedProcess[bytes],
+    process: PipedProcess,
     stdin_payload: bytes | None,
     read: Literal["all", "first_line"],
     deadline: float,
@@ -731,7 +727,7 @@ def _exchange_bounded(
 
 def _register_exchange_streams(
     selector: selectors.BaseSelector,
-    process: PipedProcess[bytes],
+    process: PipedProcess,
     exchange: _CliExchange,
 ) -> None:
     stdin = process.stdin
@@ -745,7 +741,7 @@ def _register_exchange_streams(
 
 def _register_output_streams(
     selector: selectors.BaseSelector,
-    process: PipedProcess[bytes],
+    process: PipedProcess,
 ) -> None:
     for stream, name in ((process.stdout, "stdout"), (process.stderr, "stderr")):
         if stream is not None:
@@ -974,7 +970,7 @@ def _output_limit_reached(exchange: _CliExchange) -> _CliOutput:
     )
 
 
-def _close_stdin(process: PipedProcess[bytes]) -> None:
+def _close_stdin(process: PipedProcess) -> None:
     if process.stdin is not None:
         process.stdin.close()
 
@@ -1048,7 +1044,12 @@ def _claude_output(binary: Path) -> str | None:
 
 
 class PrivateCredentialHome:
-    """One disposable CLI home whose cleanup follows its child processes."""
+    """One disposable CLI home whose cleanup follows its child processes.
+
+    Removal never decides a call's outcome. A home that cannot be removed is
+    logged by error class alone and stays owned: its finalizer retries when the
+    home is collected or the process exits.
+    """
 
     def __init__(
         self,
@@ -1058,9 +1059,13 @@ class PrivateCredentialHome:
         prefix: str,
         missing_credential_is_error: bool,
     ) -> None:
-        self._home = Path(
-            tempfile.mkdtemp(prefix=prefix, dir=current_config().cli_working_directory_root),
-        )
+        try:
+            created = tempfile.mkdtemp(
+                prefix=prefix, dir=current_config().cli_working_directory_root,
+            )
+        except OSError:
+            raise AgentCliUnavailableError("could not create a private CLI home") from None
+        self._home = Path(created)
         self._reservations = 0
         self._cleanup_requested = False
         self._cleaned = False
@@ -1076,14 +1081,13 @@ class PrivateCredentialHome:
                 relative_destination,
                 missing_credential_is_error=missing_credential_is_error,
             )
+        except OSError:
+            self._discard_failed_setup()
+            raise AgentCliUnavailableError(
+                "could not prepare the private CLI credential copy",
+            ) from None
         except BaseException:
-            try:
-                _remove_private_tree(self._home)
-            except PrivateCredentialHomeRemovalError:
-                log.exception(
-                    "private credential home setup cleanup failed; "
-                    "removal is left to the finalizer",
-                )
+            self._discard_failed_setup()
             raise
 
     @property
@@ -1098,20 +1102,14 @@ class PrivateCredentialHome:
         return _PrivateCredentialHomeReservation(self)
 
     def close(self) -> None:
+        """Remove the home once no child holds it; never raises for a failed removal."""
         with self._lock:
             self._cleanup_requested = True
             self._remove_if_unused_locked()
 
-    def close_preserving_error(self) -> None:
-        """Close on a failure path without letting a removal failure hide the cause."""
-        try:
-            self.close()
-        except PrivateCredentialHomeRemovalError as error:
-            log.error(
-                "private credential home removal failed (%s); "
-                "removal is left to the finalizer",
-                type(error).__name__,
-            )
+    def _discard_failed_setup(self) -> None:
+        if _remove_private_tree(self._home):
+            self._finalizer.detach()
 
     def _release(self) -> None:
         with self._lock:
@@ -1121,8 +1119,12 @@ class PrivateCredentialHome:
             self._remove_if_unused_locked()
 
     def _remove_if_unused_locked(self) -> None:
-        if self._cleanup_requested and not self._reservations and not self._cleaned:
-            _remove_private_tree(self._home)
+        if (
+            self._cleanup_requested
+            and not self._reservations
+            and not self._cleaned
+            and _remove_private_tree(self._home)
+        ):
             self._cleaned = True
             self._finalizer.detach()
 
@@ -1138,13 +1140,7 @@ class _PrivateCredentialHomeReservation:
             if self._released:
                 return
             self._released = True
-        try:
-            self._home._release()
-        except PrivateCredentialHomeRemovalError:
-            log.exception(
-                "private credential home removal failed; "
-                "it is retried when the home is collected or the process exits",
-            )
+        self._home._release()
 
     def on_spawn_failed(self) -> None:
         self.release()
@@ -1154,15 +1150,12 @@ class _PrivateCredentialHomeReservation:
 
 
 def _remove_abandoned_tree(root: Path, creator_process_id: int) -> None:
-    if os.getpid() != creator_process_id:
-        return
-    try:
+    if os.getpid() == creator_process_id:
         _remove_private_tree(root)
-    except PrivateCredentialHomeRemovalError:
-        log.exception("abandoned private credential home could not be removed")
 
 
-def _remove_private_tree(root: Path) -> None:
+def _remove_private_tree(root: Path) -> bool:
+    """Remove one private home; a failure is logged by its class alone, never its path."""
     last_error: OSError = FileExistsError()
     for make_removable in (False, True):
         try:
@@ -1172,10 +1165,9 @@ def _remove_private_tree(root: Path) -> None:
         except OSError as error:
             last_error = error
         if not os.path.lexists(root):
-            return
-    raise PrivateCredentialHomeRemovalError(
-        f"private credential home removal failed ({type(last_error).__name__})",
-    ) from None
+            return True
+    log.error("private credential home removal failed (%s)", type(last_error).__name__)
+    return False
 
 
 def _make_tree_removable(root: Path) -> None:
@@ -1273,7 +1265,7 @@ def _decode(collected: bytearray) -> str:
     return collected.decode(errors="replace")
 
 
-def _reap_process_group(process: PipedProcess[bytes]) -> bool:
+def _reap_process_group(process: PipedProcess) -> bool:
     for stream in (process.stdin, process.stdout, process.stderr):
         if stream is not None:
             stream.close()
@@ -1288,7 +1280,7 @@ def _reap_process_group(process: PipedProcess[bytes]) -> bool:
 
 
 def _reap_in_background(
-    process: PipedProcess[bytes],
+    process: PipedProcess,
     on_reaped: Callable[[int, bool], None] | None,
 ) -> None:
     try:
@@ -1301,7 +1293,7 @@ def _reap_in_background(
         _notify_reaped(on_reaped, process.pid, became_zombie=True)
 
 
-def _wait_for_process_group_exit(process: PipedProcess[bytes], timeout: float) -> bool:
+def _wait_for_process_group_exit(process: PipedProcess, timeout: float) -> bool:
     """Wait until SIGKILL has made the whole group unaddressable.
 
     Waiting only for the direct child can return while one of its children
@@ -1336,7 +1328,7 @@ def _process_group_exists(process_id: int) -> bool:
     return True
 
 
-def _bounded_wait(process: PipedProcess[bytes], timeout: float) -> bool:
+def _bounded_wait(process: PipedProcess, timeout: float) -> bool:
     try:
         process.wait(timeout=timeout)
         return True

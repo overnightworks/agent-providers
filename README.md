@@ -117,9 +117,13 @@ The host names each provider credential *file*. Catalog probes copy the needed
 file into a private home for their bounded run. Every Claude or Grok turn uses
 a fresh private home below
 `cli_working_directory_root`: directories are mode 0700 and credential copies
-are mode 0400. The source is opened only for reading. The home remains until
-the turn child has been reaped, including a delayed spawn or background reap,
-then is removed. A direct overwrite of the copy fails, while a CLI can create and
+are mode 0400. The source is opened only for reading. A turn's home remains
+until its direct child has exited, including a delayed spawn or background
+reap; a grandchild that outlives that child is not waited for, and the
+synchronous call's timeout kills only the direct child. A catalog home lasts for
+its bounded probe. Removal never changes a call's outcome: a home that cannot be
+removed is logged by error class alone, without its path, and removal is retried
+when the home is collected or the process exits. A direct overwrite of the copy fails, while a CLI can create and
 rename a replacement in its disposable directory; that renewal vanishes at
 cleanup. This is not evidence that a CLI refreshes credentials in practice.
 

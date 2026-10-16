@@ -6,6 +6,7 @@ import asyncio
 import json
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -20,7 +21,7 @@ from agent_providers.config import current_config, current_turn_config
 from agent_providers.errors import ProviderUnavailableError, SafeRouteReasonCode
 from agent_providers.events import AssistantTextEvent, FinalEvent, ToolCallEvent
 from agent_providers.grok import transport as grok_cli_adapter
-from agent_providers.process import CliRunOutcome, CliRunReason, PrivateCredentialHome
+from agent_providers.process import CliRunOutcome, CliRunReason
 from agent_providers.tool_loop import (
     InitialTurn,
     ToolCallBatch,
@@ -52,33 +53,45 @@ def test_grok_turn_without_a_configured_credential_is_logged_out(tmp_path: Path)
     assert raised.value.reason.code is SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED
 
 
-def test_grok_credential_home_is_removed_when_aclose_is_cancelled_and_retried(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+class _OneWorkerExecutor(ThreadPoolExecutor):
+    """The loop's only worker, reporting when the job queued behind the busy one arrives."""
+
+    def __init__(self) -> None:
+        super().__init__(max_workers=1)
+        self.second_job_queued = asyncio.Event()
+        self._submitted = 0
+
+    def submit(self, fn, /, *args, **kwargs):
+        future = super().submit(fn, *args, **kwargs)
+        self._submitted += 1
+        if self._submitted == 2:
+            self.second_job_queued.set()
+        return future
+
+
+def test_grok_credential_home_is_removed_when_aclose_is_cancelled_while_queued() -> None:
     root = current_config().cli_working_directory_root
     before = set(root.iterdir())
     transport = _transport()
     homes = set(root.iterdir()) - before
     assert homes
-    cleanup_may_finish = threading.Event()
-    close_home = PrivateCredentialHome.close
+    worker_may_continue = threading.Event()
 
-    def close_once_allowed(home: PrivateCredentialHome) -> None:
-        cleanup_may_finish.wait()
-        close_home(home)
-
-    monkeypatch.setattr(PrivateCredentialHome, "close", close_once_allowed)
-
-    async def cancel_then_retry() -> None:
+    async def cancel_while_the_close_is_queued() -> None:
+        executor = _OneWorkerExecutor()
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(executor)
+        busy_worker = loop.run_in_executor(None, worker_may_continue.wait)
         closing = asyncio.create_task(transport.aclose())
-        await asyncio.sleep(0)
+        await executor.second_job_queued.wait()
         closing.cancel()
         with pytest.raises(asyncio.CancelledError):
             await closing
-        cleanup_may_finish.set()
+        worker_may_continue.set()
+        await busy_worker
         await transport.aclose()
 
-    asyncio.run(cancel_then_retry())
+    asyncio.run(cancel_while_the_close_is_queued())
 
     assert not any(home.exists() for home in homes)
 

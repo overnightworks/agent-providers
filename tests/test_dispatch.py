@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import importlib
 import inspect
+import re
+from pathlib import Path
 
+import pytest
 from provider_test_support import drive_cowriter_turn
 
 from agent_providers import dispatch
@@ -36,3 +40,26 @@ def test_image_capability_says_a_grok_cli_route_carries_no_image_tool():
     assert isinstance(capability, ImageCapability)
     assert capability.carries_image_tool is False
     assert capability.failure.code is SafeRouteReasonCode.NO_IMAGE_TOOL
+
+
+README = Path(__file__).resolve().parents[1] / "README.md"
+DOTTED_NAME = re.compile(r"`((?:[a-z_]+\.)+[A-Za-z_]+)`")
+
+
+def renamed_public_names() -> list[str]:
+    names_section = README.read_text().split("### Names and values", 1)[1].split("\n## ", 1)[0]
+    rows = [line.split("|")[1:3] for line in names_section.splitlines() if line.startswith("| `")]
+    return sorted({
+        old
+        for before, now in rows
+        for old in DOTTED_NAME.findall(before)
+        if old not in DOTTED_NAME.findall(now)
+    })
+
+
+@pytest.mark.parametrize("old_name", renamed_public_names())
+def test_a_renamed_public_name_is_gone_without_an_alias(old_name: str):
+    module_path, _, attribute = old_name.rpartition(".")
+    module = importlib.import_module(f"agent_providers.{module_path}")
+
+    assert not hasattr(module, attribute)

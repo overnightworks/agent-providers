@@ -347,7 +347,7 @@ def _refuse_a_multi_result_batch(message: InitialTurn | ToolResultBatch) -> None
             "codex",
             "cli",
             normalize_route_failure(SafeRouteReasonCode.TOOL_PROTOCOL_ERROR),
-        ) from None
+        )
 
 
 def _tool_transport_prompt(

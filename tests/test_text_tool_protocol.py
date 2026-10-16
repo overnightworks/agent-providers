@@ -674,7 +674,7 @@ def test_the_rules_a_refusal_can_name_are_exactly_these_seven():
 def test_an_offset_counts_from_the_block_start_past_the_opening_line_and_whitespace(
     parse, newline, whitespace_before_the_value, filler_length,
 ):
-    value = f'["{"x" * filler_length}",@'
+    value = f'["{"x" * filler_length}",]'
     row = _Refusal(
         OPEN + newline + whitespace_before_the_value + value,
         TextToolRejectionRule.CALL_NOT_JSON,
@@ -767,6 +767,19 @@ def test_the_excerpt_is_the_exact_code_point_slice_even_through_a_character(unit
     assert excerpt == block[window_start:window_end]
     assert excerpt[0] == (unit[-1] if edge == "window-start" else "a")
     assert excerpt[-1] == (unit[0] if edge == "window-end" else "b")
+
+
+def test_the_excerpt_keeps_a_decomposed_character_inside_the_window_without_normalization():
+    decomposed_e_acute = "e\u0301"
+    text = _broken_block("a" * 1000, "b" * 1000)
+    offset = text.index("@")
+    text = text[: offset - 100] + decomposed_e_acute + text[offset - 100 + 2 :]
+
+    rejection, block = _window_of(text)
+    excerpt = rejection.excerpt.get_secret_value()
+
+    assert excerpt == block[offset - 512 : offset + 512]
+    assert decomposed_e_acute in excerpt
 
 
 @pytest.mark.parametrize(

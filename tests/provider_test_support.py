@@ -413,7 +413,6 @@ A_CANARY: Final = "canary-lyrics-3f9c71"
 A_CALLER_CANARY: Final = "caller-canary-8b21e5"
 PROSE_BEFORE_THE_CALL: Final = "Looking that up.\n"
 DEEPLY_NESTED_JSON: Final = "[" * 100_000
-NESTED_READERS: Final = ("event line", "tool result")
 CALLER_CONTEXTS: Final = pytest.mark.parametrize(
     "while_the_caller_handles_an_exception",
     [

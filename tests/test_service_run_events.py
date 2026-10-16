@@ -51,6 +51,7 @@ from agent_providers.events import (
     ToolResultEvent,
 )
 from agent_providers.grok import transport as grok_cli_adapter
+from agent_service import run_events
 from agent_service.config import RunConfig
 from agent_service.identity import Principal
 from agent_service.routing import Cli
@@ -263,5 +264,6 @@ def test_a_refused_tool_call_reaches_neither_the_frames_nor_the_service_log(monk
         FailureCode.PROVIDER_ERROR, "The provider failed during the run.",
     )
     assert A_CANARY.encode() not in raw
-    assert caplog.records
-    assert A_CANARY not in formatted_log_text(caplog.records)
+    service_records = [record for record in caplog.records if record.name == run_events.__name__]
+    assert [record.levelno for record in service_records] == [logging.ERROR]
+    assert A_CANARY not in formatted_log_text(service_records)

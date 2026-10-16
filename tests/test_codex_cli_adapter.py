@@ -19,7 +19,6 @@ from provider_test_support import (
     CALLER_CONTEXTS,
     COWRITER_TOOL_CATALOG,
     DEEPLY_NESTED_JSON,
-    NESTED_READERS,
     CallerCanaryError,
     a_call_nested_too_deeply_to_decode,
     a_call_to_an_undeclared_tool_carrying,
@@ -1007,36 +1006,43 @@ async def _drain_first_round(transport) -> None:
         pass
 
 
-@pytest.mark.parametrize("reader", NESTED_READERS)
-def test_a_codex_reader_takes_deep_nesting_as_the_input_it_cannot_decode(
-    monkeypatch, reader,
+def test_a_codex_event_line_nested_too_deeply_is_refused_as_a_cli_protocol_error(
+    monkeypatch,
 ) -> None:
     calls: list = []
-    lines = (
-        [DEEPLY_NESTED_JSON.encode() + b"\n"]
-        if reader == "event line"
-        else _tool_round_lines('<songmaker_tool_call>\n{"name":"list_songs","arguments":{}}\n'
-                               "</songmaker_tool_call>")
-    )
+    lines = [DEEPLY_NESTED_JSON.encode() + b"\n"]
     monkeypatch.setattr(codex_protocol, "run_cli_bounded", _runner(lines, _outcome(), calls))
     transport = _transport()
 
     async def collect() -> None:
-        if reader == "event line":
-            with pytest.raises(ProviderUnavailableError) as raised:
-                await _drain_first_round(transport)
-            assert raised.value.reason.code is SafeRouteReasonCode.CLI_PROTOCOL_ERROR
-        else:
+        with pytest.raises(ProviderUnavailableError) as raised:
             await _drain_first_round(transport)
-            nested_result = ToolResultBatch((ToolResult("one", DEEPLY_NESTED_JSON, False),))
-            assert [item async for item in transport.stream(nested_result)]
+        assert raised.value.reason.code is SafeRouteReasonCode.CLI_PROTOCOL_ERROR
         await transport.aclose()
 
     asyncio.run(collect())
-    if reader == "event line":
-        assert len(calls) == 1
-    else:
-        assert DEEPLY_NESTED_JSON.encode() in calls[1][1]["stdin_payload"]
+
+    assert len(calls) == 1
+
+
+def test_a_codex_tool_result_nested_too_deeply_is_passed_on_in_the_next_prompt(
+    monkeypatch,
+) -> None:
+    calls: list = []
+    lines = _tool_round_lines('<songmaker_tool_call>\n{"name":"list_songs","arguments":{}}\n'
+                              "</songmaker_tool_call>")
+    monkeypatch.setattr(codex_protocol, "run_cli_bounded", _runner(lines, _outcome(), calls))
+    transport = _transport()
+
+    async def collect() -> None:
+        await _drain_first_round(transport)
+        nested_result = ToolResultBatch((ToolResult("one", DEEPLY_NESTED_JSON, False),))
+        assert [item async for item in transport.stream(nested_result)]
+        await transport.aclose()
+
+    asyncio.run(collect())
+
+    assert DEEPLY_NESTED_JSON.encode() in calls[1][1]["stdin_payload"]
 
 
 _UNDECODABLE_EVENT_LINES = pytest.mark.parametrize(

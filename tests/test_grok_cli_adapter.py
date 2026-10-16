@@ -16,7 +16,6 @@ from provider_test_support import (
     COWRITER_TOOL_CATALOG,
     DEEPLY_NESTED_JSON,
     GROK_SESSION_ID,
-    NESTED_READERS,
     a_call_nested_too_deeply_to_decode,
     a_call_to_an_undeclared_tool_carrying,
     assert_a_multi_result_batch_is_rejected,
@@ -552,35 +551,48 @@ def test_a_grok_call_nested_too_deeply_is_refused_not_a_failed_route(
     assert "RecursionError" not in formatted_log_text(caplog.records)
 
 
-@pytest.mark.parametrize("reader", NESTED_READERS)
-def test_a_grok_reader_takes_deep_nesting_as_the_input_it_cannot_decode(
-    monkeypatch, caplog, reader,
+def test_a_grok_event_line_nested_too_deeply_is_refused_as_a_cli_protocol_error(
+    monkeypatch, caplog,
 ) -> None:
     calls = []
     nested_line = DEEPLY_NESTED_JSON.encode() + b"\n"
-    lines = [nested_line] if reader == "event line" else grok_tool_round_lines(_tool_call_text())
     monkeypatch.setattr(
-        grok_cli_adapter, "run_cli_bounded", grok_cli_runner(lines, grok_cli_outcome(), calls),
+        grok_cli_adapter, "run_cli_bounded",
+        grok_cli_runner([nested_line], grok_cli_outcome(), calls),
     )
     caplog.set_level("WARNING", logger="agent_providers.grok.transport")
     transport = _transport()
 
     async def collect() -> None:
-        if reader == "event line":
-            with pytest.raises(ProviderUnavailableError) as raised:
-                await _collect_transport_responses(transport)
-            assert raised.value.reason.code is SafeRouteReasonCode.CLI_PROTOCOL_ERROR
-        else:
+        with pytest.raises(ProviderUnavailableError) as raised:
             await _collect_transport_responses(transport)
-            nested_result = ToolResultBatch((ToolResult("one", DEEPLY_NESTED_JSON, False),))
-            assert [item async for item in transport.stream(nested_result)]
+        assert raised.value.reason.code is SafeRouteReasonCode.CLI_PROTOCOL_ERROR
         await transport.aclose()
 
     asyncio.run(collect())
-    if reader == "event line":
-        assert "cli_stream_response_invalid" in caplog.text
-    else:
-        assert DEEPLY_NESTED_JSON.encode() in calls[1][1]["prompt_file_bytes"]
+
+    assert "cli_stream_response_invalid" in caplog.text
+
+
+def test_a_grok_tool_result_nested_too_deeply_is_passed_on_in_the_next_prompt(
+    monkeypatch,
+) -> None:
+    calls = []
+    monkeypatch.setattr(
+        grok_cli_adapter, "run_cli_bounded",
+        grok_cli_runner(grok_tool_round_lines(_tool_call_text()), grok_cli_outcome(), calls),
+    )
+    transport = _transport()
+
+    async def collect() -> None:
+        await _collect_transport_responses(transport)
+        nested_result = ToolResultBatch((ToolResult("one", DEEPLY_NESTED_JSON, False),))
+        assert [item async for item in transport.stream(nested_result)]
+        await transport.aclose()
+
+    asyncio.run(collect())
+
+    assert DEEPLY_NESTED_JSON.encode() in calls[1][1]["prompt_file_bytes"]
 
 
 def test_grok_tool_transport_rejects_unknown_events_without_logging_the_protocol(

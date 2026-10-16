@@ -198,6 +198,7 @@ def test_claims_that_break_the_format_are_refused(claims):
         " User-Alice ",
         "Stra\u00dfe",
         "e\u0301",
+        "caf\u00e9",
         "\ufb01",
     ],
     ids=[
@@ -208,6 +209,7 @@ def test_claims_that_break_the_format_are_refused(claims):
         "padded-and-capitalised",
         "sharp-s",
         "decomposed-e",
+        "precomposed-e",
         "fi-ligature",
     ],
 )

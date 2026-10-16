@@ -267,7 +267,7 @@ def test_an_unexpected_member_with_a_newline_in_its_name_is_refused_on_one_line(
     assert _refused_on_one_line(_written(tmp_path, config_text), capsys) == refusal
 
 
-def _unreadable_file_beside(tmp_path: Path) -> Path:
+def _config_path_with_a_newline(tmp_path: Path) -> Path:
     return tmp_path / "agent\nservice.toml"
 
 
@@ -302,7 +302,7 @@ def _file_written_as(contents: bytes):
 def test_a_config_path_with_a_newline_is_shown_escaped_on_one_line_in_every_refusal(
     tmp_path, capsys, write, refusal
 ):
-    config_file = _unreadable_file_beside(tmp_path)
+    config_file = _config_path_with_a_newline(tmp_path)
     write(config_file)
 
     assert main(["--config", str(config_file)]) == EXIT_BAD_CONFIG

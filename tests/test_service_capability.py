@@ -160,6 +160,7 @@ def test_a_signed_capability_has_exactly_the_capability_header(tmp_path):
         " User-Alice ",
         "Stra\u00dfe",
         "e\u0301",
+        "caf\u00e9",
         "\ufb01",
     ],
     ids=[
@@ -171,6 +172,7 @@ def test_a_signed_capability_has_exactly_the_capability_header(tmp_path):
         "padded-and-capitalised",
         "sharp-s",
         "decomposed-e",
+        "precomposed-e",
         "fi-ligature",
     ],
 )

@@ -42,6 +42,7 @@ from test_keycloak_token_shapes import (
     _access_token,
     _fetch_key_set_from_test_keycloak,
     _realm_url,
+    verify,  # noqa: F401 - a fixture, requested by name
 )
 from webauth.jwt_verification import KEY_SET_REFRESH_COOLDOWN_SECONDS, KeySetFetchError
 from wire_builders import started
@@ -156,8 +157,8 @@ def test_another_apps_workload_cannot_act_for_a_user_of_this_app(service):
     assert_rejected(response, RejectionCode.FORBIDDEN, 403)
 
 
-def test_only_the_user_who_started_a_run_reads_it_with_real_tokens(verified_claims_of):
-    alice_claims = verified_claims_of(_user_token("alice"))
+def test_only_the_user_who_started_a_run_reads_it_with_real_tokens(verify):  # noqa: F811 - the imported fixture
+    alice_claims = verify(_user_token("alice"))
     run_id = uuid4()
     records = RunRecords()
     records.begin(

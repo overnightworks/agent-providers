@@ -506,3 +506,19 @@ async def test_a_side_effecting_call_followed_by_silence_still_ends_idle_timeout
 
     assert drive.types[1] == "tool_call"
     assert _failed_at(drive, 120, FailureCode.IDLE_TIMEOUT).message == IDLE_TIMEOUT_MESSAGE
+
+
+async def _spin() -> None:
+    while True:
+        await asyncio.sleep(0)
+
+
+@in_loop
+async def test_a_supervisor_that_never_settles_fails_the_stepped_clock_instead_of_hanging():
+    spinner = asyncio.create_task(_spin())
+    try:
+        with pytest.raises(AssertionError, match="the run never settled"):
+            await StepClock().parked()
+    finally:
+        spinner.cancel()
+        await asyncio.gather(spinner, return_exceptions=True)

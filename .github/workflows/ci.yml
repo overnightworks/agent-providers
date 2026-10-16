@@ -13,6 +13,7 @@ jobs:
   checks:
     name: checks
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
@@ -103,6 +104,7 @@ jobs:
   keycloak-token-shapes:
     name: keycloak-token-shapes
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       KEYCLOAK_IMAGE: quay.io/keycloak/keycloak:26.8.1@sha256:79c623a22abacf3fe6c00a5fb30f5b7843d717b234033b80995891c06116d244
       KEYCLOAK_URL: http://localhost:8080

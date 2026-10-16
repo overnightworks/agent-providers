@@ -91,12 +91,16 @@ def run_body(**overrides: object) -> dict[str, Any]:
     }
 
 
+MOST_BUSY_TURNS_BEFORE_THE_RUN_NEVER_SETTLES: Final = 100_000
+
+
 class _IdleSelector(selectors.DefaultSelector):
     """A selector that tells when the loop has nothing left to run and is about to block."""
 
     def __init__(self) -> None:
         super().__init__()
         self._idle_watchers: list[asyncio.Future[None]] = []
+        self._busy_turns = 0
 
     def idle(self) -> asyncio.Future[None]:
         watcher = asyncio.get_running_loop().create_future()
@@ -104,13 +108,27 @@ class _IdleSelector(selectors.DefaultSelector):
         return watcher
 
     def select(self, timeout: float | None = None) -> list[tuple[selectors.SelectorKey, int]]:
-        if timeout == 0 or not self._idle_watchers:  # a ready callback keeps the loop busy
+        if not self._idle_watchers:
             return super().select(timeout)
-        watchers, self._idle_watchers = self._idle_watchers, []
-        for watcher in watchers:
-            if not watcher.done():
-                watcher.set_result(None)
+        if timeout == 0:  # a ready callback keeps the loop busy
+            self._busy_turns += 1
+            if self._busy_turns <= MOST_BUSY_TURNS_BEFORE_THE_RUN_NEVER_SETTLES:
+                return super().select(timeout)
+            self._release_watchers(AssertionError("the run never settled"))
+        else:
+            self._release_watchers(None)
         return super().select(0)  # the watchers' owners are ready now, so do not block
+
+    def _release_watchers(self, failure: AssertionError | None) -> None:
+        watchers, self._idle_watchers = self._idle_watchers, []
+        self._busy_turns = 0
+        for watcher in watchers:
+            if watcher.done():
+                continue
+            if failure is None:
+                watcher.set_result(None)
+            else:
+                watcher.set_exception(failure)
 
 
 class SteppedLoop(asyncio.SelectorEventLoop):

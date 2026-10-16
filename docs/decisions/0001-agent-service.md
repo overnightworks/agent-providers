@@ -347,7 +347,6 @@ compromise.
 7. **Interim.** Until A1a4-2b lands, the service mints no capability for a run;
    `[signing]` is optional.
 
-
 **A1a4-2a rulings (operator and head, 16.10.2026).**
 
 - **O3 MCP origins: https only, one per app.** `[apps.<app>] mcp_origin` accepts only
@@ -378,7 +377,7 @@ compromise.
   by their keys.
 - **D10 registry.** `mcp_origin` is optional and must be in its serialized form: a
   lower-case DNS host, a non-default port only, no path. A host whose last label is
-  all decimal digits or `0x` followed by hexadecimal digits, and a bracketed IPv6
+  all decimal digits or `0x` followed by zero or more hexadecimal digits, and a bracketed IPv6
   address, are refused.
 - **D13 expiry.** `iat = floor(now)` and `exp = floor(now + max_duration_s)` from one
   reading of the wall clock at admission. `exp - iat` can exceed `max_duration_s` by
@@ -402,7 +401,8 @@ compromise.
 
 8. **The registry names each app's MCP origin.** The value is decided by `McpOrigin`:
    `https://`, a lower-case DNS host (labels of 1 to 63 letters, digits and hyphens,
-   253 in all, no trailing dot), a port only when it is not 443, in decimal digits
+   none starting or ending with a hyphen, 253 in all, no trailing dot), a port only
+   when it is not 443, in decimal digits
    from 1 to 65535 without leading zeros, and nothing else. Origins are unique, and an
    origin needs `[signing]`. A refusal names `apps.<app>.mcp_origin` and gives the
    canonical form where one exists and would itself load.

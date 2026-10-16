@@ -28,6 +28,7 @@ MAX_CAPABILITY_CHARACTERS: Final = 8192
 _HTTPS_SCHEME: Final = "https://"
 _DEFAULT_HTTPS_PORT: Final = 443
 _HIGHEST_PORT: Final = 65535
+_LONGEST_PORT: Final = len(str(_HIGHEST_PORT))
 _LONGEST_HOST: Final = 253
 _LONGEST_LABEL: Final = 63
 _STRICT_ORIGIN: Final = re.compile(r"https://(?P<host>[a-z0-9.-]+)(?::(?P<port>\d+))?", re.ASCII)
@@ -66,7 +67,12 @@ def _is_dns_name(host: str) -> bool:
 
 
 def _is_written_non_default_port(port: str) -> bool:
-    return port[0] != "0" and int(port) <= _HIGHEST_PORT and int(port) != _DEFAULT_HTTPS_PORT
+    return (
+        len(port) <= _LONGEST_PORT
+        and port[0] != "0"
+        and int(port) <= _HIGHEST_PORT
+        and int(port) != _DEFAULT_HTTPS_PORT
+    )
 
 
 def _canonical_form_that_loads(text: str) -> str | None:
@@ -89,7 +95,7 @@ def _origin_in_serialized_form(text: str) -> str:
         return text
     if (canonical := _canonical_form_that_loads(text)) is not None:
         raise ValueError(f"must be written in its canonical form {canonical}")
-    if not text.startswith(_HTTPS_SCHEME):
+    if not text.lower().startswith(_HTTPS_SCHEME):
         raise ValueError("must be an https origin: https://<host> or https://<host>:<port>")
     raise ValueError(refusal)
 

@@ -78,8 +78,10 @@ def capability_claims(
 
 def signed_capability(scope: CapabilityScope, claims: CapabilityClaims) -> Capability:
     token = scope.key.sign(claims.model_dump(mode="json"), CAPABILITY_TOKEN_TYPE)
-    if len(token) > MAX_CAPABILITY_CHARACTERS:
-        raise CapabilityTooLarge(len(token))
+    length = len(token)
+    if length > MAX_CAPABILITY_CHARACTERS:
+        del token  # the refusal's traceback keeps this frame alive
+        raise CapabilityTooLarge(length)
     return Capability(claims, token)
 
 

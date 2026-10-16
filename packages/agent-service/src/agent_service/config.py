@@ -192,7 +192,7 @@ class ServiceConfig(_Section):
             if owner != name:
                 raise ValueError(
                     f"profiles.{shown_text(name)}.provider: {profile.provider} already has"
-                    f" profile {shown_text(owner)!r}"
+                    f" profile {owner!r}"
                 )
         return self
 
@@ -202,8 +202,7 @@ class ServiceConfig(_Section):
             for purpose in app.purposes:
                 if purpose not in self.purposes:
                     raise ValueError(
-                        f"apps.{shown_text(app_name)}.purposes:"
-                        f" unknown purpose {shown_text(purpose)!r}"
+                        f"apps.{shown_text(app_name)}.purposes: unknown purpose {purpose!r}"
                     )
         return self
 
@@ -215,8 +214,8 @@ class ServiceConfig(_Section):
             if owner != app_name:
                 raise ValueError(
                     f"apps.{shown_text(app_name)}.workload_client:"
-                    f" {shown_text(app.workload_client)!r} is already"
-                    f" the workload client of app {shown_text(owner)!r}"
+                    f" {app.workload_client!r} is already"
+                    f" the workload client of app {owner!r}"
                 )
         return self
 
@@ -242,7 +241,7 @@ class ServiceConfig(_Section):
             if owner != app_name:
                 raise ValueError(
                     f"apps.{shown_text(app_name)}.mcp_origin: {app.mcp_origin} is already"
-                    f" the MCP origin of app {shown_text(owner)!r}"
+                    f" the MCP origin of app {owner!r}"
                 )
         return self
 
@@ -264,7 +263,7 @@ class ServiceConfig(_Section):
                 except CapabilityTooLarge as too_large:
                     raise ValueError(
                         f"apps.{shown_text(app_name)}.tools: the capability for purpose"
-                        f" {shown_text(purpose)!r} would be {too_large.length} characters;"
+                        f" {purpose!r} would be {too_large.length} characters;"
                         f" the limit is {MAX_CAPABILITY_CHARACTERS}"
                     ) from None
         return self

@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import base64
-import gc
 import json
 import logging
-import types
 import uuid
 from pathlib import Path
 
@@ -14,11 +12,15 @@ import pytest
 from jwt.algorithms import RSAAlgorithm
 from service_support import (
     COWRITER,
+    LAST_TOOL_NAME_LENGTH_AT_THE_LIMIT,
     SONGMAKER_ORIGIN,
     TEST_ISSUER,
     capable_service_config,
-    generated_rsa_key,
+    everything_a_refusal_holds,
     pem_of,
+    reaches_text,
+    record_signed_tokens,
+    tool_names_with_the_last_of_length,
 )
 from webauth.jwt_verification import (
     MAX_TOKEN_CHARACTERS,
@@ -48,8 +50,6 @@ from agent_service.signing import SigningKey
 
 RUN_ID = uuid.UUID("8c2f6c1e-3b5a-4d8e-9f10-2a7b4c6d8e01")
 NOW_IN_2026 = 1_792_152_000.0
-SHORT_TOOL_NAME_LENGTH = 35
-SHORTEST_NAME_OF_THE_LAST_TOOL_AT_THE_LIMIT = 55
 
 
 def _scope(tmp_path: Path, **songmaker: object) -> CapabilityScope:
@@ -151,8 +151,28 @@ def test_a_signed_capability_has_exactly_the_capability_header(tmp_path):
 
 @pytest.mark.parametrize(
     "subject",
-    ["user-alice", "user\x00alice", "user-\U0001f3b5", "u" * 600, '"' * 255],
-    ids=["ascii", "nul", "astral", "600-characters", "255-quotation-marks"],
+    [
+        "user-alice",
+        "user\x00alice",
+        "user-\U0001f3b5",
+        "u" * 600,
+        '"' * 255,
+        " User-Alice ",
+        "Stra\u00dfe",
+        "e\u0301",
+        "\ufb01",
+    ],
+    ids=[
+        "ascii",
+        "nul",
+        "astral",
+        "600-characters",
+        "255-quotation-marks",
+        "padded-and-capitalised",
+        "sharp-s",
+        "decomposed-e",
+        "fi-ligature",
+    ],
 )
 def test_a_verifier_accepts_a_capability_until_it_expires_with_the_subject_unchanged(
     tmp_path, subject
@@ -223,9 +243,8 @@ def test_the_capability_limit_is_the_limit_webauths_verifier_enforces():
 def _scope_with_the_last_tool_named_to(
     scope: CapabilityScope, last_tool_length: int
 ) -> CapabilityScope:
-    short_tools = [f"{index:03d}".ljust(SHORT_TOOL_NAME_LENGTH, "x") for index in range(127)]
-    last_tool = "127".ljust(last_tool_length, "x")
-    return CapabilityScope(scope.origin, tuple(sorted([*short_tools, last_tool])), scope.key)
+    tools = tool_names_with_the_last_of_length(last_tool_length)
+    return CapabilityScope(scope.origin, tuple(sorted(tools)), scope.key)
 
 
 def _preflight_token_of(scope: CapabilityScope) -> str:
@@ -236,16 +255,14 @@ def _preflight_token_of(scope: CapabilityScope) -> str:
 
 
 def test_a_capability_of_exactly_8192_characters_is_signed(tmp_path):
-    scope = _scope_with_the_last_tool_named_to(
-        _scope(tmp_path), SHORTEST_NAME_OF_THE_LAST_TOOL_AT_THE_LIMIT
-    )
+    scope = _scope_with_the_last_tool_named_to(_scope(tmp_path), LAST_TOOL_NAME_LENGTH_AT_THE_LIMIT)
 
     assert len(_preflight_token_of(scope)) == MAX_CAPABILITY_CHARACTERS
 
 
 def test_a_capability_of_8193_characters_is_refused_with_its_length(tmp_path):
     scope = _scope_with_the_last_tool_named_to(
-        _scope(tmp_path), SHORTEST_NAME_OF_THE_LAST_TOOL_AT_THE_LIMIT + 1
+        _scope(tmp_path), LAST_TOOL_NAME_LENGTH_AT_THE_LIMIT + 1
     )
 
     with pytest.raises(CapabilityTooLarge) as refusal:
@@ -254,44 +271,34 @@ def test_a_capability_of_8193_characters_is_refused_with_its_length(tmp_path):
     assert refusal.value.length == MAX_CAPABILITY_CHARACTERS + 1
 
 
+def test_a_refused_oversized_capability_holds_no_token_anywhere(tmp_path, monkeypatch):
+    signed = record_signed_tokens(monkeypatch)
+    scope = _scope_with_the_last_tool_named_to(
+        _scope(tmp_path), LAST_TOOL_NAME_LENGTH_AT_THE_LIMIT + 1
+    )
+
+    with pytest.raises(CapabilityTooLarge) as refusal:
+        _preflight_token_of(scope)
+
+    assert signed
+    assert not reaches_text(everything_a_refusal_holds(refusal.value), signed)
+
+
 def test_no_representation_of_a_capability_or_its_scope_shows_the_token_or_the_key(tmp_path):
     scope = _scope(tmp_path)
     capability = signed_capability(scope, _claims_of(scope))
     shown = [repr(capability), str(capability), repr(scope), str(scope)]
-    secret_lines = pem_of(generated_rsa_key()).decode().splitlines()
+    secret_lines = pem_of(scope.key.private_key).decode().splitlines()
 
     assert not any(capability.token in text for text in shown)
     assert not any(line in text for text in shown for line in secret_lines)
     assert not any("PRIVATE KEY" in text for text in shown)
 
 
-def _strings_reachable_from(root: object) -> set[str]:
-    skipped = (type, types.ModuleType, types.FunctionType, types.BuiltinFunctionType)
-    seen: set[int] = set()
-    strings: set[str] = set()
-    pending = [root]
-    while pending:
-        item = pending.pop()
-        if id(item) in seen or isinstance(item, skipped):
-            continue
-        seen.add(id(item))
-        if isinstance(item, str):
-            strings.add(item)
-        pending.extend(gc.get_referents(item))
-    return strings
-
-
 def _loaded_recording_the_signed_tokens(
     tmp_path, monkeypatch, caplog
 ) -> tuple[ServiceConfig, list[str]]:
-    signed: list[str] = []
-    sign = SigningKey.sign
-
-    def recording_sign(key, claims, token_type):
-        signed.append(sign(key, claims, token_type))
-        return signed[-1]
-
-    monkeypatch.setattr(SigningKey, "sign", recording_sign)
+    signed = record_signed_tokens(monkeypatch)
     with caplog.at_level(logging.DEBUG):
         config = capable_service_config(tmp_path)
     return config, signed
@@ -301,9 +308,8 @@ def test_loading_a_configuration_keeps_no_measurement_token_anywhere(tmp_path, m
     config, measurement_tokens = _loaded_recording_the_signed_tokens(tmp_path, monkeypatch, caplog)
 
     formatted = [logging.Formatter().format(record) for record in caplog.records]
-    reachable = _strings_reachable_from(config)
     assert measurement_tokens
+    assert not reaches_text(config, measurement_tokens)
     for token in measurement_tokens:
         assert not any(token in text for text in formatted)
         assert token not in repr(config)
-        assert token not in reachable

@@ -141,7 +141,9 @@ def _admitted(
         route=served,
     )
     return StreamingResponse(
-        run_frames(admitted, runners.for_route(served), app_config, config.runs, LoopClock()),
+        run_frames(
+            admitted, runners.for_route(served), app_config, config.runs, LoopClock()
+        ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-store"},
     )

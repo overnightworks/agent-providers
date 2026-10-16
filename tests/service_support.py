@@ -39,7 +39,9 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import FastAPI
 from jwt.algorithms import RSAAlgorithm
+from pydantic import ValidationError
 
+import agent_service.signing as signing
 from agent_client.run_stream import StreamViolation, ViolationKind
 from agent_client.sse import RunStreamDecoder
 from agent_client.wire import RejectionCode, RunEvent, RunRejection, RunRequest
@@ -234,6 +236,16 @@ class WallClock:
         self.current = moment
 
 
+SHORT_TOOL_NAME_LENGTH = 35
+LAST_TOOL_NAME_LENGTH_AT_THE_LIMIT = 55
+
+
+def tool_names_with_the_last_of_length(last_tool_name_length: int) -> list[str]:
+    """128 tool names, sorted; the last is the one whose length tunes a capability to the limit."""
+    names = [f"{index:03d}".ljust(SHORT_TOOL_NAME_LENGTH, "x") for index in range(127)]
+    return [*names, "127".ljust(last_tool_name_length, "x")]
+
+
 def reaches_text(root: object, needles: Sequence[str]) -> bool:
     """Whether any text reachable from ``root`` contains a needle.
 
@@ -253,6 +265,51 @@ def reaches_text(root: object, needles: Sequence[str]) -> bool:
             return True
         pending.extend(gc.get_referents(candidate))
     return False
+
+
+def record_signed_tokens(monkeypatch) -> list[str]:
+    """Every token the signing key signs from now on, in order."""
+    signed: list[str] = []
+    sign = signing.SigningKey.sign
+
+    def recording_sign(key, claims, token_type):
+        signed.append(sign(key, claims, token_type))
+        return signed[-1]
+
+    monkeypatch.setattr(signing.SigningKey, "sign", recording_sign)
+    return signed
+
+
+def everything_a_refusal_holds(refusal: BaseException) -> list[object]:
+    """The refusal, its cause and context chain, their frames' locals and pydantic's contexts.
+
+    The first frame of the refusal's own traceback is the caller that caught it, so it is left out.
+    """
+    held: list[object] = []
+    pending: list[BaseException] = [refusal]
+    seen: set[int] = set()
+    while pending:
+        error = pending.pop()
+        if id(error) in seen:
+            continue
+        seen.add(id(error))
+        held.append(error)
+        pending.extend(link for link in (error.__cause__, error.__context__) if link)
+        if isinstance(error, ValidationError):
+            for problem in error.errors():
+                held.append(problem)
+                pending.extend(
+                    value
+                    for value in problem.get("ctx", {}).values()
+                    if isinstance(value, BaseException)
+                )
+        traceback = error.__traceback__
+        if error is refusal and traceback:
+            traceback = traceback.tb_next
+        while traceback:
+            held.append(list(traceback.tb_frame.f_locals.values()))
+            traceback = traceback.tb_next
+    return held
 
 
 class TokenMint:

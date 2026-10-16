@@ -111,6 +111,25 @@ def test_any_other_origin_is_refused_without_a_canonical_form(origin):
     assert "canonical form" not in _refusal_of(origin)
 
 
+@pytest.mark.parametrize(
+    ("origin", "refusal"),
+    [
+        (
+            "HTTPS://songmaker.internal:0",
+            "must be https://<host> or https://<host>:<port> and nothing else: no user"
+            " information, path, query, fragment, space, control or non-ASCII character",
+        ),
+        (
+            f"{ORIGIN}:{'9' * 5000}",
+            "must write a port as decimal digits from 1 to 65535, without leading zeros, never 443",
+        ),
+    ],
+    ids=["upper-case-scheme", "port-of-5000-digits"],
+)
+def test_an_origin_is_refused_in_the_format_s_own_words(origin, refusal):
+    assert _refusal_of(origin).removeprefix("Value error, ") == refusal
+
+
 def test_a_host_of_253_characters_is_accepted():
     origin = f"https://{HOST_OF_253}"
 
@@ -171,8 +190,26 @@ def test_claims_that_break_the_format_are_refused(claims):
 
 @pytest.mark.parametrize(
     "subject",
-    ["user\x00alice", "user-\U0001f3b5-alice", "u" * 600, '"' * 255],
-    ids=["nul", "astral", "600-characters", "255-quotation-marks"],
+    [
+        "user\x00alice",
+        "user-\U0001f3b5-alice",
+        "u" * 600,
+        '"' * 255,
+        " User-Alice ",
+        "Stra\u00dfe",
+        "e\u0301",
+        "\ufb01",
+    ],
+    ids=[
+        "nul",
+        "astral",
+        "600-characters",
+        "255-quotation-marks",
+        "padded-and-capitalised",
+        "sharp-s",
+        "decomposed-e",
+        "fi-ligature",
+    ],
 )
 def test_a_principal_subject_round_trips_exactly(subject):
     claims = CapabilityClaims.from_claims(_claims_with(principal=_principal_with(sub=subject)))

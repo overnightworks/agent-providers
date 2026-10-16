@@ -19,13 +19,22 @@ from agent_providers.errors import (
 )
 
 
-def test_stream_turn_refuses_an_unknown_provider_before_any_route_runs():
+def test_stream_turn_refuses_an_unknown_provider_before_any_route_runs(monkeypatch):
+    routes_started: list[str] = []
+
+    def start_route(**arguments):
+        routes_started.append(arguments["provider"])
+        raise ProviderUnavailableError(arguments["provider"], "route started")
+
+    monkeypatch.setattr(dispatch, "_stream_for_route", start_route)
+
     turn = drive_cowriter_turn("bob")
 
     assert isinstance(turn.error, ProviderUnavailableError)
     assert turn.error.reason.code is SafeRouteReasonCode.ROUTE_FAILED
     assert turn.events == []
     assert turn.executed == []
+    assert routes_started == []
 
 
 def test_stream_turn_takes_only_keyword_arguments():

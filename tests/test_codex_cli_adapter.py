@@ -1002,6 +1002,11 @@ def test_a_codex_call_nested_too_deeply_is_refused_not_a_failed_route(
     assert "RecursionError" not in formatted_log_text(caplog.records)
 
 
+async def _drain_first_round(transport) -> None:
+    async for _ in transport.stream(InitialTurn("system", [])):
+        pass
+
+
 @pytest.mark.parametrize("reader", NESTED_READERS)
 def test_a_codex_reader_takes_deep_nesting_as_the_input_it_cannot_decode(
     monkeypatch, reader,
@@ -1019,12 +1024,10 @@ def test_a_codex_reader_takes_deep_nesting_as_the_input_it_cannot_decode(
     async def collect() -> None:
         if reader == "event line":
             with pytest.raises(ProviderUnavailableError) as raised:
-                async for _ in transport.stream(InitialTurn("system", [])):
-                    pass
+                await _drain_first_round(transport)
             assert raised.value.reason.code is SafeRouteReasonCode.CLI_PROTOCOL_ERROR
         else:
-            async for _ in transport.stream(InitialTurn("system", [])):
-                pass
+            await _drain_first_round(transport)
             nested_result = ToolResultBatch((ToolResult("one", DEEPLY_NESTED_JSON, False),))
             assert [item async for item in transport.stream(nested_result)]
         await transport.aclose()

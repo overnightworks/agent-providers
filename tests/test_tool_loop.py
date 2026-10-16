@@ -290,10 +290,9 @@ def test_a_refused_second_response_writes_one_line_with_its_round_and_correlatio
     ])
     caplog.set_level(logging.DEBUG)
 
+    turn = _events(transport, lambda _name, _arguments: ToolOutcome("ok", False), A_CORRELATION_ID)
     with pytest.raises(TextToolCallRejectedError) as raised:
-        asyncio.run(_events(
-            transport, lambda _name, _arguments: ToolOutcome("ok", False), A_CORRELATION_ID,
-        ))
+        asyncio.run(turn)
 
     assert raised.value is refused
     assert transport.closed

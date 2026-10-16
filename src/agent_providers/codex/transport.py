@@ -159,12 +159,7 @@ class CodexCliToolTransport:
         """Stream one response, retaining only the server-issued thread ID."""
         if self._closed:
             raise RuntimeError("Codex CLI tool transport is closed")
-        if isinstance(message, ToolResultBatch) and len(message.results) != 1:
-            raise ProviderUnavailableError(
-                "codex",
-                "cli",
-                normalize_route_failure(SafeRouteReasonCode.TOOL_PROTOCOL_ERROR),
-            ) from None
+        _refuse_a_multi_result_batch(message)
         prompt = _tool_transport_prompt(self._catalog, message)
         is_resume = self._thread_id is not None
         arguments = _codex_tool_arguments(
@@ -344,6 +339,15 @@ def _run_codex_tool_round(
         )
         channel._close(outcome)
         return outcome
+
+
+def _refuse_a_multi_result_batch(message: InitialTurn | ToolResultBatch) -> None:
+    if isinstance(message, ToolResultBatch) and len(message.results) != 1:
+        raise ProviderUnavailableError(
+            "codex",
+            "cli",
+            normalize_route_failure(SafeRouteReasonCode.TOOL_PROTOCOL_ERROR),
+        ) from None
 
 
 def _tool_transport_prompt(

@@ -149,13 +149,7 @@ class GrokCliToolTransport:
         """Stream one response and retain its server-issued session ID."""
         if self._closed:
             raise RuntimeError("Grok CLI tool transport is closed")
-        if isinstance(message, ToolResultBatch) and len(message.results) != 1:
-            _log_tool_protocol_rejection(ToolProtocolRejectionCode.TOOL_RESULT_BATCH_INVALID)
-            raise ProviderUnavailableError(
-                "grok",
-                "cli",
-                normalize_route_failure(SafeRouteReasonCode.TOOL_PROTOCOL_ERROR),
-            ) from None
+        _refuse_a_multi_result_batch(message)
         prompt = _tool_transport_prompt(self._catalog, message)
         is_resume = self._session_id is not None
         if is_resume:
@@ -237,6 +231,16 @@ class GrokCliToolTransport:
         """Request cleanup after every current or background reaper finishes."""
         self._closed = True
         await asyncio.shield(asyncio.to_thread(self._home.close))
+
+
+def _refuse_a_multi_result_batch(message: InitialTurn | ToolResultBatch) -> None:
+    if isinstance(message, ToolResultBatch) and len(message.results) != 1:
+        _log_tool_protocol_rejection(ToolProtocolRejectionCode.TOOL_RESULT_BATCH_INVALID)
+        raise ProviderUnavailableError(
+            "grok",
+            "cli",
+            normalize_route_failure(SafeRouteReasonCode.TOOL_PROTOCOL_ERROR),
+        ) from None
 
 
 def _tool_transport_prompt(

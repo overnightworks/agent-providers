@@ -2578,6 +2578,8 @@ def test_a_reap_that_raises_is_handed_off_with_a_sigkill_and_a_background_reap(
     assert returned_at <= cli_settle_deadline(deadline)
     assert background_reap_ended.wait(timeout=2)
     assert handed_off[0].returncode == -9
+    handed_off_streams = (handed_off[0].stdin, handed_off[0].stdout, handed_off[0].stderr)
+    assert all(stream.closed for stream in handed_off_streams)
     assert held_at_release == [1]
     assert process_pool.reservation_count() == 0
     assert failure_watch.reported_steps() == ["reap PermissionError"]
@@ -2802,6 +2804,7 @@ def test_the_returned_outcome_is_the_overrun_a_consumer_already_published(
     consumer.join(timeout=1)
 
     assert outcome is consumed[0]
+    assert channel.abort_requested()
     assert channel.receive(timeout=0) is outcome
     failure_watch.assert_nothing_leaked()
 
@@ -2971,4 +2974,116 @@ def test_whichever_thread_settles_first_decides_the_return_and_the_channel(
         assert channel.receive(timeout=0) == b"hello\n"
     assert channel.receive(timeout=0) is outcome
     assert process_pool.reservation_count() == 0
+    failure_watch.assert_nothing_leaked()
+
+
+def test_a_caller_that_adopts_a_consumers_overrun_before_the_spawn_still_requests_abort(
+    monkeypatch, failure_watch, pooled_run,
+) -> None:
+    process_pool, callbacks = pooled_run
+    channel = CliLineChannel(maximum_lines=1)
+    release_spawn = threading.Event()
+    reaped = threading.Event()
+    release_reservation = callbacks["on_reaped"]
+    real_open_pipes = process.open_pipes
+
+    def late_open_pipes(*arguments, **keywords):
+        release_spawn.wait(timeout=2)
+        return real_open_pipes(*arguments, **keywords)
+
+    def record_release(process_id: int, became_zombie: bool) -> None:
+        release_reservation(process_id, became_zombie)
+        reaped.set()
+
+    callbacks["on_reaped"] = record_release
+    monkeypatch.setattr(process, "open_pipes", late_open_pipes)
+    started_at = time.monotonic()
+    consumed: list[bytes | CliRunOutcome] = []
+    consumer = threading.Thread(
+        target=lambda: consumed.append(channel.receive(settle_by=started_at + 0.02)),
+    )
+    consumer.start()
+
+    outcome = _run_pooled(
+        "true", callbacks, deadline=started_at + 0.2, stdout_line_channel=channel,
+    )
+    consumer.join(timeout=1)
+
+    assert outcome.reason is CliRunReason.CLEANUP_OVERRAN
+    assert outcome is consumed[0]
+    assert channel.abort_requested()
+    release_spawn.set()
+    assert reaped.wait(timeout=2)
+    failure_watch.assert_nothing_leaked()
+
+
+def test_control_flow_raised_by_the_channel_close_on_the_callers_thread_propagates_after_the_abort(
+    monkeypatch, failure_watch, pooled_run,
+) -> None:
+    process_pool, callbacks = pooled_run
+    monkeypatch.setattr("agent_providers.process.CLI_TERMINATION_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr("agent_providers.process.CLI_PROBE_CALLER_TIMEOUT_MARGIN_SECONDS", 0.01)
+    channel = CliLineChannel(maximum_lines=1)
+    caller = threading.current_thread()
+    release_reap = threading.Event()
+    released = threading.Event()
+    real_reap = process._reap_process_group
+    real_close = CliLineChannel._close
+    release_reservation = callbacks["on_reaped"]
+
+    def delayed_reap(child) -> bool:
+        release_reap.wait(timeout=2)
+        return real_reap(child)
+
+    def close_that_exits_on_the_callers_thread(self, outcome):
+        if threading.current_thread() is caller:
+            raise SystemExit(A_RUNNER_FAILURE_CANARY)
+        return real_close(self, outcome)
+
+    def record_release(process_id: int, became_zombie: bool) -> None:
+        release_reservation(process_id, became_zombie)
+        released.set()
+
+    callbacks["on_reaped"] = record_release
+    monkeypatch.setattr(process, "_reap_process_group", delayed_reap)
+    monkeypatch.setattr(CliLineChannel, "_close", close_that_exits_on_the_callers_thread)
+
+    with pytest.raises(SystemExit):
+        _run_pooled(
+            "exec sleep 10",
+            callbacks,
+            deadline=time.monotonic() + 0.05,
+            stdout_line_channel=channel,
+        )
+
+    assert channel.abort_requested()
+    assert failure_watch.reported_steps() == ["close SystemExit"]
+    release_reap.set()
+    assert released.wait(timeout=2)
+    failure_watch.assert_nothing_leaked()
+
+
+def test_control_flow_raised_by_the_log_handler_while_reporting_propagates_after_publishing(
+    monkeypatch, failure_watch, pooled_run,
+) -> None:
+    process_pool, callbacks = pooled_run
+    fail_to_start_the_runner_thread(monkeypatch, RuntimeError(A_RUNNER_FAILURE_CANARY))
+    channel = CliLineChannel(maximum_lines=1)
+
+    class ExitingHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            raise SystemExit
+
+    handler = ExitingHandler()
+    process_logger = logging.getLogger("agent_providers.process")
+    process_logger.addHandler(handler)
+    try:
+        with pytest.raises(SystemExit):
+            _run_pooled(":", callbacks, stdout_line_channel=channel)
+    finally:
+        process_logger.removeHandler(handler)
+
+    published = channel.receive(timeout=0)
+    assert isinstance(published, CliRunOutcome)
+    assert published.reason is CliRunReason.SPAWN_FAILED
     failure_watch.assert_nothing_leaked()

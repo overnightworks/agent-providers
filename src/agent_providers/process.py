@@ -230,8 +230,7 @@ class _StepFailures:
     def contained(self, step: str, *, reported: bool = True) -> Iterator[None]:
         try:
             yield
-        # NOSONAR S5754 below: the worker publishes every exit; the caller re-raises control flow.
-        except BaseException as error:  # NOSONAR
+        except BaseException as error:  # NOSONAR(S5754) every exit publishes; callers re-raise
             self._errors[step] = error
             if reported:
                 self._failed.append(f"{step} {type(error).__name__}")
@@ -561,6 +560,11 @@ def _recorded_outcome(state: _BoundedRunState) -> CliRunOutcome:
         return cast(CliRunOutcome, state.outcome)
 
 
+_RUNNER_TIMEOUT_REASONS = frozenset(
+    {CliRunReason.DEADLINE_BEFORE_SPAWN, CliRunReason.CLEANUP_OVERRAN}
+)
+
+
 def _settle_from_caller(
     state: _BoundedRunState,
     request: _CliRunRequest,
@@ -569,7 +573,7 @@ def _settle_from_caller(
     channel = request.stdout_line_channel
     failures = _StepFailures()
     settled = _settle(state, channel, outcome, failures)
-    if channel is not None and settled.reason is outcome.reason:
+    if channel is not None and settled.reason in _RUNNER_TIMEOUT_REASONS:
         channel.request_abort()
     failures.report()
     failures.raise_control_flow()
@@ -733,7 +737,7 @@ def _reap_or_hand_off(process: PipedProcess, failures: _StepFailures) -> bool:
         _signal_process_group(process.pid, signal.SIGKILL)
     for stream in (process.stdin, process.stdout, process.stderr):
         if stream is not None:
-            with failures.contained("hand-off close", reported=False):
+            with failures.contained("hand-off close"):
                 stream.close()
     return True
 

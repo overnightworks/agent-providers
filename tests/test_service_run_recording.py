@@ -959,7 +959,7 @@ class _Ending:
 
     def breaks(self, step: _Step) -> BaseException:
         """The failure of a failing step: its own, or a stray cancellation nobody requested."""
-        return asyncio.CancelledError(step.canary) if step in self.stray else step.fails()
+        return _cancelled_unasked(step) if step in self.stray else step.fails()
 
     @property
     def ends_by_itself(self) -> bool:

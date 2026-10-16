@@ -263,7 +263,7 @@ def _exit_of(
     happened; a failure met twice counts once, at its first part. A
     cancellation is delivered when a cancellation request is on the leaving
     task (``cancel_requested``); a ``CancelledError`` a step raised without
-    one is that step's failure, recorded among ``failures``.
+    one is that step's failure, recorded among ``failures`` as ``RunStepCancelled``.
 
     1. A delivered cancellation always wins: one caught while the run was
        torn down is raised, and the body's outcome is left to propagate

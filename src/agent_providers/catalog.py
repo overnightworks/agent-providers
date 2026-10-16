@@ -309,7 +309,8 @@ def list_provider_models(provider: str, route: ProviderRoute) -> list[str]:
     this route accepts as its model. A name is not a fixed model. The Claude CLI
     lists aliases (``opus``, ``sonnet[1m]``) that the CLI maps itself, and an API
     id can be a provider-side alias too. Nor is the list complete: it keeps only
-    chat models, Codex leaves out the slugs its CLI hides, and the Claude CLI
+    the names that carry the provider's model prefix or pass its chat filter,
+    Codex leaves out the slugs its CLI hides, and the Claude CLI
     also accepts full model ids that it does not list. A name missing from the
     list is no proof that the route refuses it.
 

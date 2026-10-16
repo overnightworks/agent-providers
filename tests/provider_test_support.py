@@ -42,6 +42,13 @@ from agent_providers.tools import ToolCatalog
 
 _fake_cli_processes: list[MagicMock] = []
 
+GROK_LOGGED_IN = """You are logged in with grok.com.
+
+Available models:
+  * grok-4.6 (default)
+  - grok-4.5
+  - deepseek-v4-flash
+"""
 CLAUDE_MODEL_CATALOG_STDOUT = (
     "Current model: `Opus 5 (1M context)` (effort: high)\n"
     "Usage: /model <name>. Available: sonnet, opus, haiku, fable, best, "

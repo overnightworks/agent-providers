@@ -13,10 +13,10 @@ from pathlib import Path
 import pytest
 from provider_test_support import (
     CLAUDE_MODEL_CATALOG_STDOUT,
+    GROK_LOGGED_IN,
     fake_cli_executable,
     override_provider_runtime,
 )
-from test_process import GROK_LOGGED_IN
 
 from agent_providers.catalog import (
     ProviderRoute,
@@ -34,9 +34,9 @@ CLAUDE_MODEL_CATALOG_ALIASES = sorted([
 CLAUDE_LOGGED_IN = json.dumps({"loggedIn": True, "authMethod": "claude.ai"})
 CLAUDE_LOGGED_OUT = json.dumps({"loggedIn": False})
 CLAUDE_MODEL_COMMAND = ("-p", "/model")
+CLAUDE_MODEL_CATALOG_NAMING_NO_MODEL = "Usage: /model <name>. Available: or a full model ID.\n"
 CLAUDE_STATUS_COMMAND = ("auth", "status")
 CODEX_MODEL_COMMAND = ("debug", "models")
-CODEX_STATUS_COMMAND = ("login", "status")
 GROK_LOGGED_IN_OFFERING_ONLY_DEEPSEEK = (
     "You are logged in with grok.com.\n\nAvailable models:\n  * deepseek-v4-flash (default)\n"
 )
@@ -86,7 +86,7 @@ CLI_OFFERS = [
 
 CLI_OFFERS_NOTHING_USABLE = [
     pytest.param(
-        "claude", {CLAUDE_MODEL_COMMAND: "Usage: /model <name>. Available: or a full model ID.\n"},
+        "claude", {CLAUDE_MODEL_COMMAND: CLAUDE_MODEL_CATALOG_NAMING_NO_MODEL},
         id="claude-prints-only-the-full-id-clause",
     ),
     pytest.param(
@@ -147,7 +147,7 @@ def test_a_claude_cli_route_with_a_broken_catalogue_is_disturbed_and_lists_nothi
 ) -> None:
     _configure_cli(tmp_path, "claude", {
         CLAUDE_STATUS_COMMAND: CLAUDE_LOGGED_IN,
-        CLAUDE_MODEL_COMMAND: "Available: or a full model ID.\n",
+        CLAUDE_MODEL_COMMAND: CLAUDE_MODEL_CATALOG_NAMING_NO_MODEL,
     })
 
     snapshot = probe_provider_route("claude", ProviderRoute.CLI)

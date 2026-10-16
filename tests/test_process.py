@@ -16,7 +16,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from provider_test_support import SECRET_ENV_KEYS, override_provider_runtime, shell_child
+from provider_test_support import GROK_LOGGED_IN, SECRET_ENV_KEYS, override_provider_runtime, shell_child
 
 from agent_providers import process
 from agent_providers.config import current_config
@@ -49,13 +49,6 @@ from agent_providers.process import (
 )
 from agent_providers.spawn import INHERITED_MACHINE_VARIABLES, ChildProcess
 
-GROK_LOGGED_IN = """You are logged in with grok.com.
-
-Available models:
-  * grok-4.6 (default)
-  - grok-4.5
-  - deepseek-v4-flash
-"""
 GROK_LOGGED_OUT = """You are not authenticated.
 
 Available models:

@@ -3,15 +3,34 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import json
+import pickle
+import traceback
+from collections.abc import Callable
+from dataclasses import asdict, dataclass
 
 import pytest
+from provider_test_support import (
+    A_CANARY,
+    COWRITER_TOOL_CATALOG,
+    a_call_to_an_undeclared_tool_carrying,
+)
+from pydantic import BaseModel, SecretStr
 
 from agent_providers import dispatch
 from agent_providers.errors import (
     ProviderUnavailableError,
     SafeRouteReasonCode,
+    TextToolCallRejectedError,
     ToolProtocolRejectionCode,
     normalize_route_failure,
+)
+from agent_providers.text_tool_protocol import (
+    TextToolProtocolError,
+    TextToolRejection,
+    TextToolRejectionRule,
+    TextToolStreamParser,
 )
 
 
@@ -77,3 +96,156 @@ def test_terminal_tool_loop_rejection_logs_a_closed_code_without_input(caplog) -
     asyncio.run(collect())
     assert ToolProtocolRejectionCode.TOOL_LOOP_TERMINAL_INVALID in caplog.text
     assert marker not in caplog.text
+
+
+class _HostModel(BaseModel):
+    rejection: TextToolRejection
+
+
+@dataclass
+class _HostRecord:
+    rejection: TextToolRejection
+
+
+def _the_parser_refuses_the_canary_call() -> TextToolProtocolError:
+    parser = TextToolStreamParser(COWRITER_TOOL_CATALOG)
+    parser.feed(a_call_to_an_undeclared_tool_carrying())
+    try:
+        parser.finish()
+    except TextToolProtocolError as refused:
+        return refused
+    raise AssertionError("the canary call was accepted")
+
+
+def _the_host_catches(error: TextToolCallRejectedError) -> TextToolCallRejectedError:
+    try:
+        raise error
+    except TextToolCallRejectedError as caught:
+        return caught
+
+
+@pytest.fixture
+def parser_error() -> TextToolProtocolError:
+    return _the_parser_refuses_the_canary_call()
+
+
+@pytest.fixture
+def host_error(parser_error) -> TextToolCallRejectedError:
+    return _the_host_catches(TextToolCallRejectedError("grok", "cli", parser_error.rejection))
+
+
+def test_the_canary_call_is_refused_under_the_unknown_tool_rule(parser_error):
+    assert parser_error.rejection.rule is TextToolRejectionRule.UNKNOWN_TOOL
+    assert A_CANARY in parser_error.rejection.excerpt.get_secret_value()
+
+
+type _Rendering = Callable[[TextToolProtocolError, TextToolCallRejectedError], str]
+
+_RENDERINGS: dict[str, tuple[_Rendering, bool]] = {
+    "str-of-the-record": (lambda refused, host: str(refused.rejection), True),
+    "repr-of-the-record": (lambda refused, host: repr(refused.rejection), True),
+    "f-string-of-the-record": (lambda refused, host: f"{refused.rejection}", True),
+    "percent-s-of-the-record": (lambda refused, host: "%s" % refused.rejection, True),  # noqa: UP031
+    "str-of-the-excerpt": (lambda refused, host: str(refused.rejection.excerpt), True),
+    "str-of-the-parser-error": (lambda refused, host: str(refused), False),
+    "repr-of-the-parser-error": (lambda refused, host: repr(refused), False),
+    "str-of-the-host-error": (lambda refused, host: str(host), False),
+    "repr-of-the-host-error": (lambda refused, host: repr(host), False),
+    "f-string-of-the-host-error": (lambda refused, host: f"{host}", False),
+    "percent-s-of-the-host-error": (lambda refused, host: "%s" % host, False),  # noqa: UP031
+    "args-of-the-host-error": (lambda refused, host: repr(host.args), False),
+    "traceback-of-the-parser-error": (
+        lambda refused, host: "".join(traceback.format_exception(refused)), False,
+    ),
+    "traceback-of-the-host-error": (
+        lambda refused, host: "".join(traceback.format_exception(host)), False,
+    ),
+    "reason-json-of-the-host-error": (lambda refused, host: host.reason.model_dump_json(), False),
+    "repr-of-a-host-pydantic-model": (
+        lambda refused, host: repr(_HostModel(rejection=refused.rejection)), True,
+    ),
+    "json-of-a-host-pydantic-model": (
+        lambda refused, host: _HostModel(rejection=refused.rejection).model_dump_json(), True,
+    ),
+    "json-mode-dump-of-a-host-pydantic-model": (
+        lambda refused, host: repr(
+            _HostModel(rejection=refused.rejection).model_dump(mode="json"),
+        ),
+        True,
+    ),
+    "repr-of-a-host-dataclass": (
+        lambda refused, host: repr(_HostRecord(refused.rejection)), True,
+    ),
+    "asdict-of-a-host-dataclass": (
+        lambda refused, host: repr(asdict(_HostRecord(refused.rejection))), True,
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("render", "shows_the_mask"), _RENDERINGS.values(), ids=_RENDERINGS.keys(),
+)
+def test_no_ordinary_rendering_shows_the_refused_text(
+    parser_error, host_error, render, shows_the_mask,
+):
+    rendered = render(parser_error, host_error)
+
+    assert A_CANARY not in rendered
+    assert ("**********" in rendered) is shows_the_mask
+
+
+def test_the_host_error_is_a_provider_unavailable_error_with_the_same_safe_answer(host_error):
+    assert isinstance(host_error, ProviderUnavailableError)
+    assert host_error.reason == normalize_route_failure(SafeRouteReasonCode.TOOL_PROTOCOL_ERROR)
+    assert str(host_error) == "Co-Writer tool response was invalid."
+    assert (host_error.provider, host_error.route) == ("grok", "cli")
+    assert host_error.__context__ is None
+    assert host_error.__cause__ is None
+
+
+def test_the_excerpt_cannot_be_serialized_by_plain_json(parser_error):
+    with pytest.raises(TypeError):
+        json.dumps(parser_error.rejection.excerpt)
+
+
+_ROUND_TRIPS: dict[str, Callable] = {
+    "pickle": lambda error: pickle.loads(pickle.dumps(error)),  # noqa: S301
+    "copy": copy.copy,
+    "deepcopy": copy.deepcopy,
+}
+
+
+@pytest.mark.parametrize("round_trip", _ROUND_TRIPS.values(), ids=_ROUND_TRIPS.keys())
+@pytest.mark.parametrize("which", ["parser-error", "host-error"])
+def test_a_rejection_error_survives_a_round_trip_with_its_mask(
+    parser_error, host_error, which, round_trip,
+):
+    original = parser_error if which == "parser-error" else host_error
+
+    rebuilt = round_trip(original)
+
+    assert type(rebuilt) is type(original)
+    assert str(rebuilt) == str(original)
+    assert rebuilt.rejection == original.rejection
+    assert isinstance(rebuilt.rejection.excerpt, SecretStr)
+    assert rebuilt.rejection.excerpt.get_secret_value() == (
+        original.rejection.excerpt.get_secret_value()
+    )
+    if which == "host-error":
+        assert (rebuilt.provider, rebuilt.route, rebuilt.reason) == (
+            original.provider, original.route, original.reason,
+        )
+
+
+@pytest.mark.parametrize("which", ["parser-error", "host-error"])
+def test_pickled_bytes_carry_the_excerpt_in_plain_text(parser_error, host_error, which):
+    original = parser_error if which == "parser-error" else host_error
+
+    assert A_CANARY.encode() in pickle.dumps(original)
+
+
+def test_each_error_rebuilds_from_its_constructor_arguments(parser_error, host_error):
+    rejection = parser_error.rejection
+
+    assert parser_error.__reduce__() == (TextToolProtocolError, (rejection,))
+    assert host_error.__reduce__() == (TextToolCallRejectedError, ("grok", "cli", rejection))

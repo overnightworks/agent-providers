@@ -3,18 +3,23 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
+from provider_test_support import A_CANARY, formatted_log_text
+from pydantic import SecretStr
 
 from agent_providers import tool_loop
+from agent_providers.errors import TextToolCallRejectedError
 from agent_providers.events import (
     AssistantTextEvent,
     FinalEvent,
     ToolCallEvent,
     ToolResultEvent,
 )
+from agent_providers.text_tool_protocol import TextToolRejection, TextToolRejectionRule
 from agent_providers.tool_loop import (
     FinalText,
     InitialTurn,
@@ -33,7 +38,7 @@ A_CORRELATION_ID = "job-42"
 
 
 class _FakeTransport:
-    def __init__(self, responses: list[list[TransportResponse]]) -> None:
+    def __init__(self, responses: list[list[TransportResponse | Exception]]) -> None:
         self._responses = responses
         self.messages: list[InitialTurn | ToolResultBatch] = []
         self.closed = False
@@ -43,6 +48,8 @@ class _FakeTransport:
     ) -> AsyncIterator[TransportResponse]:
         self.messages.append(message)
         for response in self._responses.pop(0):
+            if isinstance(response, Exception):
+                raise response
             yield response
 
     async def aclose(self) -> None:
@@ -266,3 +273,36 @@ def test_the_host_names_the_sentence_a_crashed_tool_reports() -> None:
     assert events[1] == ToolResultEvent(
         tool_use_id="call-1", content=host_message, is_error=True,
     )
+
+
+def test_a_refused_second_response_writes_one_line_with_its_round_and_correlation_id(caplog):
+    rejection = TextToolRejection(
+        rule=TextToolRejectionRule.UNKNOWN_TOOL,
+        offset=23,
+        length=90,
+        excerpt_start=0,
+        excerpt=SecretStr(A_CANARY),
+    )
+    refused = TextToolCallRejectedError("grok", "cli", rejection)
+    transport = _FakeTransport([
+        [ToolCallBatch((ToolCall("call-1", "read", {}),))],
+        [refused],
+    ])
+    caplog.set_level(logging.DEBUG)
+
+    with pytest.raises(TextToolCallRejectedError) as raised:
+        asyncio.run(_events(
+            transport, lambda _name, _arguments: ToolOutcome("ok", False), A_CORRELATION_ID,
+        ))
+
+    assert raised.value is refused
+    assert transport.closed
+    [line] = [r for r in caplog.records if "rejected" in r.getMessage()]
+    assert (line.name, line.levelno, line.exc_info) == (
+        "agent_providers.tool_loop", logging.WARNING, None,
+    )
+    assert line.getMessage() == (
+        "Tool call rejected provider=grok route=api round=1 correlation_id=job-42 "
+        "code=text_tool_response_invalid rule=unknown_tool offset=23 length=90"
+    )
+    assert A_CANARY not in formatted_log_text(caplog.records)

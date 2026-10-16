@@ -588,7 +588,9 @@ class RunnerFailureWatch:
         ])
         for canary in (A_RUNNER_FAILURE_CANARY, ANOTHER_RUNNER_FAILURE_CANARY):
             assert canary not in visible
-        assert self.unhandled_thread_errors == []
+        assert self.unhandled_thread_errors == [], [
+            (error.thread.name, repr(error.exc_value)) for error in self.unhandled_thread_errors
+        ]
 
 
 def _text_of(surface: BaseException | str) -> str:

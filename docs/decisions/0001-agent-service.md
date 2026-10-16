@@ -474,8 +474,9 @@ Piece 3 of A1a3 (`agent_service.run_liveness`, the slow client):
     gets.
 25. A client that takes each frame within its window is never dropped and sees
     no change; the deadline sequence may differ, because the supervisor wakes at
-    deadlines and not when the slot falls vacant, so a stall deadline that is
-    not a multiple of the heartbeat interval can be read late.
+    deadlines and not when the slot falls vacant, so a stall instant set while
+    the slot was full can still wake the supervisor after the client took the
+    frame.
 26. Closing the stream during or after a drop stops nothing twice and returns
     only after the runner's close has finished (rule 10).
 27. After the drop's cleanup the pump and the supervisor are gone; only the

@@ -81,7 +81,8 @@ def _streamed(runner: Runner | None, records: RunRecords | None = None) -> bytes
     )
 
     async def collected() -> bytes:
-        frames = run_frames(admitted, runner, SONGMAKER, RunConfig(), LoopClock(), records or RunRecords())
+        store = records or RunRecords()
+        frames = run_frames(admitted, runner, SONGMAKER, RunConfig(), LoopClock(), store)
         return b"".join([frame async for frame in frames])
 
     return asyncio.run(collected())

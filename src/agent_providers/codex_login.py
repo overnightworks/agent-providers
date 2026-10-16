@@ -32,8 +32,8 @@ class CodexLogin:
         raise TypeError("a Codex login holds credentials and cannot be serialised")
 
 
-def judge_codex_login(document: bytes) -> CodexLogin:
-    """Judge a login document: complete and renewable-free, unfinished, or unreadable."""
+def assess_codex_login(document: bytes) -> CodexLogin:
+    """Assess a login document: complete and renewable-free, unfinished, or unreadable."""
     try:
         parsed = json.loads(document)
     except (ValueError, RecursionError):

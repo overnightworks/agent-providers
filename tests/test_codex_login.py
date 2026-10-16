@@ -14,7 +14,7 @@ from provider_test_support import (
     a_codex_login,
 )
 
-from agent_providers.codex_login import CodexLogin, CodexLoginVerdict, judge_codex_login
+from agent_providers.codex_login import CodexLogin, CodexLoginVerdict, assess_codex_login
 
 A_DEEPLY_NESTED_DOCUMENT = b"[" * 100_000
 A_DOCUMENT_WITH_A_HUGE_INTEGER = b'{"tokens": {"account_id": ' + b"9" * 5_000 + b"}}"
@@ -47,14 +47,14 @@ USABLE, INCOMPLETE, MALFORMED = (
         pytest.param(b'{"tokens":{"account_id":null}}', MALFORMED, id="null-account-id"),
     ],
 )
-def test_judge_codex_login_names_each_document_shape(
+def test_assess_codex_login_names_each_document_shape(
     document: bytes, verdict: CodexLoginVerdict,
 ) -> None:
-    assert judge_codex_login(document).verdict is verdict
+    assert assess_codex_login(document).verdict is verdict
 
 
 def test_a_usable_login_hands_a_child_the_login_without_its_refresh_token() -> None:
-    blanked = judge_codex_login(a_codex_login()).blanked_document
+    blanked = assess_codex_login(a_codex_login()).blanked_document
 
     assert blanked == json.dumps({
         "auth_mode": "chatgpt",
@@ -71,7 +71,7 @@ def test_a_usable_login_hands_a_child_the_login_without_its_refresh_token() -> N
 
 @pytest.mark.parametrize("document", [b"not json", b'{"tokens":{}}', a_codex_login(last_refresh=3)])
 def test_a_login_that_is_not_usable_carries_no_document(document: bytes) -> None:
-    assert judge_codex_login(document).blanked_document is None
+    assert assess_codex_login(document).blanked_document is None
 
 
 @pytest.mark.parametrize(
@@ -85,7 +85,7 @@ def test_a_login_that_is_not_usable_carries_no_document(document: bytes) -> None
     ],
 )
 def test_a_usable_codex_login_never_shows_its_tokens(disclose) -> None:
-    login = judge_codex_login(a_codex_login())
+    login = assess_codex_login(a_codex_login())
     assert isinstance(login, CodexLogin)
 
     if disclose in (repr, str):

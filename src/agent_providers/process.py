@@ -24,7 +24,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Final, Literal, NotRequired, Required, TypedDict, Unpack
 
-from agent_providers.codex_login import CodexLoginVerdict, judge_codex_login
+from agent_providers.codex_login import CodexLoginVerdict, assess_codex_login
 from agent_providers.config import current_config, current_turn_config
 from agent_providers.constants import (
     CLAUDE_CLI_AUTH_METHOD_FIELD,
@@ -1261,7 +1261,7 @@ def blank_codex_refresh_token(source_document: bytes) -> bytes:
     break the stored login, so every Codex child receives this copy instead of
     the operator's file.
     """
-    blanked = judge_codex_login(source_document).blanked_document
+    blanked = assess_codex_login(source_document).blanked_document
     # The traceback keeps this frame alive, so the document must not stay in it.
     del source_document
     if blanked is None:
@@ -1538,7 +1538,7 @@ def codex_cli_login_is_usable() -> bool:
     document = _read_credential_file(current_config().codex_cli_auth_file)
     if document is None:
         return False
-    verdict = judge_codex_login(document).verdict
+    verdict = assess_codex_login(document).verdict
     # The traceback keeps this frame alive, so the document must not stay in it.
     del document
     if verdict is CodexLoginVerdict.MALFORMED:

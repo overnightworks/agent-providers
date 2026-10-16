@@ -12,6 +12,7 @@ import sys
 import tempfile
 import threading
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from unittest.mock import patch
 
@@ -724,6 +725,55 @@ def test_bounded_runner_returns_at_the_settle_instant_when_its_cleanup_overruns(
     assert cli_settle_deadline(deadline) <= returned_at < cli_settle_deadline(deadline) + 0.5
     release_cleanup.set()
     assert reaped.wait(timeout=1)
+
+
+class _LateWakingEvent(threading.Event):
+    """An event whose first timed-out wait wakes late, as a loaded scheduler would."""
+
+    lateness_seconds = 0.15
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._woke_late = False
+
+    def wait(self, timeout: float | None = None) -> bool:
+        occurred = super().wait(timeout)
+        if not occurred and not self._woke_late:
+            self._woke_late = True
+            time.sleep(self.lateness_seconds)
+        return occurred
+
+
+def test_the_second_wait_ends_at_the_settle_instant_however_late_the_first_one_woke(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr("agent_providers.process.CLI_TERMINATION_GRACE_SECONDS", 0.2)
+
+    @dataclass
+    class LateWakingState(process._BoundedRunState):
+        completed: threading.Event = field(default_factory=_LateWakingEvent)
+
+    release_cleanup = threading.Event()
+    real_reap = process._reap_process_group
+    monkeypatch.setattr(process, "_BoundedRunState", LateWakingState)
+    monkeypatch.setattr(
+        process,
+        "_reap_process_group",
+        lambda child: (release_cleanup.wait(timeout=2), real_reap(child))[1],
+    )
+    deadline = time.monotonic() + 0.05
+
+    outcome = run_cli_bounded(
+        shell_child("-c", "exec sleep 10"),
+        stdin_payload=None,
+        read="all",
+        deadline=deadline,
+    )
+    returned_at = time.monotonic()
+    release_cleanup.set()
+
+    assert outcome.reason is CliRunReason.CLEANUP_OVERRAN
+    assert returned_at < cli_settle_deadline(deadline) + _LateWakingEvent.lateness_seconds / 2
 
 
 def test_bounded_runner_notifies_a_zombie_reap_only_after_background_confirmation(

@@ -1,6 +1,8 @@
-"""The HTTP surface: ``POST /runs``, the one entrance through which an app starts a run.
+"""The HTTP surface: ``POST /runs``, the one entrance through which an app starts a run,
+and ``GET /runs/{id}``, through which the app and user that started it read where it stands.
 
-A request is checked in a fixed order, and the first failure answers:
+Both routes check the two tokens first, with the same answers. A ``POST`` is then
+checked in a fixed order, and the first failure answers:
 
 1. the workload token, then the user token (``agent_service.identity``);
 2. the body's protocol version, then its shape (``agent_service.run_request``);
@@ -9,7 +11,10 @@ A request is checked in a fixed order, and the first failure answers:
 
 An admitted run answers ``200 text/event-stream`` with its frames
 (``agent_service.run_events``). Every refusal is a typed ``RunRejection``
-that is never cached. No answer echoes a token.
+that is never cached. No answer echoes a token. A ``GET`` answers the run's
+``RunStatus`` to its owner, and one ``not_found`` to everyone else: for an id
+nobody began, an expired or evicted run, another app's or user's run, and a
+path segment that is not a run id's text form.
 """
 
 from __future__ import annotations
@@ -19,6 +24,7 @@ import uuid
 from collections.abc import Mapping
 from http import HTTPStatus
 from typing import Final
+from uuid import UUID
 
 from fastapi import FastAPI, Request
 from fastapi.responses import Response, StreamingResponse
@@ -30,6 +36,7 @@ from agent_service.identity import Caller, CallerCheck, build_verifier
 from agent_service.routing import NotEnabled, route
 from agent_service.run_events import run_frames
 from agent_service.run_liveness import LoopClock
+from agent_service.run_records import RunRecords
 from agent_service.run_request import MAX_REQUEST_BYTES, parse_run_request
 from agent_service.runners import AdmittedRun, Runners
 
@@ -65,19 +72,18 @@ def create_app(
     config: ServiceConfig,
     *,
     runners: Runners | None = None,
+    records: RunRecords | None = None,
     fetch_key_set: KeySetFetch = fetch_key_set_over_https,
     monotonic_clock: MonotonicClock = time.monotonic,
 ) -> FastAPI:
     callers = CallerCheck(build_verifier(config.identity, fetch_key_set, monotonic_clock), config)
     installed_runners = runners or Runners()
+    installed_records = records or RunRecords()
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
     @app.post("/runs")
     async def start_run(request: Request) -> Response:
-        caller = await callers.caller(
-            request.headers.get(WORKLOAD_TOKEN_HEADER),
-            _bearer_token(request.headers.get("Authorization")),
-        )
+        caller = await _caller_of(callers, request)
         if isinstance(caller, RejectionCode):
             return rejection(caller)
         body = await _limited_body(request)
@@ -85,6 +91,25 @@ def create_app(
         if isinstance(run_request, RejectionCode):
             return rejection(run_request)
         return _admitted(config, installed_runners, caller, run_request)
+
+    @app.get("/runs/{run_id}")
+    async def run_status(request: Request, run_id: str) -> Response:
+        caller = await _caller_of(callers, request)
+        if isinstance(caller, RejectionCode):
+            return rejection(caller)
+        parsed_id = _run_id_from(run_id)
+        status = (
+            None
+            if parsed_id is None
+            else installed_records.read(parsed_id, caller.app, caller.principal)
+        )
+        if status is None:
+            return rejection(RejectionCode.NOT_FOUND)
+        return Response(
+            content=status.model_dump_json(),
+            media_type="application/json",
+            headers={"Cache-Control": "no-store"},
+        )
 
     return app
 
@@ -133,6 +158,22 @@ def rejection(code: RejectionCode) -> Response:
         media_type="application/json",
         headers=headers,
     )
+
+
+async def _caller_of(callers: CallerCheck, request: Request) -> Caller | RejectionCode:
+    return await callers.caller(
+        request.headers.get(WORKLOAD_TOKEN_HEADER),
+        _bearer_token(request.headers.get("Authorization")),
+    )
+
+
+def _run_id_from(segment: str) -> UUID | None:
+    """The run id a path segment names: only the 8-4-4-4-12 text form, in any letter case."""
+    try:
+        run_id = UUID(segment)
+    except ValueError:
+        return None
+    return run_id if str(run_id) == segment.lower() else None
 
 
 def _bearer_token(authorization: str | None) -> str | None:

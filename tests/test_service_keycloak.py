@@ -14,6 +14,7 @@ Runs only where ``KEYCLOAK_URL`` names that Keycloak.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from uuid import uuid4
 
 import pytest
 from service_support import (
@@ -22,8 +23,10 @@ from service_support import (
     ScriptedRunner,
     StepClock,
     TokenMint,
+    answer_of,
     assert_rejected,
     decoded_events,
+    get_run,
     post_run,
     run_body,
     run_headers,
@@ -41,11 +44,14 @@ from test_keycloak_token_shapes import (
     _realm_url,
 )
 from webauth.jwt_verification import KEY_SET_REFRESH_COOLDOWN_SECONDS, KeySetFetchError
+from wire_builders import started
 
-from agent_client.wire import RejectionCode
+from agent_client.wire import RejectionCode, RunStatus
 from agent_providers.events import AssistantTextEvent, FinalEvent
 from agent_service.app import create_app
+from agent_service.identity import Principal
 from agent_service.routing import Api, Cli
+from agent_service.run_records import RunRecords
 from agent_service.runners import Runners
 
 pytestmark = [
@@ -82,12 +88,12 @@ def _workload_token(client: str) -> str:
     )
 
 
-def _user_token(user: str) -> str:
+def _user_token(user: str, login_client: str = USER_LOGIN_CLIENT) -> str:
     return _access_token(
         {
             "grant_type": "password",
-            "client_id": USER_LOGIN_CLIENT,
-            "client_secret": CLIENT_SECRETS[USER_LOGIN_CLIENT],
+            "client_id": login_client,
+            "client_secret": CLIENT_SECRETS[login_client],
             "username": user,
             "password": USER_PASSWORDS[user],
         }
@@ -148,6 +154,41 @@ def test_another_apps_workload_cannot_act_for_a_user_of_this_app(service):
     )
 
     assert_rejected(response, RejectionCode.FORBIDDEN, 403)
+
+
+def test_only_the_user_who_started_a_run_reads_it_with_real_tokens(verified_claims_of):
+    alice_claims = verified_claims_of(_user_token("alice"))
+    run_id = uuid4()
+    records = RunRecords()
+    records.begin(
+        started(run_id),
+        "songmaker",
+        Principal(str(alice_claims["iss"]), str(alice_claims["sub"])),
+    )
+    app = create_app(
+        service_config(issuer=_realm_url()),
+        records=records,
+        fetch_key_set=_fetch_key_set_from_test_keycloak,
+    )
+    with served(app) as base_url:
+        songmaker = _songmaker_workload()
+        alice = get_run(base_url, run_headers(songmaker, _user_token("alice")), str(run_id))
+        bob = get_run(base_url, run_headers(songmaker, _user_token("bob")), str(run_id))
+        never_begun = get_run(
+            base_url, run_headers(songmaker, _user_token("alice")), str(uuid4())
+        )
+        through_presentator = get_run(
+            base_url,
+            run_headers(
+                _workload_token(PRESENTATOR_CLIENT), _user_token("alice", PRESENTATOR_CLIENT)
+            ),
+            str(run_id),
+        )
+
+    assert RunStatus.model_validate_json(alice.content).run_id == run_id
+    assert_rejected(never_begun, RejectionCode.NOT_FOUND, 404)
+    assert answer_of(bob) == answer_of(never_begun)
+    assert answer_of(through_presentator) == answer_of(never_begun)
 
 
 def test_a_token_of_an_unpublished_key_is_unavailable_once_the_key_set_origin_stops():

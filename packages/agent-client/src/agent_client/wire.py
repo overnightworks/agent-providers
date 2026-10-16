@@ -4,7 +4,8 @@ This module is the one owner of what travels between a client and the
 service (decision record 0001, H6): the request that starts a run, the run's
 event stream as a closed union discriminated on ``type`` with every event
 carrying the protocol version, the run id and its sequence number, and the
-typed body the service answers with when it refuses a request.
+typed body the service answers with when it refuses a request, and the status
+body it answers ``GET /runs/{id}`` with.
 A new variant or a new field is a new ``PROTOCOL_VERSION``.
 
 Validation is strict, so the wire's JSON types are the contract: a sequence
@@ -17,11 +18,20 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterator
+from datetime import timedelta
 from enum import StrEnum
-from typing import Annotated, Any, Final, Literal, TypeGuard, get_args
+from typing import Annotated, Any, Final, Literal, Self, TypeGuard, get_args
 from uuid import UUID
 
-from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field
+from pydantic import (
+    AfterValidator,
+    AwareDatetime,
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    model_validator,
+)
 
 from agent_client.tools import ToolEffect
 
@@ -40,6 +50,22 @@ class FailureCode(StrEnum):
     LIMIT_EXCEEDED = "limit_exceeded"
     IDLE_TIMEOUT = "idle_timeout"
     INTERNAL_ERROR = "internal_error"
+
+
+class RunState(StrEnum):
+    """Where a run stands: still running, or how it ended."""
+
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class ClientLoss(StrEnum):
+    """How the service lost the client of a run: it fell behind, or it went away."""
+
+    DROPPED = "dropped"
+    DISCONNECTED = "disconnected"
 
 
 class RejectionCode(StrEnum):
@@ -245,6 +271,40 @@ class RunRejection(_WireModel):
 
     code: Annotated[RejectionCode, Field(strict=False)]
     message: Annotated[UnicodeText, Field(max_length=MAX_MESSAGE_LENGTH)]
+
+
+def _refuse_non_utc_instant(instant: AwareDatetime) -> AwareDatetime:
+    if instant.utcoffset() != timedelta(0):
+        raise ValueError("must be a UTC instant")
+    return instant
+
+
+UtcInstant = Annotated[AwareDatetime, AfterValidator(_refuse_non_utc_instant)]
+"""The one decider of a wire timestamp: an aware instant written in UTC."""
+
+
+class RunStatus(_WireModel):
+    """The HTTP body of ``GET /runs/{id}``: where a run stands.
+
+    ``events`` counts what the service accepted, not what the client received.
+    ``ended_at`` may precede ``started_at`` when the service's clock stepped back.
+    """
+
+    run_id: Annotated[UUID, Field(strict=False)]
+    state: Annotated[RunState, Field(strict=False)]
+    failure_code: Annotated[FailureCode | None, Field(strict=False)]
+    events: int = Field(ge=1)
+    started_at: UtcInstant
+    ended_at: UtcInstant | None
+    client_lost: Annotated[ClientLoss | None, Field(strict=False)]
+
+    @model_validator(mode="after")
+    def _ending_matches_state(self) -> Self:
+        if (self.failure_code is not None) != (self.state is RunState.FAILED):
+            raise ValueError("failure_code is set exactly when the run failed")
+        if (self.ended_at is None) != (self.state is RunState.RUNNING):
+            raise ValueError("ended_at is set exactly when the run is over")
+        return self
 
 
 class TurnRole(StrEnum):

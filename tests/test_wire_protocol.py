@@ -31,12 +31,16 @@ from agent_client.tools import ToolDeclaration, ToolEffect
 from agent_client.wire import (
     MAX_MESSAGE_LENGTH,
     PROTOCOL_VERSION,
+    ClientLoss,
     FailureCode,
     RejectionCode,
     RunEvent,
     RunRejection,
     RunRequest,
+    RunState,
+    RunStatus,
     TurnRole,
+    is_run_event,
 )
 from agent_providers.text_tool_protocol import render_tool_catalog
 from agent_providers.tools import ToolCatalog, anthropic_tool_schemas, openai_tool_schemas
@@ -276,6 +280,94 @@ def test_a_rejection_body_off_the_contract_is_refused(body: dict[str, object]) -
 
     with pytest.raises(ValidationError):
         RunRejection.model_validate_json(rejection_json)
+
+
+STATUS = {
+    "v": PROTOCOL_VERSION,
+    "run_id": str(RUN_ID),
+    "state": "succeeded",
+    "failure_code": None,
+    "events": 5,
+    "started_at": "2026-10-16T12:00:00Z",
+    "ended_at": "2026-10-16T12:00:04Z",
+    "client_lost": None,
+}
+RUNNING = {**STATUS, "state": "running", "ended_at": None}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param(STATUS, id="succeeded"),
+        pytest.param(RUNNING, id="running"),
+        pytest.param({**STATUS, "state": "cancelled"}, id="cancelled"),
+        *(
+            pytest.param({**STATUS, "state": "failed", "failure_code": code.value}, id=code.value)
+            for code in FailureCode
+        ),
+        *(
+            pytest.param({**STATUS, "client_lost": loss.value}, id=f"client {loss.value}")
+            for loss in ClientLoss
+        ),
+        pytest.param({**RUNNING, "client_lost": "dropped"}, id="running with a lost client"),
+        pytest.param({**STATUS, "ended_at": "2026-10-16T11:59:00Z"}, id="ended before it started"),
+    ],
+)
+def test_a_status_body_round_trips_through_its_json(body: dict[str, object]) -> None:
+    status = RunStatus.model_validate_json(json.dumps(body))
+
+    assert json.loads(status.model_dump_json()) == body
+    assert not is_run_event(status)
+
+
+def test_a_status_body_names_its_state_and_codes_as_enums() -> None:
+    body = {**STATUS, "state": "failed", "failure_code": "limit_exceeded", "client_lost": "dropped"}
+
+    status = RunStatus.model_validate_json(json.dumps(body))
+
+    assert (status.state, status.failure_code, status.client_lost) == (
+        RunState.FAILED,
+        FailureCode.LIMIT_EXCEEDED,
+        ClientLoss.DROPPED,
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param({**STATUS, "extra": 1}, id="unknown key"),
+        *(
+            pytest.param(
+                {name: value for name, value in STATUS.items() if name != missing},
+                id=f"no {missing}",
+            )
+            for missing in STATUS
+        ),
+        pytest.param({**STATUS, "v": True}, id="version true"),
+        pytest.param({**STATUS, "v": 1.0}, id="version as a float"),
+        pytest.param({**STATUS, "v": 2}, id="version 2"),
+        pytest.param({**STATUS, "events": 0}, id="no events"),
+        pytest.param({**STATUS, "events": True}, id="events true"),
+        pytest.param({**STATUS, "events": 1.0}, id="events as a float"),
+        pytest.param({**STATUS, "events": "3"}, id="events as a string"),
+        pytest.param({**STATUS, "run_id": "not-a-uuid"}, id="run id not a uuid"),
+        pytest.param({**STATUS, "state": "done"}, id="unknown state"),
+        pytest.param({**STATUS, "failure_code": "interrupted"}, id="failure code on success"),
+        pytest.param({**STATUS, "state": "failed"}, id="failed without a code"),
+        pytest.param({**RUNNING, "ended_at": "2026-10-16T12:00:04Z"}, id="running with an end"),
+        pytest.param({**STATUS, "ended_at": None}, id="ended without an end"),
+        pytest.param({**STATUS, "started_at": "2026-10-16T12:00:00"}, id="naive start"),
+        pytest.param({**STATUS, "started_at": "2026-10-16T14:00:00+02:00"}, id="start at +02:00"),
+        pytest.param({**STATUS, "ended_at": "2026-10-16T14:00:04+02:00"}, id="end at +02:00"),
+        pytest.param({**STATUS, "started_at": 1792152000}, id="start as an integer"),
+        pytest.param({**STATUS, "client_lost": "gone"}, id="unknown client loss"),
+    ],
+)
+def test_a_status_body_off_the_contract_is_refused(body: dict[str, object]) -> None:
+    status_json = json.dumps(body)
+
+    with pytest.raises(ValidationError):
+        RunStatus.model_validate_json(status_json)
 
 
 REQUEST = {

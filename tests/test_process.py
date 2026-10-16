@@ -1376,7 +1376,7 @@ def test_private_credential_home_is_removed_when_its_process_ends_with_cleanup_p
     assert not Path(completed.stdout.strip()).exists()
 
 
-_REFUSED_THEN_ALLOWED_REMOVAL_SCRIPT = """
+_REFUSE_REMOVAL_TWICE_PRELUDE = """
 import gc
 import shutil
 import sys
@@ -1406,35 +1406,47 @@ home = PrivateCredentialHome(
     missing_credential_is_error=True,
 )
 home_path = home.path
+"""
+_REFUSED_THEN_ALLOWED_REMOVAL_SCRIPT = _REFUSE_REMOVAL_TWICE_PRELUDE + """
 del home
 gc.collect()
 print(home_path)
 print(home_path.exists())
 """
+_HOME_STILL_ALIVE_AT_EXIT_SCRIPT = _REFUSE_REMOVAL_TWICE_PRELUDE + """
+print(home_path)
+"""
 
 
-def test_private_credential_home_is_removed_at_exit_after_its_finalizer_failed(
-    tmp_path: Path,
-) -> None:
+def _run_home_script(script: str, tmp_path: Path) -> list[str]:
     source = tmp_path / "source.json"
     source.write_text(_CATALOG_AUTH_PAYLOAD)
-
     completed = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            _REFUSED_THEN_ALLOWED_REMOVAL_SCRIPT,
-            current_config().model_dump_json(),
-            str(source),
-        ],
+        [sys.executable, "-c", script, current_config().model_dump_json(), str(source)],
         capture_output=True,
         text=True,
         check=True,
         timeout=60,
     )
+    return completed.stdout.split()
 
-    home_path, existed_after_finalizer = completed.stdout.split()
+
+def test_private_credential_home_is_removed_at_exit_after_its_finalizer_failed(
+    tmp_path: Path,
+) -> None:
+    home_path, existed_after_finalizer = _run_home_script(
+        _REFUSED_THEN_ALLOWED_REMOVAL_SCRIPT, tmp_path,
+    )
+
     assert existed_after_finalizer == "True"
+    assert not Path(home_path).exists()
+
+
+def test_private_credential_home_still_alive_at_exit_is_removed_after_its_finalizer_failed(
+    tmp_path: Path,
+) -> None:
+    (home_path,) = _run_home_script(_HOME_STILL_ALIVE_AT_EXIT_SCRIPT, tmp_path)
+
     assert not Path(home_path).exists()
 
 

@@ -1150,15 +1150,24 @@ class _PrivateCredentialHomeReservation:
         self.release()
 
 
-def _remove_abandoned_tree(
-    root: Path, creator_process_id: int, *, retry_at_exit: bool = True,
-) -> None:
+def _remove_abandoned_tree(root: Path, creator_process_id: int) -> None:
     if os.getpid() != creator_process_id:
         return
-    if not _remove_private_tree(root) and retry_at_exit:
-        atexit.register(
-            _remove_abandoned_tree, root, creator_process_id, retry_at_exit=False,
-        )
+    if not _remove_private_tree(root):
+        _homes_awaiting_exit_sweep.add((root, creator_process_id))
+
+
+def _sweep_failed_homes_at_exit() -> None:
+    for root, creator_process_id in tuple(_homes_awaiting_exit_sweep):
+        if os.getpid() == creator_process_id:
+            _remove_private_tree(root)
+
+
+# Registered at import, before any weakref.finalize exists. atexit runs handlers
+# last-in first-out, so weakref's exit hook runs first and fills the registry,
+# and this sweep runs after it.
+_homes_awaiting_exit_sweep: set[tuple[Path, int]] = set()
+atexit.register(_sweep_failed_homes_at_exit)
 
 
 def _remove_private_tree(root: Path) -> bool:

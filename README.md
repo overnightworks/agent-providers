@@ -122,8 +122,9 @@ until its direct child has exited, including a delayed spawn or background
 reap; a grandchild that outlives that child is not waited for, and the
 synchronous call's timeout kills only the direct child. A catalog home lasts for
 its bounded probe. Removal never changes a call's outcome: a home that cannot be
-removed is logged by error class alone, without its path, and removal is retried
-when the home is collected or the process exits. A direct overwrite of the copy fails, while a CLI can create and
+removed is logged by error class alone, without its path. Removal is tried at
+`close()`, then by the finalizer, then by one exit-time sweep; after that the copy
+stays under the host's root, logged at error level. A direct overwrite of the copy fails, while a CLI can create and
 rename a replacement in its disposable directory; that renewal vanishes at
 cleanup. This is not evidence that a CLI refreshes credentials in practice.
 

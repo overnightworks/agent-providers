@@ -57,6 +57,7 @@ from agent_providers.process import (
     run_claude_catalog_cli,
 )
 from agent_providers.spawn import (
+    AsyncPipedProcess,
     ChildProcess,
     PipedProcessTimeout,
     closed_environment,
@@ -328,7 +329,7 @@ async def acall_claude_with_mcp_stream(
 
 
 async def _consume_stream(
-    proc: asyncio.subprocess.Process,
+    proc: AsyncPipedProcess,
     timeout_seconds: int,
     correlation_id: str | None = None,
 ) -> AsyncIterator[StreamEvent]:
@@ -1580,7 +1581,7 @@ def _probe_cli_surface_sync(
 
 
 async def _reap_stream_process_after_cancellation(
-    proc: asyncio.subprocess.Process,
+    proc: AsyncPipedProcess,
 ) -> None:
     """Finish a streaming CLI reap even if its consumer was cancelled.
 
@@ -1619,7 +1620,7 @@ async def _reap_stream_process_after_cancellation(
     await anyio.lowlevel.checkpoint_if_cancelled()
 
 
-async def _reap_process_group(proc: asyncio.subprocess.Process) -> bool:
+async def _reap_process_group(proc: AsyncPipedProcess) -> bool:
     """Terminate ``proc``'s whole process group and confirm it exited.
 
     Every wait below is bounded — a process the OS has already confirmed
@@ -1652,7 +1653,7 @@ async def _reap_process_group(proc: asyncio.subprocess.Process) -> bool:
     return await _confirm_exit_or_track_zombie(proc)
 
 
-async def _wait_for_sigterm_exit(proc: asyncio.subprocess.Process) -> bool:
+async def _wait_for_sigterm_exit(proc: AsyncPipedProcess) -> bool:
     try:
         async with asyncio.timeout(CLAUDE_CLI_SIGTERM_GRACE_SECONDS):
             await proc.wait()
@@ -1661,7 +1662,7 @@ async def _wait_for_sigterm_exit(proc: asyncio.subprocess.Process) -> bool:
         return False
 
 
-async def _wait_for_zombie_reap(proc: asyncio.subprocess.Process) -> bool:
+async def _wait_for_zombie_reap(proc: AsyncPipedProcess) -> bool:
     try:
         async with asyncio.timeout(CLAUDE_CLI_ZOMBIE_REAP_TIMEOUT_SECONDS):
             await proc.wait()
@@ -1670,14 +1671,14 @@ async def _wait_for_zombie_reap(proc: asyncio.subprocess.Process) -> bool:
         return False
 
 
-async def _confirm_exit_or_track_zombie(proc: asyncio.subprocess.Process) -> bool:
+async def _confirm_exit_or_track_zombie(proc: AsyncPipedProcess) -> bool:
     if await _wait_for_zombie_reap(proc):
         _release_zombie_reservation(proc.pid)
         return False
     return _track_zombie_reap_async(proc)
 
 
-def _track_zombie_reap_async(proc: asyncio.subprocess.Process) -> bool:
+def _track_zombie_reap_async(proc: AsyncPipedProcess) -> bool:
     log.error(
         "Claude CLI process group %d did not exit within %ds of SIGKILL",
         proc.pid,
@@ -1690,7 +1691,7 @@ def _track_zombie_reap_async(proc: asyncio.subprocess.Process) -> bool:
     return True
 
 
-async def _reap_in_background(proc: asyncio.subprocess.Process) -> None:
+async def _reap_in_background(proc: AsyncPipedProcess) -> None:
     """Finish waiting for a process ``_reap_process_group`` gave up waiting
     on, off any caller's critical path, so it is reaped once it does exit
     rather than left a zombie for the rest of the container's life."""
@@ -1759,7 +1760,7 @@ async def _spawn_reserved_async_cli_process(
     *,
     home_reservation: process._PrivateCredentialHomeReservation | None = None,
     stream_buffer_limit: int | None = None,
-) -> asyncio.subprocess.Process:
+) -> AsyncPipedProcess:
     reservation = _reserve_zombie_admission(home_reservation)
     if reservation is None:
         if home_reservation is not None:

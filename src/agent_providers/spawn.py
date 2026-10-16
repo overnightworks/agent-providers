@@ -60,6 +60,7 @@ INHERITED_MACHINE_VARIABLES: Final[tuple[str, ...]] = (
 StderrPolicy = Literal["capture", "devnull"]
 
 type PipedProcess = subprocess.Popen[bytes]
+type AsyncPipedProcess = asyncio.subprocess.Process
 PipedProcessTimeout = subprocess.TimeoutExpired
 
 
@@ -172,7 +173,7 @@ async def open_async_pipes(
     child: ChildProcess,
     *,
     stream_buffer_limit: int | None = None,
-) -> asyncio.subprocess.Process:
+) -> AsyncPipedProcess:
     """Start one child on the event loop with pipes on every stream.
 
     Its own session, because every failure path in the calling turn reaps

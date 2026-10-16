@@ -22,6 +22,7 @@ from provider_test_support import (
     ANOTHER_RUNNER_FAILURE_CANARY,
     GROK_LOGGED_IN,
     SECRET_ENV_KEYS,
+    FailingLogHandler,
     RunnerFailureWatch,
     fail_to_start_the_runner_thread,
     override_provider_runtime,
@@ -2677,20 +2678,7 @@ def test_a_report_made_while_the_log_handler_fails_never_prints_the_failure_text
     monkeypatch, failure_watch, pooled_run,
 ) -> None:
     process_pool, callbacks = pooled_run
-    handler_errors: list[logging.LogRecord] = []
-
-    class FailingHandler(logging.Handler):
-        def emit(self, record: logging.LogRecord) -> None:
-            try:
-                raise RuntimeError("log handler failed")
-            except RuntimeError:
-                self.handleError(record)
-
-        def handleError(self, record: logging.LogRecord) -> None:
-            handler_errors.append(record)
-            super().handleError(record)
-
-    handler = FailingHandler()
+    handler = FailingLogHandler()
     process_logger = logging.getLogger("agent_providers.process")
     process_logger.addHandler(handler)
     monkeypatch.setattr(process, "_exchange_bounded", _raising(ValueError(A_RUNNER_FAILURE_CANARY)))
@@ -2701,7 +2689,7 @@ def test_a_report_made_while_the_log_handler_fails_never_prints_the_failure_text
 
     assert outcome.reason is CliRunReason.IO_ERROR
     assert failure_watch.reported_steps() == ["exchange ValueError"]
-    assert len(handler_errors) == 1
+    assert len(handler.handled_records) == 1
     assert process_pool.reservation_count() == 0
     failure_watch.assert_nothing_leaked()
 

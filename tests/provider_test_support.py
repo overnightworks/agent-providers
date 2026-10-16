@@ -25,7 +25,7 @@ import stat
 import tempfile
 import threading
 import traceback
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
@@ -557,6 +557,9 @@ ANOTHER_RUNNER_FAILURE_CANARY: Final = "second-runner-failure-canary-2e8b"
 RUNNER_STEP_FAILURE_PREFIX: Final = "agent CLI runner step failed: "
 
 
+_RUNNER_THREAD_TARGET_SUFFIXES: Final = ("(_run_cli_bounded)", "(_run_codex_image_runner)")
+
+
 class RunnerFailureWatch:
     """What a failed runner step may leave behind: nothing but its named class.
 
@@ -579,17 +582,17 @@ class RunnerFailureWatch:
         else:
             self.unhandled_thread_errors.append(error)
 
-    def _wait_for_the_runner_threads_to_end(self) -> None:
+    def wait_for_the_runner_threads_to_end(self) -> None:
         for thread in threading.enumerate():
             if (
                 thread not in self._threads_of_earlier_tests
-                and thread.name.endswith("(_run_cli_bounded)")
+                and thread.name.endswith(_RUNNER_THREAD_TARGET_SUFFIXES)
             ):
                 thread.join(timeout=5)
                 assert not thread.is_alive(), "a runner thread outlived its test"
 
     def reported_steps(self) -> list[str]:
-        self._wait_for_the_runner_threads_to_end()
+        self.wait_for_the_runner_threads_to_end()
         return [
             record.getMessage().removeprefix(RUNNER_STEP_FAILURE_PREFIX)
             for record in self._caplog.records
@@ -601,7 +604,7 @@ class RunnerFailureWatch:
         return {thread.name for thread in self._threads_of_earlier_tests}
 
     def assert_nothing_leaked(self, *surfaces: BaseException | str) -> None:
-        self._wait_for_the_runner_threads_to_end()
+        self.wait_for_the_runner_threads_to_end()
         captured = self._capfd.readouterr()
         visible = "\n".join([
             formatted_log_text(self._caplog.records),
@@ -638,13 +641,33 @@ def pool_callbacks(process_pool, reservation) -> dict[str, Any]:
     }
 
 
-def fail_to_start_the_runner_thread(monkeypatch, error: BaseException) -> None:
-    """Make only the bounded runner's worker thread fail to start."""
+def fail_to_start_the_runner_thread(
+    monkeypatch, error: BaseException, target: Callable[..., Any] = process._run_cli_bounded,
+) -> None:
+    """Make only the worker thread running ``target`` fail to start."""
     real_start = threading.Thread.start
 
     def start(worker: threading.Thread) -> None:
-        if worker._target is process._run_cli_bounded:
+        if worker._target is target:
             raise error
         real_start(worker)
 
     monkeypatch.setattr(threading.Thread, "start", start)
+
+
+class FailingLogHandler(logging.Handler):
+    """A log handler whose every emit fails and is handled, keeping the records it failed on."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.handled_records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            raise RuntimeError("log handler failed")
+        except RuntimeError:
+            self.handleError(record)
+
+    def handleError(self, record: logging.LogRecord) -> None:
+        self.handled_records.append(record)
+        super().handleError(record)

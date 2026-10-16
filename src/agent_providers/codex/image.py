@@ -58,6 +58,7 @@ from agent_providers.process import (
     CliLineChannel,
     CliRunOutcome,
     CliRunReason,
+    StepFailures,
     cli_settle_deadline,
     resolve_cli_binary,
 )
@@ -367,8 +368,8 @@ def _run_codex_image_runner(
     channel: CliLineChannel,
 ) -> None:
     """Publish a failed outcome when the one runner step raises, then name its class."""
-    failure: str | None = None
-    try:
+    failures = StepFailures()
+    with failures.contained("run"):
         run_reserved_codex_cli(
             reservation,
             child,
@@ -378,11 +379,10 @@ def _run_codex_image_runner(
             output_read_limit_bytes=CODEX_CLI_TURN_OUTPUT_READ_LIMIT_BYTES,
             stdout_line_channel=channel,
         )
-    except BaseException as exc:  # NOSONAR(S5754) every exit publishes an outcome
-        failure = type(exc).__name__
-        channel._close(_failed_runner_outcome())
-    if failure is not None:
-        log.error("Codex image runner step failed route=cli step=run error=%s", failure)
+    if failures.failed("run"):
+        with failures.contained("publish"):
+            channel._close(_failed_runner_outcome())
+    failures.report()
 
 
 def _failed_runner_outcome() -> CliRunOutcome:

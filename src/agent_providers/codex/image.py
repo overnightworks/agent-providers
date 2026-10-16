@@ -289,7 +289,7 @@ def _usage_limit_retry_at(message: str) -> str | None:
     match = _USAGE_LIMIT_RETRY_AT_PATTERN.search(message)
     if match is None:
         return None
-    return match.group("retry_at").rstrip().removesuffix(".")
+    return match.group("retry_at").rstrip().removesuffix(".") or None
 
 
 def _codex_image_turn_failure_message(stdout: str) -> str | None:

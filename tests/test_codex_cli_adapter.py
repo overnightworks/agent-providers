@@ -197,6 +197,11 @@ def _image_event_stream(codex_home: Path) -> str:
     )
 
 
+def _quota_failure(message: str) -> CliRunOutcome:
+    event = {"type": "turn.failed", "error": {"message": message}}
+    return _outcome(returncode=1, stdout=json.dumps(event) + "\n")
+
+
 def _image_runner(
     outcome: CliRunOutcome,
     create_artifacts: Callable[[Path], None] | None = None,
@@ -665,6 +670,24 @@ def test_a_generated_image_outside_the_hosts_bounds_is_refused(
             "Sep 7th, 2026 8:45 PM",
         ),
         (
+            _quota_failure("usage limit, try again at Sep 7th, 2026 8:45 PM.\nSee billing."),
+            codex_image.CodexImageQuotaError,
+            "usage limit",
+            "Sep 7th, 2026 8:45 PM",
+        ),
+        (
+            _quota_failure("usage limit, try again at Sep 7th.."),
+            codex_image.CodexImageQuotaError,
+            "usage limit",
+            "Sep 7th.",
+        ),
+        (
+            _quota_failure("usage limit, try again at ."),
+            codex_image.CodexImageQuotaError,
+            "usage limit",
+            None,
+        ),
+        (
             _outcome(
                 returncode=1,
                 stdout=(
@@ -684,6 +707,9 @@ def test_a_generated_image_outside_the_hosts_bounds_is_refused(
         "nonzero-exit",
         "turn-failed-names-auth",
         "turn-failed-names-usage-limit",
+        "usage-limit-hint-followed-by-a-later-line",
+        "usage-limit-hint-keeps-all-but-one-trailing-dot",
+        "usage-limit-hint-without-a-time",
         "turn-failed-names-generic-message",
     ),
 )
@@ -701,7 +727,7 @@ def test_codex_cover_image_names_terminal_cli_failures(
 
     if expected_message is not None:
         assert expected_message in str(raised.value)
-    if expected_retry_at is not None:
+    if expected_error is codex_image.CodexImageQuotaError:
         assert raised.value.retry_at == expected_retry_at
 
 

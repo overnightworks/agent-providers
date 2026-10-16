@@ -1403,7 +1403,10 @@ def _clear_frames_and_cut_links(
     """Clear the failure's finished frames and cut its inner links, group members included."""
     entry = first_entry
     while entry is not None and not any(entry is kept for kept in callers_traceback):
-        entry.tb_frame.clear()
+        try:
+            entry.tb_frame.clear()
+        except RuntimeError:
+            break  # a frame still executing belongs to the caller; below it is the earlier raise
         entry = entry.tb_next
     failure.__cause__ = None
     if failure.__context__ is not None:

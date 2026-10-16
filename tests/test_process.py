@@ -2787,6 +2787,40 @@ def _raise_a_group_whose_member_frame_holds_the_document(source_document: bytes)
     return source_document
 
 
+def _the_running_frame_of(function) -> types.FrameType:
+    frame = sys._getframe()
+    while frame.f_code is not function.__code__:
+        frame = frame.f_back
+    return frame
+
+
+def _caught_earlier_in_the_running_callers(source_document: bytes) -> ValueError:
+    nested_frames = (_the_running_frame_of(_drive_in_the_caller), sys._getframe(1))
+    entry = None
+    for frame in reversed(nested_frames):
+        entry = types.TracebackType(entry, frame, frame.f_lasti, frame.f_lineno)
+    return ValueError("caught earlier by a caller that is still running").with_traceback(entry)
+
+
+def _raise_an_exception_caught_earlier_in_a_running_frame(source_document: bytes) -> bytes:
+    raise _caught_earlier_in_the_running_callers(source_document)
+
+
+def _raise_a_group_of_that_exception_and_a_member_holding_the_document(
+    source_document: bytes,
+) -> bytes:
+    caught_earlier = _caught_earlier_in_the_running_callers(source_document)
+    try:
+        _raise_a_group_whose_member_frame_holds_the_document(source_document)
+    except ExceptionGroup as group:
+        raise ExceptionGroup("group", [caught_earlier, *group.exceptions])
+    return source_document
+
+
+def _re_raise_the_handled_exception_from_none(source_document: bytes) -> bytes:
+    raise sys.exception() from None
+
+
 def _traceback_entries(error: BaseException) -> Iterator[types.TracebackType]:
     entry = error.__traceback__
     while entry is not None:
@@ -2804,6 +2838,11 @@ _CREDENTIAL_COPIES = {
     "another-wearing-the-callers-frames": _raise_another_exception_wearing_the_callers_frames,
     "group-member-after-the-decoder-error": _raise_a_group_whose_member_follows_the_decoder_error,
     "group-member-frame-holds-the-document": _raise_a_group_whose_member_frame_holds_the_document,
+    "caught-earlier-in-a-running-frame": _raise_an_exception_caught_earlier_in_a_running_frame,
+    "group-of-a-running-frame-exception-and-a-member-holding-the-document": (
+        _raise_a_group_of_that_exception_and_a_member_holding_the_document
+    ),
+    "raise-sys-exception-from-none": _re_raise_the_handled_exception_from_none,
 }
 
 
@@ -2817,6 +2856,7 @@ def test_a_credential_copy_leaves_the_callers_exception_untouched_and_drops_the_
     credential_copy,
 ) -> None:
     def enter_with_the_copy(handled: BaseException):
+        handled.__suppress_context__ = False
         links_at_entry = _links_of(handled)
         traceback_at_entry = handled.__traceback__
         try:
@@ -2842,6 +2882,7 @@ def test_a_credential_copy_leaves_the_callers_exception_untouched_and_drops_the_
     assert handled.__context__ is not handled
     assert handled.__cause__ is not None
     assert not decoder_errors_left
+    assert "executing frame" not in str(propagated)
     for error in (handled, propagated):
         if error is not None:
             assert not traceback_frames_hold(error, "canary-")

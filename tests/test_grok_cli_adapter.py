@@ -401,7 +401,10 @@ def test_grok_tool_transport_rejects_a_multi_result_batch(monkeypatch, caplog) -
     error = assert_a_multi_result_batch_is_rejected(transport)
     assert not isinstance(error, TextToolCallRejectedError)
     assert len(calls) == 1
-    assert "tool_result_batch_invalid" in caplog.text
+    assert (
+        "Tool protocol rejection provider=grok route=cli code=tool_result_batch_invalid"
+        in caplog.text
+    )
 
 
 @pytest.mark.parametrize("session_id", (None, "not-a-uuid"))
@@ -894,6 +897,7 @@ def test_grok_tool_transport_removes_its_private_session_tree_and_redacts_logs(
     working_directory = str(calls[0][0].working_directory)
     assert not Path(working_directory).exists()
     assert (external_session / "history.jsonl").read_text() == "leave me"
+    assert "Grok CLI tool round provider=grok route=cli round=1 session=" in caplog.text
     for forbidden in (lyrics, song_id, call_json, stderr_document, "prompt_history"):
         assert forbidden not in caplog.text
 

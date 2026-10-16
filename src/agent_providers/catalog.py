@@ -5,12 +5,9 @@ route right now* — answered by probing the mounted CLI or the provider's
 model endpoint. And *is this provider set up at all* — answered as one of
 four closed cases a host can render without re-deriving them.
 
-A host names its own surfaces (a chat, a judge, a batch job) and states per
+A host names its own surfaces (a chat, a batch job) and states per
 surface which CLI setup methods that surface can actually use; this package
 knows the providers, not the host's surfaces.
-
-Self-contained by design: no application import, so the package can be
-released on its own (issue #825).
 """
 
 from __future__ import annotations

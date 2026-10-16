@@ -4,9 +4,6 @@ This module owns the wire representation and validation only.  Which tools
 exist, what they are called and what they accept comes from the host's
 :class:`~agent_providers.tools.ToolCatalog`; executing one is the host's job
 as well.
-
-Self-contained by design: no application import, so the package can be
-released on its own (issue #825).
 """
 
 from __future__ import annotations
@@ -52,7 +49,7 @@ type JsonValue = JsonPrimitive | list[JsonValue] | dict[str, JsonValue]
 
 @dataclass(frozen=True)
 class TextToolCall:
-    """A validated call ready for the co-writer tool executor."""
+    """A validated call ready for the host's tool executor."""
 
     name: str
     arguments: dict[str, JsonValue]
@@ -334,7 +331,7 @@ def _parse_streamed_call(catalog: ToolCatalog, buffer: str) -> TextToolCall:
 
     The close is whatever immediately follows the call's own JSON value --
     see :func:`_first_json_boundary`. The JSON decoder consumes a closing
-    tag written inside a string value (lyrics that mention it, say)
+    tag written inside a string value (text that quotes it, say)
     structurally, as ordinary string content, so it is never mistaken for
     the close; only the tag right after the value's end counts. This also
     means the tag no longer has to sit on its own line: the boundary is
@@ -419,7 +416,7 @@ def _first_json_boundary(block: str, opening_line_length: int, close_tag: str) -
     pass, O(len(block)) -- and requires the closing tag to be the next thing
     after it, modulo JSON whitespace. ``JSONDecoder.raw_decode`` stops the
     moment the top-level value is complete, so a closing tag written inside
-    a string argument (lyrics that mention it, say) is consumed as ordinary
+    a string argument (text that quotes it, say) is consumed as ordinary
     string content on the way there rather than examined as a candidate
     boundary; a lookalike-stuffed payload still costs one linear parse, not
     one parse attempt per lookalike.

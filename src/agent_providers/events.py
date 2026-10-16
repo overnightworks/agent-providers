@@ -6,9 +6,6 @@ events, not the agent service's wire: the streamed run contract has one owner,
 ``agent_client.wire``, onto which the agent service maps a turn's events
 (slice A1a). Hosts that call the core directly still consume these types, so
 their field names and defaults stay a public contract.
-
-Self-contained by design: pydantic only, no application import, so the
-package can be released on its own (issue #825).
 """
 
 from __future__ import annotations

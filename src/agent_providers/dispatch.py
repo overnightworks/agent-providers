@@ -1,13 +1,10 @@
 """Run one turn on the provider and route the host selected — never another.
 
 A route is chosen by the host and executed here, with no fallback: a failing
-CLI never silently becomes an HTTP call, because a musician who signed a CLI
+CLI never silently becomes an HTTP call, because a user who signed a CLI
 in did not agree to spend an API key. Everything a turn needs beyond the
 route — the tools it may call and who may run them — arrives from the host
 as a catalog and an executor.
-
-Self-contained by design: no application import, so the package can be
-released on its own (issue #825).
 """
 
 from __future__ import annotations
@@ -125,7 +122,7 @@ async def stream_turn(
         raise _unavailable(provider, route, SafeRouteReasonCode.ROUTE_FAILED) from exc
     except Exception as exc:
         log.warning(
-            "Co-writer adapter failed provider=%s route=%s class=%s",
+            "Turn failed provider=%s route=%s class=%s",
             provider,
             route,
             type(exc).__name__,
@@ -206,7 +203,7 @@ async def _stream_grok_cli_tool_turn(
     catalog: ToolCatalog,
     correlation_id: str | None,
 ) -> AsyncIterator[StreamEvent]:
-    """Run Grok's text protocol through the shared co-writer tool loop."""
+    """Run Grok's text protocol through the shared tool loop."""
     async for event in _stream_cli_tool_turn(
         provider="grok",
         system=system,
@@ -227,7 +224,7 @@ async def _stream_codex_cli_tool_turn(
     catalog: ToolCatalog,
     correlation_id: str | None,
 ) -> AsyncIterator[StreamEvent]:
-    """Run Codex's text protocol through the shared co-writer tool loop."""
+    """Run Codex's text protocol through the shared tool loop."""
     async for event in _stream_cli_tool_turn(
         provider="codex",
         system=system,
@@ -269,7 +266,7 @@ async def _stream_cli_tool_turn(
         ) from exc
     except ToolLoopProtocolError as exc:
         log.warning(
-            "Co-writer tool protocol rejection provider=%s route=cli code=%s",
+            "Tool protocol rejection provider=%s route=cli code=%s",
             provider,
             ToolProtocolRejectionCode.TOOL_LOOP_TERMINAL_INVALID,
         )
@@ -302,7 +299,7 @@ def call_provider_once(
             raise
         raise _unavailable(provider, ProviderRoute.API, SafeRouteReasonCode.ROUTE_FAILED) from exc
     except Exception as exc:
-        log.warning("Judge adapter failed provider=%s class=%s", provider, type(exc).__name__)
+        log.warning("One-shot completion failed provider=%s class=%s", provider, type(exc).__name__)
         raise _unavailable(provider, ProviderRoute.API, SafeRouteReasonCode.ROUTE_FAILED) from exc
 
 

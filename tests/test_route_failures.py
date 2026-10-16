@@ -98,7 +98,10 @@ def test_terminal_tool_loop_rejection_logs_a_closed_code_without_input(caplog) -
 
     caplog.set_level("WARNING", logger="agent_providers.dispatch")
     asyncio.run(collect())
-    assert ToolProtocolRejectionCode.TOOL_LOOP_TERMINAL_INVALID in caplog.text
+    assert (
+        f"Tool protocol rejection provider=grok route=cli code="
+        f"{ToolProtocolRejectionCode.TOOL_LOOP_TERMINAL_INVALID}"
+    ) in caplog.text
     assert marker not in caplog.text
 
 

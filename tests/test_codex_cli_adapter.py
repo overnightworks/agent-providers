@@ -545,6 +545,7 @@ def test_codex_tool_transport_cleans_its_home_and_does_not_log_protocol_text(
 
     asyncio.run(collect_and_close())
     assert not calls[0][0].working_directory.exists()
+    assert "Codex CLI tool round provider=codex route=cli round=1 duration_ms=" in caplog.text
     for forbidden in (lyrics, song_id, protocol, "private stderr", "private.jsonl"):
         assert forbidden not in caplog.text
 

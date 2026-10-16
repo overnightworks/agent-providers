@@ -1,4 +1,4 @@
-"""The Codex CLI's album-cover image route.
+"""The Codex CLI's image route.
 
 What counts as an acceptable image is the host's decision, so every bound
 this route enforces arrives as an :class:`~agent_providers.images.ImagePolicy`.
@@ -107,7 +107,7 @@ _CODEX_IMAGE_ISOLATION_ARGS: Final = (
 
 
 class CodexImageError(Exception):
-    """A redacted failure while producing an album-cover suggestion."""
+    """A redacted failure while producing an image."""
 
 
 class CodexImageLoginError(CodexImageError):
@@ -146,7 +146,7 @@ class CodexImageCliError(CodexImageError):
 
 
 class CodexImageEncoderUnavailableError(CodexImageError):
-    """This deployment has no image encoder, so no turn can produce a cover."""
+    """This deployment has no image encoder, so no image turn can produce an image."""
 
 
 class CodexImageQuotaError(CodexImageError):

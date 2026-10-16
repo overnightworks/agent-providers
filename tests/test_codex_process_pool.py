@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from provider_test_support import override_provider_runtime
+from provider_test_support import override_turn_runtime
 
 from agent_providers.codex.pool import (
     CodexProcessKind,
@@ -14,7 +14,7 @@ from agent_providers.errors import CodexProcessPoolSaturatedError
 
 
 def test_the_process_wide_pool_admits_only_as_many_runs_as_the_runtime_allows() -> None:
-    override_provider_runtime(
+    override_turn_runtime(
         codex_max_concurrent_processes=2,
         codex_max_concurrent_image_runs=1,
     )

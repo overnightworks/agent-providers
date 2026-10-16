@@ -152,6 +152,9 @@ body rules be fixed before the build.
   forbid unknown fields; a refused file stops startup naming the field.
   `[identity]` names issuer, key-set URL (https), audience, subscription group,
   group claim and the clock leeway `leeway_seconds` (0 to 300, default 0);
+  `[runs]` the run's pace and limits: `heartbeat_interval_s` (an integer, 1 to
+  300, default 15), `idle_timeout_s` (default 120) and `max_duration_s`
+  (default 600), which must satisfy heartbeat < idle < maximum;
   `[profiles.<name>]` one profile per provider;
   `[purposes."<p>"]` an optional `cli_provider` and `api_alias`;
   `[apps.<app>]` its `workload_client`, its purposes, and its tools' effects,
@@ -226,7 +229,7 @@ a request that names its own tools or MCP endpoint could reach anything.
 - The capability is per run, not per call. When the service admits a run it
   mints one short-lived capability bound to the audience (the app's MCP origin),
   the app, the principal, the run id, the purpose, the tool allowlist, and an
-  expiry equal to the run's maximum duration. The CLI gets it in its per-run MCP
+  expiry equal to the run's maximum duration (`[runs] max_duration_s`). The CLI gets it in its per-run MCP
   config header; the API-route tool loop sends the same one. The app's MCP server
   checks it on every request, opens a fresh DB session and re-checks ownership.
 - Hardening: redirects are denied, egress is limited to the registered origins,
@@ -359,6 +362,47 @@ existing `agent_providers.events` is that contract.
 
 **Consequence.** A client validates a stream against one contract, and a
 second wire owner cannot appear without contradicting this ruling.
+
+### A1a3 liveness ruling (head, 16.10.2026)
+
+The numbers 15 s heartbeat, 120 s idle and 600 s maximum are provisional
+defaults of `[runs]`; A1b's live proof may retune them. Piece 1 of A1a3
+(`agent_service.run_liveness`):
+
+1. One injected clock; the origin t0 is the reading when `run_started` is
+   produced. The maximum is t0 + `max_duration_s`, whatever the runner does.
+2. `run_started.heartbeat_interval_s` is the configured cadence.
+3. A heartbeat is queued when the cadence passes with no frame queued and the
+   client has taken every queued frame; otherwise that beat is skipped. It
+   counts in `seq`.
+4. Idle time is only time spent waiting on the runner. Every runner event,
+   including an empty text fragment, resets it; a heartbeat and a stalled
+   client do not.
+5. After `idle_timeout_s` of waiting on the runner the run ends `failed:
+   idle_timeout`.
+6. At the maximum the decision `failed: limit_exceeded` is taken and the
+   runner's cancellation starts at once, even when the client does not read.
+   The terminal is queued after the runner's close has finished.
+7. One step is outstanding at a time; a heartbeat never cancels or restarts it.
+8. At one instant: a runner event already yielded, then the maximum, then
+   idle, then the heartbeat.
+9. Every ending closes the runner and waits for the close before the terminal
+   is queued; nothing but frames already encoded and the terminal follows the
+   decision.
+10. Closing the stream stops the runner the same way, once, and returns only
+    after the close has finished, however often the closer is cancelled.
+11. A close that raises is logged at ERROR with the run id and changes
+    nothing else. An unexpected error in the supervision stops the runner and
+    then cuts the stream, so a decoder sees it truncated.
+12. When a stream ends no task of the run is alive and the runner was closed
+    once.
+13. A cut-short run says the service's own fixed text and keeps its code even
+    after a side-effecting `tool_call` (ruling (c) holds).
+14. Bad numbers stop startup: strict types (no `true`, `15.5` or `inf`),
+    heartbeat 1 to 300, and heartbeat < idle < maximum.
+
+A runner must end when its step is cancelled or closed, and its close must
+finish in bounded time (`runners.py`).
 
 ## H7 CLI isolation and admission
 

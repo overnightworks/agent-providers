@@ -253,10 +253,12 @@ class SupervisedRun:
     async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:
         self._supervisor.cancel()
         try:
-            await _finished(self._supervisor)
+            try:
+                await _finished(self._supervisor)
+            finally:
+                await self._stop()
         finally:
-            await self._stop()
-        failure = None if self._supervisor.cancelled() else self._supervisor.exception()
+            failure = None if self._supervisor.cancelled() else self._supervisor.exception()
         if failure is None:
             return
         if exc_type is None:

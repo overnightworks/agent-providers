@@ -11,6 +11,7 @@ socket.
 from __future__ import annotations
 
 import asyncio
+import gc
 import logging
 import math
 import uuid
@@ -18,6 +19,7 @@ from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
 
+import anyio
 import pytest
 from service_support import (
     ALICE,
@@ -76,6 +78,7 @@ READ_SCRIPT = (
     FINAL,
 )
 EXHAUSTED = None
+RECORDING_FAILURE_CANARY = "RECORDING_FAILURE_CANARY"
 ALL_THE_WAY_TO_THE_MAXIMUM = 600
 STALL_PAST_THE_MAXIMUM = RunConfig(stall_timeout_s=590, idle_timeout_s=595)
 
@@ -606,10 +609,43 @@ async def _client_leaves(client: ClientSocket, response: asyncio.Task[None]) -> 
     client.leave()
 
 
-async def _response_is_cancelled_twice(client: ClientSocket, response: asyncio.Task[None]) -> None:
+async def _response_is_cancelled(client: ClientSocket, response: asyncio.Task[None]) -> None:
     response.cancel()
-    await asyncio.sleep(0)
-    response.cancel()
+
+
+@pytest.mark.parametrize("spec_version", ["2.3", "2.4"])
+@in_loop
+async def test_a_response_cancelled_again_during_the_held_close_still_waits_for_it(
+    monkeypatch, spec_version
+):
+    runner = GatedRunner()
+    runner.hold_close()
+    client = ClientSocket(spec_version=spec_version, blocks_the_second_chunk=True)
+    async with _answering(client, monkeypatch, runner) as (drive, records, response):
+        await drive.run_to(15)
+        response.cancel()
+        await drive.clock.parked()
+        assert not response.done()
+
+        for _ in range(3):
+            response.cancel()
+            await asyncio.sleep(0)
+            await drive.clock.parked()
+            assert not response.done()
+
+        drive.clock.advance_to(20)
+        runner.release_close()
+        with pytest.raises(asyncio.CancelledError):
+            await response
+
+        _assert_recorded(
+            _status_of_the_run(drive, records),
+            RunState.CANCELLED,
+            events=2,
+            at=20,
+            lost=ClientLoss.DISCONNECTED,
+        )
+        _assert_closed_cleanly(drive)
 
 
 @pytest.mark.parametrize(
@@ -617,10 +653,10 @@ async def _response_is_cancelled_twice(client: ClientSocket, response: asyncio.T
     [
         pytest.param("2.3", _client_leaves, None, id="disconnect-below-spec-2.4"),
         pytest.param(
-            "2.3", _response_is_cancelled_twice, asyncio.CancelledError, id="cancelled-below-2.4"
+            "2.3", _response_is_cancelled, asyncio.CancelledError, id="cancelled-below-2.4"
         ),
         pytest.param(
-            "2.4", _response_is_cancelled_twice, asyncio.CancelledError, id="cancelled-from-2.4"
+            "2.4", _response_is_cancelled, asyncio.CancelledError, id="cancelled-from-2.4"
         ),
     ],
 )
@@ -661,6 +697,100 @@ async def test_a_response_that_ends_waits_for_the_held_close_of_its_run_before_i
             lost=ClientLoss.DISCONNECTED,
         )
         _assert_closed_cleanly(drive)
+
+
+@in_loop
+async def test_a_run_whose_terminal_was_accepted_is_recorded_when_the_held_close_is_released():
+    runner = GatedRunner()
+    runner.hold_close()
+    async with driven(runner, read=False) as drive:
+        drive.took(await anext(drive.frames))
+        await drive.run_to(5)
+        runner.release(FINAL)
+        await drive.run_to(6)
+        closing = asyncio.create_task(drive.frames.aclose())
+        await drive.clock.parked()
+
+        _assert_recorded(
+            drive.status(), RunState.RUNNING, events=2, at=0, lost=ClientLoss.DISCONNECTED
+        )
+
+        drive.clock.advance_to(8)
+        runner.release_close()
+        await closing
+
+        _assert_recorded(
+            drive.status(), RunState.SUCCEEDED, events=2, at=8, lost=ClientLoss.DISCONNECTED
+        )
+        drive.assert_nothing_left()
+
+
+@in_loop
+async def test_a_closer_cut_by_its_scope_still_waits_for_the_held_close_of_the_run():
+    runner = GatedRunner()
+    runner.hold_close()
+    async with driven(runner, read=False) as drive:
+        drive.took(await anext(drive.frames))
+        scope = anyio.CancelScope()
+
+        async def close_inside_the_scope() -> None:
+            with scope:
+                await drive.frames.aclose()
+
+        closing = asyncio.create_task(close_inside_the_scope())
+        await drive.clock.parked()
+        scope.cancel()
+        await drive.clock.parked()
+        assert not closing.done()
+
+        runner.release_close()
+        await closing
+
+        assert drive.status().state is RunState.CANCELLED
+        drive.assert_nothing_left()
+
+
+class _RecordsWhoseEndingFails(RunRecords):
+    def _finish(self, record, fallback) -> None:
+        raise RuntimeError(RECORDING_FAILURE_CANARY)
+
+
+@in_loop
+async def test_a_recording_defect_surfaces_as_a_supervision_failure():
+    async with driven(records=_RecordsWhoseEndingFails(), read=False) as drive:
+        drive.took(await anext(drive.frames))
+        drive.runner.release(FINAL)
+
+        with pytest.raises(RuntimeError, match=RECORDING_FAILURE_CANARY):
+            await anext(drive.frames)
+
+
+async def _close_a_run_whose_cleanup_fails() -> None:
+    runner = GatedRunner()
+    runner.hold_close()
+    async with driven(runner, records=_RecordsWhoseEndingFails(), read=False) as drive:
+        drive.took(await anext(drive.frames))
+        closing = asyncio.create_task(drive.frames.aclose())
+        await drive.clock.parked()
+        runner.release_close()
+        with pytest.raises(RuntimeError, match=RECORDING_FAILURE_CANARY):
+            await closing
+
+
+@in_loop
+async def test_a_failed_cleanup_leaves_no_exception_unretrieved_and_no_text_in_the_logs(caplog):
+    caplog.set_level(logging.DEBUG)
+    unretrieved: list[dict[str, object]] = []
+    asyncio.get_running_loop().set_exception_handler(
+        lambda _loop, context: unretrieved.append(context)
+    )
+
+    await _close_a_run_whose_cleanup_fails()
+
+    await asyncio.sleep(0)
+    gc.collect()
+    assert unretrieved == []
+    assert RECORDING_FAILURE_CANARY not in caplog.text
 
 
 @in_loop
@@ -724,6 +854,7 @@ def test_a_served_run_is_read_by_its_owner_alone_and_forgotten_by_a_restart():
 
 
 def test_no_text_of_a_run_is_in_its_status_its_logs_or_the_store(caplog):
+    caplog.set_level(logging.DEBUG)
     records = RunRecords()
     with served(_served_app(records, _canary_events())) as base_url:
         streamed = post_run(base_url, _headers())

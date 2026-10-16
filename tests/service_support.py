@@ -483,7 +483,7 @@ class ClientSocket:
 
     ``send`` blocks on the second body chunk until ``released`` is set, as
     uvicorn's drain does, or raises ``second_chunk_raises`` there. With
-    ``suspends_the_start`` the start message suspends once. ``receive`` answers
+    ``suspends_the_start`` the start message never completes. ``receive`` answers
     the request first and ``http.disconnect`` once the client ``leave``s.
     """
 

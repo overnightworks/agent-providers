@@ -78,7 +78,9 @@ def _seed() -> Seeded:
     other_app, _ = begin("presentator", ALICE)
     other_subject, _ = begin("songmaker", BOB)
     other_issuer, _ = begin("songmaker", ALICE_ELSEWHERE)
-    return Seeded(records, running, owned, expired, evicted, other_app, other_subject, other_issuer)
+    return Seeded(
+        records, running, owned, expired, evicted, other_app, other_subject, other_issuer
+    )
 
 
 @pytest.fixture(scope="module")

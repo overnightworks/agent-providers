@@ -1304,7 +1304,7 @@ def _cancelled_unasked(step: _Step) -> asyncio.CancelledError:
             StepClock,
             None,
             RunState.RUNNING,
-            None,
+            ClientLoss.DROPPED,
             id="record_end",
         ),
         pytest.param(

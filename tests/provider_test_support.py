@@ -267,7 +267,7 @@ SECRET_ENV_KEYS: tuple[str, ...] = (
     "XAI_API_KEY",
     "OPENAI_API_KEY",
     "SESSION_SECRET",
-    "SONGMAKER_INTERNAL_TOKEN",
+    "NOTES_INTERNAL_TOKEN",
     "DATABASE_URL",
     "REDIS_URL",
     "POSTGRES_USER",
@@ -280,18 +280,18 @@ SECRET_ENV_KEYS: tuple[str, ...] = (
 )
 
 MCP_TOOL_NAMES: frozenset[str] = frozenset({
-    "list_albums",
-    "list_songs",
-    "search_songs",
-    "get_song",
-    "get_version",
-    "get_generation",
-    "create_song",
-    "update_song_lyrics",
-    "update_song_prompt",
-    "update_song_style",
-    "rename_song",
-    "suggest_album_cover",
+    "list_folders",
+    "list_notes",
+    "search_notes",
+    "get_note",
+    "get_revision",
+    "get_attachment",
+    "create_note",
+    "update_note_text",
+    "update_note_summary",
+    "update_note_tags",
+    "rename_note",
+    "suggest_folder_icon",
 })
 
 _STRING = {"type": "string"}
@@ -312,94 +312,94 @@ def _object(
 
 
 SAMPLE_TOOL_MARKUP: Final = ToolProtocolMarkup(
-    tag_namespace="songmaker", product_name="Songmaker"
+    tag_namespace="notes", product_name="Notes"
 )
 
-COWRITER_TOOL_CATALOG: ToolCatalog = ToolCatalog(
+SAMPLE_TOOL_CATALOG: ToolCatalog = ToolCatalog(
     tools=(
         ToolDeclaration(
-            name="list_albums",
-            description="List all albums owned by the current user.",
+            name="list_folders",
+            description="List all folders owned by the current user.",
             parameters=_object({}),
         ),
         ToolDeclaration(
-            name="list_songs",
+            name="list_notes",
             description=(
-                "List songs. Without album_id, every owned song; "
-                "with album_id, that album."
+                "List notes. Without folder_id, every owned note; "
+                "with folder_id, that folder."
             ),
-            parameters=_object({"album_id": _STRING}),
+            parameters=_object({"folder_id": _STRING}),
         ),
         ToolDeclaration(
-            name="search_songs",
-            description="Search songs by title substring. Limit defaults to 20, max 50.",
+            name="search_notes",
+            description="Search notes by title substring. Limit defaults to 20, max 50.",
             parameters=_object({"query": _STRING, "limit": _INT}, ["query"]),
         ),
         ToolDeclaration(
-            name="get_song",
-            description="Read the full state of a song.",
-            parameters=_object({"song_id": _STRING}, ["song_id"]),
+            name="get_note",
+            description="Read the full state of a note.",
+            parameters=_object({"note_id": _STRING}, ["note_id"]),
         ),
         ToolDeclaration(
-            name="get_version",
-            description="Read a specific version snapshot of a song.",
+            name="get_revision",
+            description="Read a specific revision snapshot of a note.",
             parameters=_object(
-                {"song_id": _STRING, "version_id": _STRING}, ["song_id", "version_id"],
+                {"note_id": _STRING, "revision_id": _STRING}, ["note_id", "revision_id"],
             ),
         ),
         ToolDeclaration(
-            name="get_generation",
-            description="Read a generation's metadata, scores, whisper transcript, and rating.",
-            parameters=_object({"generation_id": _STRING}, ["generation_id"]),
+            name="get_attachment",
+            description="Read an attachment's metadata, size, preview text, and rating.",
+            parameters=_object({"attachment_id": _STRING}, ["attachment_id"]),
         ),
         ToolDeclaration(
-            name="create_song",
-            description="Create a new song in an album.",
+            name="create_note",
+            description="Create a new note in a folder.",
             parameters=_object(
                 {
-                    "album_id": _STRING,
+                    "folder_id": _STRING,
                     "title": _STRING,
-                    "lyrics": _STRING,
+                    "text": _STRING,
                     "prompt": _STRING,
                 },
-                ["album_id", "title"],
+                ["folder_id", "title"],
             ),
         ),
         ToolDeclaration(
-            name="update_song_lyrics",
-            description="Replace the song's current lyrics.",
-            parameters=_object({"song_id": _STRING, "lyrics": _STRING}, ["song_id", "lyrics"]),
+            name="update_note_text",
+            description="Replace the note's current text.",
+            parameters=_object({"note_id": _STRING, "text": _STRING}, ["note_id", "text"]),
         ),
         ToolDeclaration(
-            name="update_song_prompt",
-            description="Replace the song's current style prompt.",
-            parameters=_object({"song_id": _STRING, "prompt": _STRING}, ["song_id", "prompt"]),
+            name="update_note_summary",
+            description="Replace the note's current summary.",
+            parameters=_object({"note_id": _STRING, "prompt": _STRING}, ["note_id", "prompt"]),
         ),
         ToolDeclaration(
-            name="update_song_style",
-            description="Update bpm, key_scale, and/or audio_duration.",
+            name="update_note_tags",
+            description="Update bpm, key_scale, and/or audio_duration tags.",
             parameters=_object(
                 {
-                    "song_id": _STRING,
+                    "note_id": _STRING,
                     "bpm": _INT,
                     "key_scale": _STRING,
                     "audio_duration": _INT,
                 },
-                ["song_id"],
+                ["note_id"],
             ),
         ),
         ToolDeclaration(
-            name="rename_song",
-            description="Rename a song's title.",
-            parameters=_object({"song_id": _STRING, "title": _STRING}, ["song_id", "title"]),
+            name="rename_note",
+            description="Rename a note's title.",
+            parameters=_object({"note_id": _STRING, "title": _STRING}, ["note_id", "title"]),
         ),
         ToolDeclaration(
-            name="suggest_album_cover",
+            name="suggest_folder_icon",
             description=(
-                "Request three album cover suggestions. "
+                "Request three folder icon suggestions. "
                 "Returns the queued job ID and status."
             ),
-            parameters=_object({"album_id": _STRING}, ["album_id"]),
+            parameters=_object({"folder_id": _STRING}, ["folder_id"]),
         ),
     ),
     markup=SAMPLE_TOOL_MARKUP,
@@ -466,7 +466,7 @@ def grok_tool_round_lines(text: str, session_id: str = GROK_SESSION_ID) -> list[
     ]
 
 
-A_CANARY: Final = "canary-lyrics-3f9c71"
+A_CANARY: Final = "canary-text-3f9c71"
 A_CALLER_CANARY: Final = "caller-canary-8b21e5"
 PROSE_BEFORE_THE_CALL: Final = "Looking that up.\n"
 DEEPLY_NESTED_JSON: Final = "[" * 100_000
@@ -481,14 +481,14 @@ CALLER_CONTEXTS: Final = pytest.mark.parametrize(
 
 def a_call_to_an_undeclared_tool_carrying(canary: str = A_CANARY) -> str:
     return (
-        f"{PROSE_BEFORE_THE_CALL}<songmaker_tool_call>\n"
-        f'{{"name":"delete_everything","arguments":{{"lyrics":"{canary}"}}}}\n'
-        "</songmaker_tool_call>"
+        f"{PROSE_BEFORE_THE_CALL}<notes_tool_call>\n"
+        f'{{"name":"delete_everything","arguments":{{"text":"{canary}"}}}}\n'
+        "</notes_tool_call>"
     )
 
 
 def a_call_nested_too_deeply_to_decode() -> str:
-    return f"<songmaker_tool_call>\n{DEEPLY_NESTED_JSON}\n</songmaker_tool_call>"
+    return f"<notes_tool_call>\n{DEEPLY_NESTED_JSON}\n</notes_tool_call>"
 
 
 class CallerCanaryError(Exception):
@@ -502,7 +502,7 @@ class DrivenTurn:
     executed: list[str]
 
 
-def drive_cowriter_turn(
+def drive_turn(
     provider: str,
     *,
     correlation_id: str | None = None,
@@ -530,7 +530,7 @@ def drive_cowriter_turn(
                 system="system",
                 messages=[{"role": "user", "content": "hello"}],
                 executor=executor,
-                catalog=COWRITER_TOOL_CATALOG,
+                catalog=SAMPLE_TOOL_CATALOG,
                 correlation_id=correlation_id,
             ):
                 events.append(event)

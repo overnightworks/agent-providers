@@ -17,17 +17,17 @@ from agent_client.capability import (
     McpOrigin,
 )
 
-ORIGIN = "https://songmaker.internal"
+ORIGIN = "https://notes.internal"
 EXAMPLE_CLAIMS: dict[str, Any] = {
     "iss": "agent-service",
     "aud": ORIGIN,
     "sub": "8c2f6c1e-3b5a-4d8e-9f10-2a7b4c6d8e01",
     "iat": 1792152000,
     "exp": 1792152600,
-    "app": "songmaker",
-    "purpose": "songmaker.cowriter",
+    "app": "notes",
+    "purpose": "notes.assistant",
     "principal": {"iss": "https://keycloak.test/realms/agent-test", "sub": "user-alice"},
-    "tools": ["edit_song", "read_song"],
+    "tools": ["edit_note", "read_note"],
 }
 EXAMPLE_TEXT = json.dumps(EXAMPLE_CLAIMS, separators=(",", ":"))
 LABEL_OF_64 = "a" * 64
@@ -47,7 +47,7 @@ def _refusal_of(origin: str) -> str:
     "origin",
     [
         ORIGIN,
-        "https://songmaker.internal:8443",
+        "https://notes.internal:8443",
         "https://xn--bcher-kva.internal:8443",
         "https://123.internal",
         "https://api.0xfoo",
@@ -60,11 +60,11 @@ def test_a_canonical_https_dns_origin_is_accepted_unchanged(origin):
 @pytest.mark.parametrize(
     "origin",
     [
-        "HTTPS://Songmaker.internal",
-        "https://songmaker.internal:443",
-        "https://songmaker.internal:0443",
-        "https://songmaker.internal/",
-        "https://songmaker.internal.",
+        "HTTPS://Notes.internal",
+        "https://notes.internal:443",
+        "https://notes.internal:0443",
+        "https://notes.internal/",
+        "https://notes.internal.",
     ],
 )
 def test_an_origin_with_a_canonical_form_is_refused_giving_it(origin):
@@ -74,35 +74,35 @@ def test_an_origin_with_a_canonical_form_is_refused_giving_it(origin):
 @pytest.mark.parametrize(
     "origin",
     [
-        "https://songmaker.internal/mcp",
-        "https://songmaker.internal?x",
-        "https://songmaker.internal#x",
-        "https://u:p@songmaker.internal",
-        "http://songmaker.internal",
-        "ftp://songmaker",
+        "https://notes.internal/mcp",
+        "https://notes.internal?x",
+        "https://notes.internal#x",
+        "https://u:p@notes.internal",
+        "http://notes.internal",
+        "ftp://notes",
         "https://",
         "https://:8443",
-        "songmaker:8443",
-        "https://-songmaker",
-        "https://songmaker-.internal",
+        "notes:8443",
+        "https://-notes",
+        "https://notes-.internal",
         pytest.param(f"https://{LABEL_OF_64}.internal", id="label-of-64-characters"),
         pytest.param(f"https://{HOST_OF_254}", id="host-of-254-characters"),
-        "https://songmaker.internal:0",
-        "https://songmaker.internal:65536",
-        "https://songmaker.internal:8x",
-        "https://songmaker.internal:",
-        "https://song maker.internal",
-        "https://songmaker.internal ",
-        "https://songmaker\t.internal",
-        "https://songmaker.internal\n",
-        "https://songmaker\x00.internal",
-        "https://songmaker%2e.internal",
+        "https://notes.internal:0",
+        "https://notes.internal:65536",
+        "https://notes.internal:8x",
+        "https://notes.internal:",
+        "https://no tes.internal",
+        "https://notes.internal ",
+        "https://notes\t.internal",
+        "https://notes.internal\n",
+        "https://notes\x00.internal",
+        "https://notes%2e.internal",
         "https://10.0.0.5:8443",
         "https://127.1",
-        "https://songmaker.123",
+        "https://notes.123",
         "https://0x7f000001",
         "https://127.0.0.0x1",
-        "https://songmaker.0x",
+        "https://notes.0x",
         "https://[fd00::1]:8443",
         "https://bücher.internal",
     ],
@@ -115,7 +115,7 @@ def test_any_other_origin_is_refused_without_a_canonical_form(origin):
     ("origin", "refusal"),
     [
         (
-            "HTTPS://songmaker.internal:0",
+            "HTTPS://notes.internal:0",
             "must be https://<host> or https://<host>:<port> and nothing else: no user"
             " information, path, query, fragment, space, control or non-ASCII character",
         ),
@@ -159,7 +159,7 @@ REFUSED_CLAIMS = [
     *[pytest.param(_claims_with(**{name: None}), id=f"missing-{name}") for name in EXAMPLE_CLAIMS],
     pytest.param(_claims_with(iss="other-service"), id="another-issuer"),
     pytest.param(_claims_with(aud=[ORIGIN]), id="audience-as-a-list"),
-    pytest.param(_claims_with(aud="https://Songmaker.internal"), id="audience-not-canonical"),
+    pytest.param(_claims_with(aud="https://Notes.internal"), id="audience-not-canonical"),
     pytest.param(_claims_with(sub="not-a-uuid"), id="subject-not-a-uuid"),
     pytest.param(_claims_with(sub="{8c2f6c1e-3b5a-4d8e-9f10-2a7b4c6d8e01}"), id="braced-subject"),
     pytest.param(_claims_with(sub="8C2F6C1E-3B5A-4D8E-9F10-2A7B4C6D8E01"), id="upper-case-subject"),
@@ -177,7 +177,7 @@ REFUSED_CLAIMS = [
     pytest.param(_claims_with(principal=_principal_with(sub="")), id="principal-empty-sub"),
     pytest.param(_claims_with(principal=_principal_with(sub="\ud800")), id="principal-lone-sub"),
     pytest.param(_claims_with(principal=_principal_with(extra="x")), id="principal-extra-member"),
-    pytest.param(_claims_with(tools=["read_song", "read_song"]), id="tool-named-twice"),
+    pytest.param(_claims_with(tools=["read_note", "read_note"]), id="tool-named-twice"),
     pytest.param(_claims_with(tools=[""]), id="empty-tool-name"),
 ]
 

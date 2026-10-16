@@ -18,15 +18,15 @@ from provider_test_support import (
     A_CALLER_CANARY,
     CALLER_CONTEXTS,
     CANARY_ACCESS_TOKEN,
-    COWRITER_TOOL_CATALOG,
     DEEPLY_NESTED_JSON,
+    SAMPLE_TOOL_CATALOG,
     CallerCanaryError,
     a_call_nested_too_deeply_to_decode,
     a_call_to_an_undeclared_tool_carrying,
     a_codex_login,
     assert_a_multi_result_batch_is_rejected,
     assert_the_canary_reaches_only_the_host,
-    drive_cowriter_turn,
+    drive_turn,
     exception_chain,
     formatted_log_text,
     override_provider_runtime,
@@ -79,7 +79,7 @@ A_COVER_POLICY = ImagePolicy(
 def _transport() -> codex_transport.CodexCliToolTransport:
     """Build the transport under test with songmaker's own tool catalog."""
     return codex_transport.CodexCliToolTransport(
-        model="codex-test", catalog=COWRITER_TOOL_CATALOG,
+        model="codex-test", catalog=SAMPLE_TOOL_CATALOG,
     )
 
 _A_CODEX_LOGIN = json.loads(a_codex_login())
@@ -309,7 +309,7 @@ def test_codex_tool_transport_uses_an_empty_private_work_directory_on_resume(mon
     rounds = iter([
         [
             json.dumps({"type": "thread.started", "thread_id": thread_id}).encode() + b"\n",
-            b'{"type":"item.completed","item":{"type":"agent_message","text":"<songmaker_tool_call>\\n{\\"name\\":\\"list_songs\\",\\"arguments\\":{}}\\n</songmaker_tool_call>"}}\n',
+            b'{"type":"item.completed","item":{"type":"agent_message","text":"<notes_tool_call>\\n{\\"name\\":\\"list_notes\\",\\"arguments\\":{}}\\n</notes_tool_call>"}}\n',
             b'{"type":"turn.completed","usage":{}}\n',
         ],
         [
@@ -341,7 +341,7 @@ def test_codex_tool_transport_uses_an_empty_private_work_directory_on_resume(mon
     transport = _transport()
     events = asyncio.run(_collect_tool_events(_codex_tool_events(
         transport,
-        lambda _name, _arguments: ToolOutcome('{"songs":[]}', False),
+        lambda _name, _arguments: ToolOutcome('{"notes":[]}', False),
     )))
 
     assert isinstance(events[0], ToolCallEvent)
@@ -365,7 +365,7 @@ def test_codex_tool_transport_uses_an_empty_private_work_directory_on_resume(mon
             assert config in child.command
     assert prompts == [
         b"system\n\nUser: hello",
-        b'<songmaker_tool_result>\n{"songs":[]}\n</songmaker_tool_result>',
+        b'<notes_tool_result>\n{"notes":[]}\n</notes_tool_result>',
     ]
     assert not first_child.working_directory.exists()
     assert first_child.environment == second_child.environment
@@ -507,12 +507,12 @@ def test_codex_tool_transport_cleans_its_home_and_does_not_log_protocol_text(
     caplog,
 ) -> None:
     calls: list = []
-    lyrics = "private lyrics"
-    song_id = "song-private"
+    text = "private text"
+    note_id = "note-private"
     protocol = (
-        "<songmaker_tool_call>\n"
-        f'{{"name":"update_song_lyrics","arguments":{{"song_id":"{song_id}","lyrics":"{lyrics}"}}}}\n'
-        "</songmaker_tool_call>"
+        "<notes_tool_call>\n"
+        f'{{"name":"update_note_text","arguments":{{"note_id":"{note_id}","text":"{text}"}}}}\n'
+        "</notes_tool_call>"
     )
 
     def run_cli_bounded(child, **kwargs):
@@ -548,7 +548,7 @@ def test_codex_tool_transport_cleans_its_home_and_does_not_log_protocol_text(
     asyncio.run(collect_and_close())
     assert not calls[0][0].working_directory.exists()
     assert "Codex CLI tool round provider=codex route=cli round=1 duration_ms=" in caplog.text
-    for forbidden in (lyrics, song_id, protocol, "private stderr", "private.jsonl"):
+    for forbidden in (text, note_id, protocol, "private stderr", "private.jsonl"):
         assert forbidden not in caplog.text
 
 
@@ -1188,7 +1188,7 @@ def test_a_refused_codex_call_hands_its_text_only_to_the_host(
     )
     caplog.set_level(logging.DEBUG)
 
-    turn = drive_cowriter_turn(
+    turn = drive_turn(
         "codex",
         correlation_id="job-41",
         while_the_caller_handles_an_exception=while_the_caller_handles_an_exception,
@@ -1214,7 +1214,7 @@ def test_a_codex_call_nested_too_deeply_is_refused_not_a_failed_route(
     )
     caplog.set_level(logging.DEBUG)
 
-    turn = drive_cowriter_turn(
+    turn = drive_turn(
         "codex",
         while_the_caller_handles_an_exception=while_the_caller_handles_an_exception,
     )
@@ -1253,8 +1253,8 @@ def test_a_codex_tool_result_nested_too_deeply_is_passed_on_in_the_next_prompt(
     monkeypatch,
 ) -> None:
     calls: list = []
-    lines = _tool_round_lines('<songmaker_tool_call>\n{"name":"list_songs","arguments":{}}\n'
-                              "</songmaker_tool_call>")
+    lines = _tool_round_lines('<notes_tool_call>\n{"name":"list_notes","arguments":{}}\n'
+                              "</notes_tool_call>")
     monkeypatch.setattr(codex_protocol, "run_cli_bounded", _runner(lines, _outcome(), calls))
     transport = _transport()
 

@@ -149,7 +149,7 @@ def test_rejects_a_ninth_tool_round_without_executing_it(monkeypatch) -> None:
 
 def test_executor_failure_returns_a_named_error_to_the_model(caplog) -> None:
     transport = _FakeTransport([
-        [ToolCallBatch((ToolCall("call-1", "write", {"lyrics": "secret"}),))],
+        [ToolCallBatch((ToolCall("call-1", "write", {"text": "secret"}),))],
         [FinalText()],
     ])
 
@@ -168,7 +168,7 @@ def test_executor_failure_returns_a_named_error_to_the_model(caplog) -> None:
     ] == ["ERROR"]
 
     assert events == [
-        ToolCallEvent(tool_use_id="call-1", name="write", input={"lyrics": "secret"}),
+        ToolCallEvent(tool_use_id="call-1", name="write", input={"text": "secret"}),
         ToolResultEvent(
             tool_use_id="call-1", content="Co-Writer tool failed.", is_error=True,
         ),
@@ -210,13 +210,13 @@ def test_aclose_stops_the_active_transport_without_a_follow_up_round() -> None:
 
 
 def test_logs_never_include_tool_input_or_result(caplog) -> None:
-    lyrics = "private lyrics"
-    song_id = "song-private"
-    call_json = '{"lyrics":"private lyrics","song_id":"song-private"}'
+    text = "private text"
+    note_id = "note-private"
+    call_json = '{"text":"private text","note_id":"note-private"}'
     transport = _FakeTransport([
-        [ToolCallBatch((ToolCall("safe-call", "update_song_lyrics", {
-            "lyrics": lyrics,
-            "song_id": song_id,
+        [ToolCallBatch((ToolCall("safe-call", "update_note_text", {
+            "text": text,
+            "note_id": note_id,
         }),))],
         [FinalText()],
     ])
@@ -228,8 +228,8 @@ def test_logs_never_include_tool_input_or_result(caplog) -> None:
 
     assert "provider=grok" in caplog.text
     assert "route=api" in caplog.text
-    assert "tool=update_song_lyrics" in caplog.text
-    for forbidden in (lyrics, song_id, call_json):
+    assert "tool=update_note_text" in caplog.text
+    for forbidden in (text, note_id, call_json):
         assert forbidden not in caplog.text
 
 

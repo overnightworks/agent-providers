@@ -1,8 +1,0 @@
-claim_id = "dd366f962cac46ae8240bac79f65ee9c"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "dc6d9e8042147951988ba7101f0be63c0bd90db5"
-branch = "claude/issue-67-a1a4-2a-capability-contract"
-scope = ["README.md", "docs/decisions/0001-agent-service.md", "packages/agent-client/src/agent_client/__init__.py", "packages/agent-client/src/agent_client/capability.py", "packages/agent-client/src/agent_client/wire.py", "packages/agent-service/src/agent_service/app.py", "packages/agent-service/src/agent_service/capability.py", "packages/agent-service/src/agent_service/config.py", "packages/agent-service/src/agent_service/signing.py", "tests/service_support.py", "tests/test_capability_claims.py", "tests/test_service_capability.py", "tests/test_service_config.py", "tests/test_service_entrance.py"]
-opened_commit = "c89e74cf426cf7a01ef11f80c6d8ad315f6f89ea"
-whole_reason = "One capability contract spans the client type, the service registry, its preflight, the rejection code and their docs; split slices would share the same config validator and the ADR ruling items 8-11."

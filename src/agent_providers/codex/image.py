@@ -288,8 +288,7 @@ def _run_codex_image_cli(
         return _read_codex_image_events(channel, event_gate, abort_signal, settle_by)
     finally:
         channel.request_abort()
-        while not isinstance(_receive_within(channel, settle_by), CliRunOutcome):
-            pass
+        _await_the_outcome(channel, settle_by)
 
 
 def _start_codex_image_runner(
@@ -313,7 +312,7 @@ def _start_codex_image_runner(
     )
     try:
         runner.start()
-    except BaseException as exc:
+    except BaseException as exc:  # NOSONAR(S5754) the reservation is abandoned first
         start_failure = exc
     else:
         return
@@ -345,6 +344,13 @@ def _read_codex_image_events(
             continue
 
 
+def _await_the_outcome(channel: CliLineChannel, settle_by: float) -> CliRunOutcome:
+    while True:
+        received = _receive_within(channel, settle_by)
+        if isinstance(received, CliRunOutcome):
+            return received
+
+
 def _receive_within(channel: CliLineChannel, settle_by: float) -> bytes | CliRunOutcome | None:
     try:
         return channel.receive(timeout=_CHANNEL_POLL_SECONDS, settle_by=settle_by)
@@ -372,7 +378,7 @@ def _run_codex_image_runner(
             output_read_limit_bytes=CODEX_CLI_TURN_OUTPUT_READ_LIMIT_BYTES,
             stdout_line_channel=channel,
         )
-    except BaseException as exc:
+    except BaseException as exc:  # NOSONAR(S5754) every exit publishes an outcome
         failure = type(exc).__name__
         channel._close(_failed_runner_outcome())
     if failure is not None:

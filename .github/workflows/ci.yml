@@ -19,6 +19,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
 
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
         with:
@@ -42,7 +44,16 @@ jobs:
       - name: Tests
         env:
           PYTHONPATH: src:packages/agent-client/src:packages/agent-service/src
-        run: uv run --locked --no-sync --no-build pytest tests -q
+        run: >-
+          uv run --locked --no-sync --no-build pytest tests -q
+          --cov=src --cov=packages/agent-client/src --cov=packages/agent-service/src
+          --cov-report=xml:coverage.xml
+
+      - name: Upload the coverage report for the quality gate
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage
+          path: coverage.xml
 
       - name: Build the three distributions
         run: uv build --all-packages
@@ -118,6 +129,8 @@ jobs:
       KEYCLOAK_URL: http://localhost:8080
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
 
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
         with:
@@ -171,3 +184,15 @@ jobs:
       - name: Stop Keycloak
         if: always()
         run: docker rm --force keycloak
+
+  quality:
+    needs: [checks, keycloak-token-shapes]
+    if: always()
+    permissions:
+      contents: read
+      actions: read
+    uses: overnightworks/quality/.github/workflows/gate.yml@75467b7888ab8158dda370c770d3323dfc1f594e # v0.1.1
+    with:
+      coverage-artifact: coverage
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}

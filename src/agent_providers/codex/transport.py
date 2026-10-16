@@ -34,6 +34,7 @@ from agent_providers.codex.protocol import (
     ITEM_EVENT_TYPES,
     CodexCliStreamFailure,
     CodexLoginMirrorError,
+    codex_child_process,
     codex_cli_failure_reason,
     copy_codex_login_mirror,
     error_item_message,
@@ -56,7 +57,6 @@ from agent_providers.process import (
     CliLineChannel,
     CliRunOutcome,
     CliRunReason,
-    scrubbed_env,
 )
 from agent_providers.sandbox.paths import (
     CODEX_HOME_DIRECTORY_NAME,
@@ -130,9 +130,9 @@ class CodexCliToolTransport:
             dir=current_config().cli_working_directory_root,
         )
         os.chmod(self._turn_directory.name, 0o700)
-        turn_root = Path(self._turn_directory.name)
-        self._work_directory = turn_root / "work"
-        self._codex_home = turn_root / CODEX_HOME_DIRECTORY_NAME
+        self._turn_root = Path(self._turn_directory.name).resolve()
+        self._work_directory = self._turn_root / "work"
+        self._codex_home = self._turn_root / CODEX_HOME_DIRECTORY_NAME
         self._work_directory.mkdir(mode=0o700)
         self._codex_home.mkdir(mode=0o700)
         try:
@@ -165,7 +165,7 @@ class CodexCliToolTransport:
                 normalize_route_failure(SafeRouteReasonCode.TOOL_PROTOCOL_ERROR),
             ) from None
         is_resume = self._thread_id is not None
-        command = _build_codex_tool_command(
+        arguments = _codex_tool_arguments(
             self._model,
             thread_id=self._thread_id,
         )
@@ -183,11 +183,12 @@ class CodexCliToolTransport:
             asyncio.to_thread(
                 _run_codex_tool_round,
                 reservation=reservation,
-                command=command,
+                arguments=arguments,
                 prompt=prompt,
                 deadline=self._deadline,
                 channel=channel,
-                cwd=str(self._work_directory),
+                turn_root=self._turn_root,
+                work_directory=self._work_directory,
                 codex_home=self._codex_home,
             )
         )
@@ -257,7 +258,7 @@ class CodexCliToolTransport:
         await asyncio.to_thread(self._turn_directory.cleanup)
 
 
-def _build_codex_tool_command(
+def _codex_tool_arguments(
     model: str,
     *,
     thread_id: str | None = None,
@@ -279,10 +280,8 @@ def _build_codex_tool_command(
         "--model",
         model,
     )
-    binary = current_config().codex_cli_binary
     if thread_id is None:
         return (
-            binary,
             "exec",
             "--sandbox",
             "read-only",
@@ -290,7 +289,6 @@ def _build_codex_tool_command(
             "-",
         )
     return (
-        binary,
         "exec",
         "resume",
         *common,
@@ -302,25 +300,29 @@ def _build_codex_tool_command(
 def _run_codex_tool_round(
     *,
     reservation: CodexProcessReservation,
-    command: tuple[str, ...],
+    arguments: tuple[str, ...],
     prompt: bytes,
     deadline: float,
     channel: CliLineChannel,
-    cwd: str,
+    turn_root: Path,
+    work_directory: Path,
     codex_home: Path,
 ) -> CliRunOutcome:
     """Run one round from stdin and reap its reservation."""
     try:
         return run_reserved_codex_cli(
             reservation,
-            command,
+            codex_child_process(
+                arguments,
+                turn_root=turn_root,
+                work_directory=work_directory,
+                codex_home=codex_home,
+            ),
             stdin_payload=prompt,
             read="all",
             deadline=deadline,
             output_read_limit_bytes=CODEX_CLI_TURN_OUTPUT_READ_LIMIT_BYTES,
             stdout_line_channel=channel,
-            cwd=cwd,
-            extra_env=_codex_cli_env(codex_home),
         )
     except Exception as exc:
         get_codex_process_pool().abandon_unspawned(reservation)
@@ -459,13 +461,6 @@ def _finish_codex_tool_round(
         _log_codex_tool_round(round_index, started_at, None)
         return FinalText(parsed.text), state.received_thread_id
     raise CodexCliStreamFailure("codex_cli_stream_protocol_error")
-
-
-def _codex_cli_env(codex_home: Path) -> dict[str, str]:
-    """Pass a scrubbed environment and only this turn's private Codex home."""
-    environment = scrubbed_env()
-    environment["CODEX_HOME"] = str(codex_home)
-    return environment
 
 
 def _thread_started_id(event: dict[str, object]) -> str:

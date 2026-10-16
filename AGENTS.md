@@ -72,6 +72,11 @@ The suite is fast and needs no live provider: the CLI processes are faked and
 the tool-surface probe is patched. Run it whole. `[image]` is required at
 collection because one test imports Pillow at module load.
 
+CI also runs the `quality` gate (`overnightworks/quality`, pinned by commit in
+`ci.yml`); its required check is `quality / verdict`. Its secret allowance and
+mandatory jobs live in `quality/config.toml`, its SonarCloud scope in
+`sonar-project.properties`, and the `checks` job feeds it `coverage.xml`.
+
 CI also proves the built wheels outside the workspace: in a fresh venv, the
 client wheel alone imports every `agent_client` module, client and core
 together import `agent_providers.dispatch` with the identical

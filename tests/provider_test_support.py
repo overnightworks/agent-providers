@@ -23,6 +23,7 @@ import os
 import shlex
 import stat
 import tempfile
+import threading
 import traceback
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -33,6 +34,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from agent_client.tools import ToolDeclaration
+from agent_providers import process
 from agent_providers.catalog import ProviderRoute
 from agent_providers.config import (
     ProviderRuntimeConfig,
@@ -548,3 +550,101 @@ def assert_the_canary_reaches_only_the_host(
         f"code={ToolProtocolRejectionCode.TEXT_TOOL_RESPONSE_INVALID} "
         f"rule={rule} offset={rejection.offset} length={rejection.length}"
     )
+
+
+A_RUNNER_FAILURE_CANARY: Final = "runner-failure-canary-7c1d"
+ANOTHER_RUNNER_FAILURE_CANARY: Final = "second-runner-failure-canary-2e8b"
+RUNNER_STEP_FAILURE_PREFIX: Final = "agent CLI runner step failed: "
+
+
+class RunnerFailureWatch:
+    """What a failed runner step may leave behind: nothing but its named class.
+
+    Install it before the run; it catches thread errors that nobody handled,
+    keeps the log, and decides whether a canary reached any visible surface.
+    """
+
+    def __init__(self, monkeypatch, caplog, capfd) -> None:
+        self._caplog = caplog
+        self._capfd = capfd
+        self._threads_of_earlier_tests = set(threading.enumerate()) - {threading.current_thread()}
+        self.unhandled_thread_errors: list[threading.ExceptHookArgs] = []
+        self._previous_excepthook = threading.excepthook
+        monkeypatch.setattr(threading, "excepthook", self._record_unhandled_thread_error)
+        caplog.set_level(logging.DEBUG)
+
+    def _record_unhandled_thread_error(self, error: threading.ExceptHookArgs) -> None:
+        if error.thread in self._threads_of_earlier_tests:
+            self._previous_excepthook(error)
+        else:
+            self.unhandled_thread_errors.append(error)
+
+    def _wait_for_the_runner_threads_to_end(self) -> None:
+        for thread in threading.enumerate():
+            if (
+                thread not in self._threads_of_earlier_tests
+                and thread.name.endswith("(_run_cli_bounded)")
+            ):
+                thread.join(timeout=5)
+                assert not thread.is_alive(), "a runner thread outlived its test"
+
+    def reported_steps(self) -> list[str]:
+        self._wait_for_the_runner_threads_to_end()
+        return [
+            record.getMessage().removeprefix(RUNNER_STEP_FAILURE_PREFIX)
+            for record in self._caplog.records
+            if record.getMessage().startswith(RUNNER_STEP_FAILURE_PREFIX)
+            and record.threadName not in self._names_of_earlier_threads()
+        ]
+
+    def _names_of_earlier_threads(self) -> set[str]:
+        return {thread.name for thread in self._threads_of_earlier_tests}
+
+    def assert_nothing_leaked(self, *surfaces: BaseException | str) -> None:
+        self._wait_for_the_runner_threads_to_end()
+        captured = self._capfd.readouterr()
+        visible = "\n".join([
+            formatted_log_text(self._caplog.records),
+            captured.out,
+            captured.err,
+            *(_text_of(surface) for surface in surfaces),
+        ])
+        for canary in (A_RUNNER_FAILURE_CANARY, ANOTHER_RUNNER_FAILURE_CANARY):
+            assert canary not in visible
+        assert self.unhandled_thread_errors == [], [
+            (error.thread.name, repr(error.exc_value)) for error in self.unhandled_thread_errors
+        ]
+
+
+def _text_of(surface: BaseException | str) -> str:
+    if isinstance(surface, str):
+        return surface
+    linked = [surface.__cause__, surface.__context__]
+    return "\n".join([
+        str(surface),
+        repr(surface),
+        *(_text_of(error) for error in linked if error is not None),
+    ])
+
+
+def pool_callbacks(process_pool, reservation) -> dict[str, Any]:
+    """The reservation callbacks, wired as the Codex protocol wires them."""
+    return {
+        "on_spawned": lambda process_id: process_pool.bind(reservation, process_id),
+        "on_spawn_failed": lambda: process_pool.abandon_unspawned(reservation),
+        "on_reaped": lambda process_id, _became_zombie: process_pool.reap(
+            reservation, process_id,
+        ),
+    }
+
+
+def fail_to_start_the_runner_thread(monkeypatch, error: BaseException) -> None:
+    """Make only the bounded runner's worker thread fail to start."""
+    real_start = threading.Thread.start
+
+    def start(worker: threading.Thread) -> None:
+        if worker._target is process._run_cli_bounded:
+            raise error
+        real_start(worker)
+
+    monkeypatch.setattr(threading.Thread, "start", start)

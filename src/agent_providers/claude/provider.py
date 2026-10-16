@@ -1535,7 +1535,6 @@ def _probe_cli_surface_sync(
             deadline=deadline,
             stderr="devnull",
             output_read_limit_bytes=CLI_OUTPUT_READ_LIMIT_BYTES,
-            cleanup_margin_seconds=_cleanup_margin_seconds(),
             on_spawned=on_spawned,
             on_spawn_failed=on_spawn_failed,
             on_reaped=on_reaped,
@@ -1551,7 +1550,7 @@ def _probe_cli_surface_sync(
         if not released:
             _release_zombie_reservation(reservation)
             home_reservation.release()
-        raise UnavailableError(f"Claude CLI probe failed to run: {outcome.spawn_error}")
+        raise UnavailableError("Claude CLI probe failed to run")
     if outcome.reason is process.CliRunReason.DEADLINE_BEFORE_SPAWN:
         raise UnavailableError("Claude CLI probe did not start within its budget")
     if outcome.reason is process.CliRunReason.CLEANUP_OVERRAN:
@@ -1559,7 +1558,7 @@ def _probe_cli_surface_sync(
     if outcome.became_zombie:
         raise _ZombieProbeError("Claude CLI probe process outlived SIGKILL")
     if outcome.reason is process.CliRunReason.IO_ERROR:
-        raise UnavailableError(f"Claude CLI probe failed to run: {outcome.io_error}")
+        raise UnavailableError("Claude CLI probe failed to run")
     if outcome.reason in {
         process.CliRunReason.DEADLINE_WHILE_WRITING,
         process.CliRunReason.DEADLINE_WHILE_READING,

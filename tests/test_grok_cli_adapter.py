@@ -12,16 +12,19 @@ from pathlib import Path
 
 import pytest
 from provider_test_support import (
+    A_RUNNER_FAILURE_CANARY,
     CALLER_CONTEXTS,
     DEEPLY_NESTED_JSON,
     GROK_SESSION_ID,
     SAMPLE_TOOL_CATALOG,
+    RunnerFailureWatch,
     a_call_nested_too_deeply_to_decode,
     a_call_to_an_undeclared_tool_carrying,
     assert_a_multi_result_batch_is_rejected,
     assert_private_credential_child,
     assert_the_canary_reaches_only_the_host,
     drive_turn,
+    fail_to_start_the_runner_thread,
     formatted_log_text,
     grok_cli_outcome,
     grok_cli_runner,
@@ -30,6 +33,7 @@ from provider_test_support import (
 )
 
 from agent_client.tools import ToolDeclaration
+from agent_providers import process
 from agent_providers.config import current_config, current_turn_config
 from agent_providers.errors import (
     ProviderUnavailableError,
@@ -250,6 +254,53 @@ def test_grok_tool_transport_starts_then_resumes_in_one_private_credential_home(
     assert not first_child.working_directory.exists()
     assert not third_home.exists()
     assert source.read_text() == "{}"
+
+
+def _grok_runner_that_fails_by(failure: str, monkeypatch):
+    if failure == "the-runner-thread-cannot-start":
+        fail_to_start_the_runner_thread(monkeypatch, RuntimeError(A_RUNNER_FAILURE_CANARY))
+    else:
+        def spawn_that_raises(*_arguments, **_keywords):
+            raise BaseException(A_RUNNER_FAILURE_CANARY)
+
+        monkeypatch.setattr(process, "open_pipes", spawn_that_raises)
+
+
+@pytest.mark.parametrize(
+    ("failure", "reported_steps"),
+    [
+        ("the-runner-thread-cannot-start", ["start RuntimeError"]),
+        ("the-spawn-raises-a-base-exception", []),
+    ],
+)
+def test_a_grok_tool_turn_whose_runner_fails_ends_promptly_and_removes_its_home(
+    monkeypatch, caplog, capfd, failure, reported_steps,
+) -> None:
+    watch = RunnerFailureWatch(monkeypatch, caplog, capfd)
+    _grok_runner_that_fails_by(failure, monkeypatch)
+    children: list[object] = []
+    real_runner = grok_cli_adapter.run_cli_bounded
+
+    def run_and_record(child, **kwargs):
+        children.append(child)
+        return real_runner(child, **kwargs)
+
+    monkeypatch.setattr(grok_cli_adapter, "run_cli_bounded", run_and_record)
+    transport = _transport()
+
+    async def fail_and_close() -> ProviderUnavailableError:
+        responses = asyncio.wait_for(_collect_transport_responses(transport), timeout=1)
+        with pytest.raises(ProviderUnavailableError) as raised:
+            await responses
+        await transport.aclose()
+        return raised.value
+
+    failed = asyncio.run(fail_and_close())
+
+    assert failed.reason.code is SafeRouteReasonCode.CLI_PROTOCOL_ERROR
+    assert not Path(children[0].environment["HOME"]).exists()
+    assert watch.reported_steps() == reported_steps
+    watch.assert_nothing_leaked(failed)
 
 
 @pytest.mark.parametrize(

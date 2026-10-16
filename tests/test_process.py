@@ -2898,27 +2898,38 @@ def _the_running_frame_of(function) -> types.FrameType:
     return frame
 
 
-def _caught_earlier_in_the_running_callers(source_document: bytes) -> ValueError:
-    nested_frames = (_the_running_frame_of(_drive_in_the_caller), sys._getframe(1))
-    entry = None
-    for frame in reversed(nested_frames):
-        entry = types.TracebackType(entry, frame, frame.f_lasti, frame.f_lineno)
-    return ValueError("caught earlier by a caller that is still running").with_traceback(entry)
+def _fail_holding_the_callers_earlier_state() -> None:
+    callers_earlier_state = "intact"
+    raise ValueError(callers_earlier_state)
+
+
+def _the_earlier_failure_caught_by_the_running_caller() -> ValueError:
+    frame = sys._getframe()
+    while frame.f_code.co_name != "enter_with_the_copy":
+        frame = frame.f_back
+    return frame.f_locals["earlier_failure"]
 
 
 def _raise_an_exception_caught_earlier_in_a_running_frame(source_document: bytes) -> bytes:
-    raise _caught_earlier_in_the_running_callers(source_document)
+    raise _the_earlier_failure_caught_by_the_running_caller()
 
 
 def _raise_a_group_of_that_exception_and_a_member_holding_the_document(
     source_document: bytes,
 ) -> bytes:
-    caught_earlier = _caught_earlier_in_the_running_callers(source_document)
+    caught_earlier = _the_earlier_failure_caught_by_the_running_caller()
     try:
         _raise_a_group_whose_member_frame_holds_the_document(source_document)
     except ExceptionGroup as group:
         raise ExceptionGroup("group", [caught_earlier, *group.exceptions])
     return source_document
+
+
+def _raise_the_earlier_exception_from_the_decoder_error(source_document: bytes) -> bytes:
+    def what_follows(handled, decoder_error):
+        raise _the_earlier_failure_caught_by_the_running_caller() from decoder_error
+
+    return _decode_failing_then(source_document, what_follows)
 
 
 def _re_raise_the_handled_exception_from_none(source_document: bytes) -> bytes:
@@ -2947,7 +2958,16 @@ _CREDENTIAL_COPIES = {
         _raise_a_group_of_that_exception_and_a_member_holding_the_document
     ),
     "raise-sys-exception-from-none": _re_raise_the_handled_exception_from_none,
+    "raise-the-earlier-exception-from-the-decoder-error": (
+        _raise_the_earlier_exception_from_the_decoder_error
+    ),
 }
+
+
+_COPIES_RAISING_THE_EARLIER_FAILURE = (
+    _raise_an_exception_caught_earlier_in_a_running_frame,
+    _raise_the_earlier_exception_from_the_decoder_error,
+)
 
 
 def _links_of(error: BaseException) -> tuple:
@@ -2964,16 +2984,20 @@ def test_a_credential_copy_leaves_the_callers_exception_untouched_and_drops_the_
         links_at_entry = _links_of(handled)
         traceback_at_entry = handled.__traceback__
         try:
+            _fail_holding_the_callers_earlier_state()
+        except ValueError as caught_earlier:
+            earlier_failure = caught_earlier
+        try:
             _enter_a_private_home_copying_with(credential_copy)
         except BaseException as propagated:
-            return propagated, handled, links_at_entry, traceback_at_entry
-        return None, handled, links_at_entry, traceback_at_entry
+            return propagated, handled, links_at_entry, traceback_at_entry, earlier_failure
+        return None, handled, links_at_entry, traceback_at_entry, earlier_failure
 
     gc.collect()
     gc.disable()
     try:
-        propagated, handled, links_at_entry, traceback_at_entry = _drive_in_the_caller(
-            True, enter_with_the_copy,
+        propagated, handled, links_at_entry, traceback_at_entry, earlier_failure = (
+            _drive_in_the_caller(True, enter_with_the_copy)
         )
         decoder_errors_left = [
             item for item in gc.get_objects() if isinstance(item, json.JSONDecodeError)
@@ -2986,7 +3010,8 @@ def test_a_credential_copy_leaves_the_callers_exception_untouched_and_drops_the_
     assert handled.__context__ is not handled
     assert handled.__cause__ is not None
     assert not decoder_errors_left
-    assert "executing frame" not in str(propagated)
+    if credential_copy in _COPIES_RAISING_THE_EARLIER_FAILURE:
+        assert propagated is earlier_failure
     for error in (handled, propagated):
         if error is not None:
             assert not traceback_frames_hold(error, "canary-")
@@ -2998,6 +3023,8 @@ def test_a_credential_copy_leaves_the_callers_exception_untouched_and_drops_the_
                 }
     callers_frame = list(_traceback_entries(handled))[-1].tb_frame
     assert callers_frame.f_locals == {"callers_own_state": "intact"}
+    earlier_state_frame = list(_traceback_entries(earlier_failure))[-1].tb_frame
+    assert earlier_state_frame.f_locals == {"callers_earlier_state": "intact"}
 
 
 @pytest.mark.usefixtures("a_stored_codex_login")

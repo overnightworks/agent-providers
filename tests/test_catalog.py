@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import httpx
 import pytest
 from provider_test_support import (
     CLAUDE_MODEL_CATALOG_STDOUT,
@@ -17,14 +18,23 @@ from provider_test_support import (
     fake_cli_executable,
     override_provider_runtime,
 )
+from pydantic import SecretStr
 
 from agent_providers.catalog import (
+    ProviderReady,
     ProviderRoute,
     ProviderRouteReadinessState,
+    ProviderSetupMethod,
     list_provider_models,
     probe_provider_route,
+    provider_configuration,
 )
-from agent_providers.errors import ProviderModelCatalogUnavailableError, SafeRouteReasonCode
+from agent_providers.constants import ProviderName
+from agent_providers.errors import (
+    ProviderModelCatalogUnavailableError,
+    ProviderUnavailableError,
+    SafeRouteReasonCode,
+)
 from agent_providers.process import clear_agent_cli_caches
 
 CLAUDE_MODEL_CATALOG_ALIASES = sorted([
@@ -32,6 +42,7 @@ CLAUDE_MODEL_CATALOG_ALIASES = sorted([
     "fable[1m]", "opusplan", "default",
 ])
 CLAUDE_LOGGED_IN = json.dumps({"loggedIn": True, "authMethod": "claude.ai"})
+CODEX_LOGGED_IN = "Logged in using ChatGPT"
 CLAUDE_LOGGED_OUT = json.dumps({"loggedIn": False})
 CLAUDE_MODEL_COMMAND = ("-p", "/model")
 CLAUDE_MODEL_CATALOG_NAMING_NO_MODEL = "Usage: /model <name>. Available: or a full model ID.\n"
@@ -180,3 +191,119 @@ def test_listing_the_claude_cli_starts_it_once(tmp_path: Path) -> None:
     list_provider_models("claude", ProviderRoute.CLI)
 
     assert starts.read_text().splitlines() == ["-p /model"]
+
+
+@pytest.mark.parametrize(("stored", "is_provider"), [
+    ("claude", True), ("grok", True), ("codex", True), ("bob", False), ("", False),
+])
+def test_a_stored_provider_string_is_found_by_value(stored: str, is_provider: bool) -> None:
+    assert (stored in ProviderName) is is_provider
+
+
+def test_the_provider_names_are_public_in_their_documented_order() -> None:
+    assert [(member.name, member.value) for member in ProviderName] == [
+        ("CLAUDE", "claude"), ("GROK", "grok"), ("CODEX", "codex"),
+    ]
+
+
+_UNKNOWN_PROVIDER_CALLS = {
+    "list-cli": lambda: list_provider_models("bob", ProviderRoute.CLI),
+    "list-api": lambda: list_provider_models("bob", ProviderRoute.API),
+    "probe": lambda: probe_provider_route("bob", ProviderRoute.API),
+    "configuration": lambda: provider_configuration("bob", frozenset()),
+}
+
+
+@pytest.mark.parametrize(
+    "ask", _UNKNOWN_PROVIDER_CALLS.values(), ids=_UNKNOWN_PROVIDER_CALLS.keys(),
+)
+def test_asking_the_catalog_about_an_unknown_provider_is_refused_by_name(ask) -> None:
+    with pytest.raises(ProviderUnavailableError) as refusal:
+        ask()
+
+    assert str(refusal.value) == "Unknown provider 'bob'"
+
+
+API_ROUTES = [
+    pytest.param("claude", "anthropic_api_key", ["claude-opus-5", "text-embedding"],
+                 ["claude-opus-5"], id="claude"),
+    pytest.param("grok", "xai_api_key", ["grok-4.6", "grok-4.6-image"],
+                 ["grok-4.6"], id="grok"),
+    pytest.param("codex", "openai_api_key", ["gpt-5.6", "whisper-1"],
+                 ["gpt-5.6"], id="codex"),
+]
+
+
+@pytest.mark.parametrize(("provider", "key_setting", "offered", "expected"), API_ROUTES)
+def test_each_api_route_lists_the_chat_models_its_api_offers(
+    monkeypatch: pytest.MonkeyPatch, provider: str, key_setting: str,
+    offered: list[str], expected: list[str],
+) -> None:
+    override_provider_runtime(**{key_setting: SecretStr("a-key")})
+    monkeypatch.setattr(httpx, "get", lambda url, **_: httpx.Response(
+        200, json={"data": [{"id": model_id} for model_id in offered]},
+        request=httpx.Request("GET", url),
+    ))
+
+    assert list_provider_models(provider, ProviderRoute.API) == expected
+
+
+@pytest.mark.parametrize(("provider", "key_setting", "environment_key"), [
+    ("grok", "xai_api_key", "XAI_API_KEY"),
+    ("codex", "openai_api_key", "OPENAI_API_KEY"),
+])
+def test_a_provider_with_an_api_key_is_ready_through_the_api_key(
+    provider: str, key_setting: str, environment_key: str,
+) -> None:
+    override_provider_runtime(**{key_setting: SecretStr("a-key")})
+
+    configuration = provider_configuration(provider, frozenset())
+
+    assert isinstance(configuration, ProviderReady)
+    assert configuration.method is ProviderSetupMethod.API_KEY
+    assert configuration.environment_key == environment_key
+
+
+SIGNED_IN_CLI_ANSWERS = {
+    "claude": {
+        CLAUDE_STATUS_COMMAND: CLAUDE_LOGGED_IN,
+        CLAUDE_MODEL_COMMAND: CLAUDE_MODEL_CATALOG_STDOUT,
+    },
+    "grok": {("models",): GROK_LOGGED_IN},
+    "codex": {
+        ("login", "status"): CODEX_LOGGED_IN,
+        CODEX_MODEL_COMMAND: _codex_models(("gpt-5.6", "list", 10)),
+    },
+}
+
+
+@pytest.mark.parametrize("provider", ["claude", "grok", "codex"])
+def test_a_signed_in_cli_route_is_not_configured_once_its_binary_is_gone(
+    provider: str, tmp_path: Path,
+) -> None:
+    fake_cli_executable(tmp_path, SIGNED_IN_CLI_ANSWERS[provider])
+    override_provider_runtime(
+        cli_binary_search_path=(tmp_path,), **{f"{provider}_cli_binary": "fake-cli"},
+    )
+    with_binary = probe_provider_route(provider, ProviderRoute.CLI)
+    (tmp_path / "fake-cli").unlink()
+    clear_agent_cli_caches()
+
+    without_binary = probe_provider_route(provider, ProviderRoute.CLI)
+
+    assert with_binary.readiness is ProviderRouteReadinessState.READY
+    assert without_binary.readiness is ProviderRouteReadinessState.NOT_CONFIGURED
+    assert without_binary.reason.code is SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED
+
+
+@pytest.mark.parametrize("provider", ["claude", "grok", "codex"])
+def test_a_cli_route_whose_private_home_cannot_be_made_is_disturbed(
+    provider: str, tmp_path: Path,
+) -> None:
+    override_provider_runtime(cli_working_directory_root=tmp_path / "missing-root")
+    clear_agent_cli_caches()
+
+    snapshot = probe_provider_route(provider, ProviderRoute.CLI)
+
+    assert snapshot.readiness is ProviderRouteReadinessState.DISTURBED
+    assert snapshot.reason.code is SafeRouteReasonCode.CLI_BINARY_UNAVAILABLE

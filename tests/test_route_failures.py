@@ -20,6 +20,9 @@ from pydantic import BaseModel, SecretStr
 
 from agent_providers import dispatch
 from agent_providers.errors import (
+    CodexProcessPoolSaturatedError,
+    ProviderError,
+    ProviderModelCatalogUnavailableError,
     ProviderUnavailableError,
     SafeRouteReasonCode,
     TextToolCallRejectedError,
@@ -42,14 +45,15 @@ from agent_providers.text_tool_protocol import (
         (SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED, "CLI is not signed in."),
         (SafeRouteReasonCode.CLI_AUTH_REJECTED, "CLI login was rejected or has expired."),
         (SafeRouteReasonCode.CLI_BINARY_UNAVAILABLE, "CLI is unavailable."),
+        (SafeRouteReasonCode.CLI_CAPACITY_EXHAUSTED, "Codex is busy. Try again shortly."),
         (SafeRouteReasonCode.CLI_PROTOCOL_ERROR, "CLI returned an invalid response."),
         (SafeRouteReasonCode.API_HTTP_ERROR, "API request failed."),
         (SafeRouteReasonCode.API_PROTOCOL_ERROR, "API returned an invalid response."),
         (SafeRouteReasonCode.CATALOGUE_HTTP_ERROR, "Model catalogue request failed."),
         (SafeRouteReasonCode.CATALOGUE_PROTOCOL_ERROR, "Model catalogue response was invalid."),
-        (SafeRouteReasonCode.TOOL_EXECUTION_FAILED, "Co-Writer tool failed."),
-        (SafeRouteReasonCode.TOOL_PROTOCOL_ERROR, "Co-Writer tool response was invalid."),
-        (SafeRouteReasonCode.TOOL_LIMIT_EXCEEDED, "Co-Writer tool-call limit was reached."),
+        (SafeRouteReasonCode.TOOL_EXECUTION_FAILED, "Tool failed."),
+        (SafeRouteReasonCode.TOOL_PROTOCOL_ERROR, "Tool response was invalid."),
+        (SafeRouteReasonCode.TOOL_LIMIT_EXCEEDED, "Tool-call limit was reached."),
         (SafeRouteReasonCode.ROUTE_FAILED, "Selected route failed."),
     ],
 )
@@ -197,7 +201,7 @@ def test_no_ordinary_rendering_shows_the_refused_text(
 def test_the_host_error_is_a_provider_unavailable_error_with_the_same_safe_answer(host_error):
     assert isinstance(host_error, ProviderUnavailableError)
     assert host_error.reason == normalize_route_failure(SafeRouteReasonCode.TOOL_PROTOCOL_ERROR)
-    assert str(host_error) == "Co-Writer tool response was invalid."
+    assert str(host_error) == "Tool response was invalid."
     assert (host_error.provider, host_error.route) == ("grok", "cli")
     assert host_error.__context__ is None
     assert host_error.__cause__ is None
@@ -248,4 +252,36 @@ def test_each_error_rebuilds_from_its_constructor_arguments(parser_error, host_e
     rejection = parser_error.rejection
 
     assert parser_error.__reduce__() == (TextToolProtocolError, (rejection,))
-    assert host_error.__reduce__() == (TextToolCallRejectedError, ("grok", "cli", rejection))
+    assert host_error.__reduce__() == (
+        TextToolCallRejectedError, ("grok", "cli", rejection), host_error.__dict__,
+    )
+
+
+_TOOL_PROTOCOL_REASON = normalize_route_failure(SafeRouteReasonCode.TOOL_PROTOCOL_ERROR)
+
+_PLAIN_ERRORS = {
+    "provider-error": ProviderError("grok", "grok is down"),
+    "unavailable-with-message": ProviderUnavailableError("grok", "no key"),
+    "unavailable-with-reason": ProviderUnavailableError("grok", "cli", _TOOL_PROTOCOL_REASON),
+    "catalog-with-message": ProviderModelCatalogUnavailableError("codex", "no catalog"),
+    "catalog-with-reason": ProviderModelCatalogUnavailableError(
+        "codex", "ignored", _TOOL_PROTOCOL_REASON,
+    ),
+    "pool-saturated": CodexProcessPoolSaturatedError(kind="turn", scope="host"),
+}
+
+
+@pytest.mark.parametrize("round_trip", _ROUND_TRIPS.values(), ids=_ROUND_TRIPS.keys())
+@pytest.mark.parametrize("original", _PLAIN_ERRORS.values(), ids=_PLAIN_ERRORS.keys())
+def test_a_route_error_survives_a_round_trip_with_its_attributes(original, round_trip):
+    original = copy.copy(original)
+    original.add_note("a note")
+    original.extra = "an extra attribute"
+
+    rebuilt = round_trip(original)
+
+    assert rebuilt.__notes__ == ["a note"]
+    assert rebuilt.extra == "an extra attribute"
+    assert type(rebuilt) is type(original)
+    assert str(rebuilt) == str(original)
+    assert rebuilt.__dict__ == original.__dict__

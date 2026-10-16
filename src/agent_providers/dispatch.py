@@ -30,9 +30,9 @@ from agent_providers.codex.image import codex_image_turn_is_available
 from agent_providers.codex.transport import CodexCliToolTransport
 from agent_providers.config import current_config
 from agent_providers.constants import (
-    COWRITER_PROVIDERS,
     GROK_CHAT_URL,
     OPENAI_CHAT_URL,
+    ProviderName,
 )
 from agent_providers.errors import (
     ProviderUnavailableError,
@@ -98,7 +98,7 @@ async def stream_turn(
     catalog: ToolCatalog,
     correlation_id: str | None = None,
 ) -> AsyncIterator[StreamEvent]:
-    if provider not in COWRITER_PROVIDERS:
+    if provider not in ProviderName:
         raise _unavailable(provider, route, SafeRouteReasonCode.ROUTE_FAILED)
     if not model:
         raise _unavailable(provider, route, SafeRouteReasonCode.ROUTE_FAILED)
@@ -282,7 +282,7 @@ def call_provider_once(
     *, provider: str, model: str, prompt: str, timeout: int, system: str | None = None,
 ) -> str:
     """Run one tool-free completion on the provider's HTTP API."""
-    if provider not in COWRITER_PROVIDERS or not model:
+    if provider not in ProviderName or not model:
         raise _unavailable(provider, ProviderRoute.API, SafeRouteReasonCode.ROUTE_FAILED)
     try:
         if provider == "claude":

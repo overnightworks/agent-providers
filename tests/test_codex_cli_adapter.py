@@ -1092,7 +1092,10 @@ def _alternating_agent_messages(count: int) -> list[dict]:
             ],
             (
                 "...+9",
-                *(f"{_ALTERNATING_ITEM_EVENTS[index % 2]}:agent_message*2" for index in range(9, 40)),
+                *(
+                    f"{_ALTERNATING_ITEM_EVENTS[index % 2]}:agent_message*2"
+                    for index in range(9, 40)
+                ),
                 "turn.completed",
             ),
         ),

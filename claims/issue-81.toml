@@ -1,0 +1,8 @@
+claim_id = "dea9e14d8d9a4e918e2e798383a45c67"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "8812996d73f2734fe5a8ec24b1a66a98eeee5528"
+branch = "claude/issue-81-public-names-library-terms"
+scope = ["README.md", "src/agent_providers/catalog.py", "src/agent_providers/claude/adapter.py", "src/agent_providers/claude/provider.py", "src/agent_providers/codex/image.py", "src/agent_providers/codex/transport.py", "src/agent_providers/constants.py", "src/agent_providers/dispatch.py", "src/agent_providers/grok/transport.py", "src/agent_providers/openai_adapter.py", "src/agent_providers/process.py", "src/agent_providers/tool_loop.py", "tests/provider_test_support.py", "tests/test_claude_provider.py", "tests/test_codex_cli_adapter.py", "tests/test_dispatch.py", "tests/test_process.py", "tests/test_tool_loop.py"]
+opened_commit = "c482b2dc159c58d08ad0bb7dda8e211a3c39689d"
+whole_reason = "The public names hosts import are renamed together with every importer in one breaking slice, so no half-renamed state lands."

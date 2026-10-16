@@ -1,0 +1,8 @@
+claim_id = "2bf4d99c5a474c7cb6287609ae96d623"
+agent = "Claude fe12493e-3d52-442e-b01b-4ee4336de2f0"
+role = "builder"
+base = "9ca33f2de5feab49251e65371f2b404382394498"
+branch = "claude/issue-40-a1a3-3-langsamer-client-wer-seinen-warte"
+scope = ["README.md", "docs/decisions/0001-agent-service.md", "packages/agent-service/src/agent_service/config.py", "packages/agent-service/src/agent_service/run_liveness.py", "tests/service_support.py", "tests/test_service_config.py", "tests/test_service_limits.py", "tests/test_service_liveness.py", "tests/test_service_slow_client.py"]
+opened_commit = "c7cddcf934ac15d86a0be5fd334acb8ce6f319ad"
+whole_reason = "Stall deadline, drop path, config, ADR qualifications and restated tests are one slice."

@@ -14,6 +14,7 @@ import pytest
 from PIL import Image
 from provider_test_support import (
     COWRITER_TOOL_CATALOG,
+    assert_a_multi_result_batch_is_rejected,
     override_provider_runtime,
     use_codex_process_pool,
 )
@@ -34,8 +35,6 @@ from agent_providers.tool_loop import (
     InitialTurn,
     ToolCallBatch,
     ToolOutcome,
-    ToolResult,
-    ToolResultBatch,
     stream_tool_loop,
 )
 
@@ -196,6 +195,11 @@ def _image_event_stream(codex_home: Path) -> str:
     return (_FIXTURES / "codex-imagegen-real-stream.jsonl").read_text().replace(
         "{CODEX_HOME}", str(codex_home.resolve()),
     )
+
+
+def _quota_failure(message: str) -> CliRunOutcome:
+    event = {"type": "turn.failed", "error": {"message": message}}
+    return _outcome(returncode=1, stdout=json.dumps(event) + "\n")
 
 
 def _image_runner(
@@ -360,19 +364,7 @@ def test_codex_tool_transport_rejects_a_multi_result_batch_without_a_resume(monk
     ], _outcome(), calls))
     transport = _transport()
 
-    async def reject_batch() -> None:
-        assert [item async for item in transport.stream(InitialTurn("system", []))]
-        batch = ToolResultBatch((
-            ToolResult("one", "1", False),
-            ToolResult("two", "2", False),
-        ))
-        with pytest.raises(ProviderUnavailableError) as raised:
-            async for _ in transport.stream(batch):
-                pass
-        assert raised.value.reason.code is SafeRouteReasonCode.TOOL_PROTOCOL_ERROR
-        await transport.aclose()
-
-    asyncio.run(reject_batch())
+    assert_a_multi_result_batch_is_rejected(transport)
     assert len(calls) == 1
 
 
@@ -678,6 +670,24 @@ def test_a_generated_image_outside_the_hosts_bounds_is_refused(
             "Sep 7th, 2026 8:45 PM",
         ),
         (
+            _quota_failure("usage limit, try again at Sep 7th, 2026 8:45 PM.\nSee billing."),
+            codex_image.CodexImageQuotaError,
+            "usage limit",
+            "Sep 7th, 2026 8:45 PM",
+        ),
+        (
+            _quota_failure("usage limit, try again at Sep 7th.."),
+            codex_image.CodexImageQuotaError,
+            "usage limit",
+            "Sep 7th.",
+        ),
+        (
+            _quota_failure("usage limit, try again at ."),
+            codex_image.CodexImageQuotaError,
+            "usage limit",
+            None,
+        ),
+        (
             _outcome(
                 returncode=1,
                 stdout=(
@@ -697,6 +707,9 @@ def test_a_generated_image_outside_the_hosts_bounds_is_refused(
         "nonzero-exit",
         "turn-failed-names-auth",
         "turn-failed-names-usage-limit",
+        "usage-limit-hint-followed-by-a-later-line",
+        "usage-limit-hint-keeps-all-but-one-trailing-dot",
+        "usage-limit-hint-without-a-time",
         "turn-failed-names-generic-message",
     ),
 )
@@ -714,7 +727,7 @@ def test_codex_cover_image_names_terminal_cli_failures(
 
     if expected_message is not None:
         assert expected_message in str(raised.value)
-    if expected_retry_at is not None:
+    if expected_error is codex_image.CodexImageQuotaError:
         assert raised.value.retry_at == expected_retry_at
 
 

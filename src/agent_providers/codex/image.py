@@ -59,7 +59,7 @@ _IMAGE_ENCODER_MISSING_DETAIL: Final = (
 )
 _USAGE_LIMIT_MARKER: Final = "usage limit"
 # Codex's own wording for the retry hint, e.g. "... try again at Sep 7th, 2026 8:45 PM."
-_USAGE_LIMIT_RETRY_AT_PATTERN: Final = re.compile(r"try again at (?P<retry_at>.+?)\.?\s*$")
+_USAGE_LIMIT_RETRY_AT_PATTERN: Final = re.compile(r"try again at (?P<retry_at>.+)")
 
 _CODEX_IMAGE_ISOLATION_ARGS: Final = (
     "--skip-git-repo-check",
@@ -281,11 +281,15 @@ def _raise_for_codex_image_outcome(outcome: CliRunOutcome) -> None:
     if codex_cli_failure_reason(message) is SafeRouteReasonCode.CLI_AUTH_REJECTED:
         raise CodexImageLoginError()
     if _USAGE_LIMIT_MARKER in message.lower():
-        match = _USAGE_LIMIT_RETRY_AT_PATTERN.search(message)
-        raise CodexImageQuotaError(
-            message, retry_at=match.group("retry_at") if match else None,
-        )
+        raise CodexImageQuotaError(message, retry_at=_usage_limit_retry_at(message))
     raise CodexImageCliError(message)
+
+
+def _usage_limit_retry_at(message: str) -> str | None:
+    match = _USAGE_LIMIT_RETRY_AT_PATTERN.search(message)
+    if match is None:
+        return None
+    return match.group("retry_at").rstrip().removesuffix(".") or None
 
 
 def _codex_image_turn_failure_message(stdout: str) -> str | None:

@@ -297,11 +297,11 @@ def _execute_tool(tool_round: _ToolRound, call: ToolCall) -> ToolOutcome:
     try:
         outcome = tool_round.executor(call.name, call.arguments)
     except Exception as exc:
-        # A host executor reports a failed tool as an outcome, so anything
-        # raised past it is a defect or an infrastructure failure, not an
-        # answer. The turn survives it; the class is named so it is findable,
-        # and the message never is — it may quote the song.
-        log.error("Co-writer tool executor raised %s", type(exc).__name__)
+        # The executor is the host's port and reports a failed tool as a
+        # ToolOutcome, so anything raised is a host defect. The exception text
+        # is host data the library cannot classify, so only the class is
+        # logged; exc_info=False withholds the traceback on purpose.
+        log.error("Host tool executor raised %s", type(exc).__name__, exc_info=False)
         outcome = ToolOutcome(tool_round.tool_failure_message, True)
     duration_ms = round((time.monotonic() - started_at) * 1000)
     log.info(

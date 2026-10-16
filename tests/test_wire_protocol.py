@@ -272,8 +272,10 @@ def test_a_rejection_body_round_trips_through_its_json(code: RejectionCode) -> N
     ],
 )
 def test_a_rejection_body_off_the_contract_is_refused(body: dict[str, object]) -> None:
+    rejection_json = json.dumps(body)
+
     with pytest.raises(ValidationError):
-        RunRejection.model_validate_json(json.dumps(body))
+        RunRejection.model_validate_json(rejection_json)
 
 
 REQUEST = {
@@ -301,8 +303,10 @@ def test_a_run_request_round_trips_through_its_json() -> None:
     "field", ["provider", "model", "route", "user_id", "mcp_url", "mcp_token", "tools"]
 )
 def test_a_run_request_naming_what_the_service_decides_is_refused(field: str) -> None:
+    request_json = json.dumps({**REQUEST, field: "chosen by the client"})
+
     with pytest.raises(ValidationError):
-        RunRequest.model_validate_json(json.dumps({**REQUEST, field: "chosen by the client"}))
+        RunRequest.model_validate_json(request_json)
 
 
 @pytest.mark.parametrize(

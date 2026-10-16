@@ -16,9 +16,12 @@ against values this package owns.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import Any
 from unittest.mock import MagicMock
+
+import pytest
 
 from agent_client.tools import ToolDeclaration
 from agent_providers.config import (
@@ -27,6 +30,8 @@ from agent_providers.config import (
     current_config,
     reset_config,
 )
+from agent_providers.errors import ProviderUnavailableError, SafeRouteReasonCode
+from agent_providers.tool_loop import InitialTurn, ToolResult, ToolResultBatch
 from agent_providers.tools import ToolCatalog
 
 _fake_cli_processes: list[MagicMock] = []
@@ -235,3 +240,21 @@ COWRITER_TOOL_CATALOG: ToolCatalog = ToolCatalog(
         ),
     ),
 )
+
+
+def assert_a_multi_result_batch_is_rejected(transport: Any) -> None:
+    """Drive a tool transport past its first turn, then hand it two results at once."""
+
+    async def reject_batch() -> None:
+        assert [item async for item in transport.stream(InitialTurn("system", []))]
+        batch = ToolResultBatch((
+            ToolResult("one", "1", False),
+            ToolResult("two", "2", False),
+        ))
+        with pytest.raises(ProviderUnavailableError) as raised:
+            async for _ in transport.stream(batch):
+                pass
+        assert raised.value.reason.code is SafeRouteReasonCode.TOOL_PROTOCOL_ERROR
+        await transport.aclose()
+
+    asyncio.run(reject_batch())

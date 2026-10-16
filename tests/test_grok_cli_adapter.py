@@ -10,7 +10,11 @@ from pathlib import Path
 from urllib.parse import quote
 
 import pytest
-from provider_test_support import COWRITER_TOOL_CATALOG, override_provider_runtime
+from provider_test_support import (
+    COWRITER_TOOL_CATALOG,
+    assert_a_multi_result_batch_is_rejected,
+    override_provider_runtime,
+)
 
 from agent_providers.config import current_config
 from agent_providers.errors import ProviderUnavailableError, SafeRouteReasonCode
@@ -264,19 +268,7 @@ def test_grok_tool_transport_rejects_a_multi_result_batch(monkeypatch) -> None:
     )
     transport = _transport()
 
-    async def reject_batch() -> None:
-        assert [item async for item in transport.stream(InitialTurn("system", []))]
-        batch = ToolResultBatch((
-            ToolResult("one", "1", False),
-            ToolResult("two", "2", False),
-        ))
-        with pytest.raises(ProviderUnavailableError) as raised:
-            async for _ in transport.stream(batch):
-                pass
-        assert raised.value.reason.code is SafeRouteReasonCode.TOOL_PROTOCOL_ERROR
-        await transport.aclose()
-
-    asyncio.run(reject_batch())
+    assert_a_multi_result_batch_is_rejected(transport)
     assert len(calls) == 1
 
 

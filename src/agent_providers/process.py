@@ -1117,8 +1117,8 @@ class _PrivateCredentialHomeReservation:
             self._released = True
         try:
             self._home._release()
-        except PrivateCredentialHomeRemovalError as error:
-            log.error("%s: a later close retries the removal", error)
+        except PrivateCredentialHomeRemovalError:
+            log.exception("private credential home stays until a later close retries")
 
     def on_spawn_failed(self) -> None:
         self.release()

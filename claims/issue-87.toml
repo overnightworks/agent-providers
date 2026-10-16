@@ -1,7 +1,0 @@
-claim_id = "ba8bebfad89643a5a720f7a3d12aef25"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "f1305ae3d0110ed2ddc194463f3b33227738e9a2"
-branch = "claude/issue-87-claude-prose-private-names"
-scope = ["src/agent_providers/claude/adapter.py", "src/agent_providers/claude/provider.py", "tests/test_claude_adapter.py"]
-opened_commit = "5f10e65a11b6bc21ba4288f335b41cfce7864ed5"

@@ -1,8 +1,0 @@
-claim_id = "79037865a3bc45718215b05662daff11"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "d5003c253e86b23aaa4ba1cb9847c11c4480f2a0"
-branch = "claude/issue-96-codex-login-decider-reader"
-scope = ["README.md", "src/agent_providers/catalog.py", "src/agent_providers/codex_login.py", "src/agent_providers/dispatch.py", "src/agent_providers/process.py", "tests/provider_test_support.py", "tests/test_catalog.py", "tests/test_codex_cli_adapter.py", "tests/test_codex_login.py", "tests/test_dispatch.py", "tests/test_process.py"]
-opened_commit = "df981ac810efb8ce4489c03f14600ab95affb348"
-whole_reason = "The decider, its reader and its four surfaces (setup, image preflight, both probes) must move together; the shared bounded-join test helper serves the FIFO cells of three of their test modules."

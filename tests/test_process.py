@@ -1376,6 +1376,68 @@ def test_private_credential_home_is_removed_when_its_process_ends_with_cleanup_p
     assert not Path(completed.stdout.strip()).exists()
 
 
+_REFUSED_THEN_ALLOWED_REMOVAL_SCRIPT = """
+import gc
+import shutil
+import sys
+from pathlib import Path
+
+from agent_providers.config import ProviderRuntimeConfig, configure
+from agent_providers.process import PrivateCredentialHome
+
+configure(ProviderRuntimeConfig.model_validate_json(sys.argv[1]))
+real_rmtree = shutil.rmtree
+refusals_left = 2
+
+
+def rmtree_refusing_the_first_two_attempts(path):
+    global refusals_left
+    if refusals_left:
+        refusals_left -= 1
+        raise PermissionError
+    real_rmtree(path)
+
+
+shutil.rmtree = rmtree_refusing_the_first_two_attempts
+home = PrivateCredentialHome(
+    Path(sys.argv[2]),
+    Path(".claude/.credentials.json"),
+    prefix="private-home-",
+    missing_credential_is_error=True,
+)
+home_path = home.path
+del home
+gc.collect()
+print(home_path)
+print(home_path.exists())
+"""
+
+
+def test_private_credential_home_is_removed_at_exit_after_its_finalizer_failed(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.json"
+    source.write_text(_CATALOG_AUTH_PAYLOAD)
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _REFUSED_THEN_ALLOWED_REMOVAL_SCRIPT,
+            current_config().model_dump_json(),
+            str(source),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=60,
+    )
+
+    home_path, existed_after_finalizer = completed.stdout.split()
+    assert existed_after_finalizer == "True"
+    assert not Path(home_path).exists()
+
+
 _FORKED_HOME_SCRIPT = """
 import os
 import sys

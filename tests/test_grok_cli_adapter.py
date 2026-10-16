@@ -89,6 +89,8 @@ def test_grok_credential_home_is_removed_when_aclose_is_cancelled_while_queued()
             await closing
         worker_may_continue.set()
         await busy_worker
+        await loop.run_in_executor(None, lambda: None)
+        assert not any(home.exists() for home in homes)
         await transport.aclose()
 
     asyncio.run(cancel_while_the_close_is_queued())

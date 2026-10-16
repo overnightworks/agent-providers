@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import concurrent.futures
 import json
 import logging
@@ -1149,9 +1150,15 @@ class _PrivateCredentialHomeReservation:
         self.release()
 
 
-def _remove_abandoned_tree(root: Path, creator_process_id: int) -> None:
-    if os.getpid() == creator_process_id:
-        _remove_private_tree(root)
+def _remove_abandoned_tree(
+    root: Path, creator_process_id: int, *, retry_at_exit: bool = True,
+) -> None:
+    if os.getpid() != creator_process_id:
+        return
+    if not _remove_private_tree(root) and retry_at_exit:
+        atexit.register(
+            _remove_abandoned_tree, root, creator_process_id, retry_at_exit=False,
+        )
 
 
 def _remove_private_tree(root: Path) -> bool:

@@ -179,8 +179,8 @@ def _with_key_set_url(url: str) -> str:
         pytest.param("[identity\n", "not TOML", id="not-toml"),
         pytest.param(VALID_CONFIG + "\n[signing]\n", "signing.key_file", id="signing-without-key"),
         pytest.param(
-            VALID_CONFIG + '\n[signing]\nkey = "/run/secrets/key.pem"\n',
-            "signing.key",
+            VALID_CONFIG + '\n[signing]\nkey_file = "/run/secrets/key.pem"\nkey = "x"\n',
+            "signing.key: Extra inputs are not permitted",
             id="signing-with-a-key-member",
         ),
         *[

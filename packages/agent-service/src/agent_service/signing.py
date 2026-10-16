@@ -34,6 +34,19 @@ class UnsoundSigningKey(ValueError):
     """A key file the service refuses to sign with; the message is the service's own words."""
 
 
+class EmptyTokenType(ValueError):
+    """A token must say what it is for; an empty ``typ`` would silently drop the header."""
+
+
+def shown_path(path: str) -> str:
+    """The path with control and non-printing characters escaped, so a message stays one line."""
+    return "".join(map(_shown_character, path))
+
+
+def _shown_character(character: str) -> str:
+    return character if character.isprintable() else character.encode("unicode_escape").decode()
+
+
 def key_id(public_key: rsa.RSAPublicKey) -> str:
     """The RFC 7638 SHA-256 thumbprint: members ``e``, ``kty``, ``n`` in order, no whitespace."""
     jwk = RSAAlgorithm.to_jwk(public_key, as_dict=True)
@@ -68,6 +81,8 @@ class SigningKey:
         return cls(key_id(public_key), public_key, private_key)
 
     def sign(self, claims: Mapping[str, object], token_type: str) -> str:
+        if not token_type:
+            raise EmptyTokenType("a token type must not be empty")
         return jwt.encode(
             dict(claims),
             self.private_key,
@@ -78,12 +93,13 @@ class SigningKey:
 
 def load_signing_key(path: Path) -> SigningKey:
     """Reads the file through one descriptor and raises ``UnsoundSigningKey`` for any refusal."""
+    shown = shown_path(str(path))
     try:
         return SigningKey.from_private_key(_parsed_private_key(_read_key_file(path)))
     except OSError as error:
-        raise UnsoundSigningKey(f"{path} cannot be read: {error.strerror}") from error
+        raise UnsoundSigningKey(f"{shown} cannot be read: {error.strerror}") from error
     except UnsoundSigningKey as refusal:
-        raise UnsoundSigningKey(f"{path} {refusal}") from None
+        raise UnsoundSigningKey(f"{shown} {refusal}") from None
 
 
 def _read_key_file(path: Path) -> bytes:
@@ -97,6 +113,8 @@ def _read_key_file(path: Path) -> bytes:
                 f"is open to group or others (mode {stat.S_IMODE(status.st_mode):04o});"
                 " a key file must grant them nothing, for example 0600 or 0400"
             )
+        if status.st_size > MAX_KEY_FILE_BYTES:
+            raise UnsoundSigningKey(f"is larger than {MAX_KEY_FILE_BYTES} bytes")
         contents = _read_at_most(descriptor, MAX_KEY_FILE_BYTES + 1)
     finally:
         os.close(descriptor)

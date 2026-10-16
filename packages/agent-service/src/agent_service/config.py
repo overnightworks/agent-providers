@@ -29,7 +29,7 @@ from webauth.https_client import is_https_url
 
 from agent_client.tools import ToolEffect
 from agent_client.wire import MAX_EVENT_BYTES
-from agent_service.signing import SigningKey, load_signing_key
+from agent_service.signing import SigningKey, load_signing_key, shown_path
 
 NonEmptyText = Annotated[str, Field(min_length=1)]
 
@@ -74,8 +74,15 @@ class IdentityConfig(_Section):
 
 def _signing_key_in_file(key_file: object) -> SigningKey:
     """Loads the key the absolute path names; a refusal stops startup as a field error."""
-    if not isinstance(key_file, str) or not Path(key_file).is_absolute():
+    if not isinstance(key_file, str):
         raise ValueError("must be an absolute path to the signing key file; ~ is not expanded")
+    shown = shown_path(key_file)
+    if shown != key_file:
+        raise ValueError(f"{shown} contains a control or non-printing character; a path must not")
+    if not Path(key_file).is_absolute():
+        raise ValueError(
+            f"{shown} must be an absolute path to the signing key file; ~ is not expanded"
+        )
     return load_signing_key(Path(key_file))
 
 

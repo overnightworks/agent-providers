@@ -290,15 +290,16 @@ schedule. To rotate:
 3. restart the service.
 
 The `kid` changes with the key. Restarting stops the service's runs but does not
-revoke their capabilities: tokens issued earlier stay acceptable until expiry
-wherever the old public key remains trusted (webauth keeps a fetched key set for an
-hour). Compromise recovery therefore also means removing the old public key from
-every verifier and invalidating its cached trust; the executable procedure is owned
-by A1m and A1d before live use. The holder of a compromised private key can mint new
-tokens, so waiting for issued capabilities to expire is not recovery. No previous
-private signing key is kept, and no previous public verification key is kept or
-published here; A1a5 decides whether 24-hour tickets need one after a planned
-rotation.
+revoke their capabilities: previously issued tokens remain acceptable until expiry
+wherever the old public key remains trusted. Compromise recovery also requires
+removing that public key from every verifier and invalidating its cached trust, with
+the executable procedure owned by A1m/A1d before live use. webauth, for one, keeps a
+fetched key set for an hour. The holder of a compromised private key can mint new
+tokens, so waiting until issued capabilities expire is not recovery. No previous
+private signing key is kept. This item keeps and publishes no previous public
+verification key; whether 24-hour tickets or a published key set need one after a
+planned rotation is decided by A1a5 and A1m (O2 (b)), and it never applies after a
+compromise.
 
 **Decisions.**
 

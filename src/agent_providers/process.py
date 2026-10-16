@@ -17,10 +17,10 @@ import weakref
 from collections import deque
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
-from typing import Any, Final, Literal, NotRequired, Required, TypedDict, Unpack
+from typing import Any, Final, Literal, NotRequired, Required, TypedDict, Unpack, cast
 
 from agent_providers.config import current_config, current_turn_config
 from agent_providers.constants import (
@@ -143,33 +143,64 @@ class CliLineChannel:
     def abort_requested(self) -> bool:
         return self._abort_requested.is_set()
 
-    def receive(self, timeout: float | None = None) -> bytes | CliRunOutcome:
-        deadline = None if timeout is None else time.monotonic() + timeout
+    def receive(
+        self,
+        timeout: float | None = None,
+        *,
+        settle_by: float | None = None,
+    ) -> bytes | CliRunOutcome:
+        give_up_at = None if timeout is None else time.monotonic() + timeout
         with self._condition:
             while True:
                 if self._lines:
                     return self._lines.popleft()
                 if self._outcome is not None:
                     return self._outcome
-                remaining = None if deadline is None else deadline - time.monotonic()
-                if remaining is not None and remaining <= 0:
+                now = time.monotonic()
+                if settle_by is not None and now >= settle_by:
+                    self._outcome = _cleanup_overran_outcome(started=True)
+                    self._condition.notify_all()
+                    return self._outcome
+                if give_up_at is not None and now >= give_up_at:
                     raise TimeoutError("CLI line channel did not produce an item in time")
-                self._condition.wait(timeout=remaining)
+                wake_instants = [
+                    instant for instant in (give_up_at, settle_by) if instant is not None
+                ]
+                self._condition.wait(timeout=min(wake_instants) - now if wake_instants else None)
 
     def _send(self, line: bytes) -> bool:
         with self._condition:
-            if self._abort_requested.is_set() or len(self._lines) >= self._maximum_lines:
+            if (
+                self._outcome is not None
+                or self._abort_requested.is_set()
+                or len(self._lines) >= self._maximum_lines
+            ):
                 return False
             self._lines.append(line)
             self._condition.notify_all()
             return True
 
-    def _close(self, outcome: CliRunOutcome) -> None:
+    def _close(self, outcome: CliRunOutcome) -> CliRunOutcome:
         with self._condition:
-            if not outcome.complete:
-                self._lines.clear()
-            self._outcome = outcome
-            self._condition.notify_all()
+            if self._outcome is None:
+                if not outcome.complete:
+                    self._lines.clear()
+                self._outcome = outcome
+                self._condition.notify_all()
+            return self._outcome
+
+
+def _cleanup_overran_outcome(*, started: bool) -> CliRunOutcome:
+    return CliRunOutcome(
+        started=started,
+        spawn_error=None,
+        returncode=None,
+        stdout="",
+        stderr="",
+        complete=False,
+        became_zombie=False,
+        reason=CliRunReason.CLEANUP_OVERRAN,
+    )
 
 
 @dataclass
@@ -179,17 +210,54 @@ class _BoundedRunState:
     lock: threading.Lock = field(default_factory=threading.Lock)
     outcome: CliRunOutcome | None = None
 
+    def record(self, outcome: CliRunOutcome) -> CliRunOutcome:
+        with self.lock:
+            if self.outcome is None:
+                self.outcome = outcome
+            recorded = self.outcome
+        self.completed.set()
+        return recorded
+
+
+class _StepFailures:
+    """The steps of a run that raised, kept by name and exception class only."""
+
+    def __init__(self, *, catching: type[BaseException] = BaseException) -> None:
+        self._catching = catching
+        self._failed: list[str] = []
+
+    @contextmanager
+    def contained(self, step: str) -> Iterator[None]:
+        try:
+            yield
+        except self._catching as error:
+            self.record(step, error)
+
+    def record(self, step: str, error: BaseException) -> None:
+        self._failed.append(f"{step} {type(error).__name__}")
+
+    def report(self) -> None:
+        for failure in self._failed:
+            log.error("agent CLI runner step failed: %s", failure)
+
 
 LOGGED_OUT = CliLogin(logged_in=False, auth_method=None)
 
 # A probe can spend its answer budget and then two termination grace periods
 # reaping its process group. Give callers enough time to receive that outcome.
 CLI_PROBE_CALLER_TIMEOUT_MARGIN_SECONDS = 0.1
-CLI_PROBE_CALLER_TIMEOUT_SECONDS = (
-    PROBE_TIMEOUT_SECONDS
-    + (2 * CLI_TERMINATION_GRACE_SECONDS)
-    + CLI_PROBE_CALLER_TIMEOUT_MARGIN_SECONDS
-)
+
+
+def _cli_settle_margin_seconds() -> float:
+    return 2 * CLI_TERMINATION_GRACE_SECONDS + CLI_PROBE_CALLER_TIMEOUT_MARGIN_SECONDS
+
+
+def cli_settle_deadline(deadline: float) -> float:
+    """The instant by which a run with this deadline has published its outcome."""
+    return deadline + _cli_settle_margin_seconds()
+
+
+CLI_PROBE_CALLER_TIMEOUT_SECONDS = PROBE_TIMEOUT_SECONDS + _cli_settle_margin_seconds()
 _BACKGROUND_REAP_POLL_SECONDS: Final = 0.1
 
 log = logging.getLogger(__name__)
@@ -389,7 +457,6 @@ class _CliRunKeywordArgs(TypedDict, total=False):
     deadline: Required[float]
     stderr: NotRequired[StderrPolicy]
     output_read_limit_bytes: NotRequired[int | None]
-    cleanup_margin_seconds: NotRequired[float | None]
     on_spawned: NotRequired[Callable[[int], None] | None]
     on_spawn_failed: NotRequired[Callable[[], None] | None]
     on_reaped: NotRequired[Callable[[int, bool], None] | None]
@@ -441,43 +508,91 @@ def run_cli_bounded(
         prompt_file_arg_index=options.get("prompt_file_arg_index"),
     )
     state = _BoundedRunState()
-    threading.Thread(
-        target=_run_cli_bounded,
-        args=(state, child, request),
-        daemon=True,
-    ).start()
-    if not state.completed.wait(timeout=max(request.deadline - time.monotonic(), 0)):
-        if not state.started.is_set():
-            return CliRunOutcome(
-                started=False,
-                spawn_error=None,
-                returncode=None,
-                stdout="",
-                stderr="",
-                complete=False,
-                became_zombie=False,
-                reason=CliRunReason.DEADLINE_BEFORE_SPAWN,
-            )
-        cleanup_margin = options.get("cleanup_margin_seconds")
-        if cleanup_margin is None:
-            cleanup_margin = (
-                2 * CLI_TERMINATION_GRACE_SECONDS + CLI_PROBE_CALLER_TIMEOUT_MARGIN_SECONDS
-            )
-        if not state.completed.wait(timeout=cleanup_margin):
-            return CliRunOutcome(
-                started=True,
-                spawn_error=None,
-                returncode=None,
-                stdout="",
-                stderr="",
-                complete=False,
-                became_zombie=False,
-                reason=CliRunReason.CLEANUP_OVERRAN,
-            )
+    worker = threading.Thread(target=_run_cli_bounded, args=(state, child, request), daemon=True)
+    start_failure = _start_worker(worker)
+    if start_failure is not None:
+        return _settle_unstarted_run(state, request, start_failure)
+    if state.completed.wait(timeout=max(request.deadline - time.monotonic(), 0)):
+        return _recorded_outcome(state)
+    if not state.started.is_set():
+        return _settle_from_caller(state, request, _deadline_before_spawn_outcome())
+    settle_wait = max(cli_settle_deadline(request.deadline) - time.monotonic(), 0)
+    if state.completed.wait(timeout=settle_wait):
+        return _recorded_outcome(state)
+    return _settle_from_caller(state, request, _cleanup_overran_outcome(started=True))
+
+
+def _start_worker(worker: threading.Thread) -> BaseException | None:
+    try:
+        worker.start()
+    except BaseException as error:
+        return error
+    return None
+
+
+def _settle_unstarted_run(
+    state: _BoundedRunState,
+    request: _CliRunRequest,
+    start_failure: BaseException,
+) -> CliRunOutcome:
+    failures = _StepFailures()
+    failures.record("start", start_failure)
+    with failures.contained("on_spawn_failed"):
+        _notify_spawn_failed(request.on_spawn_failed)
+    outcome = _settle(
+        state,
+        request.stdout_line_channel,
+        _spawn_failure_outcome(start_failure),
+        failures,
+    )
+    failures.report()
+    if not isinstance(start_failure, Exception):
+        raise start_failure
+    return outcome
+
+
+def _recorded_outcome(state: _BoundedRunState) -> CliRunOutcome:
     with state.lock:
-        if state.outcome is None:
-            raise RuntimeError("bounded CLI runner completed without an outcome")
-        return state.outcome
+        return cast(CliRunOutcome, state.outcome)
+
+
+def _settle_from_caller(
+    state: _BoundedRunState,
+    request: _CliRunRequest,
+    outcome: CliRunOutcome,
+) -> CliRunOutcome:
+    channel = request.stdout_line_channel
+    if channel is not None:
+        channel.request_abort()
+    failures = _StepFailures(catching=Exception)
+    settled = _settle(state, channel, outcome, failures)
+    failures.report()
+    return settled
+
+
+def _settle(
+    state: _BoundedRunState,
+    channel: CliLineChannel | None,
+    outcome: CliRunOutcome,
+    failures: _StepFailures,
+) -> CliRunOutcome:
+    if channel is not None:
+        with failures.contained("close"):
+            outcome = channel._close(outcome)
+    return state.record(outcome)
+
+
+def _deadline_before_spawn_outcome() -> CliRunOutcome:
+    return CliRunOutcome(
+        started=False,
+        spawn_error=None,
+        returncode=None,
+        stdout="",
+        stderr="",
+        complete=False,
+        became_zombie=False,
+        reason=CliRunReason.DEADLINE_BEFORE_SPAWN,
+    )
 
 
 @dataclass(frozen=True)
@@ -502,61 +617,43 @@ def _run_cli_bounded(
     child: ChildProcess,
     request: _CliRunRequest,
 ) -> None:
-    process, prompt_file_path, outcome = _start_bounded_cli(
-        child,
-        request.stderr,
-        request.on_spawn_failed,
-        request.prompt_file_bytes,
-        request.prompt_file_arg_index,
-    )
-    output = _CliOutput(
-        bytearray(),
-        bytearray(),
-        complete=False,
-        reason=CliRunReason.IO_ERROR,
-    )
-    try:
-        if process is not None:
-            state.started.set()
-            _notify_spawned(request.on_spawned, process.pid)
-            output = _exchange_bounded(
-                process,
-                request.stdin_payload,
-                request.read,
-                request.deadline,
-                request.output_read_limit_bytes,
-                request.stdout_line_channel,
-            )
-    finally:
-        if process is not None:
-            outcome = _finished_bounded_cli_run(process, output, request.on_reaped)
-        outcome = _cleanup_bounded_cli_prompt_file(prompt_file_path, outcome)
-        if outcome is None:
-            raise RuntimeError("bounded CLI runner exited without an outcome")
-        _publish_bounded_outcome(state, outcome)
-        if request.stdout_line_channel is not None:
-            request.stdout_line_channel._close(outcome)
+    failures = _StepFailures()
+    started, prompt_file_path = _start_bounded_cli(child, request, failures)
+    background_reap_process: PipedProcess | None = None
+    if isinstance(started, CliRunOutcome):
+        outcome = started
+    else:
+        state.started.set()
+        output = _exchange_after_spawn(started, request, failures)
+        outcome, handed_off = _reaped_outcome(started, output, request.on_reaped, failures)
+        if handed_off and request.on_reaped is not None:
+            background_reap_process = started
+    outcome = _outcome_after_prompt_file_cleanup(prompt_file_path, outcome, failures)
+    _settle(state, request.stdout_line_channel, outcome, failures)
+    failures.report()
+    if background_reap_process is not None:
+        _reap_in_background(background_reap_process, request.on_reaped)
 
 
 def _start_bounded_cli(
     child: ChildProcess,
-    stderr: StderrPolicy,
-    on_spawn_failed: Callable[[], None] | None,
-    prompt_file_bytes: bytes | None,
-    prompt_file_arg_index: int | None,
-) -> tuple[PipedProcess | None, str | None, CliRunOutcome | None]:
+    request: _CliRunRequest,
+    failures: _StepFailures,
+) -> tuple[PipedProcess | CliRunOutcome, str | None]:
     prompt_file_path: str | None = None
+    spawn_failure: BaseException | None = None
     try:
         prompted_child, prompt_file_path = _with_private_prompt_file(
             child,
-            prompt_file_bytes,
-            prompt_file_arg_index,
+            request.prompt_file_bytes,
+            request.prompt_file_arg_index,
         )
-        process = open_pipes(prompted_child, stderr=stderr)
-    except Exception as error:
-        _notify_spawn_failed(on_spawn_failed)
-        return None, prompt_file_path, _spawn_failure_outcome(error)
-    return process, prompt_file_path, None
+        return open_pipes(prompted_child, stderr=request.stderr), prompt_file_path
+    except BaseException as error:
+        spawn_failure = error
+    with failures.contained("on_spawn_failed"):
+        _notify_spawn_failed(request.on_spawn_failed)
+    return _spawn_failure_outcome(spawn_failure), prompt_file_path
 
 
 def _spawn_failure_outcome(error: BaseException) -> CliRunOutcome:
@@ -572,21 +669,45 @@ def _spawn_failure_outcome(error: BaseException) -> CliRunOutcome:
     )
 
 
-def _finished_bounded_cli_run(
+def _exchange_after_spawn(
+    process: PipedProcess,
+    request: _CliRunRequest,
+    failures: _StepFailures,
+) -> _CliOutput:
+    output = _CliOutput(
+        bytearray(),
+        bytearray(),
+        complete=False,
+        reason=CliRunReason.IO_ERROR,
+    )
+    spawn_announced = False
+    with failures.contained("on_spawned"):
+        _notify_spawned(request.on_spawned, process.pid)
+        spawn_announced = True
+    if spawn_announced:
+        with failures.contained("exchange"):
+            output = _exchange_bounded(
+                process,
+                request.stdin_payload,
+                request.read,
+                request.deadline,
+                request.output_read_limit_bytes,
+                request.stdout_line_channel,
+            )
+    return output
+
+
+def _reaped_outcome(
     process: PipedProcess,
     output: _CliOutput,
     on_reaped: Callable[[int, bool], None] | None,
-) -> CliRunOutcome:
-    became_zombie = _reap_process_group(process)
-    if became_zombie and on_reaped is not None:
-        threading.Thread(
-            target=_reap_in_background,
-            args=(process, on_reaped),
-            daemon=True,
-        ).start()
-    else:
-        _notify_reaped(on_reaped, process.pid, became_zombie=False)
-    return CliRunOutcome(
+    failures: _StepFailures,
+) -> tuple[CliRunOutcome, bool]:
+    became_zombie = _reap_or_hand_off(process, failures)
+    if not became_zombie:
+        with failures.contained("on_reaped"):
+            _notify_reaped(on_reaped, process.pid, became_zombie=False)
+    outcome = CliRunOutcome(
         started=True,
         spawn_error=None,
         returncode=process.returncode,
@@ -597,31 +718,32 @@ def _finished_bounded_cli_run(
         reason=output.reason,
         io_error=output.io_error,
     )
+    return outcome, became_zombie
 
 
-def _cleanup_bounded_cli_prompt_file(
+def _reap_or_hand_off(process: PipedProcess, failures: _StepFailures) -> bool:
+    """Reap the group; a reap that raises is handed to the background reap."""
+    with failures.contained("reap"):
+        return _reap_process_group(process)
+    with failures.contained("hand-off"):
+        _signal_process_group(process.pid, signal.SIGKILL)
+    return True
+
+
+def _outcome_after_prompt_file_cleanup(
     prompt_file_path: str | None,
-    outcome: CliRunOutcome | None,
-) -> CliRunOutcome | None:
+    outcome: CliRunOutcome,
+    failures: _StepFailures,
+) -> CliRunOutcome:
     if prompt_file_path is None:
         return outcome
-    try:
+    prompt_file_removed = False
+    with failures.contained("prompt_file"):
         _unlink_prompt_file(prompt_file_path)
-    except OSError as error:
-        if outcome is None:
-            raise RuntimeError("bounded CLI runner exited without an outcome")
-        return CliRunOutcome(
-            started=outcome.started,
-            spawn_error=outcome.spawn_error,
-            returncode=outcome.returncode,
-            stdout=outcome.stdout,
-            stderr=outcome.stderr,
-            complete=False,
-            became_zombie=outcome.became_zombie,
-            reason=CliRunReason.IO_ERROR,
-            io_error=error,
-        )
-    return outcome
+        prompt_file_removed = True
+    if prompt_file_removed:
+        return outcome
+    return replace(outcome, complete=False, reason=CliRunReason.IO_ERROR, io_error=None)
 
 
 def _with_private_prompt_file(
@@ -666,12 +788,6 @@ _DEADLINE_REASONS = frozenset(
         CliRunReason.DEADLINE_WHILE_READING,
     }
 )
-
-
-def _publish_bounded_outcome(state: _BoundedRunState, outcome: CliRunOutcome) -> None:
-    with state.lock:
-        state.outcome = outcome
-    state.completed.set()
 
 
 def _notify_spawned(callback: Callable[[int], None] | None, process_id: int) -> None:
@@ -1403,14 +1519,14 @@ def _reap_in_background(
     process: PipedProcess,
     on_reaped: Callable[[int, bool], None] | None,
 ) -> None:
-    try:
+    failures = _StepFailures()
+    with failures.contained("background reap of agent CLI process group"):
         while _process_group_exists(process.pid):
             process.poll()
             time.sleep(_BACKGROUND_REAP_POLL_SECONDS)
-    except OSError:
-        log.exception("background reap of agent CLI process group %s failed", process.pid)
-    finally:
+    with failures.contained("on_reaped"):
         _notify_reaped(on_reaped, process.pid, became_zombie=True)
+    failures.report()
 
 
 def _wait_for_process_group_exit(process: PipedProcess, timeout: float) -> bool:

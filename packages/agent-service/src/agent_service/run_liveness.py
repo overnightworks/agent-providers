@@ -322,6 +322,9 @@ class SupervisedRun:
             return False
         if frame is not None and not await self._deliver(frame):
             return False
+        if self._maximum_reached():
+            await self._end(self._limit_exceeded())
+            return False
         self._request_step(self._clock())
         return True
 

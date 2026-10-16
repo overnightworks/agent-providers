@@ -424,6 +424,20 @@ async def test_an_event_already_yielded_at_the_maximum_is_handled_before_the_max
         assert drive.terminal[0] == 600
 
 
+@in_loop
+async def test_no_further_runner_step_is_asked_for_once_the_maximum_has_arrived():
+    async with driven() as drive:
+        await drive.speak_quietly_every(100, 500)
+        await drive.run_to(599)
+        steps_waiting = drive.runner.steps
+        drive.runner.release(TEXT)
+        drive.clock.advance_to(600)
+        await drive.finished()
+
+    _failed_at(drive, 600, FailureCode.LIMIT_EXCEEDED)
+    assert drive.runner.steps == steps_waiting
+
+
 @pytest.mark.parametrize("ending", ["succeeded", "provider_error", "idle_timeout", "limit"])
 @in_loop
 async def test_the_runner_is_closed_before_the_terminal_is_taken(ending):

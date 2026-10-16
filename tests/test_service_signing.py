@@ -131,6 +131,7 @@ NOT_REGULAR = "is not a regular file"
 NOT_A_PEM_KEY = "is not an unencrypted PEM private key"
 UNSHOWABLE = "contains a control or non-printing character; a path must not"
 CONTROL_PATHS_AS_SHOWN = {
+    "relative\nkey.pem": "relative\\nkey.pem",
     "/virtual/line\nbreak.pem": "/virtual/line\\nbreak.pem",
     "/virtual/nul\x00byte.pem": "/virtual/nul\\x00byte.pem",
     "/virtual/escape\x1b[0m.pem": "/virtual/escape\\x1b[0m.pem",
@@ -150,6 +151,11 @@ RUNS_AS_ROOT = os.geteuid() == 0
 REFUSED_KEY_FILES = [
     pytest.param(lambda _: "secrets/key.pem", ABSOLUTE_PATH_REASON, id="relative-path"),
     pytest.param(lambda _: "~/.secrets/key.pem", ABSOLUTE_PATH_REASON, id="home-relative-path"),
+    pytest.param(
+        lambda _: "relative\nkey.pem",
+        ABSOLUTE_PATH_REASON,
+        id="relative-path-with-a-control-character",
+    ),
     pytest.param(
         lambda tmp_path: str(tmp_path / "absent.pem"),
         "cannot be read: No such file or directory",

@@ -1,8 +1,0 @@
-claim_id = "bc94ff799d97438ab08e099d8538ad52"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "3138523dad183d013b55dcdff370abe5e3b85a76"
-branch = "claude/issue-100-sample-host-notes"
-scope = ["tests/conftest.py", "tests/provider_test_support.py", "tests/test_capability_claims.py", "tests/test_claude_provider.py", "tests/test_claude_provider_streaming.py", "tests/test_codex_cli_adapter.py", "tests/test_dispatch.py", "tests/test_grok_cli_adapter.py", "tests/test_route_failures.py", "tests/test_service_run_events.py", "tests/test_sse_codec.py", "tests/test_text_tool_protocol.py", "tests/test_tool_loop.py", "tests/test_wire_protocol.py"]
-opened_commit = "11801982d0835f8cde2d110c318b4e18bfeb699e"
-whole_reason = "One sample host is shared by the core and client test modules; renaming its tools in some of them breaks the rest."

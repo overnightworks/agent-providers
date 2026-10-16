@@ -1,8 +1,0 @@
-claim_id = "834fc036db9a4da1b1ce8949450fbc36"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "f1305ae3d0110ed2ddc194463f3b33227738e9a2"
-branch = "claude/issue-85-codex-probe-blank-refresh-token"
-scope = ["src/agent_providers/codex/protocol.py", "src/agent_providers/process.py", "tests/test_codex_cli_adapter.py", "tests/test_process.py"]
-opened_commit = "e9d3f40ffea87722d839c6f01c76484748568797"
-whole_reason = "One credential writer moves under both its callers and its test covers every Codex child; splitting would leave two writers for a while."

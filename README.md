@@ -136,9 +136,17 @@ cleanup. This is not evidence that a CLI refreshes credentials in practice.
 
 The library logs closed diagnostic codes for rejected Grok tool-protocol and
 Codex image-gate paths. They identify a stable rejection class without copying
-provider events, prompts, arguments, paths, IDs, or exception text into logs.
-`ImageToolBlockedError` describes this library's image-gate decision; it is not
-an administrative diagnosis from Codex. The earlier Songmaker #899 evidence
+prompts, arguments, paths, IDs, or exception text into logs. The Codex image
+route's three codes are `unexpected_event`, `blocked_item` and
+`unexpected_item`, logged as
+`Codex image tool rejected route=cli code=<code> types=[...]`; a completed turn
+that drew nothing is logged as `Codex image not created route=cli types=[...]`.
+`types` is the turn's event sequence as closed event and kind *names* from the
+gate's own sets, never event contents: anything outside them is `other`,
+consecutive repeats read `name*N`, and a long turn keeps its last 32 names
+behind a leading `...+K`. `ImageToolBlockedError` describes this library's
+image-gate decision and carries the same names as `observed`; it is not an
+administrative diagnosis from Codex. The earlier Songmaker #899 evidence
 cannot reconstruct the concrete Grok or image cause, so a new provider run is
 needed to observe these codes.
 
@@ -204,6 +212,28 @@ of these prefixes. This library ships the constants, not a profile — a host
 brings its own AppArmor/seccomp profile that permits exactly those prefixes and
 derives it from these values, so a rename becomes a red test rather than a
 silently refused mount.
+
+The Codex image gate admits the events Codex CLI 0.163.0 measurably emits for
+a cover turn, and no command at all. One real turn on 0.163.0 (16.10.2026)
+under a production sandbox profile streamed `thread.started`, `turn.started`,
+three `item.completed:agent_message`, `turn.completed`, left one PNG under
+`generated_images/` and exited 0: the image call is invisible to
+`exec --json`, and no `command_execution` item appears. A command can only add
+capability to a turn, so none is admitted, and none is required: a
+`command_execution` item ends the turn as `blocked_item`. Requiring the skill
+read the older CLI made was a canary, not a guard, and it blocked every cover
+on 0.163.0. The supported CLI is 0.163.0, where this was measured; 0.147.0
+read the skill through the shell, which is now refused as `blocked_item`, so a
+host still on 0.147 must move to 0.163. If a later CLI reads the skill through
+the shell again, the logged `types` show `item.started:command_execution`, and
+that path is measured before it is admitted. The residual: on 0.163.0 the
+gate's block checks cover only the tool calls the CLI *reports*. The image call
+itself is not reported, and this measurement does not establish whether other
+tools invoked through the same path are reported either. A returned PNG is tied
+to the turn only by its location under the private `CODEX_HOME` and by the
+re-encode under the host's `ImagePolicy`. The gate is therefore defence in
+depth; the containment is the read-only sandbox plus the host's AppArmor and
+seccomp profile, which the host owns.
 
 ## Development
 

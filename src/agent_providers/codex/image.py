@@ -16,7 +16,8 @@ import os
 import re
 import tempfile
 import threading
-from dataclasses import dataclass
+from collections import deque
+from dataclasses import dataclass, field
 from enum import StrEnum
 from io import BytesIO
 from pathlib import Path
@@ -39,7 +40,6 @@ from agent_providers.codex.protocol import (
     codex_cli_failure_reason,
     copy_codex_login_mirror,
     error_item_message,
-    event_item,
     event_item_type,
     failed_turn_message,
     parse_codex_line,
@@ -69,6 +69,22 @@ _IMAGE_ENCODER_MISSING_DETAIL: Final = (
 _USAGE_LIMIT_MARKER: Final = "usage limit"
 # Codex's own wording for the retry hint, e.g. "... try again at Sep 7th, 2026 8:45 PM."
 _USAGE_LIMIT_RETRY_AT_PATTERN: Final = re.compile(r"try again at (?P<retry_at>.+)")
+
+_IMAGE_ITEM_KIND: Final = "image_gen"
+_ERROR_ITEM_KIND: Final = "error"
+_ERROR_EVENT: Final = "error"
+_TURN_COMPLETED_EVENT: Final = "turn.completed"
+_TURN_FAILED_EVENT: Final = "turn.failed"
+_OTHER_TOKEN: Final = "other"
+_OBSERVED_WINDOW_SIZE: Final = 32
+_EVENT_TYPE_VOCABULARY: Final = (
+    INFORMATIONAL_EVENT_TYPES
+    | ITEM_EVENT_TYPES
+    | {_TURN_COMPLETED_EVENT, _TURN_FAILED_EVENT, _ERROR_EVENT}
+)
+_ITEM_KIND_VOCABULARY: Final = (
+    BLOCKED_ITEM_TYPES | INFORMATIONAL_ITEM_TYPES | {_IMAGE_ITEM_KIND, _ERROR_ITEM_KIND}
+)
 
 _CODEX_IMAGE_ISOLATION_ARGS: Final = (
     "--skip-git-repo-check",
@@ -102,10 +118,6 @@ class ImageToolBlockedReason(StrEnum):
     UNEXPECTED_EVENT = "unexpected_event"
     BLOCKED_ITEM = "blocked_item"
     UNEXPECTED_ITEM = "unexpected_item"
-    BOOTSTRAP_COMMAND_MISMATCH = "bootstrap_command_mismatch"
-    BOOTSTRAP_CWD_PRESENT = "bootstrap_cwd_present"
-    BOOTSTRAP_SEQUENCE_INVALID = "bootstrap_sequence_invalid"
-    BOOTSTRAP_MISSING = "bootstrap_missing"
 
 
 class ImageToolBlockedError(CodexImageError):
@@ -113,6 +125,7 @@ class ImageToolBlockedError(CodexImageError):
 
     def __init__(self, reason: ImageToolBlockedReason) -> None:
         self.reason = reason
+        self.observed: tuple[str, ...] = ()
         super().__init__()
 
 
@@ -210,14 +223,21 @@ def generate_codex_cover_image(
                 model=model,
             )
             _raise_for_codex_image_outcome(outcome)
-            _validate_codex_image_events(
+            observed = _validate_codex_image_events(
                 outcome.stdout,
                 codex_home=codex_home,
             )
+            artifact = _find_only_generated_png(codex_home)
         except ImageToolBlockedError as exc:
-            log.warning("Codex image tool rejected route=cli code=%s", exc.reason)
+            log.warning(
+                "Codex image tool rejected route=cli code=%s types=[%s]",
+                exc.reason,
+                ", ".join(exc.observed),
+            )
             raise
-        artifact = _find_only_generated_png(codex_home)
+        except CodexImageNotCreatedError:
+            log.warning("Codex image not created route=cli types=[%s]", ", ".join(observed))
+            raise
         return _normalize_generated_png(artifact, policy)
 
 
@@ -346,12 +366,49 @@ def _codex_image_turn_failure_message(stdout: str) -> str | None:
     return message
 
 
-def _validate_codex_image_events(output: str, *, codex_home: Path) -> None:
-    """Accept only image generation and its measured read-only bootstrap pair."""
+def _validate_codex_image_events(output: str, *, codex_home: Path) -> tuple[str, ...]:
+    """Accept only image generation and return the closed tokens of the transcript."""
     event_gate = _CodexImageEventGate(codex_home=codex_home)
     for line in output.splitlines():
         event_gate.accept(line.encode("utf-8"))
     event_gate.finish()
+    return event_gate.observed_tokens()
+
+
+class _ObservedTokens:
+    """The bounded record of a transcript: collapsed repeats, then a window."""
+
+    def __init__(self) -> None:
+        self._window: deque[tuple[str, int]] = deque(maxlen=_OBSERVED_WINDOW_SIZE)
+        self._dropped = 0
+
+    def record(self, token: str) -> None:
+        if self._window and self._window[-1][0] == token:
+            self._window[-1] = (token, self._window[-1][1] + 1)
+            return
+        if len(self._window) == _OBSERVED_WINDOW_SIZE:
+            self._dropped += 1
+        self._window.append((token, 1))
+
+    def snapshot(self) -> tuple[str, ...]:
+        dropped = (f"...+{self._dropped}",) if self._dropped else ()
+        return (
+            *dropped,
+            *(f"{token}*{count}" if count > 1 else token for token, count in self._window),
+        )
+
+
+def _observed_token(event_type: str, event: dict[str, object]) -> str:
+    """Name an event by the gate's own vocabulary, never by its contents."""
+    if event_type in ITEM_EVENT_TYPES:
+        try:
+            item_type = event_item_type(event)
+        except CodexCliStreamFailure:
+            item_type = _OTHER_TOKEN
+        if item_type not in _ITEM_KIND_VOCABULARY:
+            item_type = _OTHER_TOKEN
+        return f"{event_type}:{item_type}"
+    return event_type if event_type in _EVENT_TYPE_VOCABULARY else _OTHER_TOKEN
 
 
 @dataclass
@@ -361,51 +418,57 @@ class _CodexImageEventGate:
     codex_home: Path
     saw_completed_turn: bool = False
     completed_error_item_message: str | None = None
-    command_id: str | None = None
-    saw_completed_command: bool = False
+    _observed: _ObservedTokens = field(default_factory=_ObservedTokens)
+
+    def observed_tokens(self) -> tuple[str, ...]:
+        return self._observed.snapshot()
 
     def accept(self, line: bytes) -> None:
-        """Accept one event while preserving the command-pair state."""
+        """Accept one event, naming the tokens seen so far on a blocked one."""
+        try:
+            self._accept(line)
+        except ImageToolBlockedError as exc:
+            exc.observed = self.observed_tokens()
+            raise
+
+    def _accept(self, line: bytes) -> None:
         try:
             event_type, event = parse_codex_line(line)
-            if event_type in INFORMATIONAL_EVENT_TYPES:
-                return
-            if event_type == "turn.completed":
-                if self.saw_completed_turn or not isinstance(event.get("usage"), dict):
-                    raise CodexImageCliError()
-                self.saw_completed_turn = True
-                return
-            if event_type in {"error", "turn.failed"}:
-                raise CodexImageCliError()
-            if event_type not in ITEM_EVENT_TYPES:
-                raise ImageToolBlockedError(ImageToolBlockedReason.UNEXPECTED_EVENT)
-            item_type = event_item_type(event)
-            if event_type == CODEX_ITEM_COMPLETED_EVENT and item_type == "error":
-                self.completed_error_item_message = error_item_message(event)
-                return
-            if item_type == "command_execution":
-                self.command_id, self.saw_completed_command = _validate_image_skill_command(
-                    event_type,
-                    event,
-                    command_id=self.command_id,
-                    saw_completed_command=self.saw_completed_command,
-                    expected_command=_expected_image_skill_command(self.codex_home),
-                )
-                return
-            if item_type in BLOCKED_ITEM_TYPES:
-                raise ImageToolBlockedError(ImageToolBlockedReason.BLOCKED_ITEM)
-            if item_type in INFORMATIONAL_ITEM_TYPES or item_type == "image_gen":
-                return
-            raise ImageToolBlockedError(ImageToolBlockedReason.UNEXPECTED_ITEM)
+        except CodexCliStreamFailure as exc:
+            self._observed.record(_OTHER_TOKEN)
+            raise CodexImageCliError() from exc
+        self._observed.record(_observed_token(event_type, event))
+        try:
+            self._decide(event_type, event)
         except CodexCliStreamFailure as exc:
             raise CodexImageCliError() from exc
 
+    def _decide(self, event_type: str, event: dict[str, object]) -> None:
+        if event_type in INFORMATIONAL_EVENT_TYPES:
+            return
+        if event_type == _TURN_COMPLETED_EVENT:
+            if self.saw_completed_turn or not isinstance(event.get("usage"), dict):
+                raise CodexImageCliError()
+            self.saw_completed_turn = True
+            return
+        if event_type in {_ERROR_EVENT, _TURN_FAILED_EVENT}:
+            raise CodexImageCliError()
+        if event_type not in ITEM_EVENT_TYPES:
+            raise ImageToolBlockedError(ImageToolBlockedReason.UNEXPECTED_EVENT)
+        item_type = event_item_type(event)
+        if event_type == CODEX_ITEM_COMPLETED_EVENT and item_type == _ERROR_ITEM_KIND:
+            self.completed_error_item_message = error_item_message(event)
+            return
+        if item_type in BLOCKED_ITEM_TYPES:
+            raise ImageToolBlockedError(ImageToolBlockedReason.BLOCKED_ITEM)
+        if item_type in INFORMATIONAL_ITEM_TYPES or item_type == _IMAGE_ITEM_KIND:
+            return
+        raise ImageToolBlockedError(ImageToolBlockedReason.UNEXPECTED_ITEM)
+
     def finish(self) -> None:
-        """Require a completed turn and its sole measured bootstrap command."""
+        """Require a completed turn."""
         if self.saw_completed_turn:
-            if self.command_id is not None and self.saw_completed_command:
-                return
-            raise ImageToolBlockedError(ImageToolBlockedReason.BOOTSTRAP_MISSING)
+            return
         if (
             self.completed_error_item_message is not None
             and codex_cli_failure_reason(self.completed_error_item_message)
@@ -413,45 +476,6 @@ class _CodexImageEventGate:
         ):
             raise CodexImageLoginError()
         raise CodexImageCliError()
-
-
-def _expected_image_skill_command(codex_home: Path) -> str:
-    skill_path = codex_home.resolve() / "skills" / ".system" / "imagegen" / "SKILL.md"
-    return f"/bin/bash -lc \"sed -n '1,240p' {skill_path}\""
-
-
-def _validate_image_skill_command(
-    event_type: str,
-    event: dict[str, object],
-    *,
-    command_id: str | None,
-    saw_completed_command: bool,
-    expected_command: str,
-) -> tuple[str, bool]:
-    item = event_item(event)
-    item_id = item.get("id")
-    if not isinstance(item_id, str) or item.get("command") != expected_command:
-        raise ImageToolBlockedError(ImageToolBlockedReason.BOOTSTRAP_COMMAND_MISMATCH)
-    if item.get("cwd") is not None:
-        raise ImageToolBlockedError(ImageToolBlockedReason.BOOTSTRAP_CWD_PRESENT)
-    if event_type == "item.started":
-        if (
-            command_id is not None
-            or item.get("status") != "in_progress"
-            or item.get("exit_code") is not None
-        ):
-            raise ImageToolBlockedError(ImageToolBlockedReason.BOOTSTRAP_SEQUENCE_INVALID)
-        return item_id, False
-    if event_type == CODEX_ITEM_COMPLETED_EVENT:
-        if (
-            command_id != item_id
-            or saw_completed_command
-            or item.get("status") != "completed"
-            or item.get("exit_code") != 0
-        ):
-            raise ImageToolBlockedError(ImageToolBlockedReason.BOOTSTRAP_SEQUENCE_INVALID)
-        return command_id, True
-    raise ImageToolBlockedError(ImageToolBlockedReason.BOOTSTRAP_SEQUENCE_INVALID)
 
 
 def _find_only_generated_png(codex_home: Path) -> Path:

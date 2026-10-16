@@ -81,15 +81,18 @@ async def run_frames(
     wire = _WireRun(admitted.run_id, app, runs)
     started = wire.started()
     started_at = clock()
-    yield started
     if runner is None:
+        yield started
         yield wire.failed(FailureCode.PROVIDER_UNAVAILABLE, NO_RUNNER_MESSAGE)
         return
     events = runner.run(admitted)
-    async with SupervisedRun(admitted.run_id, wire, events, runs, clock, started_at) as supervised:
-        async with aclosing(supervised.frames()) as frames:
-            async for frame in frames:
-                yield frame
+    async with (
+        SupervisedRun(admitted.run_id, wire, events, runs, clock, started_at) as supervised,
+        aclosing(supervised.frames()) as frames,
+    ):
+        yield started
+        async for frame in frames:
+            yield frame
 
 
 class _WireRun:

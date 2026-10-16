@@ -19,8 +19,8 @@ import pytest
 from service_support import (
     GatedRunner,
     ScriptedRunner,
-    SteppedLoop,
     StepClock,
+    SteppedLoop,
     TokenMint,
     decoded_events,
     post_run,
@@ -262,6 +262,29 @@ async def test_the_deadlines_count_from_run_started_however_late_the_client_asks
         drive.took(await first_beat)
 
     assert [at for at, _ in drive.events] == [0, 15]
+
+
+@pytest.mark.parametrize(
+    ("late", "code"),
+    [(130, FailureCode.IDLE_TIMEOUT), (600, FailureCode.LIMIT_EXCEEDED)],
+    ids=["idle-timeout", "maximum"],
+)
+@in_loop
+async def test_a_run_is_supervised_from_run_started_whether_or_not_the_client_asks_for_more(
+    late, code
+):
+    runner = GatedRunner()
+    async with driven(runner, read=False) as drive:
+        drive.took(await anext(drive.frames))
+        drive.clock.advance_to(late)
+        await drive.clock.parked()
+
+        assert (runner.steps, runner.cancellations, runner.closes) == (1, 1, 1)
+        drive.took(await anext(drive.frames))
+
+    _failed_at(drive, late, code)
+    assert runner.steps == 1
+    drive.assert_nothing_left()
 
 
 def test_the_run_started_of_a_served_run_announces_the_configured_cadence():

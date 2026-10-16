@@ -1328,6 +1328,33 @@ def _install_credential(
         os.close(destination)
 
 
+@dataclass(frozen=True)
+class _ExceptionLinks:
+    """What an exception points at: its traceback and its three chain attributes."""
+
+    exception: BaseException
+    traceback: TracebackType | None
+    context: BaseException | None
+    cause: BaseException | None
+    suppress_context: bool
+
+    @classmethod
+    def of(cls, exception: BaseException) -> "_ExceptionLinks":
+        return cls(
+            exception,
+            exception.__traceback__,
+            exception.__context__,
+            exception.__cause__,
+            exception.__suppress_context__,
+        )
+
+    def restore(self) -> None:
+        self.exception.__traceback__ = self.traceback
+        self.exception.__context__ = self.context
+        self.exception.__cause__ = self.cause
+        self.exception.__suppress_context__ = self.suppress_context
+
+
 def _run_without_credential_remains[T](step: Callable[[], T]) -> T:
     """Run a step that touches credential bytes; no exception leaves it holding them.
 
@@ -1335,34 +1362,56 @@ def _run_without_credential_remains[T](step: Callable[[], T]) -> T:
     so does every exception chained beneath it: the decoder's error holds the
     document itself. This frame holds no bytes, so it clears the frames of the
     failure, cuts the links the step created off, and lets the same exception
-    continue as if raised here, still chained to what the caller
-    was handling. A refusal that deliberately carries no context keeps none, and
-    the caller's own exception, re-raised by the step, keeps the frames it
-    already had and is not chained to itself.
+    continue as if raised here, still chained to what the caller was handling.
+    A refusal that deliberately carries no context keeps none. The caller's own
+    exception is restored to exactly what it was at entry on every outcome, so
+    the step can neither leave links in it nor clear the frames it already had.
     """
     handled_by_the_caller = sys.exception()
-    callers_traceback = (
-        handled_by_the_caller.__traceback__ if handled_by_the_caller is not None else None
+    callers_links = (
+        _ExceptionLinks.of(handled_by_the_caller) if handled_by_the_caller is not None else None
     )
+    callers_traceback = _traceback_entries_of(handled_by_the_caller)
     try:
         return step()
     except BaseException as failure:
-        _clear_frames_until(failure.__traceback__.tb_next, callers_traceback)
-        if failure is not handled_by_the_caller:
-            failure.__cause__ = None
-            if failure.__context__ is not None:
-                failure.__context__ = handled_by_the_caller
+        _clear_frames_and_cut_links(
+            failure, failure.__traceback__.tb_next, callers_traceback, handled_by_the_caller,
+        )
         raise
+    finally:
+        if callers_links is not None:
+            callers_links.restore()
 
 
-def _clear_frames_until(entry: TracebackType | None, stop: TracebackType | None) -> None:
-    """Clear the frame of each traceback entry from ``entry`` up to, not including, ``stop``."""
-    while entry is not None and entry is not stop:
-        try:
-            entry.tb_frame.clear()
-        except RuntimeError:
-            pass
+def _traceback_entries_of(exception: BaseException | None) -> list[TracebackType]:
+    entries = []
+    entry = exception.__traceback__ if exception is not None else None
+    while entry is not None:
+        entries.append(entry)
         entry = entry.tb_next
+    return entries
+
+
+def _clear_frames_and_cut_links(
+    failure: BaseException,
+    first_entry: TracebackType | None,
+    callers_traceback: list[TracebackType],
+    handled_by_the_caller: BaseException | None,
+) -> None:
+    """Clear the failure's finished frames and cut its inner links, group members included."""
+    entry = first_entry
+    while entry is not None and not any(entry is kept for kept in callers_traceback):
+        entry.tb_frame.clear()
+        entry = entry.tb_next
+    failure.__cause__ = None
+    if failure.__context__ is not None:
+        failure.__context__ = handled_by_the_caller
+    if isinstance(failure, BaseExceptionGroup):
+        for member in failure.exceptions:
+            _clear_frames_and_cut_links(
+                member, member.__traceback__, callers_traceback, handled_by_the_caller,
+            )
 
 
 def _read_credential_file(path: Path) -> bytes | None:

@@ -610,6 +610,7 @@ def exception_chain(error: BaseException) -> list[BaseException]:
             continue
         chain.append(current)
         pending.extend(link for link in (current.__cause__, current.__context__) if link)
+        pending.extend(getattr(current, "exceptions", ()))
     return chain
 
 

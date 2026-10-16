@@ -2600,7 +2600,10 @@ def test_a_decoder_failure_propagates_unchanged_holding_no_credential_bytes(
 
 def _fail_as_the_caller_does() -> None:
     callers_own_state = "intact"
-    raise RuntimeError(callers_own_state)
+    try:
+        raise KeyError("the caller's earlier failure")
+    except KeyError as earlier:
+        raise RuntimeError(callers_own_state) from earlier
 
 
 def _drive_in_the_caller(inside_a_handler: bool, call):
@@ -2713,6 +2716,77 @@ def _re_raise_the_handled_exception(source_document: bytes) -> bytes:
     raise sys.exception()
 
 
+def _decode_failing_then(source_document: bytes, what_follows) -> bytes:
+    handled = sys.exception()
+    try:
+        json.loads(b"{" + source_document)
+    except ValueError as decoder_error:
+        return what_follows(handled, decoder_error)
+    return source_document
+
+
+def _re_raise_the_handled_exception_from_the_decoder_error(source_document: bytes) -> bytes:
+    def what_follows(handled, decoder_error):
+        raise handled from decoder_error
+
+    return _decode_failing_then(source_document, what_follows)
+
+
+def _re_raise_the_handled_exception_inside_the_decoder_handler(source_document: bytes) -> bytes:
+    def what_follows(handled, decoder_error):
+        raise handled
+
+    return _decode_failing_then(source_document, what_follows)
+
+
+def _chain_the_handled_exception_then_raise_another(source_document: bytes) -> bytes:
+    def what_follows(handled, decoder_error):
+        try:
+            raise handled from decoder_error
+        except RuntimeError:
+            raise ValueError("another failure")
+
+    return _decode_failing_then(source_document, what_follows)
+
+
+def _chain_the_handled_exception_then_return(source_document: bytes) -> bytes:
+    def what_follows(handled, decoder_error):
+        try:
+            raise handled from decoder_error
+        except RuntimeError:
+            return source_document
+
+    return _decode_failing_then(source_document, what_follows)
+
+
+def _raise_another_exception_wearing_the_callers_frames(source_document: bytes) -> bytes:
+    handled = sys.exception()
+    raise ValueError("different").with_traceback(handled.__traceback__.tb_next)
+
+
+def _raise_a_group_whose_member_follows_the_decoder_error(source_document: bytes) -> bytes:
+    def what_follows(handled, decoder_error):
+        try:
+            raise RuntimeError("member") from decoder_error
+        except RuntimeError as member:
+            member.__context__ = decoder_error
+            raise ExceptionGroup("group", [member])
+
+    return _decode_failing_then(source_document, what_follows)
+
+
+def _raise_a_group_whose_member_frame_holds_the_document(source_document: bytes) -> bytes:
+    def member_holding_the_document() -> None:
+        held_document = source_document
+        raise ValueError(len(held_document))
+
+    try:
+        member_holding_the_document()
+    except ValueError as member:
+        raise BaseExceptionGroup("group", [member])
+    return source_document
+
+
 def _traceback_entries(error: BaseException) -> Iterator[types.TracebackType]:
     entry = error.__traceback__
     while entry is not None:
@@ -2720,27 +2794,65 @@ def _traceback_entries(error: BaseException) -> Iterator[types.TracebackType]:
         entry = entry.tb_next
 
 
+_CREDENTIAL_COPIES = {
+    "bare-raise": _bare_re_raise,
+    "raise-sys-exception": _re_raise_the_handled_exception,
+    "raise-from-the-decoder-error": _re_raise_the_handled_exception_from_the_decoder_error,
+    "raise-inside-the-decoder-handler": _re_raise_the_handled_exception_inside_the_decoder_handler,
+    "chain-then-raise-another": _chain_the_handled_exception_then_raise_another,
+    "chain-then-return": _chain_the_handled_exception_then_return,
+    "another-wearing-the-callers-frames": _raise_another_exception_wearing_the_callers_frames,
+    "group-member-after-the-decoder-error": _raise_a_group_whose_member_follows_the_decoder_error,
+    "group-member-frame-holds-the-document": _raise_a_group_whose_member_frame_holds_the_document,
+}
+
+
+def _links_of(error: BaseException) -> tuple:
+    return (error.__context__, error.__cause__, error.__suppress_context__)
+
+
 @pytest.mark.usefixtures("a_stored_codex_login")
-@pytest.mark.parametrize(
-    "credential_copy", (_bare_re_raise, _re_raise_the_handled_exception),
-    ids=("bare-raise", "raise-sys-exception"),
-)
-def test_a_re_raising_credential_copy_keeps_the_callers_frames_and_drops_the_credential(
+@pytest.mark.parametrize("credential_copy", _CREDENTIAL_COPIES.values(), ids=_CREDENTIAL_COPIES)
+def test_a_credential_copy_leaves_the_callers_exception_untouched_and_drops_the_credential(
     credential_copy,
 ) -> None:
-    def enter_with_the_re_raising_copy(handled: BaseException):
-        with pytest.raises(RuntimeError) as raised:
+    def enter_with_the_copy(handled: BaseException):
+        links_at_entry = _links_of(handled)
+        traceback_at_entry = handled.__traceback__
+        try:
             _enter_a_private_home_copying_with(credential_copy)
-        return raised.value, handled
+        except BaseException as propagated:
+            return propagated, handled, links_at_entry, traceback_at_entry
+        return None, handled, links_at_entry, traceback_at_entry
 
-    propagated, handled = _drive_in_the_caller(True, enter_with_the_re_raising_copy)
+    gc.collect()
+    gc.disable()
+    try:
+        propagated, handled, links_at_entry, traceback_at_entry = _drive_in_the_caller(
+            True, enter_with_the_copy,
+        )
+        decoder_errors_left = [
+            item for item in gc.get_objects() if isinstance(item, json.JSONDecodeError)
+        ]
+    finally:
+        gc.enable()
 
-    assert propagated is handled
-    assert propagated.__context__ is None
-    _assert_no_link_holds_the_credential(propagated)
-    assert all("payload" not in entry.tb_frame.f_locals for entry in _traceback_entries(propagated))
-    callers_traceback = list(_traceback_entries(propagated))[-1]
-    assert callers_traceback.tb_frame.f_locals == {"callers_own_state": "intact"}
+    assert all(now is then for now, then in zip(_links_of(handled), links_at_entry))
+    assert any(entry is traceback_at_entry for entry in _traceback_entries(handled))
+    assert handled.__context__ is not handled
+    assert handled.__cause__ is not None
+    assert not decoder_errors_left
+    for error in (handled, propagated):
+        if error is not None:
+            assert not traceback_frames_hold(error, "canary-")
+            for link in exception_chain(error):
+                assert "canary-" not in f"{link.args} {vars(link)}"
+                assert "payload" not in {
+                    name for entry in _traceback_entries(link)
+                    for name in entry.tb_frame.f_locals
+                }
+    callers_frame = list(_traceback_entries(handled))[-1].tb_frame
+    assert callers_frame.f_locals == {"callers_own_state": "intact"}
 
 
 @pytest.mark.usefixtures("a_stored_codex_login")

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import errno
 import gc
 import json
+import linecache
 import logging
 import os
 import stat
@@ -12,6 +14,9 @@ import sys
 import tempfile
 import threading
 import time
+import types
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from unittest.mock import patch
@@ -25,14 +30,20 @@ from provider_test_support import (
     FailingLogHandler,
     RaisingLogHandler,
     RunnerFailureWatch,
+    a_codex_login,
+    a_fifo,
+    call_within_deadline,
+    exception_chain,
     fail_to_start_the_runner_thread,
     override_provider_runtime,
     pool_callbacks,
     shell_child,
+    traceback_frames_hold,
 )
 
 from agent_providers import process
 from agent_providers.codex.pool import CodexProcessKind, CodexProcessPool
+from agent_providers.codex_login import assess_codex_login
 from agent_providers.config import current_config
 from agent_providers.constants import (
     CLAUDE_CLI_AUTH_METHOD_FIELD,
@@ -2283,6 +2294,8 @@ def test_cancelling_a_line_channel_discards_unread_output() -> None:
         ("codex", "[]", CODEX_CLI_CREDENTIALS_INVALID_DETAIL),
         ("codex", '{"tokens": []}', CODEX_CLI_CREDENTIALS_INVALID_DETAIL),
         ("codex", '{"tokens": {"access_token": 3}}', CODEX_CLI_CREDENTIALS_INVALID_DETAIL),
+        ("codex", '{"tokens": {"account_id": 7}}', CODEX_CLI_CREDENTIALS_INVALID_DETAIL),
+        ("codex", '{"tokens": null}', CODEX_CLI_CREDENTIALS_INVALID_DETAIL),
     ],
 )
 def test_credential_probe_names_malformed_mounted_credentials(
@@ -2293,13 +2306,39 @@ def test_credential_probe_names_malformed_mounted_credentials(
     function = (
         process.grok_cli_token_is_present
         if checker == "grok"
-        else process.codex_cli_access_token_is_present
+        else process.codex_cli_login_is_usable
     )
     field = "grok_cli_auth_file" if checker == "grok" else "codex_cli_auth_file"
     override_provider_runtime(**{field: credential_file})
 
     with pytest.raises(AgentCliUnavailableError, match=detail):
         function()
+
+
+_A_COMPLETE_CODEX_LOGIN = json.loads(a_codex_login())
+
+
+@pytest.mark.parametrize(
+    ("document", "usable"),
+    [
+        pytest.param(None, False, id="missing"),
+        pytest.param(_A_COMPLETE_CODEX_LOGIN, True, id="complete"),
+        pytest.param({"tokens": {"access_token": "a"}}, False, id="only-an-access-token"),
+        pytest.param({"tokens": {}}, False, id="no-access-token"),
+        pytest.param(
+            {"auth_mode": "apikey", "OPENAI_API_KEY": "sk-synthetic"}, False, id="api-key",
+        ),
+    ],
+)
+def test_a_codex_login_is_usable_only_when_a_child_can_start_with_it(
+    tmp_path, document: dict | None, usable: bool,
+) -> None:
+    auth_file = tmp_path / "codex-auth.json"
+    if document is not None:
+        auth_file.write_text(json.dumps(document))
+    override_provider_runtime(codex_cli_auth_file=auth_file)
+
+    assert process.codex_cli_login_is_usable() is usable
 
 
 @pytest.mark.parametrize(
@@ -2311,10 +2350,11 @@ def test_credential_probe_names_malformed_mounted_credentials(
         '{"tokens": []}',
         '{"auth_mode": "chatgpt", "tokens": {}}',
         '{"auth_mode": "apikey", "OPENAI_API_KEY": "sk-synthetic"}',
+        a_codex_login(tokens={"account_id": 7}).decode(),
     ),
     ids=(
         "missing", "not-json", "not-an-object", "tokens-not-an-object", "no-access-token",
-        "api-key-only",
+        "api-key-only", "numeric-account-id",
     ),
 )
 def test_an_unusable_codex_login_makes_the_probe_answer_logged_out(
@@ -2360,6 +2400,651 @@ def test_the_grok_probe_hands_its_child_the_login_byte_for_byte(tmp_path, monkey
     assert grok_cli_status().login.logged_in is True
     assert copies == [auth_file.read_bytes()]
 
+
+_CREDENTIAL_BOUND = 256 * 1024
+
+
+def _a_directory(directory: Path) -> Path:
+    path = directory / "source"
+    path.mkdir()
+    return path
+
+
+def _a_symlink_to_a_login(directory: Path) -> Path:
+    target = directory / "target"
+    target.write_text(json.dumps(_A_COMPLETE_CODEX_LOGIN))
+    link = directory / "source"
+    link.symlink_to(target)
+    return link
+
+
+def _a_dangling_symlink(directory: Path) -> Path:
+    link = directory / "source"
+    link.symlink_to(directory / "gone")
+    return link
+
+
+def _a_file_over_the_bound(directory: Path) -> Path:
+    path = directory / "source"
+    path.write_bytes(b"x" * (_CREDENTIAL_BOUND + 1))
+    return path
+
+
+def _a_path_through_a_regular_file(directory: Path) -> Path:
+    (directory / "file").write_text("{}")
+    return directory / "file" / "auth.json"
+
+
+_NOT_A_PLAIN_FILE = [
+    pytest.param(a_fifo, "CLI credential is not a regular file", id="fifo"),
+    pytest.param(_a_directory, "CLI credential is not a regular file", id="directory"),
+    pytest.param(lambda _: Path("/dev/null"), "CLI credential is not a regular file", id="device"),
+    pytest.param(_a_symlink_to_a_login, "CLI credential is a symbolic link", id="symlink"),
+    pytest.param(_a_dangling_symlink, "CLI credential is a symbolic link", id="dangling-symlink"),
+    pytest.param(
+        _a_file_over_the_bound, "CLI credentials exceed the copy bound", id="over-the-bound",
+    ),
+    pytest.param(
+        _a_path_through_a_regular_file, "could not read CLI credentials", id="enotdir",
+    ),
+]
+
+
+@pytest.mark.parametrize(("make_source", "detail"), _NOT_A_PLAIN_FILE)
+def test_the_credential_reader_refuses_what_is_not_a_plain_file(
+    tmp_path: Path, make_source, detail: str,
+) -> None:
+    source = make_source(tmp_path)
+    open_descriptors = len(os.listdir("/proc/self/fd"))
+
+    with pytest.raises(AgentCliUnavailableError) as refusal:
+        call_within_deadline(process._read_credential_file, source)
+
+    assert str(refusal.value) == detail
+    assert len(os.listdir("/proc/self/fd")) == open_descriptors
+
+
+def _read_while_close_fails(source: Path) -> AgentCliUnavailableError:
+    real_close = os.close
+
+    def close_then_fail(descriptor: int) -> None:
+        real_close(descriptor)
+        raise OSError(errno.EIO, "synthetic close failure")
+
+    with patch.object(process.os, "close", close_then_fail):
+        with pytest.raises(AgentCliUnavailableError) as refusal:
+            process._read_credential_file(source)
+    return refusal.value
+
+
+def _read_while_close_fails_inside_a_handler(source: Path) -> AgentCliUnavailableError:
+    try:
+        raise RuntimeError("an error the caller is already handling")
+    except RuntimeError:
+        return _read_while_close_fails(source)
+
+
+@pytest.mark.parametrize(
+    "read",
+    (_read_while_close_fails, _read_while_close_fails_inside_a_handler),
+    ids=("plain-call", "inside-a-handler"),
+)
+def test_the_credential_reader_discards_the_content_when_the_close_fails(
+    tmp_path: Path, read,
+) -> None:
+    source = tmp_path / "source"
+    source.write_text("synthetic-credential-canary")
+    open_descriptors = len(os.listdir("/proc/self/fd"))
+
+    refusal = read(source)
+
+    assert str(refusal) == "could not read CLI credentials"
+    assert refusal.__context__ is None
+    assert refusal.__cause__ is None
+    assert not traceback_frames_hold(refusal, "synthetic-credential-canary")
+    assert len(os.listdir("/proc/self/fd")) == open_descriptors
+
+
+def test_the_credential_reader_reads_the_opened_file_not_the_path_after_the_open(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    source = tmp_path / "source"
+    source.write_bytes(b"the opened file")
+    real_open = os.open
+
+    def open_then_replace_the_path_with_a_fifo(path, flags, *arguments):
+        descriptor = real_open(path, flags, *arguments)
+        source.unlink()
+        os.mkfifo(source)
+        return descriptor
+
+    monkeypatch.setattr(process.os, "open", open_then_replace_the_path_with_a_fifo)
+
+    assert process._read_credential_file(source) == b"the opened file"
+
+
+@pytest.mark.parametrize("size", (0, _CREDENTIAL_BOUND), ids=("empty", "exactly-the-bound"))
+def test_the_credential_reader_returns_a_plain_file_within_the_bound(
+    tmp_path: Path, size: int,
+) -> None:
+    source = tmp_path / "source"
+    source.write_bytes(b"x" * size)
+
+    assert process._read_credential_file(source) == b"x" * size
+
+
+def test_the_credential_reader_reports_a_missing_file_as_absent(tmp_path: Path) -> None:
+    assert process._read_credential_file(tmp_path / "missing") is None
+
+
+def _assert_no_link_holds_the_credential(error: BaseException) -> None:
+    # Pytest's assertion rewriting would keep the literal in the test's own frame,
+    # which the handled exception's traceback reaches.
+    assert not traceback_frames_hold(error, "canary-")
+    for link in exception_chain(error):
+        attributes = f"{link.args} {vars(link)}"
+        assert "canary-" not in attributes
+    assert error.__cause__ is None
+
+
+def _assert_nothing_reachable_holds_the_credential(
+    error: BaseException, *, handled_by_the_caller: BaseException | None,
+) -> None:
+    _assert_no_link_holds_the_credential(error)
+    assert error.__context__ is handled_by_the_caller
+    if handled_by_the_caller is not None:
+        callers_frame = handled_by_the_caller.__traceback__.tb_next.tb_frame
+        assert callers_frame.f_locals == {"callers_own_state": "intact"}
+
+
+def _enter_through_the_login_decider(tmp_path: Path) -> bool:
+    return process.codex_cli_login_is_usable()
+
+
+def _enter_through_a_private_credential_home(tmp_path: Path) -> str:
+    PrivateCredentialHome(
+        current_config().codex_cli_auth_file,
+        Path(".codex/auth.json"),
+        prefix="private-home-",
+        missing_credential_is_error=True,
+        credential_copy=process.blank_codex_refresh_token,
+    )
+    return "installed"
+
+
+_CREDENTIAL_HANDLING_CODE = frozenset(
+    function.__code__
+    for function in (
+        process._read_credential_file,
+        process._read_regular_file,
+        process._read_within_bound,
+        process._install_credential,
+        process.blank_codex_refresh_token,
+        process._codex_login_in_the_mirror_is_usable,
+        assess_codex_login,
+    )
+)
+
+
+_LINES_THAT_ACQUIRE_OR_RELEASE_A_DESCRIPTOR = (
+    "try:", "os.open(", "os.close(", "_close_descriptor(",
+)
+
+
+def _acquires_or_releases_a_descriptor(frame) -> bool:
+    source = linecache.getline(frame.f_code.co_filename, frame.f_lineno).strip()
+    return any(marker in source for marker in _LINES_THAT_ACQUIRE_OR_RELEASE_A_DESCRIPTOR)
+
+
+def _interrupt_at_line(position: int):
+    seen_lines = 0
+
+    def on_line(frame, event, argument):
+        nonlocal seen_lines
+        # An interruption delivered before the line that closes a descriptor, or
+        # between an open and its try, leaves it open in any Python code.
+        if event == "line" and not _acquires_or_releases_a_descriptor(frame):
+            seen_lines += 1
+            if seen_lines == position:
+                raise KeyboardInterrupt
+        return on_line
+
+    def on_call(frame, event, argument):
+        return on_line if frame.f_code in _CREDENTIAL_HANDLING_CODE else None
+
+    return on_call
+
+
+@contextmanager
+def _a_read_that_fails_after_one_chunk():
+    real_read = os.read
+    reads = 0
+
+    def read(descriptor: int, length: int) -> bytes:
+        nonlocal reads
+        reads += 1
+        if reads > 1:
+            raise OSError(errno.EIO, "input/output error")
+        return real_read(descriptor, 16)
+
+    with patch.object(process.os, "read", read):
+        yield
+
+
+@contextmanager
+def _a_stored_login_read_whole():
+    yield
+
+
+_LOGIN_SCENARIOS = {
+    "usable": (
+        a_codex_login(),
+        _a_stored_login_read_whole,
+        {
+            _enter_through_the_login_decider: True,
+            _enter_through_a_private_credential_home: "installed",
+        },
+    ),
+    "malformed": (
+        b'{"token":"canary-access-token",',
+        _a_stored_login_read_whole,
+        {
+            _enter_through_the_login_decider: AgentCliUnavailableError,
+            _enter_through_a_private_credential_home: CliCredentialNotConfiguredError,
+        },
+    ),
+    "incomplete": (
+        a_codex_login(tokens={"id_token": ""}),
+        _a_stored_login_read_whole,
+        {
+            _enter_through_the_login_decider: False,
+            _enter_through_a_private_credential_home: CliCredentialNotConfiguredError,
+        },
+    ),
+    "read-fails-mid-way": (
+        a_codex_login(),
+        _a_read_that_fails_after_one_chunk,
+        {
+            _enter_through_the_login_decider: AgentCliUnavailableError,
+            _enter_through_a_private_credential_home: AgentCliUnavailableError,
+        },
+    ),
+}
+
+
+@pytest.fixture
+def a_stored_codex_login(tmp_path: Path) -> None:
+    store_codex_login(tmp_path, a_codex_login())
+
+
+def store_codex_login(tmp_path: Path, document: bytes) -> None:
+    auth_file = tmp_path / "codex-auth.json"
+    auth_file.write_bytes(document)
+    override_provider_runtime(codex_cli_auth_file=auth_file, cli_working_directory_root=tmp_path)
+
+
+_BOTH_ENTRY_POINTS = pytest.mark.parametrize(
+    "enter",
+    (_enter_through_the_login_decider, _enter_through_a_private_credential_home),
+    ids=("login-decider", "private-credential-home"),
+)
+
+
+@_BOTH_ENTRY_POINTS
+@pytest.mark.usefixtures("a_stored_codex_login")
+def test_a_decoder_failure_propagates_unchanged_holding_no_credential_bytes(
+    tmp_path: Path, enter,
+) -> None:
+    open_descriptors = len(os.listdir("/proc/self/fd"))
+
+    with patch.object(json.decoder.JSONDecoder, "raw_decode", side_effect=MemoryError):
+        with pytest.raises(MemoryError) as raised:
+            enter(tmp_path)
+
+    _assert_nothing_reachable_holds_the_credential(raised.value, handled_by_the_caller=None)
+    assert len(os.listdir("/proc/self/fd")) == open_descriptors
+
+def _fail_as_the_caller_does() -> None:
+    callers_own_state = "intact"
+    try:
+        raise KeyError("the caller's earlier failure")
+    except KeyError as earlier:
+        raise RuntimeError(callers_own_state) from earlier
+
+
+def _drive_in_the_caller(inside_a_handler: bool, call):
+    """Call with the caller's handled error (or None); return what the call returned."""
+    if not inside_a_handler:
+        return call(None)
+    try:
+        _fail_as_the_caller_does()
+    except RuntimeError as handled:
+        return call(handled)
+
+
+_INSIDE_A_HANDLER = pytest.mark.parametrize(
+    "inside_a_handler", (False, True), ids=("plain-call", "inside-a-handler"),
+)
+
+
+@_BOTH_ENTRY_POINTS
+@_INSIDE_A_HANDLER
+@pytest.mark.parametrize("scenario", _LOGIN_SCENARIOS)
+def test_an_interruption_at_any_line_propagates_holding_no_credential_bytes(
+    tmp_path: Path, enter, inside_a_handler: bool, scenario: str,
+) -> None:
+    document, around_the_read, endings = _LOGIN_SCENARIOS[scenario]
+    store_codex_login(tmp_path, document)
+    open_descriptors = len(os.listdir("/proc/self/fd"))
+    interrupted_lines = 0
+
+    def enter_interrupted_at(position: int, handled: BaseException | None):
+        with around_the_read():
+            sys.settrace(_interrupt_at_line(position))
+            try:
+                return enter(tmp_path), None, handled
+            except KeyboardInterrupt as interruption:
+                return None, interruption, handled
+            except Exception as refusal:
+                return None, refusal, handled
+            finally:
+                sys.settrace(None)
+
+    position = 1
+    while True:
+        ending, failure, handled = _drive_in_the_caller(
+            inside_a_handler, lambda handled: enter_interrupted_at(position, handled),
+        )
+        if failure is not None:
+            _assert_no_link_holds_the_credential(failure)
+        assert len(os.listdir("/proc/self/fd")) == open_descriptors
+        if not isinstance(failure, KeyboardInterrupt):
+            break
+        _assert_nothing_reachable_holds_the_credential(
+            failure, handled_by_the_caller=handled,
+        )
+        interrupted_lines += 1
+        position += 1
+
+    assert interrupted_lines > 5
+    expected_ending = endings[enter]
+    if isinstance(expected_ending, type):
+        assert type(failure) is expected_ending, (ending, failure)
+    else:
+        assert failure is None
+        assert ending == expected_ending
+
+
+@_BOTH_ENTRY_POINTS
+@_INSIDE_A_HANDLER
+def test_a_memory_error_inside_the_malformed_handler_holds_no_credential_bytes(
+    tmp_path: Path, enter, inside_a_handler: bool,
+) -> None:
+    store_codex_login(tmp_path, _LOGIN_SCENARIOS["malformed"][0])
+    open_descriptors = len(os.listdir("/proc/self/fd"))
+
+    def enter_failing(handled: BaseException | None):
+        with patch("agent_providers.codex_login.CodexLogin", side_effect=MemoryError):
+            with pytest.raises(MemoryError) as raised:
+                enter(tmp_path)
+        return raised.value, handled
+
+    gc.collect()
+    gc.disable()
+    try:
+        failure, handled = _drive_in_the_caller(inside_a_handler, enter_failing)
+        decoder_errors_left = [
+            item for item in gc.get_objects() if isinstance(item, json.JSONDecodeError)
+        ]
+    finally:
+        gc.enable()
+    assert not decoder_errors_left
+
+    _assert_nothing_reachable_holds_the_credential(failure, handled_by_the_caller=handled)
+    assert len(os.listdir("/proc/self/fd")) == open_descriptors
+
+
+def _enter_a_private_home_copying_with(credential_copy) -> None:
+    PrivateCredentialHome(
+        current_config().codex_cli_auth_file,
+        Path(".codex/auth.json"),
+        prefix="private-home-",
+        missing_credential_is_error=True,
+        credential_copy=credential_copy,
+    )
+
+
+def _bare_re_raise(source_document: bytes) -> bytes:
+    raise
+
+
+def _re_raise_the_handled_exception(source_document: bytes) -> bytes:
+    raise sys.exception()
+
+
+def _decode_failing_then(source_document: bytes, what_follows) -> bytes:
+    handled = sys.exception()
+    try:
+        json.loads(b"{" + source_document)
+    except ValueError as decoder_error:
+        return what_follows(handled, decoder_error)
+    return source_document
+
+
+def _re_raise_the_handled_exception_from_the_decoder_error(source_document: bytes) -> bytes:
+    def what_follows(handled, decoder_error):
+        raise handled from decoder_error
+
+    return _decode_failing_then(source_document, what_follows)
+
+
+def _re_raise_the_handled_exception_inside_the_decoder_handler(source_document: bytes) -> bytes:
+    def what_follows(handled, decoder_error):
+        raise handled
+
+    return _decode_failing_then(source_document, what_follows)
+
+
+def _chain_the_handled_exception_then_raise_another(source_document: bytes) -> bytes:
+    def what_follows(handled, decoder_error):
+        try:
+            raise handled from decoder_error
+        except RuntimeError:
+            raise ValueError("another failure")
+
+    return _decode_failing_then(source_document, what_follows)
+
+
+def _chain_the_handled_exception_then_return(source_document: bytes) -> bytes:
+    def what_follows(handled, decoder_error):
+        try:
+            raise handled from decoder_error
+        except RuntimeError:
+            return source_document
+
+    return _decode_failing_then(source_document, what_follows)
+
+
+def _raise_another_exception_wearing_the_callers_frames(source_document: bytes) -> bytes:
+    handled = sys.exception()
+    raise ValueError("different").with_traceback(handled.__traceback__.tb_next)
+
+
+def _raise_a_group_whose_member_follows_the_decoder_error(source_document: bytes) -> bytes:
+    def what_follows(handled, decoder_error):
+        try:
+            raise RuntimeError("member") from decoder_error
+        except RuntimeError as member:
+            member.__context__ = decoder_error
+            raise ExceptionGroup("group", [member])
+
+    return _decode_failing_then(source_document, what_follows)
+
+
+def _raise_a_group_whose_member_frame_holds_the_document(source_document: bytes) -> bytes:
+    def member_holding_the_document() -> None:
+        held_document = source_document
+        raise ValueError(len(held_document))
+
+    try:
+        member_holding_the_document()
+    except ValueError as member:
+        raise BaseExceptionGroup("group", [member])
+    return source_document
+
+
+def _fail_holding_the_callers_earlier_state() -> None:
+    callers_earlier_state = "intact"
+    raise ValueError(callers_earlier_state)
+
+
+def _the_earlier_failure_caught_by_the_running_caller() -> ValueError:
+    frame = sys._getframe()
+    while frame.f_code.co_name != "enter_with_the_copy":
+        frame = frame.f_back
+    return frame.f_locals["earlier_failure"]
+
+
+def _raise_an_exception_caught_earlier_in_a_running_frame(source_document: bytes) -> bytes:
+    raise _the_earlier_failure_caught_by_the_running_caller()
+
+
+def _raise_a_group_of_that_exception_and_a_member_holding_the_document(
+    source_document: bytes,
+) -> bytes:
+    caught_earlier = _the_earlier_failure_caught_by_the_running_caller()
+    try:
+        _raise_a_group_whose_member_frame_holds_the_document(source_document)
+    except ExceptionGroup as group:
+        raise ExceptionGroup("group", [caught_earlier, *group.exceptions])
+    return source_document
+
+
+def _raise_the_earlier_exception_from_the_decoder_error(source_document: bytes) -> bytes:
+    def what_follows(handled, decoder_error):
+        raise _the_earlier_failure_caught_by_the_running_caller() from decoder_error
+
+    return _decode_failing_then(source_document, what_follows)
+
+
+def _re_raise_the_handled_exception_from_none(source_document: bytes) -> bytes:
+    raise sys.exception() from None
+
+
+def _traceback_entries(error: BaseException) -> Iterator[types.TracebackType]:
+    entry = error.__traceback__
+    while entry is not None:
+        yield entry
+        entry = entry.tb_next
+
+
+_CREDENTIAL_COPIES = {
+    "bare-raise": _bare_re_raise,
+    "raise-sys-exception": _re_raise_the_handled_exception,
+    "raise-from-the-decoder-error": _re_raise_the_handled_exception_from_the_decoder_error,
+    "raise-inside-the-decoder-handler": _re_raise_the_handled_exception_inside_the_decoder_handler,
+    "chain-then-raise-another": _chain_the_handled_exception_then_raise_another,
+    "chain-then-return": _chain_the_handled_exception_then_return,
+    "another-wearing-the-callers-frames": _raise_another_exception_wearing_the_callers_frames,
+    "group-member-after-the-decoder-error": _raise_a_group_whose_member_follows_the_decoder_error,
+    "group-member-frame-holds-the-document": _raise_a_group_whose_member_frame_holds_the_document,
+    "caught-earlier-in-a-running-frame": _raise_an_exception_caught_earlier_in_a_running_frame,
+    "group-of-a-running-frame-exception-and-a-member-holding-the-document": (
+        _raise_a_group_of_that_exception_and_a_member_holding_the_document
+    ),
+    "raise-sys-exception-from-none": _re_raise_the_handled_exception_from_none,
+    "raise-the-earlier-exception-from-the-decoder-error": (
+        _raise_the_earlier_exception_from_the_decoder_error
+    ),
+}
+
+
+_COPIES_RAISING_THE_EARLIER_FAILURE = (
+    _raise_an_exception_caught_earlier_in_a_running_frame,
+    _raise_the_earlier_exception_from_the_decoder_error,
+)
+
+
+def _links_of(error: BaseException) -> tuple:
+    return (error.__context__, error.__cause__, error.__suppress_context__)
+
+
+@pytest.mark.usefixtures("a_stored_codex_login")
+@pytest.mark.parametrize("credential_copy", _CREDENTIAL_COPIES.values(), ids=_CREDENTIAL_COPIES)
+def test_a_credential_copy_leaves_the_callers_exception_untouched_and_drops_the_credential(
+    credential_copy,
+) -> None:
+    def enter_with_the_copy(handled: BaseException):
+        handled.__suppress_context__ = False
+        links_at_entry = _links_of(handled)
+        traceback_at_entry = handled.__traceback__
+        try:
+            _fail_holding_the_callers_earlier_state()
+        except ValueError as caught_earlier:
+            earlier_failure = caught_earlier
+        try:
+            _enter_a_private_home_copying_with(credential_copy)
+        except BaseException as propagated:
+            return propagated, handled, links_at_entry, traceback_at_entry, earlier_failure
+        return None, handled, links_at_entry, traceback_at_entry, earlier_failure
+
+    gc.collect()
+    gc.disable()
+    try:
+        propagated, handled, links_at_entry, traceback_at_entry, earlier_failure = (
+            _drive_in_the_caller(True, enter_with_the_copy)
+        )
+        decoder_errors_left = [
+            item for item in gc.get_objects() if isinstance(item, json.JSONDecodeError)
+        ]
+    finally:
+        gc.enable()
+
+    assert all(now is then for now, then in zip(_links_of(handled), links_at_entry))
+    assert any(entry is traceback_at_entry for entry in _traceback_entries(handled))
+    assert handled.__context__ is not handled
+    assert handled.__cause__ is not None
+    assert not decoder_errors_left
+    if credential_copy in _COPIES_RAISING_THE_EARLIER_FAILURE:
+        assert propagated is earlier_failure
+    for error in (handled, propagated):
+        if error is not None:
+            assert not traceback_frames_hold(error, "canary-")
+            for link in exception_chain(error):
+                assert "canary-" not in f"{link.args} {vars(link)}"
+                assert "payload" not in {
+                    name for entry in _traceback_entries(link)
+                    for name in entry.tb_frame.f_locals
+                }
+    callers_frame = list(_traceback_entries(handled))[-1].tb_frame
+    assert callers_frame.f_locals == {"callers_own_state": "intact"}
+    earlier_state_frame = list(_traceback_entries(earlier_failure))[-1].tb_frame
+    assert earlier_state_frame.f_locals == {"callers_earlier_state": "intact"}
+
+
+@pytest.mark.usefixtures("a_stored_codex_login")
+def test_a_credential_copy_failure_chained_from_a_decoder_error_drops_the_cause() -> None:
+    def copy_failing_from_a_decoder_error(source_document: bytes) -> bytes:
+        try:
+            json.loads(b"{" + source_document)
+        except ValueError as error:
+            raise RuntimeError("copy failed") from error
+        return source_document
+
+    gc.collect()
+    gc.disable()
+    try:
+        with pytest.raises(RuntimeError) as raised:
+            _enter_a_private_home_copying_with(copy_failing_from_a_decoder_error)
+        decoder_errors_left = [
+            item for item in gc.get_objects() if isinstance(item, json.JSONDecodeError)
+        ]
+    finally:
+        gc.enable()
+
+    assert raised.value.__cause__ is None
+    _assert_no_link_holds_the_credential(raised.value)
+    assert not decoder_errors_left
 
 # ── the runner's contract: one terminal outcome, one settle instant ─────────
 

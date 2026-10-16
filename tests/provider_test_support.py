@@ -64,6 +64,32 @@ from agent_providers.tools import ToolCatalog, ToolProtocolMarkup
 
 _fake_cli_processes: list[MagicMock] = []
 
+CANARY_ACCESS_TOKEN = "canary-access-token"
+CANARY_ID_TOKEN = "canary-id-token"
+A_CODEX_LOGIN_WITH_INVALID_UTF8 = b'{"auth_mode": "\xff"}'
+
+
+def a_codex_login(*, tokens: dict[str, Any] | None = None, **top_level: Any) -> bytes:
+    document = {
+        "auth_mode": "chatgpt",
+        "last_refresh": "2026-09-04T19:20:00Z",
+        "tokens": {
+            "access_token": CANARY_ACCESS_TOKEN,
+            "id_token": CANARY_ID_TOKEN,
+            "account_id": "account",
+            "refresh_token": "canary-refresh-token",
+            **(tokens or {}),
+        },
+        **top_level,
+    }
+    return json.dumps(document).encode()
+
+
+def a_fifo(directory: Path) -> Path:
+    path = directory / "source"
+    os.mkfifo(path)
+    return path
+
 GROK_LOGGED_IN = """You are logged in with grok.com.
 
 Available models:
@@ -179,6 +205,31 @@ def override_provider_runtime(**deployment_facts: Any) -> None:
     )
     reset_config()
     configure(replacement)
+
+
+def call_within_deadline(
+    function: Callable[..., Any], *arguments: Any, seconds: float = 5.0,
+) -> Any:
+    """Return what ``function`` returns or raise what it raises; fail if it blocks.
+
+    A call that waits on a FIFO would hang the suite, so it runs in a thread
+    joined with a timeout, and a regression fails the test instead.
+    """
+    outcome: dict[str, Any] = {}
+
+    def run() -> None:
+        try:
+            outcome["value"] = function(*arguments)
+        except BaseException as error:
+            outcome["error"] = error
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(seconds)
+    assert not thread.is_alive(), "the call was still blocked at its deadline"
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["value"]
 
 
 def shell_child(
@@ -551,6 +602,29 @@ def assert_the_canary_reaches_only_the_host(
         f"rule={rule} offset={rejection.offset} length={rejection.length}"
     )
 
+
+def exception_chain(error: BaseException) -> list[BaseException]:
+    chain, pending = [], [error]
+    while pending:
+        current = pending.pop()
+        if current in chain:
+            continue
+        chain.append(current)
+        pending.extend(link for link in (current.__cause__, current.__context__) if link)
+        pending.extend(getattr(current, "exceptions", ()))
+    return chain
+
+
+def traceback_frames_hold(error: BaseException, text: str) -> bool:
+    for link in exception_chain(error):
+        frame_holder = link.__traceback__
+        while frame_holder is not None:
+            for value in frame_holder.tb_frame.f_locals.values():
+                shown = value.decode(errors="replace") if isinstance(value, bytes) else str(value)
+                if text in shown:
+                    return True
+            frame_holder = frame_holder.tb_next
+    return False
 
 A_RUNNER_FAILURE_CANARY: Final = "runner-failure-canary-7c1d"
 ANOTHER_RUNNER_FAILURE_CANARY: Final = "second-runner-failure-canary-2e8b"

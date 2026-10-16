@@ -226,7 +226,7 @@ async def test_a_breach_stops_the_runner_before_a_waiting_client_takes_anything(
 
 
 @in_loop
-async def test_a_breach_behind_a_pending_frame_stays_unobserved_until_the_maximum():
+async def test_a_breach_behind_a_pending_frame_stays_unobserved_until_the_client_is_dropped():
     async with driven(runs=RunConfig(max_tool_calls=1)) as drive:
         await drive.run_to(0)
         drive.stall()
@@ -235,13 +235,14 @@ async def test_a_breach_behind_a_pending_frame_stays_unobserved_until_the_maximu
         await drive.run_to(0)
         steps_before = drive.runner.steps
         drive.runner.release(call("past"))
-        await drive.run_to(599)
+        await drive.run_to(29)
         assert (drive.runner.steps, drive.runner.closes) == (steps_before, 0)
-        drive.clock.advance_to(600)
+        await drive.run_to(30)
+        assert (drive.runner.steps, drive.runner.closes) == (steps_before, 1)
         drive.resume()
         await drive.finished()
 
-    assert failure_of(drive).message == LIMIT_EXCEEDED_MESSAGE
+    assert "failed" not in drive.types
     assert "past" not in sent_tool_use_ids(drive)
 
 

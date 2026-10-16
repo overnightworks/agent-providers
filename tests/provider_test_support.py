@@ -40,7 +40,7 @@ from agent_providers.config import (
     current_config,
     reset_config,
 )
-from agent_providers.dispatch import stream_cowriter_turn
+from agent_providers.dispatch import stream_turn
 from agent_providers.errors import (
     ProviderUnavailableError,
     SafeRouteReasonCode,
@@ -451,7 +451,7 @@ def drive_cowriter_turn(
     correlation_id: str | None = None,
     while_the_caller_handles_an_exception: bool = False,
 ) -> DrivenTurn:
-    """Run a turn through ``stream_cowriter_turn`` and return what the host sees.
+    """Run a turn through ``stream_turn`` and return what the host sees.
 
     The error is caught where the host catches it, inside the caller's own
     handler when ``while_the_caller_handles_an_exception`` is set.
@@ -465,7 +465,7 @@ def drive_cowriter_turn(
 
     async def turn() -> BaseException | None:
         try:
-            async for event in stream_cowriter_turn(
+            async for event in stream_turn(
                 provider=provider,
                 route=ProviderRoute.CLI,
                 model=f"{provider}-test",

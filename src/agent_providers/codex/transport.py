@@ -46,7 +46,7 @@ from agent_providers.codex.protocol import (
     top_level_error_message,
 )
 from agent_providers.config import current_config
-from agent_providers.constants import COWRITER_CLI_TIMEOUT_SECONDS
+from agent_providers.constants import TURN_TIMEOUT_SECONDS
 from agent_providers.errors import (
     CodexProcessPoolSaturatedError,
     ProviderUnavailableError,
@@ -147,7 +147,7 @@ class CodexCliToolTransport:
                 "cli",
                 normalize_route_failure(SafeRouteReasonCode.CLI_AUTH_REJECTED),
             ) from None
-        self._deadline = time.monotonic() + COWRITER_CLI_TIMEOUT_SECONDS
+        self._deadline = time.monotonic() + TURN_TIMEOUT_SECONDS
         self._thread_id: str | None = None
         self._round_index = 0
         self._closed = False

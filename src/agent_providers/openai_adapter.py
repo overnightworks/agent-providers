@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 
-from agent_providers.constants import COWRITER_CLI_TIMEOUT_SECONDS
+from agent_providers.constants import TURN_TIMEOUT_SECONDS
 from agent_providers.errors import (
     ProviderUnavailableError,
     SafeRouteReasonCode,
@@ -44,7 +44,7 @@ async def stream_openai_compatible_turn(
 ) -> AsyncIterator[StreamEvent]:
     """Stream one OpenAI-compatible turn through the host's tool catalog."""
     try:
-        async with httpx.AsyncClient(timeout=COWRITER_CLI_TIMEOUT_SECONDS) as client:
+        async with httpx.AsyncClient(timeout=TURN_TIMEOUT_SECONDS) as client:
             transport = _OpenAITransport(
                 client=client,
                 provider=provider,

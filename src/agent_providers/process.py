@@ -34,12 +34,12 @@ from agent_providers.constants import (
     CODEX_CLI_LOGGED_OUT_MARKER,
     CODEX_CLI_MODELS_ARGS,
     CODEX_CLI_STATUS_ARGS,
-    COWRITER_MODELS_TIMEOUT_SECONDS,
     GROK_CLI_LOGGED_IN_MARKER,
     GROK_CLI_LOGGED_OUT_MARKER,
     GROK_CLI_MODEL_BULLETS,
     GROK_CLI_MODEL_LIST_MARKER,
     GROK_CLI_STATUS_ARGS,
+    PROBE_TIMEOUT_SECONDS,
 )
 from agent_providers.spawn import (
     ChildProcess,
@@ -185,7 +185,7 @@ LOGGED_OUT = CliLogin(logged_in=False, auth_method=None)
 # reaping its process group. Give callers enough time to receive that outcome.
 CLI_PROBE_CALLER_TIMEOUT_MARGIN_SECONDS = 0.1
 CLI_PROBE_CALLER_TIMEOUT_SECONDS = (
-    COWRITER_MODELS_TIMEOUT_SECONDS
+    PROBE_TIMEOUT_SECONDS
     + (2 * CLI_TERMINATION_GRACE_SECONDS)
     + CLI_PROBE_CALLER_TIMEOUT_MARGIN_SECONDS
 )
@@ -330,7 +330,7 @@ def run_catalog_cli(
         child,
         stdin_payload=None,
         read="all",
-        deadline=time.monotonic() + COWRITER_MODELS_TIMEOUT_SECONDS,
+        deadline=time.monotonic() + PROBE_TIMEOUT_SECONDS,
         stderr=stderr,
         output_read_limit_bytes=limit,
     )

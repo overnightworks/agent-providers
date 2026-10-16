@@ -405,7 +405,7 @@ def test_a_follower_waits_only_its_own_single_flight_budget(monkeypatch) -> None
 def test_run_cli_returns_after_its_answer_budget_and_cleanup_grace(monkeypatch) -> None:
     answer_budget = 0.05
     cleanup_grace = 0.05
-    monkeypatch.setattr("agent_providers.process.COWRITER_MODELS_TIMEOUT_SECONDS", answer_budget)
+    monkeypatch.setattr("agent_providers.process.PROBE_TIMEOUT_SECONDS", answer_budget)
     monkeypatch.setattr("agent_providers.process.CLI_TERMINATION_GRACE_SECONDS", cleanup_grace)
 
     started_at = time.monotonic()
@@ -454,7 +454,7 @@ def test_a_cli_that_floods_us_is_read_only_up_to_the_limit() -> None:
 def test_a_cli_that_never_answers_is_given_up_on() -> None:
     with (
         _a_shell_pretending_to_be_a_cli(),
-        patch("agent_providers.process.COWRITER_MODELS_TIMEOUT_SECONDS", 0.2),
+        patch("agent_providers.process.PROBE_TIMEOUT_SECONDS", 0.2),
     ):
         assert run_catalog_cli(shell_child("-c", "while :; do :; done")).complete is False
 
@@ -471,7 +471,7 @@ def test_a_cli_that_leaves_a_child_behind_is_terminated_with_its_group() -> None
 
     with (
         _a_shell_pretending_to_be_a_cli(),
-        patch("agent_providers.process.COWRITER_MODELS_TIMEOUT_SECONDS", 0.2),
+        patch("agent_providers.process.PROBE_TIMEOUT_SECONDS", 0.2),
         patch("agent_providers.spawn.subprocess.Popen", side_effect=capture_process),
     ):
         assert run_catalog_cli(shell_child("-c", command)).complete is False
@@ -493,7 +493,7 @@ def test_a_sigterm_ignoring_cli_and_child_are_reaped_after_sigkill() -> None:
 
     with (
         _a_shell_pretending_to_be_a_cli(),
-        patch("agent_providers.process.COWRITER_MODELS_TIMEOUT_SECONDS", 0.05),
+        patch("agent_providers.process.PROBE_TIMEOUT_SECONDS", 0.05),
         patch("agent_providers.process.CLI_TERMINATION_GRACE_SECONDS", 0.1),
         patch("agent_providers.spawn.subprocess.Popen", side_effect=capture_process),
     ):
@@ -526,7 +526,7 @@ def test_a_spawn_that_returns_after_its_deadline_is_reaped() -> None:
             reaped.set()
 
     with (
-        patch("agent_providers.process.COWRITER_MODELS_TIMEOUT_SECONDS", 0.1),
+        patch("agent_providers.process.PROBE_TIMEOUT_SECONDS", 0.1),
         patch("agent_providers.spawn.subprocess.Popen", side_effect=late_process),
         patch("agent_providers.process._reap_process_group", side_effect=capture_reap),
     ):
@@ -898,7 +898,7 @@ def test_bounded_runner_stops_collecting_at_the_byte_limit(monkeypatch) -> None:
 
 
 def test_run_cli_discards_partial_output_when_its_read_deadline_expires(monkeypatch) -> None:
-    monkeypatch.setattr("agent_providers.process.COWRITER_MODELS_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr("agent_providers.process.PROBE_TIMEOUT_SECONDS", 0.2)
     monkeypatch.setattr("agent_providers.process.CLI_TERMINATION_GRACE_SECONDS", 0.01)
 
     run = run_catalog_cli(shell_child("-c", "printf partial; exec sleep 10"))
@@ -915,7 +915,7 @@ def test_run_cli_keeps_a_started_cli_result_when_cleanup_reports_a_zombie(monkey
         started.append(child)
         return child
 
-    monkeypatch.setattr("agent_providers.process.COWRITER_MODELS_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr("agent_providers.process.PROBE_TIMEOUT_SECONDS", 0.2)
     monkeypatch.setattr("agent_providers.process.CLI_TERMINATION_GRACE_SECONDS", 0.01)
     monkeypatch.setattr(
         "agent_providers.process._wait_for_process_group_exit",

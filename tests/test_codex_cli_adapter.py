@@ -101,7 +101,7 @@ def test_cover_image_capability_requires_every_codex_mount(
         codex_resources_directory=resources,
     )
 
-    assert codex_image.codex_cover_image_capability_is_available()
+    assert codex_image.codex_image_turn_is_available()
 
     if missing == "cli":
         cli.unlink()
@@ -110,7 +110,7 @@ def test_cover_image_capability_requires_every_codex_mount(
     else:
         resources.rmdir()
 
-    assert not codex_image.codex_cover_image_capability_is_available()
+    assert not codex_image.codex_image_turn_is_available()
 
 
 def test_cover_image_capability_requires_the_installed_image_encoder(
@@ -130,7 +130,7 @@ def test_cover_image_capability_requires_the_installed_image_encoder(
     )
     monkeypatch.setattr(codex_image, "image_encoder_is_installed", lambda: False)
 
-    assert not codex_image.codex_cover_image_capability_is_available()
+    assert not codex_image.codex_image_turn_is_available()
 
 
 def test_a_deployment_without_the_image_encoder_refuses_before_it_spawns(
@@ -146,7 +146,7 @@ def test_a_deployment_without_the_image_encoder_refuses_before_it_spawns(
     monkeypatch.setattr(codex_image, "image_encoder_is_installed", lambda: False)
 
     with pytest.raises(codex_image.CodexImageEncoderUnavailableError):
-        codex_image.generate_codex_cover_image(
+        codex_image.generate_codex_image(
             "prompt", policy=A_COVER_POLICY, deadline=10_000_000,
         )
 
@@ -619,7 +619,7 @@ def _host_image_policy(
 def test_codex_cover_image_accepts_the_measured_0_163_stream(monkeypatch) -> None:
     monkeypatch.setattr(codex_protocol, "run_cli_bounded", _generated_png_runner())
 
-    assert codex_image.generate_codex_cover_image(
+    assert codex_image.generate_codex_image(
         "prompt", policy=A_COVER_POLICY, deadline=10_000_000,
     ).startswith(b"\x89PNG")
 
@@ -627,7 +627,7 @@ def test_codex_cover_image_accepts_the_measured_0_163_stream(monkeypatch) -> Non
 def test_a_generated_image_is_returned_in_the_shape_the_host_asked_for(monkeypatch) -> None:
     monkeypatch.setattr(codex_protocol, "run_cli_bounded", _generated_png_runner())
 
-    payload = codex_image.generate_codex_cover_image(
+    payload = codex_image.generate_codex_image(
         "prompt",
         policy=_host_image_policy(output_edge_pixels=64),
         deadline=10_000_000,
@@ -651,7 +651,7 @@ def test_a_generated_image_outside_the_hosts_bounds_is_refused(
     monkeypatch.setattr(codex_protocol, "run_cli_bounded", _generated_png_runner())
 
     with pytest.raises(codex_image.CodexImageArtifactError):
-        codex_image.generate_codex_cover_image(
+        codex_image.generate_codex_image(
             "prompt", policy=policy, deadline=10_000_000,
         )
 
@@ -853,7 +853,7 @@ def _streaming_runner(events: _StreamedEvents, state: dict[str, bool]):
 
 
 def _generate_cover(prompt: str = "prompt") -> bytes:
-    return codex_image.generate_codex_cover_image(
+    return codex_image.generate_codex_image(
         prompt, policy=A_COVER_POLICY, deadline=10_000_000,
     )
 
@@ -1163,7 +1163,7 @@ def test_codex_public_adapters_reject_unusable_login_mirrors(
     override_provider_runtime(codex_cli_auth_file=auth_file)
 
     with pytest.raises(codex_image.CodexImageLoginError):
-        codex_image.generate_codex_cover_image("prompt", policy=A_COVER_POLICY, deadline=10_000_000)
+        codex_image.generate_codex_image("prompt", policy=A_COVER_POLICY, deadline=10_000_000)
     with pytest.raises(ProviderUnavailableError) as raised:
         _transport()
 

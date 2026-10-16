@@ -15,8 +15,8 @@ from agent_providers.claude.provider import (
 )
 from agent_providers.config import current_config
 from agent_providers.constants import (
-    COWRITER_CLAUDE_API_MAX_TOKENS,
-    COWRITER_CLI_TIMEOUT_SECONDS,
+    CLAUDE_API_MAX_TOKENS,
+    TURN_TIMEOUT_SECONDS,
 )
 from agent_providers.errors import (
     ProviderUnavailableError,
@@ -55,7 +55,7 @@ async def stream_claude_turn(
         system=system,
         model=model,
         messages=messages,
-        timeout_seconds=COWRITER_CLI_TIMEOUT_SECONDS,
+        timeout_seconds=TURN_TIMEOUT_SECONDS,
         correlation_id=correlation_id,
     )
     try:
@@ -87,7 +87,7 @@ async def stream_claude_api_turn(
         anthropic = _require_anthropic_for_cowriter()
         async with anthropic.AsyncAnthropic(
             api_key=api_key,
-            timeout=COWRITER_CLI_TIMEOUT_SECONDS,
+            timeout=TURN_TIMEOUT_SECONDS,
             max_retries=0,
         ) as client:
             transport = _ClaudeApiTransport(
@@ -141,7 +141,7 @@ class _ClaudeApiTransport:
             raise _protocol_error(SafeRouteReasonCode.API_PROTOCOL_ERROR)
         async with messages_api.stream(
             model=self._model,
-            max_tokens=COWRITER_CLAUDE_API_MAX_TOKENS,
+            max_tokens=CLAUDE_API_MAX_TOKENS,
             system=self._system,
             messages=self._messages,
             tools=self._tool_schemas,

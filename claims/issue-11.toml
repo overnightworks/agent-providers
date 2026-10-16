@@ -1,7 +1,0 @@
-claim_id = "ea01048c2a6944bc9e01e30be2a9176c"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "d5055d33e96dd57cb46eec560de8c7c1478ecc98"
-branch = "claude/issue-11-readme-install-pin"
-scope = ["README.md"]
-opened_commit = "98e1c6c255bef2837afd674504b0a57e65dea821"

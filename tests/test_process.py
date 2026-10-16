@@ -3062,13 +3062,10 @@ def test_control_flow_raised_by_the_channel_close_on_the_callers_thread_propagat
     monkeypatch.setattr(process, "_reap_process_group", delayed_reap)
     monkeypatch.setattr(CliLineChannel, "_close", close_that_exits_on_the_callers_thread)
 
+    deadline = time.monotonic() + 0.05
+
     with pytest.raises(SystemExit):
-        _run_pooled(
-            "exec sleep 10",
-            callbacks,
-            deadline=time.monotonic() + 0.05,
-            stdout_line_channel=channel,
-        )
+        _run_pooled("exec sleep 10", callbacks, deadline=deadline, stdout_line_channel=channel)
 
     assert channel.abort_requested()
     assert failure_watch.reported_steps() == ["close SystemExit"]

@@ -292,8 +292,11 @@ def test_a_key_file_gives_the_same_id_every_time_and_two_keys_give_two_ids(tmp_p
     key_file = written_key_file(tmp_path, generated_rsa_key())
     other = SigningKey.from_private_key(rsa.generate_private_key(65537, 3072))
 
-    assert load_signing_key(key_file).kid == load_signing_key(key_file).kid
-    assert load_signing_key(key_file).kid != other.kid
+    first_load = load_signing_key(key_file)
+    second_load = load_signing_key(key_file)
+
+    assert first_load.kid == second_load.kid
+    assert first_load.kid != other.kid
 
 
 def _verifier_trusting(*published_keys: tuple[str, rsa.RSAPublicKey]) -> JwtVerifier:

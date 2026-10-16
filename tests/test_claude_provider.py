@@ -605,11 +605,20 @@ def test_call_cli_timeout_names_the_deadline_only_under_a_caller_deadline(
     assert str(exc.value) == reason
 
 
-@pytest.mark.parametrize("backend", ["api", "cli"])
+@pytest.mark.parametrize(
+    "complete",
+    [
+        pytest.param(
+            lambda: _call_api("hello", "sk-x", None, "claude-sonnet-4-6", 1024, deadline=99.0),
+            id="api",
+        ),
+        pytest.param(lambda: _call_cli("hello", deadline=99.0), id="cli"),
+    ],
+)
 def test_an_already_elapsed_deadline_refuses_the_completion_before_it_starts(
     _no_tool_gate_open,
     monkeypatch: pytest.MonkeyPatch,
-    backend: str,
+    complete,
 ) -> None:
     completions_started: list[str] = []
     mock_client = MagicMock()
@@ -622,10 +631,7 @@ def test_an_already_elapsed_deadline_refuses_the_completion_before_it_starts(
     )
 
     with pytest.raises(provider._DeadlineExhausted) as exc:
-        if backend == "api":
-            _call_api("hello", "sk-elapsed", None, "claude-sonnet-4-6", 1024, deadline=99.0)
-        else:
-            _call_cli("hello", deadline=99.0)
+        complete()
 
     assert str(exc.value) == "deadline_exceeded"
     assert completions_started == []

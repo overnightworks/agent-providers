@@ -5,6 +5,11 @@ events (``agent_providers.events``); the service maps those onto the wire.
 Each route has at most one runner. The CLI runner (slice A1b) and the API
 runner (A2b) are not built yet, so production installs none and a run on a
 route without a runner fails as ``provider_unavailable``.
+
+A runner must end when its step is cancelled or its generator is closed, and
+its close must finish in bounded time: the service ends a silent or overlong
+run by cancelling the step and waiting for the close (``run_liveness``), and
+never leaves a runner behind.
 """
 
 from __future__ import annotations

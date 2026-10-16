@@ -39,9 +39,11 @@ from agent_providers.events import (
     ToolCallEvent,
     ToolResultEvent,
 )
+from agent_service.config import RunConfig
 from agent_service.identity import Principal
 from agent_service.routing import Cli
 from agent_service.run_events import run_frames
+from agent_service.run_liveness import LoopClock
 from agent_service.runners import AdmittedRun, Runner
 
 SONGMAKER = service_config().apps["songmaker"]
@@ -57,7 +59,8 @@ def _streamed(runner: Runner | None) -> bytes:
     )
 
     async def collected() -> bytes:
-        return b"".join([frame async for frame in run_frames(admitted, runner, SONGMAKER)])
+        frames = run_frames(admitted, runner, SONGMAKER, RunConfig(), LoopClock())
+        return b"".join([frame async for frame in frames])
 
     return asyncio.run(collected())
 

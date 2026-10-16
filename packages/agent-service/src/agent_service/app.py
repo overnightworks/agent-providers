@@ -29,6 +29,7 @@ from agent_service.config import ServiceConfig
 from agent_service.identity import Caller, CallerCheck, build_verifier
 from agent_service.routing import NotEnabled, route
 from agent_service.run_events import run_frames
+from agent_service.run_liveness import LoopClock
 from agent_service.run_request import MAX_REQUEST_BYTES, parse_run_request
 from agent_service.runners import AdmittedRun, Runners
 
@@ -111,7 +112,9 @@ def _admitted(
         route=served,
     )
     return StreamingResponse(
-        run_frames(admitted, runners.for_route(served), app_config),
+        run_frames(
+            admitted, runners.for_route(served), app_config, config.runs, LoopClock()
+        ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-store"},
     )

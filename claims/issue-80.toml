@@ -1,7 +1,0 @@
-claim_id = "afddd8f9ca6f42f194ecc809874219df"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "8812996d73f2734fe5a8ec24b1a66a98eeee5528"
-branch = "claude/issue-80-tool-executor-contract"
-scope = ["README.md", "src/agent_providers/tool_loop.py", "tests/test_tool_loop.py"]
-opened_commit = "d1e83ea20d159eb33196ee07f92a07f0ab859bc7"

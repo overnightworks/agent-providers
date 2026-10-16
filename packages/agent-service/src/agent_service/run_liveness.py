@@ -325,9 +325,6 @@ class SupervisedRun:
         """What a supervisor queuing an ending watches: the stall alone, the rest is past."""
         return Deadlines(math.inf, math.inf, None, self._deadlines.stall)
 
-    def _maximum_reached(self) -> bool:
-        return decide(self._clock(), False, self._deadlines) is Action.LIMIT
-
     async def _next_action(self) -> Action:
         while True:
             deadlines = self._deadlines
@@ -349,9 +346,13 @@ class SupervisedRun:
             return False
         if frame is not None and not await self._deliver(frame):
             return False
-        if self._maximum_reached():
-            await self._end(self._limit_exceeded())
-            return False
+        match decide(self._clock(), False, self._blocked_deadlines):
+            case Action.DROP:
+                await self._drop()
+                return False
+            case Action.LIMIT:
+                await self._end(self._limit_exceeded())
+                return False
         self._request_step(self._clock())
         return True
 

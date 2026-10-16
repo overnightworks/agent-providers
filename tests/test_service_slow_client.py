@@ -12,7 +12,7 @@ import asyncio
 import logging
 
 import pytest
-from service_support import QUIET, Drive, GatedRunner, driven, in_loop
+from service_support import QUIET, Drive, GatedRunner, StepClock, driven, in_loop
 from starlette.responses import StreamingResponse
 
 from agent_client.run_stream import ViolationKind
@@ -147,6 +147,41 @@ async def test_a_dropped_client_is_not_sent_the_event_the_runner_yielded_at_the_
         drive.clock.advance_to(45)
         await drive.clock.parked()
         assert (drive.runner.steps, drive.runner.closes) == (1, 1)
+        await drive.drain()
+
+    assert drive.types == ["run_started", "heartbeat"]
+
+
+class _ClockPassingBetweenReads(StepClock):
+    """A clock that jumps to an instant on a chosen reading, as time passes between two lines."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._jump: tuple[int, float] | None = None
+
+    def jump_on_reading(self, number: int, instant: float) -> None:
+        self._jump = (number, instant)
+
+    def __call__(self) -> float:
+        if self._jump is not None:
+            number, instant = self._jump
+            self._jump = (number - 1, instant) if number > 1 else None
+            if number == 1:
+                self.now = instant
+        return super().__call__()
+
+
+@in_loop
+async def test_no_runner_step_is_asked_for_after_the_stall_instant_passed_while_handling_an_event():
+    clock = _ClockPassingBetweenReads()
+    async with driven(clock=clock, read=False) as drive:
+        drive.took(await anext(drive.frames))
+        await drive.run_to(44)
+        steps_waiting = drive.runner.steps
+        clock.jump_on_reading(2, 45)
+        drive.runner.release(QUIET)
+        await drive.clock.parked()
+        assert (drive.runner.steps, drive.runner.closes) == (steps_waiting, 1)
         await drive.drain()
 
     assert drive.types == ["run_started", "heartbeat"]

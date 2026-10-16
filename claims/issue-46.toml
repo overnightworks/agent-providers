@@ -1,8 +1,0 @@
-claim_id = "898ff0db7987406cbb08e9cedd2d231d"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "42352c1204201224615576e8f1eebb74bb35ea3b"
-branch = "claude/issue-46-sonar-ci"
-scope = [".github/workflows/ci.yml", ".github/workflows/release.yml", "sonar-project.properties", "tests/test_ci_workflow.py"]
-opened_commit = "e3b9ce8008c34d0320435a7bbae243ed2fcd7710"
-whole_reason = "One Sonar slice: the workflow findings and the gate that keeps them at zero live in the same two workflow files."

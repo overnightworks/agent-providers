@@ -332,6 +332,7 @@ async def test_text_at_the_heartbeat_instant_goes_out_and_the_next_heartbeat_fal
 
         assert await drive.clock.parked() == 30
     assert drive.types == ["run_started", "assistant_text"]
+    drive.assert_nothing_left()
 
 
 @pytest.mark.parametrize("spoken", [QUIET, TEXT], ids=["empty-fragment", "text"])

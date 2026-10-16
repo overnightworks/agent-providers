@@ -2440,6 +2440,9 @@ def _assert_nothing_reachable_holds_the_credential(
         assert "canary-" not in attributes
     assert error.__cause__ is None
     assert error.__context__ is handled_by_the_caller
+    if handled_by_the_caller is not None:
+        callers_frame = handled_by_the_caller.__traceback__.tb_next.tb_frame
+        assert callers_frame.f_locals == {"callers_own_state": "intact"}
 
 
 def _enter_through_the_login_decider(tmp_path: Path) -> None:
@@ -2560,12 +2563,17 @@ def test_a_decoder_failure_propagates_unchanged_holding_no_credential_bytes(
     _assert_nothing_reachable_holds_the_credential(raised.value, handled_by_the_caller=None)
     assert len(os.listdir("/proc/self/fd")) == open_descriptors
 
+def _fail_as_the_caller_does() -> None:
+    callers_own_state = "intact"
+    raise RuntimeError(callers_own_state)
+
+
 def _drive_in_the_caller(inside_a_handler: bool, call):
     """Call with the caller's handled error (or None); return what the call returned."""
     if not inside_a_handler:
         return call(None)
     try:
-        raise RuntimeError("an error the caller is already handling")
+        _fail_as_the_caller_does()
     except RuntimeError as handled:
         return call(handled)
 
@@ -2624,13 +2632,22 @@ def test_a_memory_error_inside_the_malformed_handler_holds_no_credential_bytes(
     store_codex_login(tmp_path, _LOGIN_SCENARIOS["malformed"][0])
     open_descriptors = len(os.listdir("/proc/self/fd"))
 
-    def enter_failing(handled: BaseException | None) -> BaseException | None:
+    def enter_failing(handled: BaseException | None):
         with patch("agent_providers.codex_login.CodexLogin", side_effect=MemoryError):
             with pytest.raises(MemoryError) as raised:
                 enter(tmp_path)
         return raised.value, handled
 
-    failure, handled = _drive_in_the_caller(inside_a_handler, enter_failing)
+    gc.collect()
+    gc.disable()
+    try:
+        failure, handled = _drive_in_the_caller(inside_a_handler, enter_failing)
+        decoder_errors_left = [
+            item for item in gc.get_objects() if isinstance(item, json.JSONDecodeError)
+        ]
+    finally:
+        gc.enable()
+    assert not decoder_errors_left
 
     _assert_nothing_reachable_holds_the_credential(failure, handled_by_the_caller=handled)
     assert len(os.listdir("/proc/self/fd")) == open_descriptors

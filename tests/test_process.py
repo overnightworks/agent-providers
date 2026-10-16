@@ -2393,7 +2393,7 @@ def test_the_credential_reader_discards_the_content_when_the_close_fails(
     assert len(os.listdir("/proc/self/fd")) == open_descriptors
 
 
-def test_the_credential_reader_judges_the_opened_file_not_the_path_after_the_open(
+def test_the_credential_reader_reads_the_opened_file_not_the_path_after_the_open(
     tmp_path: Path, monkeypatch,
 ) -> None:
     source = tmp_path / "source"

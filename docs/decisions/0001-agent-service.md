@@ -154,7 +154,9 @@ body rules be fixed before the build.
   group claim and the clock leeway `leeway_seconds` (0 to 300, default 0);
   `[runs]` the run's pace and limits: `heartbeat_interval_s` (an integer, 1 to
   300, default 15), `idle_timeout_s` (default 120) and `max_duration_s`
-  (default 600), which must satisfy heartbeat < idle < maximum;
+  (default 600), which must satisfy heartbeat < idle < maximum, and the
+  budget `max_tool_calls` (default 30) and `max_bytes` (default 4 MiB,
+  4194304), both positive integers outside that ordering;
   `[profiles.<name>]` one profile per provider;
   `[purposes."<p>"]` an optional `cli_provider` and `api_alias`;
   `[apps.<app>]` its `workload_client`, its purposes, and its tools' effects,
@@ -167,8 +169,10 @@ body rules be fixed before the build.
   input is deep-copied into its event, and an event that `encode_event` cannot
   write (a non-JSON value, too deep, too large) or that the service's own
   `RunStream` refuses ends the run as `failed: provider_error` before it is
-  sent. The event is encoded before `RunStream` records it, so a refused one
-  never advances the sequence the client checks.
+  sent. An event past the run's tool-call or byte budget ends the run as
+  `failed: limit_exceeded` before it is sent. The event is encoded and
+  charged before `RunStream` records it, so a refused one never advances the
+  sequence the client checks.
 - **Ruled sentences.** S1 both tokens are required; S2 a user token cannot
   pose as the workload; S3 the request names only purpose and turn; S4 H5
   decides the route; S5 a clean stream ends with exactly one terminal; S6
@@ -365,9 +369,9 @@ second wire owner cannot appear without contradicting this ruling.
 
 ### A1a3 liveness ruling (head, 16.10.2026)
 
-The numbers 15 s heartbeat, 120 s idle and 600 s maximum are provisional
-defaults of `[runs]`; A1b's live proof may retune them. Piece 1 of A1a3
-(`agent_service.run_liveness`):
+The numbers 15 s heartbeat, 120 s idle, 600 s maximum, 30 tool calls and
+4 MiB are provisional defaults of `[runs]`; A1b's live proof may retune them.
+Piece 1 of A1a3 (`agent_service.run_liveness`):
 
 1. One injected clock; the origin t0 is the reading when `run_started` is
    produced. The maximum is t0 + `max_duration_s`, whatever the runner does.
@@ -400,6 +404,38 @@ defaults of `[runs]`; A1b's live proof may retune them. Piece 1 of A1a3
     after a side-effecting `tool_call` (ruling (c) holds).
 14. Bad numbers stop startup: strict types (no `true`, `15.5` or `inf`),
     heartbeat 1 to 300, and heartbeat < idle < maximum.
+
+Piece 2 of A1a3 (`agent_service.run_events`, the budget beside `seq`):
+
+15. A run sends at most `max_tool_calls` `tool_call` frames; the next one is
+    not sent and the run ends `failed: limit_exceeded`. Results, text and
+    heartbeats do not count.
+16. The runner-caused frames (`assistant_text`, `tool_call`, `tool_result`,
+    `succeeded`) total at most `max_bytes`, counted as the length of the SSE
+    frame `encode_event` returns, the unit of `MAX_EVENT_BYTES`. A total equal
+    to the limit is sent, one byte more is refused, a refused final answer
+    ends the run `limit_exceeded`. `run_started`, heartbeats and `failed` are
+    not counted, so the terminal always goes out. The per-frame cap stays
+    `provider_error` and may exceed a small `max_bytes`.
+17. A refused event is charged nothing, takes no `seq` and is never recorded by
+    `RunStream`; the limit terminal takes the `seq` it would have had. The
+    order is encode, budget (calls before bytes), stream rules, send.
+18. A limit hit is returned as a terminal, so it uses piece 1's stop path
+    (rule 9): the runner is stopped before the terminal is queued, even with
+    the slot full. A run stalled behind a pending frame does not reach the
+    breaching event until the client reads or the maximum ends the run.
+    A yielded event is handled before the maximum (rule 8); at a double
+    breach the tool-call text wins.
+19. The texts are the service's own: "The run made too many tool calls." and
+    "The run sent too much data."; the code survives a side-effecting call
+    (rule 13). `max_tool_calls` and `max_bytes` are strict integers of at least
+    1, outside the heartbeat < idle < maximum ordering.
+20. A runner executes a tool only after the service has accepted its
+    `tool_call`; a refused call (limit, stream rules, unsendable) is never
+    executed, and stopping the runner at once is not an execution barrier.
+    This anchors the promise that the event comes "before the tool runs"
+    (`wire.py:175`). A1b (CLI runner) and A2b (API route and tool loop) own
+    the obligation and one test each.
 
 A runner must end when its step is cancelled or closed, and its close must
 finish in bounded time (`runners.py`).

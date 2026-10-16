@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shlex
 import stat
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -39,6 +41,45 @@ from agent_providers.tool_loop import InitialTurn, ToolResult, ToolResultBatch
 from agent_providers.tools import ToolCatalog
 
 _fake_cli_processes: list[MagicMock] = []
+
+GROK_LOGGED_IN = """You are logged in with grok.com.
+
+Available models:
+  * grok-4.6 (default)
+  - grok-4.5
+  - deepseek-v4-flash
+"""
+CLAUDE_MODEL_CATALOG_STDOUT = (
+    "Current model: `Opus 5 (1M context)` (effort: high)\n"
+    "Usage: /model <name>. Available: sonnet, opus, haiku, fable, best, "
+    "sonnet[1m], opus[1m], fable[1m], opusplan, default, or a full model ID.\n"
+)
+
+
+def fake_cli_executable(
+    directory: Path,
+    answers: Mapping[tuple[str, ...], str],
+    *,
+    calls_log: Path | None = None,
+) -> Path:
+    """An executable that prints the stored answer for the arguments it is started with.
+
+    Any other arguments exit 1. With ``calls_log`` every start appends one line
+    holding its arguments, so a test can count how often the CLI was started.
+    """
+    answer_files: dict[tuple[str, ...], Path] = {}
+    for index, (arguments, stdout) in enumerate(answers.items()):
+        answer_files[arguments] = directory / f"answer-{index}"
+        answer_files[arguments].write_text(stdout)
+    cases = "".join(
+        f"  {shlex.quote(' '.join(arguments))}) cat {shlex.quote(str(answer_file))} ;;\n"
+        for arguments, answer_file in answer_files.items()
+    )
+    log_line = f'echo "$*" >> {shlex.quote(str(calls_log))}\n' if calls_log else ""
+    executable = directory / "fake-cli"
+    executable.write_text(f'#!/bin/sh\n{log_line}case "$*" in\n{cases}  *) exit 1 ;;\nesac\n')
+    executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+    return executable
 
 
 def assert_private_credential_child(

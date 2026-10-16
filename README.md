@@ -28,7 +28,7 @@ It owns the machinery that is the same in every deployment:
 | Module | Owns |
 |---|---|
 | `agent_providers.config` | The deployment facts every module reads, installed once per process via `configure()` |
-| `agent_providers.catalog` | Live provider/route readiness probes and model listings (`probe_provider_route`, `list_provider_models`) |
+| `agent_providers.catalog` | Live provider/route readiness probes and the model names each route offers, aliases or ids as the provider lists them (`probe_provider_route`, `list_provider_models`) |
 | `agent_providers.dispatch` | Routing one turn to a provider and route, and the cover-image capability |
 | `agent_providers.events` | The `StreamEvent` union a turn emits in-process (assistant text, tool call, tool result, final); not the service wire |
 | `agent_providers.tool_loop` | The provider-agnostic tool loop driving a `ToolExecutor` over a `ToolTransport` |

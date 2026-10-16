@@ -41,6 +41,7 @@ from agent_providers.constants import (
     GROK_CLI_STATUS_ARGS,
     PROBE_TIMEOUT_SECONDS,
 )
+from agent_providers.errors import raise_without_chain
 from agent_providers.spawn import (
     ChildProcess,
     PipedProcess,
@@ -1253,27 +1254,34 @@ def blank_codex_refresh_token(source_document: bytes) -> bytes:
     break the stored login, so every Codex child receives this copy instead of
     the operator's file.
     """
+    blanked = _blanked_codex_login(source_document)
+    # The traceback keeps this frame alive, so the document must not stay in it.
+    del source_document
+    if blanked is None:
+        raise_without_chain(CodexLoginMirrorError())
+    return blanked
+
+
+def _blanked_codex_login(source_document: bytes) -> bytes | None:
     try:
         document = json.loads(source_document)
-    except (ValueError, RecursionError) as exc:
-        raise CodexLoginMirrorError() from exc
+    except (ValueError, RecursionError):
+        return None
     if not isinstance(document, dict):
-        raise CodexLoginMirrorError()
+        return None
     tokens = document.get("tokens")
     if not isinstance(tokens, dict):
-        raise CodexLoginMirrorError()
+        return None
     access_token = tokens.get("access_token")
-    if not isinstance(access_token, str) or not access_token:
-        raise CodexLoginMirrorError()
     auth_mode = document.get("auth_mode")
     id_token = tokens.get("id_token")
     account_id = tokens.get("account_id")
     last_refresh = document.get("last_refresh")
     if not all(
         isinstance(value, str) and value
-        for value in (auth_mode, id_token, account_id, last_refresh)
+        for value in (auth_mode, access_token, id_token, account_id, last_refresh)
     ):
-        raise CodexLoginMirrorError()
+        return None
     return json.dumps(
         {
             "auth_mode": auth_mode,
@@ -1322,6 +1330,10 @@ def _install_credential(
             try:
                 payload = credential_copy(payload)
             except CodexLoginMirrorError:
+                if missing_credential_is_error:
+                    raise CliCredentialNotConfiguredError(
+                        "configured CLI credential is unusable"
+                    ) from None
                 log.warning(
                     "the credential at the configured path %s is not a usable login; "
                     "this probe will report a logged-out provider",

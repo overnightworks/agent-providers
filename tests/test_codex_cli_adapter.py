@@ -1322,14 +1322,20 @@ def test_a_codex_event_line_the_cli_cannot_decode_leaves_no_chain_to_its_text(
 _CANARY_REFRESH_TOKEN = "canary-refresh-token-of-the-operator"
 _OPERATORS_LIVE_LOGIN = {
     **_REDACTED_CODEX_LOGIN,
-    "tokens": {**_REDACTED_CODEX_LOGIN["tokens"], "refresh_token": _CANARY_REFRESH_TOKEN},
+    "tokens": {
+        **_REDACTED_CODEX_LOGIN["tokens"],
+        "refresh_token": _CANARY_REFRESH_TOKEN,
+        "session_token": _CANARY_REFRESH_TOKEN,
+    },
 }
 
 
 def _recording_runner(copies: list[tuple[tuple[str, ...], str]], runner) -> object:
     def run_cli_bounded(child, **kwargs):
-        login_copy = Path(child.environment["CODEX_HOME"]) / "auth.json"
-        copies.append((child.command, login_copy.read_text()))
+        codex_home = Path(child.environment["CODEX_HOME"])
+        for child_file in filter(Path.is_file, codex_home.rglob("*")):
+            assert _CANARY_REFRESH_TOKEN.encode() not in child_file.read_bytes()
+        copies.append((child.command, (codex_home / "auth.json").read_text()))
         return runner(child, **kwargs)
 
     return run_cli_bounded
@@ -1397,3 +1403,61 @@ def test_no_codex_child_is_handed_the_operators_live_refresh_token(
     assert _CANARY_REFRESH_TOKEN not in child_login
     assert not any(_CANARY_REFRESH_TOKEN in argument for argument in command)
     assert _CANARY_REFRESH_TOKEN not in formatted_log_text(caplog.records)
+
+
+def _exception_chain(error: BaseException) -> list[BaseException]:
+    chain, pending = [], [error]
+    while pending:
+        current = pending.pop()
+        if current in chain:
+            continue
+        chain.append(current)
+        pending.extend(link for link in (current.__cause__, current.__context__) if link)
+    return chain
+
+
+def _values_held_by_the_traceback_frames(error: BaseException) -> list[object]:
+    held = []
+    for link in _exception_chain(error):
+        frame_holder = link.__traceback__
+        while frame_holder is not None:
+            held.extend(frame_holder.tb_frame.f_locals.values())
+            frame_holder = frame_holder.tb_next
+    return held
+
+
+def _drive_the_image_path(_codex_login_mirror: Path) -> BaseException:
+    with pytest.raises(codex_image.CodexImageLoginError) as raised:
+        codex_image.generate_codex_image("prompt", policy=A_COVER_POLICY, deadline=10_000_000)
+    return raised.value
+
+
+def _drive_the_probe_path(_codex_login_mirror: Path) -> BaseException:
+    with pytest.raises(process.CodexLoginMirrorError) as raised:
+        process.blank_codex_refresh_token(_MALFORMED_LOGIN_WITH_CANARY)
+    return raised.value
+
+
+_MALFORMED_LOGIN_WITH_CANARY = f'{{"refresh_token": "{_CANARY_REFRESH_TOKEN}", '.encode()
+
+
+@pytest.mark.parametrize(
+    "drive", (_drive_the_probe_path, _drive_the_image_path), ids=("probe", "image"),
+)
+def test_a_malformed_login_leaves_no_credential_content_in_the_error_chain(
+    monkeypatch, codex_login_mirror: Path, drive,
+) -> None:
+    codex_login_mirror.write_bytes(_MALFORMED_LOGIN_WITH_CANARY)
+    monkeypatch.setattr(process, "resolve_cli_binary", lambda _binary: Path("/usr/bin/codex"))
+
+    error = drive(codex_login_mirror)
+
+    chain = _exception_chain(error)
+    assert not any(
+        _CANARY_REFRESH_TOKEN in "".join(traceback.format_exception(link)) for link in chain
+    )
+    assert all(not isinstance(link, ValueError) for link in chain)
+    assert not any(
+        _CANARY_REFRESH_TOKEN in (value.decode() if isinstance(value, bytes) else str(value))
+        for value in _values_held_by_the_traceback_frames(error)
+    )

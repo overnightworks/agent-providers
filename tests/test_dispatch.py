@@ -14,7 +14,7 @@ from provider_test_support import drive_cowriter_turn
 import agent_providers
 from agent_providers import dispatch
 from agent_providers.catalog import ProviderRoute
-from agent_providers.dispatch import ImageCapability, image_capability
+from agent_providers.dispatch import ImageCapability, call_provider_once, image_capability
 from agent_providers.errors import (
     ProviderUnavailableError,
     SafeRouteReasonCode,
@@ -37,6 +37,13 @@ def test_stream_turn_refuses_an_unknown_provider_before_any_route_runs(monkeypat
     assert turn.events == []
     assert turn.executed == []
     assert routes_started == []
+
+
+def test_call_provider_once_refuses_an_unknown_provider():
+    with pytest.raises(ProviderUnavailableError) as refusal:
+        call_provider_once(provider="bob", model="any-model", prompt="hi", timeout=1)
+
+    assert refusal.value.reason.code is SafeRouteReasonCode.ROUTE_FAILED
 
 
 def test_stream_turn_takes_only_keyword_arguments():

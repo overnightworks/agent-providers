@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import TYPE_CHECKING, NoReturn
+from functools import partial
+from typing import TYPE_CHECKING, Any, NoReturn
 
 from pydantic import BaseModel
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from agent_providers.text_tool_protocol import TextToolRejection
+
+
+_Reduction = tuple["Callable[..., BaseException]", tuple[object, ...], dict[str, Any]]
 
 
 class SafeRouteReasonCode(StrEnum):
@@ -48,9 +54,9 @@ _SAFE_MESSAGES: dict[SafeRouteReasonCode, str] = {
     SafeRouteReasonCode.API_PROTOCOL_ERROR: "API returned an invalid response.",
     SafeRouteReasonCode.CATALOGUE_HTTP_ERROR: "Model catalogue request failed.",
     SafeRouteReasonCode.CATALOGUE_PROTOCOL_ERROR: "Model catalogue response was invalid.",
-    SafeRouteReasonCode.TOOL_EXECUTION_FAILED: "Co-Writer tool failed.",
-    SafeRouteReasonCode.TOOL_PROTOCOL_ERROR: "Co-Writer tool response was invalid.",
-    SafeRouteReasonCode.TOOL_LIMIT_EXCEEDED: "Co-Writer tool-call limit was reached.",
+    SafeRouteReasonCode.TOOL_EXECUTION_FAILED: "Tool failed.",
+    SafeRouteReasonCode.TOOL_PROTOCOL_ERROR: "Tool response was invalid.",
+    SafeRouteReasonCode.TOOL_LIMIT_EXCEEDED: "Tool-call limit was reached.",
     SafeRouteReasonCode.NO_IMAGE_TOOL: "no image tool",
     SafeRouteReasonCode.ROUTE_FAILED: "Selected route failed.",
 }
@@ -71,6 +77,9 @@ class ProviderError(Exception):
         self.provider = provider
         super().__init__(message)
 
+    def __reduce__(self) -> _Reduction:
+        return (type(self), (self.provider, str(self)), self.__dict__)
+
 
 class ProviderUnavailableError(ProviderError):
     def __init__(
@@ -82,6 +91,10 @@ class ProviderUnavailableError(ProviderError):
         self.route = route_or_message if reason is not None else None
         self.reason = reason
         super().__init__(provider, reason.message if reason is not None else route_or_message)
+
+    def __reduce__(self) -> _Reduction:
+        route_or_message = self.route if self.reason is not None else str(self)
+        return (type(self), (self.provider, route_or_message, self.reason), self.__dict__)
 
 
 class TextToolCallRejectedError(ProviderUnavailableError):
@@ -99,8 +112,8 @@ class TextToolCallRejectedError(ProviderUnavailableError):
         )
         self.rejection = rejection
 
-    def __reduce__(self) -> tuple[type[TextToolCallRejectedError], tuple[object, ...]]:
-        return (type(self), (self.provider, self.route, self.rejection))
+    def __reduce__(self) -> _Reduction:
+        return (type(self), (self.provider, self.route, self.rejection), self.__dict__)
 
 
 def raise_without_chain(error: BaseException) -> NoReturn:
@@ -127,6 +140,9 @@ class ProviderModelCatalogUnavailableError(ProviderError):
         self.reason = reason
         super().__init__(provider, reason.message if reason is not None else message)
 
+    def __reduce__(self) -> _Reduction:
+        return (type(self), (self.provider, str(self), self.reason), self.__dict__)
+
 
 class CodexProcessPoolSaturatedError(Exception):
     """Codex admission was refused before a CLI process could start."""
@@ -135,3 +151,6 @@ class CodexProcessPoolSaturatedError(Exception):
         self.kind = kind
         self.scope = scope
         super().__init__(f"Codex {scope} process capacity is busy")
+
+    def __reduce__(self) -> _Reduction:
+        return (partial(type(self), kind=self.kind, scope=self.scope), (), self.__dict__)

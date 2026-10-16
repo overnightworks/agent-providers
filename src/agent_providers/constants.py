@@ -17,6 +17,7 @@ to the config or the host when it is not.
 
 from __future__ import annotations
 
+from enum import StrEnum
 from typing import Final
 
 CLI_LOGIN_STATUS_CACHE_SECONDS = 30
@@ -65,7 +66,17 @@ CLAUDE_CLI_MAX_CONCURRENT_PROCESSES = 8
 # the outer watchdog, so callers need not infer it from incidental prose.
 DEADLINE_EXCEEDED_REASON: Final[str] = "deadline_exceeded"
 
-COWRITER_PROVIDERS: Final[frozenset[str]] = frozenset({"claude", "grok", "codex"})
+
+class ProviderName(StrEnum):
+    """The providers this library routes a turn to.
+
+    A member equals its name string, so a host's stored string is found by value.
+    """
+
+    CLAUDE = "claude"
+    GROK = "grok"
+    CODEX = "codex"
+
 
 GROK_CHAT_URL = "https://api.x.ai/v1/chat/completions"
 GROK_MODELS_URL = "https://api.x.ai/v1/models"

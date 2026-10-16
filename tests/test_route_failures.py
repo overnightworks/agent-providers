@@ -20,6 +20,9 @@ from pydantic import BaseModel, SecretStr
 
 from agent_providers import dispatch
 from agent_providers.errors import (
+    CodexProcessPoolSaturatedError,
+    ProviderError,
+    ProviderModelCatalogUnavailableError,
     ProviderUnavailableError,
     SafeRouteReasonCode,
     TextToolCallRejectedError,
@@ -249,3 +252,27 @@ def test_each_error_rebuilds_from_its_constructor_arguments(parser_error, host_e
 
     assert parser_error.__reduce__() == (TextToolProtocolError, (rejection,))
     assert host_error.__reduce__() == (TextToolCallRejectedError, ("grok", "cli", rejection))
+
+
+_TOOL_PROTOCOL_REASON = normalize_route_failure(SafeRouteReasonCode.TOOL_PROTOCOL_ERROR)
+
+_PLAIN_ERRORS = {
+    "provider-error": ProviderError("grok", "grok is down"),
+    "unavailable-with-message": ProviderUnavailableError("grok", "no key"),
+    "unavailable-with-reason": ProviderUnavailableError("grok", "cli", _TOOL_PROTOCOL_REASON),
+    "catalog-with-message": ProviderModelCatalogUnavailableError("codex", "no catalog"),
+    "catalog-with-reason": ProviderModelCatalogUnavailableError(
+        "codex", "ignored", _TOOL_PROTOCOL_REASON,
+    ),
+    "pool-saturated": CodexProcessPoolSaturatedError(kind="turn", scope="host"),
+}
+
+
+@pytest.mark.parametrize("round_trip", _ROUND_TRIPS.values(), ids=_ROUND_TRIPS.keys())
+@pytest.mark.parametrize("original", _PLAIN_ERRORS.values(), ids=_PLAIN_ERRORS.keys())
+def test_a_route_error_survives_a_round_trip_with_its_attributes(original, round_trip):
+    rebuilt = round_trip(original)
+
+    assert type(rebuilt) is type(original)
+    assert str(rebuilt) == str(original)
+    assert rebuilt.__dict__ == original.__dict__

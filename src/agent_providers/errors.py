@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from functools import partial
 from typing import TYPE_CHECKING, NoReturn
 
 from pydantic import BaseModel
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from agent_providers.text_tool_protocol import TextToolRejection
 
 
@@ -71,6 +74,9 @@ class ProviderError(Exception):
         self.provider = provider
         super().__init__(message)
 
+    def __reduce__(self) -> tuple[type[ProviderError], tuple[object, ...]]:
+        return (type(self), (self.provider, str(self)))
+
 
 class ProviderUnavailableError(ProviderError):
     def __init__(
@@ -82,6 +88,10 @@ class ProviderUnavailableError(ProviderError):
         self.route = route_or_message if reason is not None else None
         self.reason = reason
         super().__init__(provider, reason.message if reason is not None else route_or_message)
+
+    def __reduce__(self) -> tuple[type[ProviderUnavailableError], tuple[object, ...]]:
+        route_or_message = self.route if self.reason is not None else str(self)
+        return (type(self), (self.provider, route_or_message, self.reason))
 
 
 class TextToolCallRejectedError(ProviderUnavailableError):
@@ -127,6 +137,9 @@ class ProviderModelCatalogUnavailableError(ProviderError):
         self.reason = reason
         super().__init__(provider, reason.message if reason is not None else message)
 
+    def __reduce__(self) -> tuple[type[ProviderModelCatalogUnavailableError], tuple[object, ...]]:
+        return (type(self), (self.provider, str(self), self.reason))
+
 
 class CodexProcessPoolSaturatedError(Exception):
     """Codex admission was refused before a CLI process could start."""
@@ -135,3 +148,6 @@ class CodexProcessPoolSaturatedError(Exception):
         self.kind = kind
         self.scope = scope
         super().__init__(f"Codex {scope} process capacity is busy")
+
+    def __reduce__(self) -> tuple[Callable[..., CodexProcessPoolSaturatedError], tuple[()]]:
+        return (partial(type(self), kind=self.kind, scope=self.scope), ())

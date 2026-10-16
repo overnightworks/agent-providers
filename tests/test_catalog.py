@@ -199,10 +199,26 @@ def test_a_stored_provider_string_is_found_by_value(stored: str, is_provider: bo
     assert (stored in ProviderName) is is_provider
 
 
-@pytest.mark.parametrize("route", [ProviderRoute.CLI, ProviderRoute.API])
-def test_listing_models_for_an_unknown_provider_is_refused_by_name(route: ProviderRoute) -> None:
+def test_the_provider_names_are_public_in_their_documented_order() -> None:
+    assert [(member.name, member.value) for member in ProviderName] == [
+        ("CLAUDE", "claude"), ("GROK", "grok"), ("CODEX", "codex"),
+    ]
+
+
+_UNKNOWN_PROVIDER_CALLS = {
+    "list-cli": lambda: list_provider_models("bob", ProviderRoute.CLI),
+    "list-api": lambda: list_provider_models("bob", ProviderRoute.API),
+    "probe": lambda: probe_provider_route("bob", ProviderRoute.API),
+    "configuration": lambda: provider_configuration("bob", frozenset()),
+}
+
+
+@pytest.mark.parametrize(
+    "ask", _UNKNOWN_PROVIDER_CALLS.values(), ids=_UNKNOWN_PROVIDER_CALLS.keys(),
+)
+def test_asking_the_catalog_about_an_unknown_provider_is_refused_by_name(ask) -> None:
     with pytest.raises(ProviderUnavailableError) as refusal:
-        list_provider_models("bob", route)
+        ask()
 
     assert str(refusal.value) == "Unknown provider 'bob'"
 
@@ -248,7 +264,24 @@ def test_a_provider_with_an_api_key_is_ready_through_the_api_key(
 
 
 @pytest.mark.parametrize("provider", ["claude", "grok", "codex"])
-def test_a_cli_route_without_a_binary_is_not_configured(provider: str) -> None:
+def test_a_cli_route_without_a_binary_is_not_configured(provider: str, tmp_path: Path) -> None:
+    override_provider_runtime(**{f"{provider}_cli_binary": str(tmp_path / "missing-cli")})
+    clear_agent_cli_caches()
+
     snapshot = probe_provider_route(provider, ProviderRoute.CLI)
 
     assert snapshot.readiness is ProviderRouteReadinessState.NOT_CONFIGURED
+    assert snapshot.reason.code is SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED
+
+
+@pytest.mark.parametrize("provider", ["claude", "grok", "codex"])
+def test_a_cli_route_whose_private_home_cannot_be_made_is_disturbed(
+    provider: str, tmp_path: Path,
+) -> None:
+    override_provider_runtime(cli_working_directory_root=tmp_path / "missing-root")
+    clear_agent_cli_caches()
+
+    snapshot = probe_provider_route(provider, ProviderRoute.CLI)
+
+    assert snapshot.readiness is ProviderRouteReadinessState.DISTURBED
+    assert snapshot.reason.code is SafeRouteReasonCode.CLI_BINARY_UNAVAILABLE

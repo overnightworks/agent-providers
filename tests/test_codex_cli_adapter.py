@@ -1036,13 +1036,26 @@ def test_a_codex_reader_takes_deep_nesting_as_the_input_it_cannot_decode(
         assert DEEPLY_NESTED_JSON.encode() in calls[1][1]["stdin_payload"]
 
 
-@pytest.mark.parametrize(
+_UNDECODABLE_EVENT_LINES = pytest.mark.parametrize(
     "event_line",
     [
         pytest.param(b'{"type":"item.completed","text":"event-line-canary\n', id="malformed-json"),
         pytest.param(b"\xff\xfe event-line-canary\n", id="invalid-utf-8"),
     ],
 )
+
+
+@_UNDECODABLE_EVENT_LINES
+def test_the_codex_line_reader_refuses_an_undecodable_line_without_chaining_it(event_line):
+    with pytest.raises(codex_protocol.CodexCliStreamFailure) as raised:
+        codex_protocol.parse_codex_line(event_line)
+
+    assert raised.value.code == "codex_cli_stream_protocol_error"
+    assert raised.value.__context__ is None
+    assert raised.value.__cause__ is None
+
+
+@_UNDECODABLE_EVENT_LINES
 @CALLER_CONTEXTS
 def test_a_codex_event_line_the_cli_cannot_decode_leaves_no_chain_to_its_text(
     monkeypatch, event_line, while_the_caller_handles_an_exception,

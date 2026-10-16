@@ -1,8 +1,0 @@
-claim_id = "6c1bfd80491a45cfbcec6d616b053eb2"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "792fb268e609ecaa7a5c235724672efb50d9089c"
-branch = "claude/issue-9-refused-tool-call-contract"
-scope = ["README.md", "src/agent_providers/codex/protocol.py", "src/agent_providers/codex/transport.py", "src/agent_providers/errors.py", "src/agent_providers/grok/transport.py", "src/agent_providers/text_tool_protocol.py", "src/agent_providers/tool_loop.py", "tests/provider_test_support.py", "tests/test_codex_cli_adapter.py", "tests/test_cowriter_errors.py", "tests/test_grok_cli_adapter.py", "tests/test_service_run_events.py", "tests/test_text_tool_protocol.py", "tests/test_tool_loop.py"]
-opened_commit = "3058f7e9b7ef66023eace5474575c15d3488c4ec"
-whole_reason = "One rejection contract across the parser, both transports, the tool loop and the error type; a partial landing would leave a leaking path."

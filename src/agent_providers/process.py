@@ -1352,7 +1352,7 @@ class _ExceptionLinks:
         restored = self.exception
         restored.__traceback__ = self.traceback
         restored.__context__ = self.context
-        restored.__cause__ = self.cause
+        restored.__cause__ = self.cause if isinstance(self.cause, BaseException) else None
         restored.__suppress_context__ = self.suppress_context
 
 

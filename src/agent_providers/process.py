@@ -122,6 +122,11 @@ class CliRunOutcome:
     io_error: OSError | None = None
 
 
+_RUNNER_TIMEOUT_REASONS = frozenset(
+    {CliRunReason.DEADLINE_BEFORE_SPAWN, CliRunReason.CLEANUP_OVERRAN}
+)
+
+
 class CliLineChannel:
     """A bounded stream of complete stdout lines from one CLI run."""
 
@@ -158,9 +163,7 @@ class CliLineChannel:
                     return self._outcome
                 now = time.monotonic()
                 if settle_by is not None and now >= settle_by:
-                    self._outcome = _cleanup_overran_outcome(started=True)
-                    self._condition.notify_all()
-                    return self._outcome
+                    return self._terminate_with(_cleanup_overran_outcome(started=True))
                 if give_up_at is not None and now >= give_up_at:
                     raise TimeoutError("CLI line channel did not produce an item in time")
                 wake_instants = [
@@ -182,12 +185,17 @@ class CliLineChannel:
 
     def _close(self, outcome: CliRunOutcome) -> CliRunOutcome:
         with self._condition:
-            if self._outcome is None:
-                if not outcome.complete:
-                    self._lines.clear()
-                self._outcome = outcome
-                self._condition.notify_all()
-            return self._outcome
+            return self._terminate_with(outcome)
+
+    def _terminate_with(self, outcome: CliRunOutcome) -> CliRunOutcome:
+        if self._outcome is None:
+            if not outcome.complete:
+                self._lines.clear()
+            self._outcome = outcome
+            if outcome.reason in _RUNNER_TIMEOUT_REASONS:
+                self._abort_requested.set()
+            self._condition.notify_all()
+        return self._outcome
 
 
 def _cleanup_overran_outcome(*, started: bool) -> CliRunOutcome:
@@ -225,6 +233,7 @@ class _StepFailures:
     def __init__(self) -> None:
         self._failed: list[str] = []
         self._errors: dict[str, BaseException] = {}
+        self._first_control_flow: BaseException | None = None
 
     @contextmanager
     def contained(self, step: str, *, reported: bool = True) -> Iterator[None]:
@@ -232,6 +241,8 @@ class _StepFailures:
             yield
         except BaseException as error:  # NOSONAR(S5754) every exit publishes; callers re-raise
             self._errors[step] = error
+            if self._first_control_flow is None and not isinstance(error, Exception):
+                self._first_control_flow = error
             if reported:
                 self._failed.append(f"{step} {type(error).__name__}")
 
@@ -248,9 +259,8 @@ class _StepFailures:
 
     def raise_control_flow(self) -> None:
         """Re-raise the first failure that is not an ``Exception`` (caller thread only)."""
-        for error in self._errors.values():
-            if not isinstance(error, Exception):
-                raise error
+        if self._first_control_flow is not None:
+            raise self._first_control_flow
 
 
 LOGGED_OUT = CliLogin(logged_in=False, auth_method=None)
@@ -560,21 +570,13 @@ def _recorded_outcome(state: _BoundedRunState) -> CliRunOutcome:
         return cast(CliRunOutcome, state.outcome)
 
 
-_RUNNER_TIMEOUT_REASONS = frozenset(
-    {CliRunReason.DEADLINE_BEFORE_SPAWN, CliRunReason.CLEANUP_OVERRAN}
-)
-
-
 def _settle_from_caller(
     state: _BoundedRunState,
     request: _CliRunRequest,
     outcome: CliRunOutcome,
 ) -> CliRunOutcome:
-    channel = request.stdout_line_channel
     failures = _StepFailures()
-    settled = _settle(state, channel, outcome, failures)
-    if channel is not None and settled.reason in _RUNNER_TIMEOUT_REASONS:
-        channel.request_abort()
+    settled = _settle(state, request.stdout_line_channel, outcome, failures)
     failures.report()
     failures.raise_control_flow()
     return settled

@@ -2858,6 +2858,7 @@ def test_a_spawn_that_returns_after_the_deadline_is_published_and_reaped_late(
     assert outcome.reason is CliRunReason.DEADLINE_BEFORE_SPAWN
     assert deadline <= returned_at < deadline + 0.5
     assert channel.receive(timeout=0) is outcome
+    assert channel.abort_requested()
     assert process_pool.reservation_count() == 1
     release_spawn.set()
     assert reaped.wait(timeout=2)
@@ -2991,8 +2992,15 @@ def test_whichever_thread_settles_first_decides_the_return_and_the_channel(
     failure_watch.assert_nothing_leaked()
 
 
-def test_a_caller_that_adopts_a_consumers_overrun_before_the_spawn_still_requests_abort(
-    monkeypatch, failure_watch, pooled_run,
+@pytest.mark.parametrize(
+    "spawn_held_past_the_deadline",
+    [
+        pytest.param(True, id="caller-settles-after-the-deadline"),
+        pytest.param(False, id="runner-thread-completes-first"),
+    ],
+)
+def test_a_caller_that_adopts_a_consumers_overrun_still_requests_abort(
+    monkeypatch, failure_watch, pooled_run, spawn_held_past_the_deadline,
 ) -> None:
     process_pool, callbacks = pooled_run
     channel = CliLineChannel(maximum_lines=1)
@@ -3002,7 +3010,8 @@ def test_a_caller_that_adopts_a_consumers_overrun_before_the_spawn_still_request
     real_open_pipes = process.open_pipes
 
     def late_open_pipes(*arguments, **keywords):
-        release_spawn.wait(timeout=2)
+        if spawn_held_past_the_deadline:
+            release_spawn.wait(timeout=2)
         return real_open_pipes(*arguments, **keywords)
 
     def record_release(process_id: int, became_zombie: bool) -> None:
@@ -3011,20 +3020,13 @@ def test_a_caller_that_adopts_a_consumers_overrun_before_the_spawn_still_request
 
     callbacks["on_reaped"] = record_release
     monkeypatch.setattr(process, "open_pipes", late_open_pipes)
-    started_at = time.monotonic()
-    consumed: list[bytes | CliRunOutcome] = []
-    consumer = threading.Thread(
-        target=lambda: consumed.append(channel.receive(settle_by=started_at + 0.02)),
-    )
-    consumer.start()
+    consumed = channel.receive(settle_by=time.monotonic())
+    deadline = time.monotonic() + (0.05 if spawn_held_past_the_deadline else 5)
 
-    outcome = _run_pooled(
-        "true", callbacks, deadline=started_at + 0.2, stdout_line_channel=channel,
-    )
-    consumer.join(timeout=1)
+    outcome = _run_pooled("true", callbacks, deadline=deadline, stdout_line_channel=channel)
 
     assert outcome.reason is CliRunReason.CLEANUP_OVERRAN
-    assert outcome is consumed[0]
+    assert outcome is consumed
     assert channel.abort_requested()
     release_spawn.set()
     assert reaped.wait(timeout=2)
@@ -3050,9 +3052,10 @@ def test_control_flow_raised_by_the_channel_close_on_the_callers_thread_propagat
         return real_reap(child)
 
     def close_that_exits_on_the_callers_thread(self, outcome):
+        published = real_close(self, outcome)
         if threading.current_thread() is caller:
             raise SystemExit(A_RUNNER_FAILURE_CANARY)
-        return real_close(self, outcome)
+        return published
 
     def record_release(process_id: int, became_zombie: bool) -> None:
         release_reservation(process_id, became_zombie)
@@ -3072,6 +3075,35 @@ def test_control_flow_raised_by_the_channel_close_on_the_callers_thread_propagat
     release_reap.set()
     assert released.wait(timeout=2)
     failure_watch.assert_nothing_leaked()
+
+
+@pytest.mark.parametrize(
+    "raised_by_records",
+    [
+        pytest.param([SystemExit, RuntimeError], id="control-flow-first"),
+        pytest.param([RuntimeError, SystemExit], id="exception-first"),
+    ],
+)
+def test_a_later_failing_report_never_displaces_earlier_control_flow(
+    monkeypatch, failure_watch, pooled_run, raised_by_records,
+) -> None:
+    process_pool, callbacks = pooled_run
+    fail_to_start_the_runner_thread(monkeypatch, RuntimeError(A_RUNNER_FAILURE_CANARY))
+    raising_records = iter(raised_by_records)
+
+    class FailingHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            raise next(raising_records, RuntimeError)
+
+    handler = FailingHandler()
+    process_logger = logging.getLogger("agent_providers.process")
+    process_logger.addHandler(handler)
+    callbacks["on_spawn_failed"] = _raising(RuntimeError(ANOTHER_RUNNER_FAILURE_CANARY))
+    try:
+        with pytest.raises(SystemExit):
+            _run_pooled(":", callbacks, stdout_line_channel=CliLineChannel(maximum_lines=1))
+    finally:
+        process_logger.removeHandler(handler)
 
 
 def test_control_flow_raised_by_the_log_handler_while_reporting_propagates_after_publishing(

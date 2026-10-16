@@ -48,6 +48,7 @@ def test_a_valid_file_loads_with_the_documented_defaults(tmp_path):
     assert config.profiles["claude-main"].provider is Provider.CLAUDE
     assert (config.runs.heartbeat_interval_s, config.runs.idle_timeout_s) == (15, 120.0)
     assert config.runs.max_duration_s == 600.0
+    assert (config.runs.max_tool_calls, config.runs.max_bytes) == (30, 4194304)
     assert config.app_of_workload_client("songmaker-test") == "songmaker"
 
 
@@ -86,6 +87,13 @@ REFUSED_RUN_SETTINGS = (
     "max_duration_s = 0",
     "max_duration_s = -1",
     "max_duration_s = 100",
+    "max_tool_calls = 0",
+    "max_tool_calls = true",
+    "max_tool_calls = 30.0",
+    "max_bytes = 0",
+    "max_bytes = -1",
+    "max_bytes = 4194304.0",
+    "max_tool_call = 30",
 )
 
 
@@ -174,6 +182,14 @@ def test_run_limits_given_as_integers_or_floats_load(tmp_path):
     runs = load_config(_written(tmp_path, text)).runs
 
     assert (runs.heartbeat_interval_s, runs.idle_timeout_s, runs.max_duration_s) == (20, 90, 300.5)
+
+
+def test_run_budgets_given_in_the_file_load(tmp_path):
+    text = _with_runs("max_tool_calls = 5\nmax_bytes = 2097152")
+
+    runs = load_config(_written(tmp_path, text)).runs
+
+    assert (runs.max_tool_calls, runs.max_bytes) == (5, 2097152)
 
 
 def test_a_missing_file_stops_startup(tmp_path, capsys):

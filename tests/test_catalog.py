@@ -24,7 +24,12 @@ from agent_providers.catalog import (
     list_provider_models,
     probe_provider_route,
 )
-from agent_providers.errors import ProviderModelCatalogUnavailableError, SafeRouteReasonCode
+from agent_providers.constants import ProviderName
+from agent_providers.errors import (
+    ProviderModelCatalogUnavailableError,
+    ProviderUnavailableError,
+    SafeRouteReasonCode,
+)
 from agent_providers.process import clear_agent_cli_caches
 
 CLAUDE_MODEL_CATALOG_ALIASES = sorted([
@@ -180,3 +185,18 @@ def test_listing_the_claude_cli_starts_it_once(tmp_path: Path) -> None:
     list_provider_models("claude", ProviderRoute.CLI)
 
     assert starts.read_text().splitlines() == ["-p /model"]
+
+
+@pytest.mark.parametrize(("stored", "is_provider"), [
+    ("claude", True), ("grok", True), ("codex", True), ("bob", False), ("", False),
+])
+def test_a_stored_provider_string_is_found_by_value(stored: str, is_provider: bool) -> None:
+    assert (stored in ProviderName) is is_provider
+
+
+@pytest.mark.parametrize("route", [ProviderRoute.CLI, ProviderRoute.API])
+def test_listing_models_for_an_unknown_provider_is_refused_by_name(route: ProviderRoute) -> None:
+    with pytest.raises(ProviderUnavailableError) as refusal:
+        list_provider_models("bob", route)
+
+    assert str(refusal.value) == "Unknown provider 'bob'"

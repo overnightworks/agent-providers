@@ -48,9 +48,9 @@ _SAFE_MESSAGES: dict[SafeRouteReasonCode, str] = {
     SafeRouteReasonCode.API_PROTOCOL_ERROR: "API returned an invalid response.",
     SafeRouteReasonCode.CATALOGUE_HTTP_ERROR: "Model catalogue request failed.",
     SafeRouteReasonCode.CATALOGUE_PROTOCOL_ERROR: "Model catalogue response was invalid.",
-    SafeRouteReasonCode.TOOL_EXECUTION_FAILED: "Co-Writer tool failed.",
-    SafeRouteReasonCode.TOOL_PROTOCOL_ERROR: "Co-Writer tool response was invalid.",
-    SafeRouteReasonCode.TOOL_LIMIT_EXCEEDED: "Co-Writer tool-call limit was reached.",
+    SafeRouteReasonCode.TOOL_EXECUTION_FAILED: "Tool failed.",
+    SafeRouteReasonCode.TOOL_PROTOCOL_ERROR: "Tool response was invalid.",
+    SafeRouteReasonCode.TOOL_LIMIT_EXCEEDED: "Tool-call limit was reached.",
     SafeRouteReasonCode.NO_IMAGE_TOOL: "no image tool",
     SafeRouteReasonCode.ROUTE_FAILED: "Selected route failed.",
 }

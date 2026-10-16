@@ -47,9 +47,9 @@ from agent_providers.text_tool_protocol import (
         (SafeRouteReasonCode.API_PROTOCOL_ERROR, "API returned an invalid response."),
         (SafeRouteReasonCode.CATALOGUE_HTTP_ERROR, "Model catalogue request failed."),
         (SafeRouteReasonCode.CATALOGUE_PROTOCOL_ERROR, "Model catalogue response was invalid."),
-        (SafeRouteReasonCode.TOOL_EXECUTION_FAILED, "Co-Writer tool failed."),
-        (SafeRouteReasonCode.TOOL_PROTOCOL_ERROR, "Co-Writer tool response was invalid."),
-        (SafeRouteReasonCode.TOOL_LIMIT_EXCEEDED, "Co-Writer tool-call limit was reached."),
+        (SafeRouteReasonCode.TOOL_EXECUTION_FAILED, "Tool failed."),
+        (SafeRouteReasonCode.TOOL_PROTOCOL_ERROR, "Tool response was invalid."),
+        (SafeRouteReasonCode.TOOL_LIMIT_EXCEEDED, "Tool-call limit was reached."),
         (SafeRouteReasonCode.ROUTE_FAILED, "Selected route failed."),
     ],
 )
@@ -197,7 +197,7 @@ def test_no_ordinary_rendering_shows_the_refused_text(
 def test_the_host_error_is_a_provider_unavailable_error_with_the_same_safe_answer(host_error):
     assert isinstance(host_error, ProviderUnavailableError)
     assert host_error.reason == normalize_route_failure(SafeRouteReasonCode.TOOL_PROTOCOL_ERROR)
-    assert str(host_error) == "Co-Writer tool response was invalid."
+    assert str(host_error) == "Tool response was invalid."
     assert (host_error.provider, host_error.route) == ("grok", "cli")
     assert host_error.__context__ is None
     assert host_error.__cause__ is None

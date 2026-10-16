@@ -23,7 +23,11 @@ from io import BytesIO
 from pathlib import Path
 from typing import Final
 
-from agent_providers.codex.pool import CodexProcessKind, get_codex_process_pool
+from agent_providers.codex.pool import (
+    CodexProcessKind,
+    CodexProcessReservation,
+    get_codex_process_pool,
+)
 from agent_providers.codex.protocol import (
     BLOCKED_ITEM_TYPES,
     CODEX_APPROVAL_POLICY_NEVER_CONFIG,
@@ -60,6 +64,7 @@ from agent_providers.sandbox.paths import (
     CODEX_HOME_DIRECTORY_NAME,
     CODEX_IMAGE_TURN_DIRECTORY_PREFIX,
 )
+from agent_providers.spawn import ChildProcess
 
 _IMAGE_ENCODER_PACKAGE: Final = "PIL"
 log = logging.getLogger(__name__)
@@ -267,32 +272,17 @@ def _run_codex_image_cli(
         raise CodexImageCliError() from exc
     reservation = get_codex_process_pool().reserve(CodexProcessKind.IMAGE)
 
-    def run() -> None:
-        try:
-            result = run_reserved_codex_cli(
-                reservation,
-                child,
-                stdin_payload=prompt.encode("utf-8"),
-                read="all",
-                deadline=deadline,
-                output_read_limit_bytes=CODEX_CLI_TURN_OUTPUT_READ_LIMIT_BYTES,
-                stdout_line_channel=channel,
-            )
-        except Exception:
-            get_codex_process_pool().abandon_unspawned(reservation)
-            result = CliRunOutcome(
-                started=False,
-                spawn_error=None,
-                returncode=None,
-                stdout="",
-                stderr="",
-                complete=False,
-                became_zombie=False,
-                reason=CliRunReason.IO_ERROR,
-            )
-        channel._close(result)
-
-    runner = threading.Thread(target=run, daemon=True)
+    runner = threading.Thread(
+        target=_run_codex_image_runner,
+        kwargs={
+            "reservation": reservation,
+            "child": child,
+            "prompt": prompt,
+            "deadline": deadline,
+            "channel": channel,
+        },
+        daemon=True,
+    )
     runner.start()
     try:
         while True:
@@ -318,6 +308,40 @@ def _run_codex_image_cli(
         if runner.is_alive():
             channel.request_abort()
             runner.join()
+
+
+def _run_codex_image_runner(
+    *,
+    reservation: CodexProcessReservation,
+    child: ChildProcess,
+    prompt: str,
+    deadline: float,
+    channel: CliLineChannel,
+) -> None:
+    """Close the channel with the child's outcome, or with a failed one if the runner raises."""
+    try:
+        result = run_reserved_codex_cli(
+            reservation,
+            child,
+            stdin_payload=prompt.encode("utf-8"),
+            read="all",
+            deadline=deadline,
+            output_read_limit_bytes=CODEX_CLI_TURN_OUTPUT_READ_LIMIT_BYTES,
+            stdout_line_channel=channel,
+        )
+    except Exception:
+        get_codex_process_pool().abandon_unspawned(reservation)
+        result = CliRunOutcome(
+            started=False,
+            spawn_error=None,
+            returncode=None,
+            stdout="",
+            stderr="",
+            complete=False,
+            became_zombie=False,
+            reason=CliRunReason.IO_ERROR,
+        )
+    channel._close(result)
 
 
 def _codex_image_arguments(model: str) -> tuple[str, ...]:

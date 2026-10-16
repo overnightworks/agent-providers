@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import gc
 import json
 import logging
@@ -12,6 +13,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 from pathlib import Path
 from unittest.mock import patch
 
@@ -19,6 +21,8 @@ import pytest
 from provider_test_support import (
     GROK_LOGGED_IN,
     SECRET_ENV_KEYS,
+    a_codex_login,
+    a_fifo,
     call_within_deadline,
     override_provider_runtime,
     shell_child,
@@ -2199,11 +2203,7 @@ def test_credential_probe_names_malformed_mounted_credentials(
         function()
 
 
-_A_COMPLETE_CODEX_LOGIN = {
-    "auth_mode": "chatgpt",
-    "last_refresh": "2026-09-04T19:20:00Z",
-    "tokens": {"access_token": "a", "id_token": "i", "account_id": "account"},
-}
+_A_COMPLETE_CODEX_LOGIN = json.loads(a_codex_login())
 
 
 @pytest.mark.parametrize(
@@ -2238,9 +2238,7 @@ def test_a_codex_login_is_usable_only_when_a_child_can_start_with_it(
         '{"tokens": []}',
         '{"auth_mode": "chatgpt", "tokens": {}}',
         '{"auth_mode": "apikey", "OPENAI_API_KEY": "sk-synthetic"}',
-        json.dumps({**_A_COMPLETE_CODEX_LOGIN, "tokens": {
-            **_A_COMPLETE_CODEX_LOGIN["tokens"], "account_id": 7,
-        }}),
+        a_codex_login(tokens={"account_id": 7}).decode(),
     ),
     ids=(
         "missing", "not-json", "not-an-object", "tokens-not-an-object", "no-access-token",
@@ -2294,12 +2292,6 @@ def test_the_grok_probe_hands_its_child_the_login_byte_for_byte(tmp_path, monkey
 _CREDENTIAL_BOUND = 256 * 1024
 
 
-def _a_fifo(directory: Path) -> Path:
-    path = directory / "source"
-    os.mkfifo(path)
-    return path
-
-
 def _a_directory(directory: Path) -> Path:
     path = directory / "source"
     path.mkdir()
@@ -2332,7 +2324,7 @@ def _a_path_through_a_regular_file(directory: Path) -> Path:
 
 
 _NOT_A_PLAIN_FILE = [
-    pytest.param(_a_fifo, "CLI credential is not a regular file", id="fifo"),
+    pytest.param(a_fifo, "CLI credential is not a regular file", id="fifo"),
     pytest.param(_a_directory, "CLI credential is not a regular file", id="directory"),
     pytest.param(lambda _: Path("/dev/null"), "CLI credential is not a regular file", id="device"),
     pytest.param(_a_symlink_to_a_login, "CLI credential is a symbolic link", id="symlink"),
@@ -2351,11 +2343,72 @@ def test_the_credential_reader_refuses_what_is_not_a_plain_file(
     tmp_path: Path, make_source, detail: str,
 ) -> None:
     source = make_source(tmp_path)
+    open_descriptors = len(os.listdir("/proc/self/fd"))
 
     with pytest.raises(AgentCliUnavailableError) as refusal:
         call_within_deadline(process._read_credential_file, source)
 
     assert str(refusal.value) == detail
+    assert len(os.listdir("/proc/self/fd")) == open_descriptors
+
+
+def _read_while_close_fails(source: Path) -> AgentCliUnavailableError:
+    real_close = os.close
+
+    def close_then_fail(descriptor: int) -> None:
+        real_close(descriptor)
+        raise OSError(errno.EIO, "synthetic close failure")
+
+    with patch.object(process.os, "close", close_then_fail):
+        with pytest.raises(AgentCliUnavailableError) as refusal:
+            process._read_credential_file(source)
+    return refusal.value
+
+
+def _read_while_close_fails_inside_a_handler(source: Path) -> AgentCliUnavailableError:
+    try:
+        raise RuntimeError("an error the caller is already handling")
+    except RuntimeError:
+        return _read_while_close_fails(source)
+
+
+@pytest.mark.parametrize(
+    "read",
+    (_read_while_close_fails, _read_while_close_fails_inside_a_handler),
+    ids=("plain-call", "inside-a-handler"),
+)
+def test_the_credential_reader_discards_the_content_when_the_close_fails(
+    tmp_path: Path, read,
+) -> None:
+    source = tmp_path / "source"
+    source.write_text("synthetic-credential-canary")
+    open_descriptors = len(os.listdir("/proc/self/fd"))
+
+    refusal = read(source)
+
+    assert str(refusal) == "could not read CLI credentials"
+    assert refusal.__context__ is None
+    assert refusal.__cause__ is None
+    assert "synthetic-credential-canary" not in "".join(traceback.format_exception(refusal))
+    assert len(os.listdir("/proc/self/fd")) == open_descriptors
+
+
+def test_the_credential_reader_judges_the_opened_file_not_the_path_after_the_open(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    source = tmp_path / "source"
+    source.write_bytes(b"the opened file")
+    real_open = os.open
+
+    def open_then_replace_the_path_with_a_fifo(path, flags, *arguments):
+        descriptor = real_open(path, flags, *arguments)
+        source.unlink()
+        os.mkfifo(source)
+        return descriptor
+
+    monkeypatch.setattr(process.os, "open", open_then_replace_the_path_with_a_fifo)
+
+    assert process._read_credential_file(source) == b"the opened file"
 
 
 @pytest.mark.parametrize("size", (0, _CREDENTIAL_BOUND), ids=("empty", "exactly-the-bound"))

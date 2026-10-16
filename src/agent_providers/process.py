@@ -1342,10 +1342,20 @@ def _read_credential_file(path: Path) -> bytes | None:
     try:
         content, refusal = _read_regular_file(descriptor)
     finally:
-        os.close(descriptor)
+        closed = _close_descriptor(descriptor)
+    if not closed:
+        content, refusal = None, _CREDENTIAL_UNREADABLE_DETAIL
     if refusal is not None:
         raise_without_chain(AgentCliUnavailableError(refusal))
     return content
+
+
+def _close_descriptor(descriptor: int) -> bool:
+    try:
+        os.close(descriptor)
+    except OSError:
+        return False
+    return True
 
 
 def _read_regular_file(descriptor: int) -> tuple[bytes | None, str | None]:

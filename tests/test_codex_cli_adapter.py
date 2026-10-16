@@ -17,11 +17,13 @@ from PIL import Image
 from provider_test_support import (
     A_CALLER_CANARY,
     CALLER_CONTEXTS,
+    CANARY_ACCESS_TOKEN,
     COWRITER_TOOL_CATALOG,
     DEEPLY_NESTED_JSON,
     CallerCanaryError,
     a_call_nested_too_deeply_to_decode,
     a_call_to_an_undeclared_tool_carrying,
+    a_codex_login,
     assert_a_multi_result_batch_is_rejected,
     assert_the_canary_reaches_only_the_host,
     drive_cowriter_turn,
@@ -78,17 +80,7 @@ def _transport() -> codex_transport.CodexCliToolTransport:
         model="codex-test", catalog=COWRITER_TOOL_CATALOG,
     )
 
-_REDACTED_CODEX_LOGIN = {
-    "auth_mode": "chatgpt",
-    "OPENAI_API_KEY": None,
-    "last_refresh": "2026-09-04T19:20:00Z",
-    "tokens": {
-        "id_token": "id-token",
-        "access_token": "access-token",
-        "account_id": "account",
-        "refresh_token": "",
-    },
-}
+_REDACTED_CODEX_LOGIN = json.loads(a_codex_login())
 _FIXTURES = Path(__file__).parent / "fixtures"
 
 
@@ -1415,7 +1407,7 @@ def test_no_codex_child_is_handed_the_operators_live_refresh_token(
 
     (command, child_login), = copies
     assert json.loads(child_login)["tokens"]["refresh_token"] == ""
-    assert json.loads(child_login)["tokens"]["access_token"] == "access-token"
+    assert json.loads(child_login)["tokens"]["access_token"] == CANARY_ACCESS_TOKEN
     assert codex_login_mirror.read_bytes() == operators_file
     assert _CANARY_REFRESH_TOKEN not in child_login
     assert not any(_CANARY_REFRESH_TOKEN.encode() in content for content in files)

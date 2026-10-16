@@ -8,14 +8,16 @@ CLI route starts its CLI once per listing.
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 import httpx
 import pytest
 from provider_test_support import (
+    A_CODEX_LOGIN_WITH_INVALID_UTF8,
     CLAUDE_MODEL_CATALOG_STDOUT,
     GROK_LOGGED_IN,
+    a_codex_login,
+    a_fifo,
     call_within_deadline,
     fake_cli_executable,
     override_provider_runtime,
@@ -312,16 +314,7 @@ def test_a_cli_route_whose_private_home_cannot_be_made_is_disturbed(
     assert snapshot.reason.code is SafeRouteReasonCode.CLI_BINARY_UNAVAILABLE
 
 
-def _a_codex_login(**tokens: object) -> bytes:
-    return json.dumps({
-        "auth_mode": "chatgpt",
-        "last_refresh": "2026-09-04T19:20:00Z",
-        "tokens": {"access_token": "a", "id_token": "i", "account_id": "account", **tokens},
-    }).encode()
-
-
 A_CODEX_LOGIN_WITHOUT_ITS_ID_TOKEN = b'{"auth_mode":"chatgpt","tokens":{"access_token":"a"}}'
-AN_INVALID_ENCODING = b"\xff\xfe"
 
 
 def _codex_setup(tmp_path: Path, document: bytes) -> object:
@@ -332,7 +325,7 @@ def _codex_setup(tmp_path: Path, document: bytes) -> object:
 
 
 def test_codex_setup_is_ready_through_a_complete_login(tmp_path: Path) -> None:
-    configuration = _codex_setup(tmp_path, _a_codex_login())
+    configuration = _codex_setup(tmp_path, a_codex_login())
 
     assert isinstance(configuration, ProviderReady)
     assert configuration.method is ProviderSetupMethod.CODEX_CLI
@@ -342,8 +335,8 @@ def test_codex_setup_is_ready_through_a_complete_login(tmp_path: Path) -> None:
     "document",
     [
         pytest.param(A_CODEX_LOGIN_WITHOUT_ITS_ID_TOKEN, id="only-an-access-token"),
-        pytest.param(_a_codex_login(account_id=7), id="numeric-account-id"),
-        pytest.param(AN_INVALID_ENCODING, id="invalid-encoding"),
+        pytest.param(a_codex_login(tokens={"account_id": 7}), id="numeric-account-id"),
+        pytest.param(A_CODEX_LOGIN_WITH_INVALID_UTF8, id="invalid-encoding"),
     ],
 )
 def test_codex_setup_needs_a_usable_login(tmp_path: Path, document: bytes) -> None:
@@ -353,7 +346,7 @@ def test_codex_setup_needs_a_usable_login(tmp_path: Path, document: bytes) -> No
 def test_an_unreadable_codex_login_leaves_the_api_key_in_charge(tmp_path: Path) -> None:
     override_provider_runtime(openai_api_key=SecretStr("a-key"))
 
-    configuration = _codex_setup(tmp_path, AN_INVALID_ENCODING)
+    configuration = _codex_setup(tmp_path, A_CODEX_LOGIN_WITH_INVALID_UTF8)
 
     assert isinstance(configuration, ProviderReady)
     assert configuration.method is ProviderSetupMethod.API_KEY
@@ -364,14 +357,14 @@ def test_a_wrong_typed_codex_login_is_named_in_the_setup_warning(
 ) -> None:
     caplog.set_level("WARNING", logger="agent_providers.catalog")
 
-    _codex_setup(tmp_path, _a_codex_login(account_id=7))
+    _codex_setup(tmp_path, a_codex_login(tokens={"account_id": 7}))
 
     assert "codex CLI probe unavailable: AgentCliUnavailableError" in caplog.text
 
 
 def test_codex_setup_does_not_follow_a_link_to_a_complete_login(tmp_path: Path) -> None:
     target = tmp_path / "target.json"
-    target.write_bytes(_a_codex_login())
+    target.write_bytes(a_codex_login())
     link = tmp_path / "codex-auth.json"
     link.symlink_to(target)
     override_provider_runtime(codex_cli_auth_file=link)
@@ -381,15 +374,9 @@ def test_codex_setup_does_not_follow_a_link_to_a_complete_login(tmp_path: Path) 
     assert isinstance(configuration, ProviderNotLoggedIn)
 
 
-def _a_fifo_source(directory: Path) -> Path:
-    path = directory / "source"
-    os.mkfifo(path)
-    return path
-
-
 @pytest.mark.parametrize(
     "make_source",
-    [_a_fifo_source, lambda _directory: Path("/dev/null")],
+    [a_fifo, lambda _directory: Path("/dev/null")],
     ids=("fifo", "device"),
 )
 def test_the_codex_login_probe_refuses_a_source_that_is_not_a_plain_file(

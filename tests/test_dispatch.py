@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import importlib
 import inspect
-import json
 import os
 import pkgutil
 import re
@@ -12,6 +11,8 @@ from pathlib import Path
 
 import pytest
 from provider_test_support import (
+    A_CODEX_LOGIN_WITH_INVALID_UTF8,
+    a_codex_login,
     call_within_deadline,
     drive_cowriter_turn,
     override_provider_runtime,
@@ -94,14 +95,6 @@ def test_image_capability_says_a_grok_cli_route_carries_no_image_tool():
 
 
 
-def _a_codex_login(**tokens: object) -> bytes:
-    return json.dumps({
-        "auth_mode": "chatgpt",
-        "last_refresh": "2026-09-04T19:20:00Z",
-        "tokens": {"access_token": "a", "id_token": "i", "account_id": "account", **tokens},
-    }).encode()
-
-
 def _codex_image_failure(monkeypatch, auth_file: Path):
     monkeypatch.setattr(dispatch, "codex_image_turn_is_available", lambda: True)
     override_provider_runtime(codex_cli_auth_file=auth_file)
@@ -111,18 +104,19 @@ def _codex_image_failure(monkeypatch, auth_file: Path):
 @pytest.mark.parametrize(
     ("document", "failure_code"),
     [
-        pytest.param(_a_codex_login(), None, id="complete"),
+        pytest.param(a_codex_login(), None, id="complete"),
         pytest.param(
             b'{"auth_mode":"chatgpt","tokens":{"access_token":"a"}}',
             SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED, id="only-an-access-token",
         ),
         pytest.param(b"{}", SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED, id="tokens-absent"),
         pytest.param(
-            _a_codex_login(account_id=7),
+            a_codex_login(tokens={"account_id": 7}),
             SafeRouteReasonCode.CLI_BINARY_UNAVAILABLE, id="numeric-account-id",
         ),
         pytest.param(
-            b"\xff\xfe", SafeRouteReasonCode.CLI_BINARY_UNAVAILABLE, id="invalid-encoding",
+            A_CODEX_LOGIN_WITH_INVALID_UTF8, SafeRouteReasonCode.CLI_BINARY_UNAVAILABLE,
+            id="invalid-encoding",
         ),
     ],
 )

@@ -63,6 +63,32 @@ from agent_providers.tools import ToolCatalog, ToolProtocolMarkup
 
 _fake_cli_processes: list[MagicMock] = []
 
+CANARY_ACCESS_TOKEN = "canary-access-token"
+CANARY_ID_TOKEN = "canary-id-token"
+A_CODEX_LOGIN_WITH_INVALID_UTF8 = b'{"auth_mode": "\xff"}'
+
+
+def a_codex_login(*, tokens: dict[str, Any] | None = None, **top_level: Any) -> bytes:
+    document = {
+        "auth_mode": "chatgpt",
+        "last_refresh": "2026-09-04T19:20:00Z",
+        "tokens": {
+            "access_token": CANARY_ACCESS_TOKEN,
+            "id_token": CANARY_ID_TOKEN,
+            "account_id": "account",
+            "refresh_token": "canary-refresh-token",
+            **(tokens or {}),
+        },
+        **top_level,
+    }
+    return json.dumps(document).encode()
+
+
+def a_fifo(directory: Path) -> Path:
+    path = directory / "source"
+    os.mkfifo(path)
+    return path
+
 GROK_LOGGED_IN = """You are logged in with grok.com.
 
 Available models:

@@ -82,11 +82,15 @@ def test_passes_the_complete_tool_result_batch_to_the_transport() -> None:
         ToolCall("call-2", "second", {"position": 2}),
     ))
     transport = _FakeTransport([[TextDelta("draft "), first], [FinalText("done")]])
+    executed: list[str] = []
 
-    events = asyncio.run(_events(
-        transport,
-        lambda name, arguments: ToolOutcome(f"{name}:{arguments['position']}", False),
-    ))
+    def executor(name: str, arguments: dict[str, Any]) -> ToolOutcome:
+        executed.append(name)
+        return ToolOutcome(f"{name}:{arguments['position']}", False)
+
+    events = asyncio.run(_events(transport, executor))
+
+    assert executed == ["first", "second"]
 
     assert transport.messages == [
         InitialTurn("system", [{"role": "user", "content": "hello"}]),
@@ -305,3 +309,25 @@ def test_a_refused_second_response_writes_one_line_with_its_round_and_correlatio
         "code=text_tool_response_invalid rule=unknown_tool offset=23 length=90"
     )
     assert A_CANARY not in formatted_log_text(caplog.records)
+
+
+def test_a_failed_tool_reaches_the_model_as_its_own_error_outcome(caplog) -> None:
+    transport = _FakeTransport([
+        [ToolCallBatch((ToolCall("call-1", "read", {}),))],
+        [FinalText()],
+    ])
+    caplog.set_level(logging.DEBUG)
+
+    events = asyncio.run(
+        _events(transport, lambda _name, _arguments: ToolOutcome("not found", True)),
+    )
+
+    assert events == [
+        ToolCallEvent(tool_use_id="call-1", name="read", input={}),
+        ToolResultEvent(tool_use_id="call-1", content="not found", is_error=True),
+        FinalEvent(text=""),
+    ]
+    assert transport.messages[1] == ToolResultBatch((
+        tool_loop.ToolResult("call-1", "not found", True),
+    ))
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]

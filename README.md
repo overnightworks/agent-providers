@@ -191,8 +191,9 @@ guess.
 
 The other host obligations arrive as arguments where they are needed:
 
-- `ToolExecutor` (`agent_providers.tool_loop`) — the callable the tool loop
-  invokes to run one requested tool and return its `ToolOutcome`.
+- `ToolExecutor` (`agent_providers.tool_loop`) — the port that runs one tool
+  call and returns its `ToolOutcome`. Its docstring states what a failure is,
+  what raising means and what the loop logs.
 - `ToolCatalog` (`agent_providers.tools`) — the tool declarations, projected to
   each provider's schema.
 - `McpServerSpec` (`agent_providers.config`) — how the host's MCP server is

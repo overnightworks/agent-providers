@@ -1,0 +1,8 @@
+claim_id = "126f2e8e80a94e34a72e53e36376c2df"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "d5003c253e86b23aaa4ba1cb9847c11c4480f2a0"
+branch = "claude/issue-97-tool-markup-brand-from-host"
+scope = ["README.md", "src/agent_providers/tools.py", "tests/provider_test_support.py", "tests/test_text_tool_protocol.py", "tests/test_wire_protocol.py"]
+opened_commit = "b477a7ec7dd8f3736e321802a3f368a2383fcfa4"
+whole_reason = "The contract change sits in tools.py; the five test catalogs and README are the places that must declare it in the same commit."

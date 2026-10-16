@@ -1,4 +1,4 @@
-"""Claude co-writer adapters for the CLI/MCP and native API tool transports."""
+"""Claude adapters for the CLI/MCP and native API tool transports, and the one-shot completion."""
 
 from __future__ import annotations
 
@@ -81,10 +81,10 @@ async def stream_claude_api_turn(
     tool_schemas: list[dict[str, Any]],
     correlation_id: str | None = None,
 ) -> AsyncIterator[StreamEvent]:
-    """Stream one Claude API co-writer turn through the host's tool catalog."""
+    """Stream one Claude API turn through the host's tool catalog."""
     anthropic = None
     try:
-        anthropic = _require_anthropic_for_cowriter()
+        anthropic = _require_anthropic_for_api_turn()
         async with anthropic.AsyncAnthropic(
             api_key=api_key,
             timeout=TURN_TIMEOUT_SECONDS,
@@ -115,7 +115,7 @@ async def stream_claude_api_turn(
     except ProviderUnavailableError:
         raise
     except Exception as exc:
-        log.warning("Claude API co-writer failed class=%s", type(exc).__name__)
+        log.warning("Claude API turn failed class=%s", type(exc).__name__)
         raise _sdk_failure(anthropic, exc) from exc
 
 
@@ -185,7 +185,7 @@ class _ClaudeApiTransport:
         self._assistant_content = None
 
 
-def _require_anthropic_for_cowriter() -> object:
+def _require_anthropic_for_api_turn() -> object:
     try:
         import anthropic
     except ImportError as exc:
@@ -252,9 +252,9 @@ def call_claude_once(
 ) -> str:
     """Synchronous, tool-free, single-turn completion.
 
-    Used by the lyrical-coherence judge (#315), which needs one verdict, not
-    the MCP-attached multi-turn co-writer chat that ``stream_claude_turn``
-    gives a real song-editing session.
+    A one-shot completion under its caller's deadline, for a caller that needs
+    one answer, not the MCP-attached multi-turn session that
+    ``stream_claude_turn`` gives.
     """
     config = current_config()
     api_key = (

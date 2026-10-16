@@ -216,10 +216,6 @@ def test_image_tool_block_reasons_are_closed() -> None:
         "unexpected_event",
         "blocked_item",
         "unexpected_item",
-        "bootstrap_command_mismatch",
-        "bootstrap_cwd_present",
-        "bootstrap_sequence_invalid",
-        "bootstrap_missing",
     }
 
 
@@ -229,10 +225,7 @@ def _png_bytes() -> bytes:
     return output.getvalue()
 
 
-def _image_event_stream(codex_home: Path) -> str:
-    return (_FIXTURES / "codex-imagegen-real-stream.jsonl").read_text().replace(
-        "{CODEX_HOME}", str(codex_home.resolve()),
-    )
+_MEASURED_STREAM = (_FIXTURES / "codex-imagegen-0.163.0-events.jsonl").read_text()
 
 
 def _quota_failure(message: str) -> CliRunOutcome:
@@ -599,7 +592,7 @@ def _generated_png_runner() -> object:
         artifact = codex_home / "generated_images" / "thread" / "cover.png"
         artifact.parent.mkdir(parents=True)
         artifact.write_bytes(_png_bytes())
-        outcome = _outcome(stdout=_image_event_stream(codex_home))
+        outcome = _outcome(stdout=_MEASURED_STREAM)
         kwargs["on_spawned"](1)
         kwargs["on_reaped"](1, False)
         return outcome
@@ -623,7 +616,7 @@ def _host_image_policy(
     )
 
 
-def test_codex_cover_image_accepts_the_recorded_imagegen_stream(monkeypatch) -> None:
+def test_codex_cover_image_accepts_the_measured_0_163_stream(monkeypatch) -> None:
     monkeypatch.setattr(codex_protocol, "run_cli_bounded", _generated_png_runner())
 
     assert codex_image.generate_codex_cover_image(
@@ -734,6 +727,12 @@ def test_a_generated_image_outside_the_hosts_bounds_is_refused(
             "The requested model is unavailable.",
             None,
         ),
+        (
+            _outcome(stdout='{"type":"thread.started","thread_id":"thread"}\n'),
+            codex_image.CodexImageCliError,
+            None,
+            None,
+        ),
     ),
     ids=(
         "login",
@@ -745,148 +744,84 @@ def test_a_generated_image_outside_the_hosts_bounds_is_refused(
         "usage-limit-hint-keeps-all-but-one-trailing-dot",
         "usage-limit-hint-without-a-time",
         "turn-failed-names-generic-message",
+        "turn-never-completed",
     ),
 )
-def test_codex_cover_image_names_terminal_cli_failures(
+def test_codex_cover_image_names_terminal_cli_failures_without_logging_the_gate(
     monkeypatch,
+    caplog,
     outcome: CliRunOutcome,
     expected_error: type[Exception],
     expected_message: str | None,
     expected_retry_at: str | None,
 ) -> None:
     monkeypatch.setattr(codex_protocol, "run_cli_bounded", _image_runner(outcome))
+    caplog.set_level("WARNING", logger="agent_providers.codex.image")
 
     with pytest.raises(expected_error) as raised:
-        codex_image.generate_codex_cover_image("prompt", policy=A_COVER_POLICY, deadline=10_000_000)
+        _generate_cover()
 
+    assert _warnings(caplog) == []
     if expected_message is not None:
         assert expected_message in str(raised.value)
     if expected_error is codex_image.CodexImageQuotaError:
         assert raised.value.retry_at == expected_retry_at
 
 
-@pytest.mark.parametrize(
-    ("artifact_count", "expected_error"),
-    (
-        (0, codex_image.CodexImageNotCreatedError),
-        (
-            2,
-            codex_image.CodexImageArtifactError,
-        ),
-    ),
-    ids=("missing-png", "ambiguous-pngs"),
-)
-def test_codex_cover_image_rejects_missing_or_ambiguous_generated_artifacts(
-    monkeypatch,
-    artifact_count: int,
-    expected_error: type[Exception],
-) -> None:
+_A_PRIVATE_EVENT_MARKER = "private-event-marker"
+_A_PRIVATE_PROMPT_MARKER = "private-prompt-marker"
+_THREAD_OPENING = [{"type": "thread.started", "thread_id": "thread"}, {"type": "turn.started"}]
+_OPENING_TOKENS = ("thread.started", "turn.started")
+_TURN_COMPLETED = {"type": "turn.completed", "usage": {}}
+_MEASURED_TOKENS = (*_OPENING_TOKENS, "item.completed:agent_message*3", "turn.completed")
+
+
+def _item_event(event_type: str, kind: str) -> dict:
+    item = {"id": "item", "type": kind, "private": _A_PRIVATE_EVENT_MARKER}
+    return {"type": event_type, "item": item}
+
+
+def _jsonl(events: list[dict]) -> str:
+    return "".join(json.dumps(event) + "\n" for event in events)
+
+
+def _write_generated_file(name: str, content: bytes):
+    def create_artifacts(codex_home: Path) -> None:
+        artifact = codex_home / "generated_images" / name
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_bytes(content)
+
+    return create_artifacts
+
+
+def _write_png_beside_a_text_file(codex_home: Path) -> None:
+    _write_generated_file("cover.png", _png_bytes())(codex_home)
+    (codex_home / "generated_images" / "notes.txt").write_text("not an image")
+
+
+def _write_generated_directory(codex_home: Path) -> None:
+    (codex_home / "generated_images" / "thread").mkdir(parents=True)
+
+
+def _write_two_generated_pngs(codex_home: Path) -> None:
+    _write_generated_file("a.png", _png_bytes())(codex_home)
+    _write_generated_file("b.png", _png_bytes())(codex_home)
+
+
+def _symlink_generated_images_root(codex_home: Path) -> None:
+    real_root = codex_home / "elsewhere"
+    real_root.mkdir()
+    (real_root / "cover.png").write_bytes(_png_bytes())
+    (codex_home / "generated_images").symlink_to(real_root, target_is_directory=True)
+
+
+def _stdout_line(event: dict | bytes) -> bytes:
+    return event if isinstance(event, bytes) else json.dumps(event).encode() + b"\n"
+
+
+def _streaming_runner(events: list[dict | bytes], state: dict[str, bool]):
+    """A Codex run that streams its events (or raw lines) and records its abort and reap."""
     def run_cli_bounded(child, **kwargs):
-        codex_home = Path(child.environment["CODEX_HOME"])
-        for index in range(artifact_count):
-            artifact = codex_home / "generated_images" / f"cover-{index}.png"
-            artifact.parent.mkdir(parents=True, exist_ok=True)
-            artifact.write_bytes(_png_bytes())
-        outcome = _outcome(stdout=_image_event_stream(codex_home))
-        kwargs["on_spawned"](1)
-        kwargs["on_reaped"](1, False)
-        return outcome
-
-    monkeypatch.setattr(codex_protocol, "run_cli_bounded", run_cli_bounded)
-
-    with pytest.raises(expected_error):
-        codex_image.generate_codex_cover_image("prompt", policy=A_COVER_POLICY, deadline=10_000_000)
-
-
-def test_codex_cover_image_rejects_the_recorded_no_image_turn(monkeypatch, caplog) -> None:
-    outcome = _outcome(stdout=(_FIXTURES / "codex-cover-no-image-events.jsonl").read_text())
-    monkeypatch.setattr(codex_protocol, "run_cli_bounded", _image_runner(outcome))
-
-    caplog.set_level("WARNING", logger="agent_providers.codex.image")
-    with pytest.raises(codex_image.ImageToolBlockedError) as raised:
-        codex_image.generate_codex_cover_image("prompt", policy=A_COVER_POLICY, deadline=10_000_000)
-
-    assert raised.value.reason is codex_image.ImageToolBlockedReason.BOOTSTRAP_MISSING
-    assert caplog.text.count("Codex image tool rejected") == 1
-    assert "bootstrap_missing" in caplog.text
-    assert "prompt" not in caplog.text
-
-
-@pytest.mark.parametrize(
-    ("scenario", "expected_reason", "rejected_while_streaming"),
-    (
-        ("unexpected-event", codex_image.ImageToolBlockedReason.UNEXPECTED_EVENT, True),
-        ("blocked-item", codex_image.ImageToolBlockedReason.BLOCKED_ITEM, True),
-        ("unexpected-item", codex_image.ImageToolBlockedReason.UNEXPECTED_ITEM, True),
-        (
-            "bootstrap-command-mismatch",
-            codex_image.ImageToolBlockedReason.BOOTSTRAP_COMMAND_MISMATCH,
-            True,
-        ),
-        (
-            "bootstrap-cwd-present",
-            codex_image.ImageToolBlockedReason.BOOTSTRAP_CWD_PRESENT,
-            True,
-        ),
-        (
-            "bootstrap-sequence-invalid",
-            codex_image.ImageToolBlockedReason.BOOTSTRAP_SEQUENCE_INVALID,
-            True,
-        ),
-        ("bootstrap-missing", codex_image.ImageToolBlockedReason.BOOTSTRAP_MISSING, False),
-    ),
-)
-def test_codex_cover_image_reports_every_closed_block_reason_without_private_input(
-    monkeypatch,
-    caplog,
-    scenario: str,
-    expected_reason: codex_image.ImageToolBlockedReason,
-    rejected_while_streaming: bool,
-) -> None:
-    prompt_marker = "private-prompt-marker"
-    event_marker = "private-event-marker"
-    runner_state = {"aborted": False, "reaped": False}
-
-    def run_cli_bounded(child, **kwargs):
-        codex_home = Path(child.environment["CODEX_HOME"])
-        expected_command = codex_image._expected_image_skill_command(codex_home)
-        command_item = {
-            "type": "command_execution",
-            "id": "bootstrap",
-            "command": expected_command,
-            "cwd": None,
-            "status": "in_progress",
-            "exit_code": None,
-            "private": event_marker,
-        }
-        events = {
-            "unexpected-event": {"type": event_marker},
-            "blocked-item": {
-                "type": "item.started",
-                "item": {"type": "web_search", "private": event_marker},
-            },
-            "unexpected-item": {
-                "type": "item.started",
-                "item": {"type": "future_item", "private": event_marker},
-            },
-            "bootstrap-command-mismatch": {
-                "type": "item.started",
-                "item": {**command_item, "command": event_marker},
-            },
-            "bootstrap-cwd-present": {
-                "type": "item.started",
-                "item": {**command_item, "cwd": event_marker},
-            },
-            "bootstrap-sequence-invalid": {
-                "type": "item.started",
-                "item": {**command_item, "status": "completed"},
-            },
-            "bootstrap-missing": {
-                "type": "turn.completed",
-                "usage": {"private": event_marker},
-            },
-        }
-        line = json.dumps(events[scenario]).encode() + b"\n"
         channel = kwargs["stdout_line_channel"]
         abort_observed = threading.Event()
         request_abort = channel.request_abort
@@ -897,35 +832,304 @@ def test_codex_cover_image_reports_every_closed_block_reason_without_private_inp
 
         channel.request_abort = observe_abort
         kwargs["on_spawned"](2468)
-        assert channel._send(line)
-        if rejected_while_streaming:
-            assert abort_observed.wait(timeout=1)
-            assert channel.abort_requested()
-            runner_state["aborted"] = True
-        outcome = _outcome(stdout=line.decode())
+        for event in events:
+            if not channel._send(_stdout_line(event)):
+                break
+        state["aborted"] = abort_observed.wait(timeout=1)
         kwargs["on_reaped"](2468, False)
-        runner_state["reaped"] = True
-        return outcome
+        state["reaped"] = True
+        return _outcome(stdout=b"".join(map(_stdout_line, events)).decode())
 
-    monkeypatch.setattr(codex_protocol, "run_cli_bounded", run_cli_bounded)
+    return run_cli_bounded
+
+
+def _generate_cover(prompt: str = "prompt") -> bytes:
+    return codex_image.generate_codex_cover_image(
+        prompt, policy=A_COVER_POLICY, deadline=10_000_000,
+    )
+
+
+def _warnings(caplog) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "agent_providers.codex.image" and record.levelname == "WARNING"
+    ]
+
+
+def _types_line(tokens: tuple[str, ...]) -> str:
+    return "types=[" + ", ".join(tokens) + "]"
+
+
+_WITH_IMAGE_GEN_ITEMS = [
+    *_THREAD_OPENING,
+    _item_event("item.started", "image_gen"),
+    _item_event("item.completed", "image_gen"),
+    _TURN_COMPLETED,
+]
+
+
+@pytest.mark.parametrize(
+    ("stdout", "create_artifacts"),
+    (
+        (_MEASURED_STREAM, _write_generated_file("thread/cover.png", _png_bytes())),
+        (_MEASURED_STREAM, _write_png_beside_a_text_file),
+        (_jsonl(_WITH_IMAGE_GEN_ITEMS), _write_generated_file("cover.png", _png_bytes())),
+    ),
+    ids=(
+        "png-nested-in-a-directory",
+        "png-beside-a-non-png-file",
+        "image-gen-items-around-the-png",
+    ),
+)
+def test_codex_cover_image_returns_the_generated_png_of_a_completed_turn(
+    monkeypatch, stdout: str, create_artifacts: Callable[[Path], None],
+) -> None:
+    monkeypatch.setattr(
+        codex_protocol, "run_cli_bounded", _image_runner(_outcome(stdout=stdout), create_artifacts),
+    )
+
+    assert _generate_cover().startswith(b"\x89PNG")
+
+
+@pytest.mark.parametrize(
+    ("stdout", "create_artifacts", "expected_tokens"),
+    (
+        (_MEASURED_STREAM, _write_generated_directory, _MEASURED_TOKENS),
+        (_MEASURED_STREAM, _write_generated_file("notes.txt", b"not an image"), _MEASURED_TOKENS),
+        (_MEASURED_STREAM, None, _MEASURED_TOKENS),
+        (
+            (_FIXTURES / "codex-cover-no-image-events.jsonl").read_text(),
+            None,
+            (
+                "thread.started",
+                "item.completed:error",
+                "turn.started",
+                "item.completed:agent_message*2",
+                "turn.completed",
+            ),
+        ),
+        (_jsonl([_TURN_COMPLETED]), None, ("turn.completed",)),
+    ),
+    ids=(
+        "only-an-empty-directory",
+        "only-a-non-png-file",
+        "no-generated-images-directory",
+        "the-recorded-no-image-turn",
+        "only-a-completed-turn",
+    ),
+)
+def test_codex_cover_image_reports_a_completed_turn_without_a_png_as_not_created(
+    monkeypatch,
+    caplog,
+    stdout: str,
+    create_artifacts: Callable[[Path], None] | None,
+    expected_tokens: tuple[str, ...],
+) -> None:
+    monkeypatch.setattr(
+        codex_protocol, "run_cli_bounded", _image_runner(_outcome(stdout=stdout), create_artifacts),
+    )
+    caplog.set_level("WARNING", logger="agent_providers.codex.image")
+
+    with pytest.raises(codex_image.CodexImageNotCreatedError):
+        _generate_cover(_A_PRIVATE_PROMPT_MARKER)
+
+    expected_line = f"Codex image not created route=cli {_types_line(expected_tokens)}"
+    assert _warnings(caplog) == [expected_line]
+    assert all(record.exc_info is None for record in caplog.records)
+    assert _A_PRIVATE_PROMPT_MARKER not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "create_artifacts",
+    (_write_two_generated_pngs, _symlink_generated_images_root),
+    ids=("two-pngs", "symlinked-root"),
+)
+def test_codex_cover_image_refuses_ambiguous_artifacts_without_logging_the_gate(
+    monkeypatch, caplog, create_artifacts: Callable[[Path], None],
+) -> None:
+    monkeypatch.setattr(
+        codex_protocol,
+        "run_cli_bounded",
+        _image_runner(_outcome(stdout=_MEASURED_STREAM), create_artifacts),
+    )
+    caplog.set_level("WARNING", logger="agent_providers.codex.image")
+
+    with pytest.raises(codex_image.CodexImageArtifactError):
+        _generate_cover()
+
+    assert _warnings(caplog) == []
+
+
+_RECORDED_0_147_EVENTS = [
+    json.loads(line)
+    for line in (_FIXTURES / "codex-imagegen-real-stream.jsonl").read_text().splitlines()
+]
+_BLOCKED_TURNS = (
+    pytest.param(
+        _RECORDED_0_147_EVENTS,
+        codex_image.ImageToolBlockedReason.BLOCKED_ITEM,
+        (*_OPENING_TOKENS, "item.completed:agent_message", "item.started:command_execution"),
+        id="the-0.147-skill-read-through-bash",
+    ),
+    *(
+        pytest.param(
+            [*_THREAD_OPENING, _item_event(event_type, kind)],
+            codex_image.ImageToolBlockedReason.BLOCKED_ITEM,
+            (*_OPENING_TOKENS, f"{event_type}:{kind}"),
+            id=f"blocked-item-{kind}-on-{event_type}",
+        )
+        for kind in sorted(codex_protocol.BLOCKED_ITEM_TYPES)
+        for event_type in sorted(codex_protocol.ITEM_EVENT_TYPES)
+    ),
+    pytest.param(
+        [
+            *_THREAD_OPENING,
+            f"{_A_PRIVATE_EVENT_MARKER}, not JSON\n".encode(),
+            _item_event("item.started", "web_search"),
+        ],
+        codex_image.ImageToolBlockedReason.BLOCKED_ITEM,
+        (*_OPENING_TOKENS, "other", "item.started:web_search"),
+        id="an-unparsable-line-is-named-other",
+    ),
+    pytest.param(
+        [*_THREAD_OPENING, {"type": _A_PRIVATE_EVENT_MARKER}],
+        codex_image.ImageToolBlockedReason.UNEXPECTED_EVENT,
+        (*_OPENING_TOKENS, "other"),
+        id="unknown-event-type-is-named-other",
+    ),
+    pytest.param(
+        [*_THREAD_OPENING, _item_event("item.started", "future_item")],
+        codex_image.ImageToolBlockedReason.UNEXPECTED_ITEM,
+        (*_OPENING_TOKENS, "item.started:other"),
+        id="unknown-item-kind-is-named-other",
+    ),
+    pytest.param(
+        [
+            *_THREAD_OPENING,
+            {"type": "turn.failed", "error": {"message": "failed"}},
+            _item_event("item.started", "web_search"),
+        ],
+        codex_image.ImageToolBlockedReason.BLOCKED_ITEM,
+        (*_OPENING_TOKENS, "turn.failed", "item.started:web_search"),
+        id="blocked-item-after-a-failed-turn",
+    ),
+    pytest.param(
+        [
+            *_THREAD_OPENING,
+            {"type": "error", "message": "failed"},
+            _item_event("item.started", "web_search"),
+        ],
+        codex_image.ImageToolBlockedReason.BLOCKED_ITEM,
+        (*_OPENING_TOKENS, "error", "item.started:web_search"),
+        id="blocked-item-after-a-top-level-error",
+    ),
+)
+
+
+@pytest.mark.parametrize(("events", "expected_reason", "expected_tokens"), _BLOCKED_TURNS)
+def test_codex_cover_image_aborts_a_blocked_turn_and_logs_only_closed_names(
+    monkeypatch,
+    caplog,
+    events: list[dict],
+    expected_reason: codex_image.ImageToolBlockedReason,
+    expected_tokens: tuple[str, ...],
+) -> None:
+    state = {"aborted": False, "reaped": False}
+    monkeypatch.setattr(codex_protocol, "run_cli_bounded", _streaming_runner(events, state))
     caplog.set_level("WARNING", logger="agent_providers.codex.image")
 
     with pytest.raises(codex_image.ImageToolBlockedError) as raised:
-        codex_image.generate_codex_cover_image(
-            prompt_marker,
-            policy=A_COVER_POLICY,
-            deadline=10_000_000,
-        )
+        _generate_cover(_A_PRIVATE_PROMPT_MARKER)
 
-    assert raised.value.reason is expected_reason
-    assert caplog.text.count("Codex image tool rejected") == 1
-    assert expected_reason.value in caplog.text
-    assert prompt_marker not in caplog.text
-    assert event_marker not in caplog.text
-    assert runner_state == {
-        "aborted": rejected_while_streaming,
-        "reaped": True,
-    }
+    assert (raised.value.reason, raised.value.observed) == (expected_reason, expected_tokens)
+    expected_line = (
+        f"Codex image tool rejected route=cli code={expected_reason.value} "
+        f"{_types_line(expected_tokens)}"
+    )
+    assert _warnings(caplog) == [expected_line]
+    assert all(record.exc_info is None for record in caplog.records)
+    for private in (_A_PRIVATE_PROMPT_MARKER, _A_PRIVATE_EVENT_MARKER):
+        assert private not in caplog.text
+        assert private not in repr(raised.value) + str(raised.value)
+    assert state == {"aborted": True, "reaped": True}
+
+
+_ALTERNATING_ITEM_EVENTS = ("item.started", "item.completed")
+
+
+def _alternating_agent_messages(count: int) -> list[dict]:
+    return [
+        _item_event(_ALTERNATING_ITEM_EVENTS[index % 2], "agent_message") for index in range(count)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("events", "expected_tokens"),
+    (
+        (
+            [*_THREAD_OPENING, *_alternating_agent_messages(3), _TURN_COMPLETED],
+            (
+                *_OPENING_TOKENS,
+                "item.started:agent_message",
+                "item.completed:agent_message",
+                "item.started:agent_message",
+                "turn.completed",
+            ),
+        ),
+        (
+            [
+                *_THREAD_OPENING,
+                *[_item_event("item.completed", "agent_message")] * 100,
+                _TURN_COMPLETED,
+            ],
+            (*_OPENING_TOKENS, "item.completed:agent_message*100", "turn.completed"),
+        ),
+        (
+            [
+                *[event for message in _alternating_agent_messages(40) for event in (message,) * 2],
+                _TURN_COMPLETED,
+            ],
+            (
+                "...+9",
+                *(
+                    f"{_ALTERNATING_ITEM_EVENTS[index % 2]}:agent_message*2"
+                    for index in range(9, 40)
+                ),
+                "turn.completed",
+            ),
+        ),
+        (
+            [*_alternating_agent_messages(40), _TURN_COMPLETED],
+            (
+                "...+9",
+                *(f"{_ALTERNATING_ITEM_EVENTS[index % 2]}:agent_message" for index in range(9, 40)),
+                "turn.completed",
+            ),
+        ),
+    ),
+    ids=(
+        "single-occurrences-stay-bare",
+        "repeats-collapse-before-the-window",
+        "dropped-count-counts-collapsed-tokens-not-lines",
+        "a-long-turn-keeps-the-last-32-behind-a-dropped-count",
+    ),
+)
+def test_a_validated_transcript_returns_its_bounded_closed_tokens(
+    tmp_path: Path, events: list[dict], expected_tokens: tuple[str, ...],
+) -> None:
+    assert codex_image._validate_codex_image_events(
+        _jsonl(events), codex_home=tmp_path,
+    ) == expected_tokens
+
+
+def test_a_deviating_transcript_raises_the_blocked_error_with_its_tokens(tmp_path: Path) -> None:
+    transcript = _jsonl([*_THREAD_OPENING, _item_event("item.started", "command_execution")])
+
+    with pytest.raises(codex_image.ImageToolBlockedError) as raised:
+        codex_image._validate_codex_image_events(transcript, codex_home=tmp_path)
+
+    assert raised.value.observed == (*_OPENING_TOKENS, "item.started:command_execution")
 
 
 @pytest.mark.parametrize(

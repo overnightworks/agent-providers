@@ -1,0 +1,6 @@
+{"type":"thread.started","thread_id":"thread-synthetic"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"synthetic message one"}}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"synthetic message two"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"synthetic message three"}}
+{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1,"reasoning_output_tokens":0}}

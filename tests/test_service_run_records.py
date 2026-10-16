@@ -409,7 +409,8 @@ def test_two_reads_return_equal_distinct_frozen_snapshots_that_a_later_write_lea
 ) -> None:
     run_id, recorder = _begin(records)
     first, second = _read(records, run_id), _read(records, run_id)
-    assert first is not None and second is not None
+    assert first is not None
+    assert second is not None
 
     recorder.accepted(heartbeat(1))
 

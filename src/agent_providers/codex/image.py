@@ -157,8 +157,8 @@ class CodexImageQuotaError(CodexImageError):
         self.retry_at = retry_at
 
 
-def codex_cover_image_capability_is_available() -> bool:
-    """Whether this process has every dependency for a cover image turn."""
+def codex_image_turn_is_available() -> bool:
+    """Whether this process has every dependency for an image turn."""
     turns = current_turn_config()
     code_mode_host = turns.codex_code_mode_host_binary
     resources = turns.codex_resources_directory
@@ -181,7 +181,7 @@ def image_encoder_is_installed() -> bool:
     return importlib.util.find_spec(_IMAGE_ENCODER_PACKAGE) is not None
 
 
-def generate_codex_cover_image(
+def generate_codex_image(
     prompt: str,
     *,
     policy: ImagePolicy,

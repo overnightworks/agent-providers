@@ -26,13 +26,13 @@ from agent_providers.claude.adapter import (
 from agent_providers.claude.provider import (
     UnavailableError as ClaudeUnavailableError,
 )
-from agent_providers.codex.image import codex_cover_image_capability_is_available
+from agent_providers.codex.image import codex_image_turn_is_available
 from agent_providers.codex.transport import CodexCliToolTransport
 from agent_providers.config import current_config
 from agent_providers.constants import (
-    COWRITER_GROK_CHAT_URL,
-    COWRITER_OPENAI_CHAT_URL,
     COWRITER_PROVIDERS,
+    GROK_CHAT_URL,
+    OPENAI_CHAT_URL,
 )
 from agent_providers.errors import (
     ProviderUnavailableError,
@@ -66,8 +66,8 @@ from agent_providers.tools import (
 
 log = logging.getLogger(__name__)
 
-# Cover images come from Codex's CLI image turn; no other provider or route
-# ships an image tool today (#822).
+# Images come from Codex's CLI image turn; no other provider or route
+# ships an image tool today.
 _IMAGE_TOOL_PROVIDER: Final[str] = "codex"
 _IMAGE_TOOL_ROUTE: Final[ProviderRoute] = ProviderRoute.CLI
 
@@ -79,14 +79,14 @@ class _ApiConnection:
 
 
 @dataclass(frozen=True)
-class CoverImageCapability:
+class ImageCapability:
     """One route's image answer: does it own the tool, and what blocks it today."""
 
     carries_image_tool: bool
     failure: SafeRouteReason | None
 
 
-async def stream_cowriter_turn(
+async def stream_turn(
     *,
     provider: str,
     route: ProviderRoute,
@@ -314,12 +314,12 @@ def _api_connection(provider: str) -> _ApiConnection:
     if provider == "grok":
         return _ApiConnection(
             _require_secret(provider, ProviderRoute.API, config.xai_api_key),
-            COWRITER_GROK_CHAT_URL,
+            GROK_CHAT_URL,
         )
     if provider == "codex":
         return _ApiConnection(
             _require_secret(provider, ProviderRoute.API, config.openai_api_key),
-            COWRITER_OPENAI_CHAT_URL,
+            OPENAI_CHAT_URL,
         )
     raise _unavailable(provider, ProviderRoute.API, SafeRouteReasonCode.ROUTE_FAILED)
 
@@ -337,25 +337,21 @@ def _require_secret(provider: str, route: ProviderRoute, secret) -> str:
     return value
 
 
-def cover_image_capability(provider: str, route: ProviderRoute) -> CoverImageCapability:
-    """Answer whether one provider route can create cover images, or name why not.
-
-    Every caller that needs the answer — the cover job, the provider status,
-    and the admin surface — asks here instead of deciding for itself.
-    """
+def image_capability(provider: str, route: ProviderRoute) -> ImageCapability:
+    """Answer whether one provider route can run an image turn, or name why not."""
     if provider != _IMAGE_TOOL_PROVIDER or route is not _IMAGE_TOOL_ROUTE:
-        return CoverImageCapability(
+        return ImageCapability(
             carries_image_tool=False,
             failure=normalize_route_failure(SafeRouteReasonCode.NO_IMAGE_TOOL),
         )
-    return CoverImageCapability(
+    return ImageCapability(
         carries_image_tool=True, failure=_codex_cli_image_route_failure(),
     )
 
 
 def _codex_cli_image_route_failure() -> SafeRouteReason | None:
     """Name what keeps the mounted Codex CLI from running an image turn."""
-    if not codex_cover_image_capability_is_available():
+    if not codex_image_turn_is_available():
         return normalize_route_failure(SafeRouteReasonCode.CLI_BINARY_UNAVAILABLE)
     try:
         signed_in = codex_cli_access_token_is_present()

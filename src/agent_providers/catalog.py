@@ -37,16 +37,16 @@ from agent_providers.claude.provider import (
 from agent_providers.config import ProviderRuntimeConfig, current_config
 from agent_providers.constants import (
     ANTHROPIC_API_VERSION,
-    COWRITER_ANTHROPIC_MODELS_URL,
-    COWRITER_CLAUDE_MODEL_PREFIX,
-    COWRITER_GROK_MODEL_PREFIX,
-    COWRITER_GROK_MODELS_URL,
-    COWRITER_GROK_NON_CHAT_MARKERS,
-    COWRITER_MODELS_TIMEOUT_SECONDS,
-    COWRITER_OPENAI_CHAT_PREFIXES,
-    COWRITER_OPENAI_MODELS_URL,
-    COWRITER_OPENAI_NON_CHAT_MARKERS,
+    ANTHROPIC_MODELS_URL,
+    CLAUDE_MODEL_PREFIX,
     COWRITER_PROVIDERS,
+    GROK_MODEL_PREFIX,
+    GROK_MODELS_URL,
+    GROK_NON_CHAT_MARKERS,
+    OPENAI_CHAT_PREFIXES,
+    OPENAI_MODELS_URL,
+    OPENAI_NON_CHAT_MARKERS,
+    PROBE_TIMEOUT_SECONDS,
 )
 from agent_providers.errors import (
     ProviderModelCatalogUnavailableError,
@@ -454,7 +454,7 @@ def _secret(value) -> str:
 def _http_model_ids(url: str, headers: dict[str, str], provider: str) -> list[str]:
     try:
         response = httpx.get(
-            url, headers=headers, timeout=COWRITER_MODELS_TIMEOUT_SECONDS,
+            url, headers=headers, timeout=PROBE_TIMEOUT_SECONDS,
         )
     except httpx.HTTPError as exc:
         raise ProviderModelCatalogUnavailableError(
@@ -492,7 +492,7 @@ def _http_model_ids(url: str, headers: dict[str, str], provider: str) -> list[st
 
 def _list_grok_models(key: str) -> list[str]:
     ids = _http_model_ids(
-        COWRITER_GROK_MODELS_URL,
+        GROK_MODELS_URL,
         {"Authorization": f"Bearer {key}"},
         _GROK_PROVIDER,
     )
@@ -569,7 +569,7 @@ def _list_codex_cli_models() -> list[str]:
 
 def _list_openai_models(key: str) -> list[str]:
     ids = _http_model_ids(
-        COWRITER_OPENAI_MODELS_URL,
+        OPENAI_MODELS_URL,
         {"Authorization": f"Bearer {key}"},
         _CODEX_PROVIDER,
     )
@@ -606,7 +606,7 @@ def _list_claude_cli_models() -> list[str]:
 
 def _list_claude_models(key: str) -> list[str]:
     ids = _http_model_ids(
-        COWRITER_ANTHROPIC_MODELS_URL,
+        ANTHROPIC_MODELS_URL,
         {
             "x-api-key": key,
             "anthropic-version": ANTHROPIC_API_VERSION,
@@ -633,15 +633,15 @@ def _contains_marker(model_id: str, markers: tuple[str, ...]) -> bool:
 
 def _is_provider_model_id(provider: str, model_id: str) -> bool:
     if provider == _CLAUDE_PROVIDER:
-        return model_id.startswith(COWRITER_CLAUDE_MODEL_PREFIX)
+        return model_id.startswith(CLAUDE_MODEL_PREFIX)
     if provider == _GROK_PROVIDER:
         return (
-            model_id.startswith(COWRITER_GROK_MODEL_PREFIX)
-            and not _contains_marker(model_id, COWRITER_GROK_NON_CHAT_MARKERS)
+            model_id.startswith(GROK_MODEL_PREFIX)
+            and not _contains_marker(model_id, GROK_NON_CHAT_MARKERS)
         )
     if provider == _CODEX_PROVIDER:
         return (
-            model_id.startswith(COWRITER_OPENAI_CHAT_PREFIXES)
-            and not _contains_marker(model_id, COWRITER_OPENAI_NON_CHAT_MARKERS)
+            model_id.startswith(OPENAI_CHAT_PREFIXES)
+            and not _contains_marker(model_id, OPENAI_NON_CHAT_MARKERS)
         )
     return False

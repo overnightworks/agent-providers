@@ -110,7 +110,7 @@ def test_passes_the_complete_tool_result_batch_to_the_transport() -> None:
 def test_allows_eight_tool_rounds_then_one_final_response() -> None:
     calls = [
         [ToolCallBatch((ToolCall(f"call-{index}", "read", {}),))]
-        for index in range(tool_loop.COWRITER_MAX_TOOL_ROUNDS)
+        for index in range(tool_loop.MAX_TOOL_ROUNDS)
     ]
     transport = _FakeTransport([*calls, [FinalText("complete")]])
 
@@ -123,7 +123,7 @@ def test_allows_eight_tool_rounds_then_one_final_response() -> None:
 
 
 def test_rejects_a_ninth_tool_round_without_executing_it(monkeypatch) -> None:
-    monkeypatch.setattr(tool_loop, "COWRITER_MAX_TOOL_ROUNDS", 0)
+    monkeypatch.setattr(tool_loop, "MAX_TOOL_ROUNDS", 0)
     transport = _FakeTransport([[
         ToolCallBatch((ToolCall("call-9", "read", {}),)),
     ]])

@@ -35,7 +35,7 @@ from agent_providers.text_tool_protocol import TextToolRejection
 
 log = logging.getLogger(__name__)
 
-COWRITER_MAX_TOOL_ROUNDS = 8
+MAX_TOOL_ROUNDS = 8
 
 
 @dataclass(frozen=True)
@@ -251,7 +251,7 @@ async def _final_events(
 
 
 def _next_round_index(round_index: int) -> int:
-    if round_index == COWRITER_MAX_TOOL_ROUNDS:
+    if round_index == MAX_TOOL_ROUNDS:
         raise ToolLoopLimitError()
     return round_index + 1
 

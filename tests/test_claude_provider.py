@@ -58,7 +58,6 @@ from agent_providers.claude.provider import (
 from agent_providers.config import McpServerSpec, current_config, current_turn_config
 from agent_providers.constants import (
     CLAUDE_CLI_COMPLETION_TIMEOUT_SECONDS,
-    JUDGE_FAILURE_TIMEOUT,
 )
 from agent_providers.errors import ProviderUnavailableError
 from agent_providers.events import AssistantTextEvent, FinalEvent, StreamEvent
@@ -475,7 +474,7 @@ def test_judge_api_timeout_uses_the_shared_timeout_reason() -> None:
         with pytest.raises(UnavailableError) as exc:
             _call_api("hello", "sk-test", None, "claude-sonnet-4-6", 1024, deadline=110.0)
 
-    assert str(exc.value) == JUDGE_FAILURE_TIMEOUT
+    assert str(exc.value) == "deadline_exceeded"
 
 
 def test_nonjudge_api_timeout_keeps_the_provider_exception() -> None:
@@ -579,6 +578,31 @@ def test_call_cli_uses_the_shared_process_pool_and_refuses_at_its_cap(
     )
     assert run_calls == 1
     provider._release_zombie_reservation(live_turn)
+
+
+@pytest.mark.parametrize(
+    ("deadline", "reason"),
+    [
+        (500.0, "deadline_exceeded"),
+        (None, "Claude CLI timed out after 120s"),
+    ],
+)
+def test_call_cli_timeout_names_the_deadline_only_under_a_caller_deadline(
+    _no_tool_gate_open,
+    monkeypatch: pytest.MonkeyPatch,
+    deadline: float | None,
+    reason: str,
+) -> None:
+    def run_capturing(_child, **_kwargs):
+        raise provider.PipedProcessTimeout("claude", 1)
+
+    monkeypatch.setattr(provider.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(provider, "run_capturing", run_capturing)
+
+    with pytest.raises(UnavailableError) as exc:
+        _call_cli("hello", deadline=deadline)
+
+    assert str(exc.value) == reason
 
 
 def test_call_cli_strips_secrets_from_child_env(
@@ -2998,7 +3022,7 @@ def test_delayed_probe_start_is_a_probe_failure_not_a_judge_timeout(
     with pytest.raises(UnavailableError) as exc:
         provider._probe_cli_surface_sync(binary, mcp=None, deadline=100.0)
 
-    assert not isinstance(exc.value, provider._JudgeTimeoutExhausted)
+    assert not isinstance(exc.value, provider._DeadlineExhausted)
     assert str(exc.value) == "Claude CLI probe preflight budget was already exhausted"
     assert spawned == []
 

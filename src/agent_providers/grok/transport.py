@@ -18,9 +18,9 @@ from agent_providers.claude.provider import (
 )
 from agent_providers.config import current_config, current_turn_config
 from agent_providers.constants import (
-    COWRITER_CLI_TIMEOUT_SECONDS,
-    COWRITER_GROK_CLI_LINE_CHANNEL_CAPACITY,
+    GROK_CLI_LINE_CHANNEL_CAPACITY,
     GROK_CLI_STREAMING_OUTPUT_FORMAT,
+    TURN_TIMEOUT_SECONDS,
 )
 from agent_providers.errors import (
     ProviderUnavailableError,
@@ -122,7 +122,7 @@ class GrokCliToolTransport:
                 normalize_route_failure(SafeRouteReasonCode.CLI_PROTOCOL_ERROR),
             ) from exc
         self._working_directory = self._home.path.resolve()
-        self._deadline = time.monotonic() + COWRITER_CLI_TIMEOUT_SECONDS
+        self._deadline = time.monotonic() + TURN_TIMEOUT_SECONDS
         self._session_id: str | None = None
         self._round_index = 0
         self._closed = False
@@ -157,7 +157,7 @@ class GrokCliToolTransport:
         else:
             arguments = _grok_cli_tool_arguments(self._model)
         self._round_index += 1
-        channel = CliLineChannel(COWRITER_GROK_CLI_LINE_CHANNEL_CAPACITY)
+        channel = CliLineChannel(GROK_CLI_LINE_CHANNEL_CAPACITY)
         try:
             child = self._child_for(arguments)
             home_reservation = self._home.reserve()

@@ -31,6 +31,7 @@ from agent_providers.config import McpServerSpec, current_config, current_turn_c
 from agent_providers.constants import (
     CLAUDE_CLI_COMPLETION_TIMEOUT_SECONDS,
     CLAUDE_CLI_MAX_CONCURRENT_PROCESSES,
+    CLAUDE_CLI_MODEL_LIST_MARKER,
     CLAUDE_CLI_NO_TOOL_SURFACE_TIMEOUT_SECONDS,
     CLAUDE_CLI_SIGTERM_GRACE_SECONDS,
     CLAUDE_CLI_TOOL_SURFACE_FAILURE_CACHE_SECONDS,
@@ -38,9 +39,8 @@ from agent_providers.constants import (
     CLAUDE_CLI_ZOMBIE_FAILURE_CACHE_SECONDS,
     CLAUDE_CLI_ZOMBIE_REAP_TIMEOUT_SECONDS,
     CLI_OUTPUT_READ_LIMIT_BYTES,
-    COWRITER_CLAUDE_CLI_MODEL_LIST_MARKER,
-    COWRITER_MODELS_TIMEOUT_SECONDS,
-    JUDGE_FAILURE_TIMEOUT,
+    DEADLINE_EXCEEDED_REASON,
+    PROBE_TIMEOUT_SECONDS,
 )
 from agent_providers.events import (
     AssistantTextEvent,
@@ -153,8 +153,8 @@ class _ZombieProbeError(UnavailableError):
     """
 
 
-class _JudgeTimeoutExhausted(UnavailableError):
-    """The judge's caller-owned deadline elapsed without probing the CLI."""
+class _DeadlineExhausted(UnavailableError):
+    """The caller-owned deadline elapsed before the CLI was probed."""
 
 
 class _ClaudeCliProcessPoolSaturated(UnavailableError):
@@ -508,7 +508,7 @@ def list_cli_model_aliases() -> list[str]:
         raise UnavailableError("Claude CLI /model failed to run")
     if not run.complete:
         raise UnavailableError(
-            f"Claude CLI /model timed out after {COWRITER_MODELS_TIMEOUT_SECONDS}s",
+            f"Claude CLI /model timed out after {PROBE_TIMEOUT_SECONDS}s",
         )
     if run.returncode != 0:
         log.warning(
@@ -524,9 +524,9 @@ def list_cli_model_aliases() -> list[str]:
 
 def _parse_cli_model_aliases(stdout: str) -> list[str]:
     for line in stdout.splitlines():
-        if COWRITER_CLAUDE_CLI_MODEL_LIST_MARKER not in line:
+        if CLAUDE_CLI_MODEL_LIST_MARKER not in line:
             continue
-        after_marker = line.split(COWRITER_CLAUDE_CLI_MODEL_LIST_MARKER, 1)[1]
+        after_marker = line.split(CLAUDE_CLI_MODEL_LIST_MARKER, 1)[1]
         aliases = [
             token.strip()
             for token in after_marker.rstrip(".").split(", ")
@@ -1868,7 +1868,7 @@ def _call_api(
     kwargs = _build_api_kwargs(prompt, system, model, max_tokens, messages)
     request_client = (
         client.with_options(
-            timeout=_remaining_judge_timeout(deadline),
+            timeout=_remaining_deadline_seconds(deadline),
             max_retries=0,
         )
         if deadline is not None
@@ -1878,17 +1878,17 @@ def _call_api(
         response = request_client.messages.create(**kwargs)
     except anthropic.APITimeoutError as exc:
         if deadline is not None:
-            raise UnavailableError(JUDGE_FAILURE_TIMEOUT) from exc
+            raise UnavailableError(DEADLINE_EXCEEDED_REASON) from exc
         raise
     text = response.content[0].text if response.content else ""
     log.debug("Claude API response: %d chars", len(text))
     return ClaudeResponse(text=text)
 
 
-def _remaining_judge_timeout(deadline: float) -> float:
+def _remaining_deadline_seconds(deadline: float) -> float:
     remaining = deadline - time.monotonic()
     if remaining <= 0:
-        raise _JudgeTimeoutExhausted(JUDGE_FAILURE_TIMEOUT)
+        raise _DeadlineExhausted(DEADLINE_EXCEEDED_REASON)
     return remaining
 
 
@@ -1957,14 +1957,14 @@ def _call_cli(
                 child,
                 stdin_text=stdin_body,
                 timeout_seconds=(
-                    _remaining_judge_timeout(deadline)
+                    _remaining_deadline_seconds(deadline)
                     if deadline is not None
                     else CLAUDE_CLI_COMPLETION_TIMEOUT_SECONDS
                 ),
             )
         except PipedProcessTimeout as exc:
             if deadline is not None:
-                raise UnavailableError(JUDGE_FAILURE_TIMEOUT) from exc
+                raise UnavailableError(DEADLINE_EXCEEDED_REASON) from exc
             raise UnavailableError(
                 f"Claude CLI timed out after {CLAUDE_CLI_COMPLETION_TIMEOUT_SECONDS}s",
             ) from exc

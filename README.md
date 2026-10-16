@@ -29,7 +29,7 @@ It owns the machinery that is the same in every deployment:
 |---|---|
 | `agent_providers.config` | The deployment facts every module reads, installed once per process via `configure()` |
 | `agent_providers.catalog` | Live provider/route readiness probes and the model names each route offers, aliases or ids as the provider lists them (`probe_provider_route`, `list_provider_models`) |
-| `agent_providers.dispatch` | Routing one turn to a provider and route, and the cover-image capability |
+| `agent_providers.dispatch` | Routing one turn to a provider and route, and the image capability |
 | `agent_providers.events` | The `StreamEvent` union a turn emits in-process (assistant text, tool call, tool result, final); not the service wire |
 | `agent_providers.tool_loop` | The provider-agnostic tool loop driving a `ToolExecutor` over a `ToolTransport` |
 | `agent_client.tools` | `ToolDeclaration`: one tool's name, description, JSON-schema arguments and `ToolEffect` |
@@ -167,23 +167,7 @@ also runs turns adds a `TurnRuntimeConfig` as `turns`: the chat model, the
 Codex mounts and process caps, the prompt-file names, and an optional
 `McpServerSpec` describing the host's MCP server. A catalog-only host passes no
 `turns` at all and never invents a value it does not have; a host that runs no
-MCP server passes `mcp_server=None` inside `turns`. A host migrates at its next
-pin bump (both models refuse unknown fields):
-
-| Before (`ProviderRuntimeConfig`) | Now |
-|---|---|
-| `claude_chat_model` | `turns.claude_chat_model` |
-| `codex_code_mode_host_binary` | `turns.codex_code_mode_host_binary` |
-| `codex_resources_directory` | `turns.codex_resources_directory` |
-| `codex_max_concurrent_processes` | `turns.codex_max_concurrent_processes` |
-| `codex_max_concurrent_image_runs` | `turns.codex_max_concurrent_image_runs` |
-| `cli_prompt_file_prefix` | `turns.cli_prompt_file_prefix` |
-| `cli_prompt_file_placeholder` | `turns.cli_prompt_file_placeholder` |
-| `mcp_server` | `turns.mcp_server` |
-| `secret_env_keys` | removed: a child gets a closed environment, so there is nothing to scrub |
-| `grok_cli_session_root` | removed: a turn's Grok home is a private directory below `cli_working_directory_root` |
-| (absent) | `cli_binary_search_path`: new and required |
-| (absent) | `claude_cli_auth_file`: new and required, the file copied read-only into each Claude turn's private home |
+MCP server passes `mcp_server=None` inside `turns`. A host migrates at its pin bump: see [Migrating to 0.3.0](#migrating-to-030).
 
 A turn path reached
 without `turns` raises `TurnRuntimeNotConfiguredError` instead of running against a
@@ -211,6 +195,54 @@ The other host obligations arrive as arguments where they are needed:
 - The `StreamEvent` union (`agent_providers.events`) — what a turn emits
   in-process, which a host calling the core consumes. The agent service's wire
   is `agent_client.wire`, not this union.
+
+## Migrating to 0.3.0
+
+A host migrates at its pin bump to 0.3.0; both configuration models refuse unknown fields.
+
+### Configuration
+
+| Before (`ProviderRuntimeConfig`) | Now |
+|---|---|
+| `claude_chat_model` | `turns.claude_chat_model` |
+| `codex_code_mode_host_binary` | `turns.codex_code_mode_host_binary` |
+| `codex_resources_directory` | `turns.codex_resources_directory` |
+| `codex_max_concurrent_processes` | `turns.codex_max_concurrent_processes` |
+| `codex_max_concurrent_image_runs` | `turns.codex_max_concurrent_image_runs` |
+| `cli_prompt_file_prefix` | `turns.cli_prompt_file_prefix` |
+| `cli_prompt_file_placeholder` | `turns.cli_prompt_file_placeholder` |
+| `mcp_server` | `turns.mcp_server` |
+| `secret_env_keys` | removed: a child gets a closed environment, so there is nothing to scrub |
+| `grok_cli_session_root` | removed: a turn's Grok home is a private directory below `cli_working_directory_root` |
+| (absent) | `cli_binary_search_path`: new and required |
+| (absent) | `claude_cli_auth_file`: new and required, the file copied read-only into each Claude turn's private home |
+
+### Names and values
+
+| Before | Now | Host action |
+|---|---|---|
+| `dispatch.stream_cowriter_turn` | `dispatch.stream_turn` | Rename the import. |
+| `dispatch.CoverImageCapability` | `dispatch.ImageCapability` | Rename. |
+| `dispatch.cover_image_capability` | `dispatch.image_capability` | Rename. |
+| `codex.image.generate_codex_cover_image` | `codex.image.generate_codex_image` | Rename the import and every patch of an imported binding. |
+| `codex.image.codex_cover_image_capability_is_available` (also patched as `dispatch.codex_cover_image_capability_is_available`) | `codex.image.codex_image_turn_is_available` | Rename the import and the patch targets. |
+| `constants.COWRITER_CLI_TIMEOUT_SECONDS` | `constants.TURN_TIMEOUT_SECONDS` | Rename. |
+| `constants.COWRITER_MODELS_TIMEOUT_SECONDS` | `constants.PROBE_TIMEOUT_SECONDS` | Rename; patch `agent_providers.process.PROBE_TIMEOUT_SECONDS`. |
+| `constants.COWRITER_CLAUDE_API_MAX_TOKENS` | `constants.CLAUDE_API_MAX_TOKENS` | Rename. |
+| `constants.COWRITER_GROK_CLI_LINE_CHANNEL_CAPACITY` | `constants.GROK_CLI_LINE_CHANNEL_CAPACITY` | Rename. |
+| `constants.COWRITER_GROK_CHAT_URL` | `constants.GROK_CHAT_URL` | Rename. |
+| `constants.COWRITER_GROK_MODELS_URL` | `constants.GROK_MODELS_URL` | Rename. |
+| `constants.COWRITER_OPENAI_CHAT_URL` | `constants.OPENAI_CHAT_URL` | Rename. |
+| `constants.COWRITER_OPENAI_MODELS_URL` | `constants.OPENAI_MODELS_URL` | Rename. |
+| `constants.COWRITER_ANTHROPIC_MODELS_URL` | `constants.ANTHROPIC_MODELS_URL` | Rename. |
+| `constants.COWRITER_GROK_MODEL_PREFIX` | `constants.GROK_MODEL_PREFIX` | Rename. |
+| `constants.COWRITER_GROK_NON_CHAT_MARKERS` | `constants.GROK_NON_CHAT_MARKERS` | Rename. |
+| `constants.COWRITER_OPENAI_CHAT_PREFIXES` | `constants.OPENAI_CHAT_PREFIXES` | Rename. |
+| `constants.COWRITER_OPENAI_NON_CHAT_MARKERS` | `constants.OPENAI_NON_CHAT_MARKERS` | Rename. |
+| `constants.COWRITER_CLAUDE_MODEL_PREFIX` | `constants.CLAUDE_MODEL_PREFIX` | Rename. |
+| `constants.COWRITER_CLAUDE_CLI_MODEL_LIST_MARKER` | `constants.CLAUDE_CLI_MODEL_LIST_MARKER` | Rename. |
+| `constants.JUDGE_FAILURE_TIMEOUT` = `"judge_timeout"` | `constants.DEADLINE_EXCEEDED_REASON` = `"deadline_exceeded"` | Update `jobs/_runtime.py` and `scoring/lyrical_coherence.py` together to use `DEADLINE_EXCEEDED_REASON`; new timeout jobs record `deadline_exceeded`, while existing stored job errors remain unchanged. No historical data rewrite is part of this release. |
+| `tool_loop.COWRITER_MAX_TOOL_ROUNDS` | `tool_loop.MAX_TOOL_ROUNDS` | Rename the import and the patch target. |
 
 ## Sandbox
 

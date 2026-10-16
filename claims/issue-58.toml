@@ -1,8 +1,0 @@
-claim_id = "d838baaeca3d4cf3bc132e37c4facc64"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "43b5076d63f8a53d18ac78f23a56868a38c664b6"
-branch = "claude/issue-58-quality-adoption"
-scope = [".github/dependabot.yml", ".github/workflows/ci.yml", ".github/workflows/release.yml", ".gitignore", "AGENTS.md", "pyproject.toml", "quality/config.toml", "sonar-project.properties", "uv.lock"]
-opened_commit = "1a5201fbe5570df75be11454a67fc2059ad4fbfa"
-whole_reason = "The quality adoption wires one gate across CI, the release workflow, Sonar config, dependabot and the dev dependency at once; it does not split."

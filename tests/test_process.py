@@ -3103,10 +3103,11 @@ def test_a_later_failing_report_never_displaces_earlier_control_flow(
     callbacks["on_spawn_failed"] = _raising(RuntimeError(ANOTHER_RUNNER_FAILURE_CANARY))
     channel = CliLineChannel(maximum_lines=1)
     try:
-        with pytest.raises(SystemExit):
+        with pytest.raises(BaseException) as raised:
             _run_pooled(":", callbacks, stdout_line_channel=channel)
     finally:
         process_logger.removeHandler(handler)
+    assert raised.type is SystemExit
     failure_watch.assert_nothing_leaked()
 
 

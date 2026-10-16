@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import TYPE_CHECKING, NoReturn
 
 from pydantic import BaseModel
+
+if TYPE_CHECKING:
+    from agent_providers.text_tool_protocol import TextToolRejection
 
 
 class SafeRouteReasonCode(StrEnum):
@@ -78,6 +82,39 @@ class ProviderUnavailableError(ProviderError):
         self.route = route_or_message if reason is not None else None
         self.reason = reason
         super().__init__(provider, reason.message if reason is not None else route_or_message)
+
+
+class TextToolCallRejectedError(ProviderUnavailableError):
+    """A text tool call was refused; ``rejection`` says which rule and where.
+
+    The reason a host shows its user is the generic tool-protocol sentence.
+    The refused text sits only in ``rejection.excerpt``, masked from display.
+    """
+
+    def __init__(self, provider: str, route: str, rejection: TextToolRejection) -> None:
+        super().__init__(
+            provider,
+            route,
+            normalize_route_failure(SafeRouteReasonCode.TOOL_PROTOCOL_ERROR),
+        )
+        self.rejection = rejection
+
+    def __reduce__(self) -> tuple[type[TextToolCallRejectedError], tuple[object, ...]]:
+        return (type(self), (self.provider, self.route, self.rejection))
+
+
+def raise_without_chain(error: BaseException) -> NoReturn:
+    """Raise ``error`` with no ``__context__`` or ``__cause__``, even from a handler.
+
+    An exception raised while the caller handles another one is chained to it
+    implicitly, and a chain can carry the very text the error must not.
+    """
+    try:
+        raise error
+    except BaseException:
+        error.__context__ = None
+        error.__cause__ = None
+        raise
 
 
 class ProviderModelCatalogUnavailableError(ProviderError):

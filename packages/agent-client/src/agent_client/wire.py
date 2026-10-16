@@ -79,6 +79,7 @@ class RejectionCode(StrEnum):
     INVALID_REQUEST = "invalid_request"
     UNAVAILABLE = "unavailable"
     NOT_FOUND = "not_found"
+    CAPABILITY_TOO_LARGE = "capability_too_large"
 
 
 def _json_integer(value: object) -> object:

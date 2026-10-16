@@ -39,7 +39,9 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import FastAPI
 from jwt.algorithms import RSAAlgorithm
+from pydantic import ValidationError
 
+import agent_service.signing as signing
 from agent_client.run_stream import StreamViolation, ViolationKind
 from agent_client.sse import RunStreamDecoder
 from agent_client.wire import RejectionCode, RunEvent, RunRejection, RunRequest
@@ -60,31 +62,51 @@ SUBSCRIPTION_GROUP: Final = "/ki-abo"
 SONGMAKER_GROUP: Final = "/apps/songmaker"
 CLI_PROFILE: Final = "claude-main"
 COWRITER_ALIAS: Final = "cowriter"
+SONGMAKER_ORIGIN: Final = "https://songmaker.internal"
 RUN_ID_PLACEHOLDER: Final = "00000000-0000-4000-8000-000000000000"
+
+
+def _service_config_document(issuer: str, runs: Mapping[str, object] | None) -> dict[str, Any]:
+    return {
+        **({} if runs is None else {"runs": runs}),
+        "identity": {"issuer": issuer, "jwks_url": TEST_JWKS_URL},
+        "profiles": {CLI_PROFILE: {"provider": "claude"}},
+        "purposes": {
+            COWRITER: {"cli_provider": "claude", "api_alias": COWRITER_ALIAS},
+            PRESENTER: {"api_alias": "copresenter"},
+        },
+        "apps": {
+            "songmaker": {
+                "workload_client": SONGMAKER_CLIENT,
+                "purposes": [COWRITER],
+                "tools": {"read_song": "read_only", "edit_song": "side_effecting"},
+            },
+            "presentator": {"workload_client": PRESENTATOR_CLIENT, "purposes": [PRESENTER]},
+        },
+    }
 
 
 def service_config(
     issuer: str = TEST_ISSUER, runs: Mapping[str, object] | None = None
 ) -> ServiceConfig:
-    return ServiceConfig.model_validate(
-        {
-            **({} if runs is None else {"runs": runs}),
-            "identity": {"issuer": issuer, "jwks_url": TEST_JWKS_URL},
-            "profiles": {CLI_PROFILE: {"provider": "claude"}},
-            "purposes": {
-                COWRITER: {"cli_provider": "claude", "api_alias": COWRITER_ALIAS},
-                PRESENTER: {"api_alias": "copresenter"},
-            },
-            "apps": {
-                "songmaker": {
-                    "workload_client": SONGMAKER_CLIENT,
-                    "purposes": [COWRITER],
-                    "tools": {"read_song": "read_only", "edit_song": "side_effecting"},
-                },
-                "presentator": {"workload_client": PRESENTATOR_CLIENT, "purposes": [PRESENTER]},
-            },
-        }
-    )
+    return ServiceConfig.model_validate(_service_config_document(issuer, runs))
+
+
+def capable_service_config(
+    directory: Path,
+    *,
+    issuer: str = TEST_ISSUER,
+    songmaker: Mapping[str, object] | None = None,
+) -> ServiceConfig:
+    """``service_config`` with a signing key written under ``directory`` and songmaker's origin."""
+    document = _service_config_document(issuer, None)
+    document["signing"] = {"key_file": str(written_key_file(directory, generated_rsa_key()))}
+    document["apps"]["songmaker"] = {
+        **document["apps"]["songmaker"],
+        "mcp_origin": SONGMAKER_ORIGIN,
+        **(songmaker or {}),
+    }
+    return ServiceConfig.model_validate(document)
 
 
 def run_body(**overrides: object) -> dict[str, Any]:
@@ -214,6 +236,16 @@ class WallClock:
         self.current = moment
 
 
+SHORT_TOOL_NAME_LENGTH = 35
+LAST_TOOL_NAME_LENGTH_AT_THE_LIMIT = 55
+
+
+def tool_names_with_the_last_of_length(last_tool_name_length: int) -> list[str]:
+    """128 tool names, sorted; the last is the one whose length tunes a capability to the limit."""
+    names = [f"{index:03d}".ljust(SHORT_TOOL_NAME_LENGTH, "x") for index in range(127)]
+    return [*names, "127".ljust(last_tool_name_length, "x")]
+
+
 def reaches_text(root: object, needles: Sequence[str]) -> bool:
     """Whether any text reachable from ``root`` contains a needle.
 
@@ -233,6 +265,51 @@ def reaches_text(root: object, needles: Sequence[str]) -> bool:
             return True
         pending.extend(gc.get_referents(candidate))
     return False
+
+
+def record_signed_tokens(monkeypatch) -> list[str]:
+    """Every token the signing key signs from now on, in order."""
+    signed: list[str] = []
+    sign = signing.SigningKey.sign
+
+    def recording_sign(key, claims, token_type):
+        signed.append(sign(key, claims, token_type))
+        return signed[-1]
+
+    monkeypatch.setattr(signing.SigningKey, "sign", recording_sign)
+    return signed
+
+
+def everything_a_refusal_holds(refusal: BaseException) -> list[object]:
+    """The refusal, its cause and context chain, their frames' locals and pydantic's contexts.
+
+    The first frame of the refusal's own traceback is the caller that caught it, so it is left out.
+    """
+    held: list[object] = []
+    pending: list[BaseException] = [refusal]
+    seen: set[int] = set()
+    while pending:
+        error = pending.pop()
+        if id(error) in seen:
+            continue
+        seen.add(id(error))
+        held.append(error)
+        pending.extend(link for link in (error.__cause__, error.__context__) if link)
+        if isinstance(error, ValidationError):
+            for problem in error.errors():
+                held.append(problem)
+                pending.extend(
+                    value
+                    for value in problem.get("ctx", {}).values()
+                    if isinstance(value, BaseException)
+                )
+        traceback = error.__traceback__
+        if error is refusal and traceback:
+            traceback = traceback.tb_next
+        while traceback:
+            held.append(list(traceback.tb_frame.f_locals.values()))
+            traceback = traceback.tb_next
+    return held
 
 
 class TokenMint:

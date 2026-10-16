@@ -2,13 +2,23 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
+from service_support import (
+    LAST_TOOL_NAME_LENGTH_AT_THE_LIMIT,
+    everything_a_refusal_holds,
+    generated_rsa_key,
+    reaches_text,
+    record_signed_tokens,
+    tool_names_with_the_last_of_length,
+    written_key_file,
+)
 
 from agent_client.tools import ToolEffect
 from agent_service.cli import EXIT_BAD_CONFIG, main
-from agent_service.config import Provider, load_config
+from agent_service.config import ConfigError, Provider, load_config
 
 VALID_CONFIG = """
 [identity]
@@ -226,18 +236,310 @@ def test_run_budgets_given_in_the_file_load(tmp_path):
     assert (runs.max_tool_calls, runs.max_bytes) == (5, 2097152)
 
 
-def test_a_missing_file_stops_startup(tmp_path, capsys):
-    exit_status = main(["--config", str(tmp_path / "absent.toml")])
+def _refused_on_one_line(config_file: Path, capsys) -> str:
+    assert main(["--config", str(config_file)]) == EXIT_BAD_CONFIG
+    refusal = capsys.readouterr().err
+    assert refusal.count("\n") == 1
+    return refusal.removeprefix(f"agent-service: refusing to start: {config_file}: ").rstrip("\n")
 
-    assert exit_status == EXIT_BAD_CONFIG
-    assert "cannot be read" in capsys.readouterr().err
+
+MEMBER_NAMED_WITH_A_NEWLINE = '"extra\\nfield" = 1'
 
 
-def test_a_file_that_is_not_utf8_stops_startup(tmp_path, capsys):
-    path = tmp_path / "agent-service.toml"
-    path.write_bytes(VALID_CONFIG.replace("songmaker-test", "songmaker-t\xe9st").encode("latin-1"))
+@pytest.mark.parametrize(
+    ("config_text", "refusal"),
+    [
+        pytest.param(
+            _with("port = 8099", f"port = 8099\n{MEMBER_NAMED_WITH_A_NEWLINE}"),
+            "server.extra\\nfield: Extra inputs are not permitted",
+            id="server",
+        ),
+        pytest.param(
+            _with("[server]", f"{MEMBER_NAMED_WITH_A_NEWLINE}\n\n[server]"),
+            "identity.extra\\nfield: Extra inputs are not permitted",
+            id="identity",
+        ),
+    ],
+)
+def test_an_unexpected_member_with_a_newline_in_its_name_is_refused_on_one_line(
+    tmp_path, capsys, config_text, refusal
+):
+    assert _refused_on_one_line(_written(tmp_path, config_text), capsys) == refusal
 
-    exit_status = main(["--config", str(path)])
 
-    assert exit_status == EXIT_BAD_CONFIG
-    assert "not UTF-8" in capsys.readouterr().err
+def _config_path_with_a_newline(tmp_path: Path) -> Path:
+    return tmp_path / "agent\nservice.toml"
+
+
+def _file_written_as(contents: bytes):
+    def write(path: Path) -> None:
+        path.write_bytes(contents)
+
+    return write
+
+
+@pytest.mark.parametrize(
+    ("write", "refusal"),
+    [
+        pytest.param(lambda path: None, "cannot be read: No such file or directory", id="missing"),
+        pytest.param(
+            _file_written_as(
+                VALID_CONFIG.replace("songmaker-test", "songmaker-t\xe9st").encode("latin-1")
+            ),
+            "not UTF-8 TOML",
+            id="not-utf8",
+        ),
+        pytest.param(_file_written_as(b"[identity\n"), "not TOML: ", id="not-toml"),
+        pytest.param(
+            _file_written_as(
+                _with('issuer = "https://keycloak.test/realms/agent-test"\n', "").encode()
+            ),
+            "identity.issuer: Field required",
+            id="invalid",
+        ),
+    ],
+)
+def test_a_config_path_with_a_newline_is_shown_escaped_on_one_line_in_every_refusal(
+    tmp_path, capsys, write, refusal
+):
+    config_file = _config_path_with_a_newline(tmp_path)
+    write(config_file)
+
+    assert main(["--config", str(config_file)]) == EXIT_BAD_CONFIG
+    shown = capsys.readouterr().err
+    assert shown.count("\n") == 1
+    assert shown.startswith(
+        f"agent-service: refusing to start: {str(config_file).replace(chr(10), chr(92) + 'n')}:"
+        f" {refusal}"
+    )
+
+
+SONGMAKER_ORIGIN_LINE = 'mcp_origin = "https://songmaker.internal"\n'
+PRESENTATOR_ON_SONGMAKERS_ORIGIN = (
+    '\n[apps.presentator]\nworkload_client = "presentator-test"\npurposes = []\n'
+    + SONGMAKER_ORIGIN_LINE
+)
+
+
+def _signing_section(tmp_path: Path) -> str:
+    key_file = written_key_file(tmp_path, generated_rsa_key())
+    return f"\n[signing]\nkey_file = {json.dumps(str(key_file))}\n"
+
+
+def _with_origin(tmp_path: Path, origin: str) -> Path:
+    origin_line = f"mcp_origin = {json.dumps(origin)}\n"
+    return _written(tmp_path, VALID_CONFIG + origin_line + _signing_section(tmp_path))
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "https://songmaker.internal",
+        "https://songmaker.internal:8443",
+        "https://xn--bcher-kva.internal:8443",
+        "https://123.internal",
+        "https://api.0xfoo",
+    ],
+)
+def test_an_app_with_a_canonical_https_origin_and_a_signing_key_loads(tmp_path, origin):
+    config = load_config(_with_origin(tmp_path, origin))
+
+    assert config.apps["songmaker"].mcp_origin == origin
+    assert config.capability_scope("songmaker").origin == origin
+
+
+def test_an_app_without_an_origin_and_without_signing_has_no_capability_scope(tmp_path):
+    config = load_config(_written(tmp_path, VALID_CONFIG))
+
+    assert config.apps["songmaker"].mcp_origin is None
+    assert config.capability_scope("songmaker") is None
+
+
+@pytest.mark.parametrize(
+    ("origin", "refusal"),
+    [
+        pytest.param(
+            "http://songmaker.internal",
+            "must be an https origin: https://<host> or https://<host>:<port>",
+            id="http-scheme",
+        ),
+        pytest.param(
+            "HTTPS://Songmaker.internal:443",
+            "must be written in its canonical form https://songmaker.internal",
+            id="canonical-form-hint",
+        ),
+        pytest.param(
+            "https://songmaker.internal/mcp",
+            "must be https://<host> or https://<host>:<port> and nothing else:"
+            " no user information, path, query, fragment, space, control or non-ASCII character",
+            id="path",
+        ),
+        pytest.param(
+            "https://0x7f000001", "must name a DNS host, not an IP address or a number", id="number"
+        ),
+    ],
+)
+def test_an_origin_the_format_refuses_stops_startup_naming_the_field(
+    tmp_path, capsys, origin, refusal
+):
+    assert _refused_on_one_line(_with_origin(tmp_path, origin), capsys) == (
+        f"apps.songmaker.mcp_origin: {refusal}"
+    )
+
+
+def test_two_apps_on_one_origin_stop_startup_naming_the_second(tmp_path, capsys):
+    text = VALID_CONFIG + SONGMAKER_ORIGIN_LINE + _signing_section(tmp_path)
+    config_file = _written(tmp_path, text + PRESENTATOR_ON_SONGMAKERS_ORIGIN)
+
+    assert _refused_on_one_line(config_file, capsys) == (
+        "apps.presentator.mcp_origin: https://songmaker.internal is already"
+        " the MCP origin of app 'songmaker'"
+    )
+
+
+PROFILES_WITH_NEWLINES = (
+    VALID_CONFIG.replace("[profiles.claude-main]", '[profiles."claude\\nmain"]')
+    + '\n[profiles."claude\\nspare"]\nprovider = "claude"\n'
+)
+APPS_WITH_NEWLINES = VALID_CONFIG.replace("[apps.songmaker]", '[apps."song\\nmaker"]')
+SECOND_APP_ON_THE_SAME_CLIENT = (
+    '\n[apps."pres\\nentator"]\nworkload_client = "songmaker-test"\npurposes = []\n'
+)
+
+
+@pytest.mark.parametrize(
+    ("text_of", "refusal"),
+    [
+        pytest.param(
+            lambda tmp_path: PROFILES_WITH_NEWLINES,
+            "profiles.claude\\nspare.provider: claude already has profile 'claude\\nmain'",
+            id="second-profile-for-a-provider",
+        ),
+        pytest.param(
+            lambda tmp_path: APPS_WITH_NEWLINES.replace(
+                'purposes = ["songmaker.cowriter"]', 'purposes = ["no\\npurpose"]'
+            ),
+            "apps.song\\nmaker.purposes: unknown purpose 'no\\npurpose'",
+            id="unknown-purpose",
+        ),
+        pytest.param(
+            lambda tmp_path: APPS_WITH_NEWLINES + SECOND_APP_ON_THE_SAME_CLIENT,
+            "apps.pres\\nentator.workload_client: 'songmaker-test' is already"
+            " the workload client of app 'song\\nmaker'",
+            id="workload-client-of-two-apps",
+        ),
+        pytest.param(
+            lambda tmp_path: APPS_WITH_NEWLINES.replace(
+                'workload_client = "songmaker-test"',
+                'workload_client = "songmaker-test"\n' + SONGMAKER_ORIGIN_LINE,
+            ),
+            "apps.song\\nmaker.mcp_origin: needs a [signing] section,"
+            " because the app's runs carry a signed capability",
+            id="origin-without-signing",
+        ),
+        pytest.param(
+            lambda tmp_path: (
+                VALID_CONFIG.replace("[apps.songmaker]", '[apps."song\\nmaker"]')
+                + SONGMAKER_ORIGIN_LINE
+                + _signing_section(tmp_path)
+                + '\n[apps."pres\\nentator"]\nworkload_client = "presentator-test"\n'
+                "purposes = []\n" + SONGMAKER_ORIGIN_LINE
+            ),
+            "apps.pres\\nentator.mcp_origin: https://songmaker.internal is already"
+            " the MCP origin of app 'song\\nmaker'",
+            id="origin-of-two-apps",
+        ),
+        pytest.param(
+            lambda tmp_path: _tuned_app_config(
+                tmp_path, LAST_TOOL_NAME_LENGTH_AT_THE_LIMIT + 1
+            ).replace("[apps.songmaker]", '[apps."song\\nmaker"]'),
+            "apps.song\\nmaker.tools: the capability for purpose 'songmaker.cowriter'"
+            " would be 8196 characters; the limit is 8192",
+            id="capability-too-large",
+        ),
+    ],
+)
+def test_a_name_with_a_newline_is_shown_escaped_once_on_one_line(
+    tmp_path, capsys, text_of, refusal
+):
+    assert _refused_on_one_line(_written(tmp_path, text_of(tmp_path)), capsys) == refusal
+
+
+def test_an_origin_without_a_signing_section_stops_startup_naming_the_field(tmp_path, capsys):
+    config_file = _written(tmp_path, VALID_CONFIG + SONGMAKER_ORIGIN_LINE)
+
+    assert _refused_on_one_line(config_file, capsys) == (
+        "apps.songmaker.mcp_origin: needs a [signing] section,"
+        " because the app's runs carry a signed capability"
+    )
+
+
+def _tools_line_of_the_tuned_app(last_tool_name_length: int) -> str:
+    names = tool_names_with_the_last_of_length(last_tool_name_length)
+    return "tools = { " + ", ".join(f'"{name}" = "read_only"' for name in names) + " }"
+
+
+def _tuned_app_config(
+    tmp_path: Path, last_tool_name_length: int = LAST_TOOL_NAME_LENGTH_AT_THE_LIMIT
+):
+    tools_line = _tools_line_of_the_tuned_app(last_tool_name_length)
+    text = _with('tools = { read_song = "read_only" }', tools_line)
+    return text + SONGMAKER_ORIGIN_LINE + _signing_section(tmp_path)
+
+
+def test_an_app_whose_capability_is_exactly_8192_characters_at_the_preflight_loads(tmp_path):
+    load_config(_written(tmp_path, _tuned_app_config(tmp_path)))
+
+
+@pytest.mark.parametrize(
+    ("text_of", "purpose"),
+    [
+        pytest.param(
+            lambda tmp_path: _tuned_app_config(tmp_path, LAST_TOOL_NAME_LENGTH_AT_THE_LIMIT + 1),
+            "songmaker.cowriter",
+            id="one-more-character-in-a-tool-name",
+        ),
+        pytest.param(
+            lambda tmp_path: (
+                _tuned_app_config(tmp_path)
+                .replace(
+                    'purposes = ["songmaker.cowriter"]',
+                    'purposes = ["songmaker.cowriter", "songmaker.cowriterx"]',
+                )
+                .replace(
+                    "[apps.songmaker]",
+                    '[purposes."songmaker.cowriterx"]\napi_alias = "cowriter"\n\n[apps.songmaker]',
+                )
+            ),
+            "songmaker.cowriterx",
+            id="a-second-purpose-one-character-longer",
+        ),
+        pytest.param(
+            lambda tmp_path: _tuned_app_config(tmp_path).replace("agent-test", "agent-testx"),
+            "songmaker.cowriter",
+            id="an-issuer-one-character-longer",
+        ),
+    ],
+)
+def test_an_app_whose_capability_would_be_8193_characters_stops_startup_naming_its_tools(
+    tmp_path, capsys, text_of, purpose
+):
+    config_file = _written(tmp_path, text_of(tmp_path))
+
+    assert _refused_on_one_line(config_file, capsys) == (
+        f"apps.songmaker.tools: the capability for purpose {purpose!r}"
+        " would be 8193 characters; the limit is 8192"
+    )
+
+
+def test_an_oversized_capability_refusal_holds_no_token_anywhere(tmp_path, monkeypatch):
+    signed = record_signed_tokens(monkeypatch)
+    config_file = _written(
+        tmp_path, _tuned_app_config(tmp_path, LAST_TOOL_NAME_LENGTH_AT_THE_LIMIT + 1)
+    )
+
+    with pytest.raises(ConfigError) as refusal:
+        load_config(config_file)
+
+    assert signed
+    assert not reaches_text(everything_a_refusal_holds(refusal.value), signed)

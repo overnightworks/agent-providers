@@ -1,0 +1,8 @@
+claim_id = "eca09d11c49145adab3a5bc86b1eddc1"
+agent = "Claude fe12493e-3d52-442e-b01b-4ee4336de2f0"
+role = "builder"
+base = "19ade4f0932d8e9621e5b1718f400e6813e9c846"
+branch = "claude/issue-38-a1a3-2-grenzen-f-r-werkzeugaufrufe-und-b"
+scope = ["README.md", "docs/decisions/0001-agent-service.md", "packages/agent-service/src/agent_service/config.py", "packages/agent-service/src/agent_service/run_events.py", "tests/service_support.py", "tests/test_service_config.py", "tests/test_service_limits.py", "tests/test_service_liveness.py"]
+opened_commit = "2355aefa44658fbe05644101c28d0f79ce2af380"
+whole_reason = "The two limits, their config, ADR items and the moved test helpers land as one slice."

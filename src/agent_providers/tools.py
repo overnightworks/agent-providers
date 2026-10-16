@@ -6,17 +6,13 @@ schema each one accepts; the provider layer renders that declaration into
 a prompt, validates what the model asks for against it, and hands the call
 back to the host's executor.
 
-The text protocol's markers carry a brand, so they are declared here too
-(issue #825, ruling e). Their default is songmaker's own wording, so a host
-that declares nothing renders the prompt this package shipped with, byte
-for byte.
+The text protocol's markers carry a brand, so they are declared here too:
+each host declares the brand its text-protocol tools wear, so two hosts'
+markers never read as each other's.
 
 Each tool is a ``ToolDeclaration`` from ``agent_client.tools``, its one
 owner; this module re-exports that identical class, so a host importing it
 from here keeps working.
-
-Self-contained by design: pydantic and the agent client only, no application
-import, so the package can be released on its own.
 """
 
 from __future__ import annotations
@@ -28,17 +24,14 @@ from pydantic import BaseModel, ConfigDict, Field
 # The redundant alias marks a public re-export, so typed hosts may import it from here.
 from agent_client.tools import ToolDeclaration as ToolDeclaration
 
-_DEFAULT_TAG_NAMESPACE = "songmaker"
-_DEFAULT_PRODUCT_NAME = "Songmaker"
-
 
 class ToolProtocolMarkup(BaseModel):
     """The brand the text tool protocol wears in its markers and its prose."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    tag_namespace: str = Field(default=_DEFAULT_TAG_NAMESPACE, min_length=1)
-    product_name: str = Field(default=_DEFAULT_PRODUCT_NAME, min_length=1)
+    tag_namespace: str = Field(min_length=1)
+    product_name: str = Field(min_length=1)
 
     @property
     def call_open_tag(self) -> str:
@@ -71,7 +64,7 @@ class ToolCatalog(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     tools: tuple[ToolDeclaration, ...] = Field(min_length=1)
-    markup: ToolProtocolMarkup = ToolProtocolMarkup()
+    markup: ToolProtocolMarkup
 
     def declaration(self, name: str) -> ToolDeclaration | None:
         """Return the declared tool of that name, or nothing if undeclared."""

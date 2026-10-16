@@ -58,7 +58,7 @@ from agent_providers.tool_loop import (
     ToolResult,
     ToolResultBatch,
 )
-from agent_providers.tools import ToolCatalog
+from agent_providers.tools import ToolCatalog, ToolProtocolMarkup
 
 _fake_cli_processes: list[MagicMock] = []
 
@@ -259,6 +259,10 @@ def _object(
     return schema
 
 
+SAMPLE_TOOL_MARKUP: Final = ToolProtocolMarkup(
+    tag_namespace="songmaker", product_name="Songmaker"
+)
+
 COWRITER_TOOL_CATALOG: ToolCatalog = ToolCatalog(
     tools=(
         ToolDeclaration(
@@ -346,6 +350,7 @@ COWRITER_TOOL_CATALOG: ToolCatalog = ToolCatalog(
             parameters=_object({"album_id": _STRING}, ["album_id"]),
         ),
     ),
+    markup=SAMPLE_TOOL_MARKUP,
 )
 
 

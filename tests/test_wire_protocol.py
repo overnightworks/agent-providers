@@ -43,7 +43,12 @@ from agent_client.wire import (
     is_run_event,
 )
 from agent_providers.text_tool_protocol import render_tool_catalog
-from agent_providers.tools import ToolCatalog, anthropic_tool_schemas, openai_tool_schemas
+from agent_providers.tools import (
+    ToolCatalog,
+    ToolProtocolMarkup,
+    anthropic_tool_schemas,
+    openai_tool_schemas,
+)
 
 
 def _declaration(name: str, **fields: object) -> ToolDeclaration:
@@ -67,7 +72,8 @@ def test_the_effect_class_never_reaches_a_model(project) -> None:
         tools=(
             _declaration("read_song", effect=ToolEffect.READ_ONLY),
             _declaration("write_lyrics", effect=ToolEffect.SIDE_EFFECTING),
-        )
+        ),
+        markup=ToolProtocolMarkup(tag_namespace="notes", product_name="Notes"),
     )
 
     seen_by_the_model = json.dumps(project(catalog))

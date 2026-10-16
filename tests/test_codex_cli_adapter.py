@@ -590,7 +590,7 @@ def _generated_png_runner() -> object:
     def run_cli_bounded(child, **kwargs):
         codex_home = Path(child.environment["CODEX_HOME"])
         artifact = codex_home / "generated_images" / "thread" / "cover.png"
-        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.parent.mkdir(parents=True)
         artifact.write_bytes(_png_bytes())
         outcome = _outcome(stdout=_MEASURED_STREAM)
         kwargs["on_spawned"](1)
@@ -815,8 +815,12 @@ def _symlink_generated_images_root(codex_home: Path) -> None:
     (codex_home / "generated_images").symlink_to(real_root, target_is_directory=True)
 
 
-def _streaming_runner(events: list[dict], state: dict[str, bool]):
-    """A Codex run that streams its events line by line and records its abort and reap."""
+def _stdout_line(event: dict | bytes) -> bytes:
+    return event if isinstance(event, bytes) else json.dumps(event).encode() + b"\n"
+
+
+def _streaming_runner(events: list[dict | bytes], state: dict[str, bool]):
+    """A Codex run that streams its events (or raw lines) and records its abort and reap."""
     def run_cli_bounded(child, **kwargs):
         channel = kwargs["stdout_line_channel"]
         abort_observed = threading.Event()
@@ -829,12 +833,12 @@ def _streaming_runner(events: list[dict], state: dict[str, bool]):
         channel.request_abort = observe_abort
         kwargs["on_spawned"](2468)
         for event in events:
-            if not channel._send(json.dumps(event).encode() + b"\n"):
+            if not channel._send(_stdout_line(event)):
                 break
         state["aborted"] = abort_observed.wait(timeout=1)
         kwargs["on_reaped"](2468, False)
         state["reaped"] = True
-        return _outcome(stdout=_jsonl(events))
+        return _outcome(stdout=b"".join(map(_stdout_line, events)).decode())
 
     return run_cli_bounded
 
@@ -970,12 +974,23 @@ _BLOCKED_TURNS = (
     ),
     *(
         pytest.param(
-            [*_THREAD_OPENING, _item_event("item.started", kind)],
+            [*_THREAD_OPENING, _item_event(event_type, kind)],
             codex_image.ImageToolBlockedReason.BLOCKED_ITEM,
-            (*_OPENING_TOKENS, f"item.started:{kind}"),
-            id=f"blocked-item-{kind}",
+            (*_OPENING_TOKENS, f"{event_type}:{kind}"),
+            id=f"blocked-item-{kind}-on-{event_type}",
         )
         for kind in sorted(codex_protocol.BLOCKED_ITEM_TYPES)
+        for event_type in sorted(codex_protocol.ITEM_EVENT_TYPES)
+    ),
+    pytest.param(
+        [
+            *_THREAD_OPENING,
+            f"{_A_PRIVATE_EVENT_MARKER}, not JSON\n".encode(),
+            _item_event("item.started", "web_search"),
+        ],
+        codex_image.ImageToolBlockedReason.BLOCKED_ITEM,
+        (*_OPENING_TOKENS, "other", "item.started:web_search"),
+        id="an-unparsable-line-is-named-other",
     ),
     pytest.param(
         [*_THREAD_OPENING, {"type": _A_PRIVATE_EVENT_MARKER}],
@@ -1071,6 +1086,17 @@ def _alternating_agent_messages(count: int) -> list[dict]:
             (*_OPENING_TOKENS, "item.completed:agent_message*100", "turn.completed"),
         ),
         (
+            [
+                *[event for message in _alternating_agent_messages(40) for event in (message,) * 2],
+                _TURN_COMPLETED,
+            ],
+            (
+                "...+9",
+                *(f"{_ALTERNATING_ITEM_EVENTS[index % 2]}:agent_message*2" for index in range(9, 40)),
+                "turn.completed",
+            ),
+        ),
+        (
             [*_alternating_agent_messages(40), _TURN_COMPLETED],
             (
                 "...+9",
@@ -1082,6 +1108,7 @@ def _alternating_agent_messages(count: int) -> list[dict]:
     ids=(
         "single-occurrences-stay-bare",
         "repeats-collapse-before-the-window",
+        "dropped-count-counts-collapsed-tokens-not-lines",
         "a-long-turn-keeps-the-last-32-behind-a-dropped-count",
     ),
 )

@@ -357,9 +357,9 @@ def _codex_image_turn_failure_message(stdout: str) -> str | None:
             continue
         try:
             event_type, event = parse_codex_line(line.encode("utf-8"))
-            if event_type == "error":
+            if event_type == _ERROR_EVENT:
                 message = top_level_error_message(event)
-            elif event_type == "turn.failed":
+            elif event_type == _TURN_FAILED_EVENT:
                 message = failed_turn_message(event)
         except CodexCliStreamFailure:
             continue

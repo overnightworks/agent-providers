@@ -2424,6 +2424,28 @@ def failure_watch(monkeypatch, caplog, capfd) -> RunnerFailureWatch:
     return RunnerFailureWatch(monkeypatch, caplog, capfd)
 
 
+def test_the_failure_watch_hands_a_foreign_thread_error_on_to_the_previous_hook(
+    monkeypatch, caplog, capfd,
+) -> None:
+    forwarded: list[threading.ExceptHookArgs] = []
+    monkeypatch.setattr(threading, "excepthook", forwarded.append)
+    release = threading.Event()
+
+    def fail_when_released() -> None:
+        release.wait(timeout=5)
+        raise RuntimeError(A_RUNNER_FAILURE_CANARY)
+
+    leaked_thread = threading.Thread(target=fail_when_released)
+    leaked_thread.start()
+    watch = RunnerFailureWatch(monkeypatch, caplog, capfd)
+
+    release.set()
+    leaked_thread.join(timeout=5)
+
+    assert [error.thread for error in forwarded] == [leaked_thread]
+    watch.assert_nothing_leaked()
+
+
 @pytest.fixture
 def pooled_run() -> tuple[CodexProcessPool, dict]:
     process_pool = CodexProcessPool(maximum_processes=2, maximum_image_runs=1)

@@ -819,9 +819,18 @@ def _stdout_line(event: dict | bytes) -> bytes:
     return event if isinstance(event, bytes) else json.dumps(event).encode() + b"\n"
 
 
-def _streaming_runner(events: list[dict | bytes], state: dict[str, bool]):
-    """A Codex run that streams its events (or raw lines) and records its abort and reap."""
+_StreamedEvents = list[dict | bytes] | Callable[[Path], list[dict]]
+
+
+def _streaming_runner(events: _StreamedEvents, state: dict[str, bool]):
+    """A Codex run that streams its events (or raw lines) and records its abort and reap.
+
+    Events given as a callable are built from the run's resolved CODEX_HOME.
+    """
     def run_cli_bounded(child, **kwargs):
+        streamed = (
+            events(Path(child.environment["CODEX_HOME"])) if callable(events) else events
+        )
         channel = kwargs["stdout_line_channel"]
         abort_observed = threading.Event()
         request_abort = channel.request_abort
@@ -832,13 +841,13 @@ def _streaming_runner(events: list[dict | bytes], state: dict[str, bool]):
 
         channel.request_abort = observe_abort
         kwargs["on_spawned"](2468)
-        for event in events:
+        for event in streamed:
             if not channel._send(_stdout_line(event)):
                 break
         state["aborted"] = abort_observed.wait(timeout=1)
         kwargs["on_reaped"](2468, False)
         state["reaped"] = True
-        return _outcome(stdout=b"".join(map(_stdout_line, events)).decode())
+        return _outcome(stdout=b"".join(map(_stdout_line, streamed)).decode())
 
     return run_cli_bounded
 
@@ -961,13 +970,17 @@ def test_codex_cover_image_refuses_ambiguous_artifacts_without_logging_the_gate(
     assert _warnings(caplog) == []
 
 
-_RECORDED_0_147_EVENTS = [
-    json.loads(line)
-    for line in (_FIXTURES / "codex-imagegen-real-stream.jsonl").read_text().splitlines()
-]
+def _recorded_0_147_events(codex_home: Path) -> list[dict]:
+    recorded = (_FIXTURES / "codex-imagegen-real-stream.jsonl").read_text()
+    return [
+        json.loads(line)
+        for line in recorded.replace("{CODEX_HOME}", str(codex_home)).splitlines()
+    ]
+
+
 _BLOCKED_TURNS = (
     pytest.param(
-        _RECORDED_0_147_EVENTS,
+        _recorded_0_147_events,
         codex_image.ImageToolBlockedReason.BLOCKED_ITEM,
         (*_OPENING_TOKENS, "item.completed:agent_message", "item.started:command_execution"),
         id="the-0.147-skill-read-through-bash",
@@ -1031,7 +1044,7 @@ _BLOCKED_TURNS = (
 def test_codex_cover_image_aborts_a_blocked_turn_and_logs_only_closed_names(
     monkeypatch,
     caplog,
-    events: list[dict],
+    events: _StreamedEvents,
     expected_reason: codex_image.ImageToolBlockedReason,
     expected_tokens: tuple[str, ...],
 ) -> None:

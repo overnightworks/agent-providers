@@ -103,10 +103,13 @@ async def run_frames(
     started_at = clock()
     if runner is None:
         failed = wire.failed(FailureCode.PROVIDER_UNAVAILABLE, NO_RUNNER_MESSAGE)
-        with failures.leaving(), _client_lost_when_closed(wire, failures):
+        with failures.leaving():
             failures.attempt(FailedPart.CLEANUP, wire.run_over)
-            yield started
-            yield failed
+            if failures.met_any:
+                return
+            with _client_lost_when_closed(wire, failures):
+                yield started
+                yield failed
         return
     events = runner.run(admitted)
     async with (

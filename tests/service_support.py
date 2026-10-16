@@ -478,7 +478,7 @@ class BrokenClock(StepClock):
     """
 
     def __init__(
-        self, breaks_with: Callable[[], Exception] = lambda: RuntimeError("the clock broke")
+        self, breaks_with: Callable[[], BaseException] = lambda: RuntimeError("the clock broke")
     ) -> None:
         super().__init__()
         self._breaks_with = breaks_with
@@ -491,7 +491,8 @@ class ClientSocket:
     """The client end of one ASGI response: the request it posts, what it takes, when it leaves.
 
     ``send`` blocks on the second body chunk until ``released`` is set, as
-    uvicorn's drain does, or raises ``second_chunk_raises`` there. With
+    uvicorn's drain does, or raises ``second_chunk_raises`` there;
+    ``blocks_the_first_chunk`` blocks the first one forever. With
     ``suspends_the_start`` the start message never completes. ``receive`` answers
     the request first and ``http.disconnect`` once the client ``leave``s.
     """
@@ -500,6 +501,7 @@ class ClientSocket:
         self,
         *,
         spec_version: str = "2.3",
+        blocks_the_first_chunk: bool = False,
         blocks_the_second_chunk: bool = False,
         second_chunk_raises: Exception | None = None,
         suspends_the_start: bool = False,
@@ -509,6 +511,7 @@ class ClientSocket:
         self.messages: list[dict[str, Any]] = []
         self.released = asyncio.Event()
         self.answering = asyncio.Event()
+        self._blocks_the_first_chunk = blocks_the_first_chunk
         self._blocks_the_second_chunk = blocks_the_second_chunk
         self._second_chunk_raises = second_chunk_raises
         self._suspends_the_start = suspends_the_start
@@ -533,6 +536,9 @@ class ClientSocket:
         if message["type"] == "http.response.start" and self._suspends_the_start:
             self._suspends_the_start = False
             await asyncio.Event().wait()
+        if message["type"] == "http.response.body" and self._bodies() == 0:
+            if self._blocks_the_first_chunk:
+                await asyncio.Event().wait()
         if message["type"] == "http.response.body" and self._bodies() == 1:
             if self._second_chunk_raises is not None:
                 raise self._second_chunk_raises
@@ -578,9 +584,14 @@ def _run_scope(spec_version: str) -> dict[str, Any]:
 
 
 async def respond_through_the_app(
-    drive: Drive, client: ClientSocket, monkeypatch: pytest.MonkeyPatch
+    drive: Drive,
+    client: ClientSocket,
+    monkeypatch: pytest.MonkeyPatch,
+    runners: Runners | None = None,
 ) -> asyncio.Task[None]:
     """Post a run to the real app on the drive's runner, clock and store; its response task.
+
+    ``runners`` replace the drive's runner, as ``Runners()`` serves a run without one.
 
     The token checks leave the loop for a worker thread, so this returns only
     once the app has begun to answer: from then on the run waits on the clock alone.
@@ -588,7 +599,7 @@ async def respond_through_the_app(
     monkeypatch.setattr("agent_service.app.LoopClock", lambda: drive.clock)
     app = create_app(
         service_config(runs=drive.runs.model_dump()),
-        runners=Runners(cli=drive.runner),
+        runners=runners or Runners(cli=drive.runner),
         records=drive.records,
         fetch_key_set=_shared_mint().fetch_key_set,
     )

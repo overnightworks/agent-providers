@@ -45,6 +45,7 @@ from agent_providers.text_tool_protocol import (
         (SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED, "CLI is not signed in."),
         (SafeRouteReasonCode.CLI_AUTH_REJECTED, "CLI login was rejected or has expired."),
         (SafeRouteReasonCode.CLI_BINARY_UNAVAILABLE, "CLI is unavailable."),
+        (SafeRouteReasonCode.CLI_CAPACITY_EXHAUSTED, "Codex is busy. Try again shortly."),
         (SafeRouteReasonCode.CLI_PROTOCOL_ERROR, "CLI returned an invalid response."),
         (SafeRouteReasonCode.API_HTTP_ERROR, "API request failed."),
         (SafeRouteReasonCode.API_PROTOCOL_ERROR, "API returned an invalid response."),
@@ -251,7 +252,9 @@ def test_each_error_rebuilds_from_its_constructor_arguments(parser_error, host_e
     rejection = parser_error.rejection
 
     assert parser_error.__reduce__() == (TextToolProtocolError, (rejection,))
-    assert host_error.__reduce__() == (TextToolCallRejectedError, ("grok", "cli", rejection))
+    assert host_error.__reduce__() == (
+        TextToolCallRejectedError, ("grok", "cli", rejection), host_error.__dict__,
+    )
 
 
 _TOOL_PROTOCOL_REASON = normalize_route_failure(SafeRouteReasonCode.TOOL_PROTOCOL_ERROR)
@@ -271,8 +274,14 @@ _PLAIN_ERRORS = {
 @pytest.mark.parametrize("round_trip", _ROUND_TRIPS.values(), ids=_ROUND_TRIPS.keys())
 @pytest.mark.parametrize("original", _PLAIN_ERRORS.values(), ids=_PLAIN_ERRORS.keys())
 def test_a_route_error_survives_a_round_trip_with_its_attributes(original, round_trip):
+    original = copy.copy(original)
+    original.add_note("a note")
+    original.extra = "an extra attribute"
+
     rebuilt = round_trip(original)
 
+    assert rebuilt.__notes__ == ["a note"]
+    assert rebuilt.extra == "an extra attribute"
     assert type(rebuilt) is type(original)
     assert str(rebuilt) == str(original)
     assert rebuilt.__dict__ == original.__dict__

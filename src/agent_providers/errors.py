@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 from functools import partial
-from typing import TYPE_CHECKING, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn
 
 from pydantic import BaseModel
 
@@ -12,6 +12,9 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from agent_providers.text_tool_protocol import TextToolRejection
+
+
+_Reduction = tuple["Callable[..., BaseException]", tuple[object, ...], dict[str, Any]]
 
 
 class SafeRouteReasonCode(StrEnum):
@@ -74,8 +77,8 @@ class ProviderError(Exception):
         self.provider = provider
         super().__init__(message)
 
-    def __reduce__(self) -> tuple[type[ProviderError], tuple[object, ...]]:
-        return (type(self), (self.provider, str(self)))
+    def __reduce__(self) -> _Reduction:
+        return (type(self), (self.provider, str(self)), self.__dict__)
 
 
 class ProviderUnavailableError(ProviderError):
@@ -89,9 +92,9 @@ class ProviderUnavailableError(ProviderError):
         self.reason = reason
         super().__init__(provider, reason.message if reason is not None else route_or_message)
 
-    def __reduce__(self) -> tuple[type[ProviderUnavailableError], tuple[object, ...]]:
+    def __reduce__(self) -> _Reduction:
         route_or_message = self.route if self.reason is not None else str(self)
-        return (type(self), (self.provider, route_or_message, self.reason))
+        return (type(self), (self.provider, route_or_message, self.reason), self.__dict__)
 
 
 class TextToolCallRejectedError(ProviderUnavailableError):
@@ -109,8 +112,8 @@ class TextToolCallRejectedError(ProviderUnavailableError):
         )
         self.rejection = rejection
 
-    def __reduce__(self) -> tuple[type[TextToolCallRejectedError], tuple[object, ...]]:
-        return (type(self), (self.provider, self.route, self.rejection))
+    def __reduce__(self) -> _Reduction:
+        return (type(self), (self.provider, self.route, self.rejection), self.__dict__)
 
 
 def raise_without_chain(error: BaseException) -> NoReturn:
@@ -137,8 +140,8 @@ class ProviderModelCatalogUnavailableError(ProviderError):
         self.reason = reason
         super().__init__(provider, reason.message if reason is not None else message)
 
-    def __reduce__(self) -> tuple[type[ProviderModelCatalogUnavailableError], tuple[object, ...]]:
-        return (type(self), (self.provider, str(self), self.reason))
+    def __reduce__(self) -> _Reduction:
+        return (type(self), (self.provider, str(self), self.reason), self.__dict__)
 
 
 class CodexProcessPoolSaturatedError(Exception):
@@ -149,5 +152,5 @@ class CodexProcessPoolSaturatedError(Exception):
         self.scope = scope
         super().__init__(f"Codex {scope} process capacity is busy")
 
-    def __reduce__(self) -> tuple[Callable[..., CodexProcessPoolSaturatedError], tuple[()]]:
-        return (partial(type(self), kind=self.kind, scope=self.scope), ())
+    def __reduce__(self) -> _Reduction:
+        return (partial(type(self), kind=self.kind, scope=self.scope), (), self.__dict__)

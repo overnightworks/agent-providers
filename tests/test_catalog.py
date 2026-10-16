@@ -42,6 +42,7 @@ CLAUDE_MODEL_CATALOG_ALIASES = sorted([
     "fable[1m]", "opusplan", "default",
 ])
 CLAUDE_LOGGED_IN = json.dumps({"loggedIn": True, "authMethod": "claude.ai"})
+CODEX_LOGGED_IN = "Logged in using ChatGPT"
 CLAUDE_LOGGED_OUT = json.dumps({"loggedIn": False})
 CLAUDE_MODEL_COMMAND = ("-p", "/model")
 CLAUDE_MODEL_CATALOG_NAMING_NO_MODEL = "Usage: /model <name>. Available: or a full model ID.\n"
@@ -263,15 +264,36 @@ def test_a_provider_with_an_api_key_is_ready_through_the_api_key(
     assert configuration.environment_key == environment_key
 
 
+SIGNED_IN_CLI_ANSWERS = {
+    "claude": {
+        CLAUDE_STATUS_COMMAND: CLAUDE_LOGGED_IN,
+        CLAUDE_MODEL_COMMAND: CLAUDE_MODEL_CATALOG_STDOUT,
+    },
+    "grok": {("models",): GROK_LOGGED_IN},
+    "codex": {
+        ("login", "status"): CODEX_LOGGED_IN,
+        CODEX_MODEL_COMMAND: _codex_models(("gpt-5.6", "list", 10)),
+    },
+}
+
+
 @pytest.mark.parametrize("provider", ["claude", "grok", "codex"])
-def test_a_cli_route_without_a_binary_is_not_configured(provider: str, tmp_path: Path) -> None:
-    override_provider_runtime(**{f"{provider}_cli_binary": str(tmp_path / "missing-cli")})
+def test_a_signed_in_cli_route_is_not_configured_once_its_binary_is_gone(
+    provider: str, tmp_path: Path,
+) -> None:
+    fake_cli_executable(tmp_path, SIGNED_IN_CLI_ANSWERS[provider])
+    override_provider_runtime(
+        cli_binary_search_path=(tmp_path,), **{f"{provider}_cli_binary": "fake-cli"},
+    )
+    with_binary = probe_provider_route(provider, ProviderRoute.CLI)
+    (tmp_path / "fake-cli").unlink()
     clear_agent_cli_caches()
 
-    snapshot = probe_provider_route(provider, ProviderRoute.CLI)
+    without_binary = probe_provider_route(provider, ProviderRoute.CLI)
 
-    assert snapshot.readiness is ProviderRouteReadinessState.NOT_CONFIGURED
-    assert snapshot.reason.code is SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED
+    assert with_binary.readiness is ProviderRouteReadinessState.READY
+    assert without_binary.readiness is ProviderRouteReadinessState.NOT_CONFIGURED
+    assert without_binary.reason.code is SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED
 
 
 @pytest.mark.parametrize("provider", ["claude", "grok", "codex"])

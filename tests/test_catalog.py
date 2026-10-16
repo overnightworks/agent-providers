@@ -10,7 +10,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import httpx
 import pytest
+from pydantic import SecretStr
 from provider_test_support import (
     CLAUDE_MODEL_CATALOG_STDOUT,
     GROK_LOGGED_IN,
@@ -19,6 +21,9 @@ from provider_test_support import (
 )
 
 from agent_providers.catalog import (
+    ProviderReady,
+    ProviderSetupMethod,
+    provider_configuration,
     ProviderRoute,
     ProviderRouteReadinessState,
     list_provider_models,
@@ -200,3 +205,50 @@ def test_listing_models_for_an_unknown_provider_is_refused_by_name(route: Provid
         list_provider_models("bob", route)
 
     assert str(refusal.value) == "Unknown provider 'bob'"
+
+
+API_ROUTES = [
+    pytest.param("claude", "anthropic_api_key", ["claude-opus-5", "text-embedding"],
+                 ["claude-opus-5"], id="claude"),
+    pytest.param("grok", "xai_api_key", ["grok-4.6", "grok-4.6-image"],
+                 ["grok-4.6"], id="grok"),
+    pytest.param("codex", "openai_api_key", ["gpt-5.6", "whisper-1"],
+                 ["gpt-5.6"], id="codex"),
+]
+
+
+@pytest.mark.parametrize(("provider", "key_setting", "offered", "expected"), API_ROUTES)
+def test_each_api_route_lists_the_chat_models_its_api_offers(
+    monkeypatch: pytest.MonkeyPatch, provider: str, key_setting: str,
+    offered: list[str], expected: list[str],
+) -> None:
+    override_provider_runtime(**{key_setting: SecretStr("a-key")})
+    monkeypatch.setattr(httpx, "get", lambda url, **_: httpx.Response(
+        200, json={"data": [{"id": model_id} for model_id in offered]},
+        request=httpx.Request("GET", url),
+    ))
+
+    assert list_provider_models(provider, ProviderRoute.API) == expected
+
+
+@pytest.mark.parametrize(("provider", "key_setting", "environment_key"), [
+    ("grok", "xai_api_key", "XAI_API_KEY"),
+    ("codex", "openai_api_key", "OPENAI_API_KEY"),
+])
+def test_a_provider_with_an_api_key_is_ready_through_the_api_key(
+    provider: str, key_setting: str, environment_key: str,
+) -> None:
+    override_provider_runtime(**{key_setting: SecretStr("a-key")})
+
+    configuration = provider_configuration(provider, frozenset())
+
+    assert isinstance(configuration, ProviderReady)
+    assert configuration.method is ProviderSetupMethod.API_KEY
+    assert configuration.environment_key == environment_key
+
+
+@pytest.mark.parametrize("provider", ["claude", "grok", "codex"])
+def test_a_cli_route_without_a_binary_is_not_configured(provider: str) -> None:
+    snapshot = probe_provider_route(provider, ProviderRoute.CLI)
+
+    assert snapshot.readiness is ProviderRouteReadinessState.NOT_CONFIGURED

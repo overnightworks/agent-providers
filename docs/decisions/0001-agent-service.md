@@ -292,8 +292,9 @@ run's ending is in its record (A1a2).
 - A disconnect after a side-effecting tool call is reported as `failed` with code
   `interrupted`, never as success.
 - Run status is queryable: `GET /runs/{id}`, authorised by the same two tokens,
-  returns the run's terminal state. Run records live in memory for one hour;
-  there is no database.
+  returns the run's `RunStatus`. Records live in memory, readable for up to one
+  hour after the run ended, subject to earlier eviction once 10,000 ended
+  records are held and to a process restart; there is no database.
 - A client disconnect cancels the run, which kills and reaps its process. It is
   recorded as `cancelled`, or as `failed: interrupted` if a side-effecting tool
   call had already been emitted (A0b wire ruling (a)).
@@ -485,6 +486,78 @@ Piece 3 of A1a3 (`agent_service.run_liveness`, the slow client):
     asyncio flushes before it closes (owner: A1d, edge); a frame the
     supervisor had already encoded is accepted but never received (owner:
     A1a2). `stall_timeout_s` is a provisional default.
+
+### A1a2 run-record ruling (head, 16.10.2026)
+
+Piece 1 of A1a2 (`agent_service.run_records`, `GET /runs/{id}`); recording,
+rules 7 to 13, arrives with A1a2-2. Until it lands nothing records a run, so
+every authenticated `GET` answers `not_found`; invalid credentials keep their
+normal rejections.
+
+Decisions:
+
+- D2: one injected aware-UTC wall clock reads every timestamp and every expiry.
+  A clock step moves every expiry with it: a backwards step lengthens a
+  record's life (the bound caps how many records pile up), a forwards step
+  shortens it.
+- D4: `RunStatus` lives in `agent_client.wire` at protocol version 1, with no
+  client method. H6 named `GET /runs/{id}` before v1 shipped, and a new body for
+  a new endpoint changes no existing v1 body.
+- D5: the retention (1 h) and the bound (10,000 ended records) are constructor
+  defaults of `RunRecords`, not configuration.
+
+Rules:
+
+1. A record holds the run id, the app and principal that started it,
+   `started_at` and `ended_at`, the number of events the service accepted
+   (`events`), the ending (state and failure code) and `client_lost`. It holds
+   no event text, no tool input or output, no `Failed.message`, no token and no
+   group. `GET /runs/{id}` answers `RunStatus`: `v`, `run_id`, `state`
+   (`running`, `succeeded`, `failed`, `cancelled`), `failure_code` (a
+   `FailureCode` exactly when `failed`), `events` (at least 1),
+   `started_at`, `ended_at` (null exactly while `running`) and `client_lost`
+   (null, `dropped` or `disconnected`). Timestamps are aware UTC; an
+   `ended_at` earlier than `started_at` is valid. The body carries neither the
+   app nor the principal, and `events` counts what the service accepted, not
+   what the client received.
+2. An ended record is readable while `now() - ended_at` is less than the
+   retention. A running record never expires and is never evicted; its hour
+   starts when it ends. Ended records are indexed by `(ended_at,
+   completion_sequence)` in timestamp order, so a backwards clock step cannot
+   hide an expired record behind one that has not expired. Every store operation (`begin`,
+   `accepted`, `over`, `lost` and `read`) purges expired entries before
+   anything else; `over` enforces `max_ended`
+   by evicting the ended record that comes first in that order. Running
+   records do not count against the bound. No task, timer or sleep exists.
+3. The writer API is `RunRecords.begin(started, app, principal) ->
+   RunRecorder`, `RunRecorder.accepted(event)`, `RunRecorder.over(fallback)`
+   and `RunRecorder.lost(reason)`. The opening event is counted by `begin`
+   only. A terminal is kept as the pending ending and shows only after `over`;
+   the fallback ends a run that accepted no terminal and is not counted. A bare
+   `over`, a second `over`, an `accepted` after `over`, an `accepted` of
+   `RunStarted` and a `begin` of a held id are errors. `lost` records the first
+   cause only, never changes the ending, `events`, `ended_at` or the expiry
+   order, and restores nothing once the record is gone. `read` builds a new
+   frozen snapshot each time.
+4. `read(run_id, app, principal)` returns the status only when the record's
+   app, issuer and subject all equal the caller's; every other case, including
+   an unknown, expired or evicted id, returns `None`. The lookup compares a
+   real-or-dummy owner on all three fields on every read, with no
+   existence-dependent early return, exception, log or I/O. No constant-time
+   claim is made. No group or purpose is re-checked.
+5. `GET /runs/{id}` checks both tokens first, with the same checks, order and
+   answers as `POST /runs`, and looks at neither the id nor the store before
+   that. Then only the RFC 9562 text form of a UUID (8-4-4-4-12 hexadecimal
+   digits, any letter case) names a run; every other spelling answers
+   `not_found`. A missing, foreign, expired or evicted run answers the one
+   `not_found` (404, `Cache-Control: no-store`), byte-identical in body and
+   headers except `date`. The owner gets 200 `application/json` with
+   `RunStatus` and `no-store`. No answer carries token text; the handler and
+   the store log nothing.
+6. There is one `RunRecords` per `create_app`, never a module global. Nothing
+   is persisted, restored or announced. Documentation promises retention for up
+   to one hour after completion, subject to earlier capacity eviction and
+   process restart.
 
 ## H7 CLI isolation and admission
 

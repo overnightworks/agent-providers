@@ -28,8 +28,8 @@ def wire(type_: str, seq: int, **payload: object) -> dict[str, object]:
     return {"v": PROTOCOL_VERSION, "run_id": str(RUN_ID), "seq": seq, "type": type_, **payload}
 
 
-def started() -> RunStarted:
-    return RunStarted(v=PROTOCOL_VERSION, run_id=RUN_ID, seq=0, heartbeat_interval_s=15)
+def started(run_id: UUID = RUN_ID) -> RunStarted:
+    return RunStarted(v=PROTOCOL_VERSION, run_id=run_id, seq=0, heartbeat_interval_s=15)
 
 
 def text(seq: int, words: str) -> AssistantText:

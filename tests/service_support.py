@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import gc
 import json
 import selectors
 import socket
 import threading
 import time
+import types
 import uuid
 from collections.abc import (
     AsyncGenerator,
@@ -26,6 +28,7 @@ from collections.abc import (
     Sequence,
 )
 from contextlib import asynccontextmanager, contextmanager
+from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
 import httpx
@@ -186,6 +189,50 @@ class StepClock:
         return min((deadline for deadline, _ in self._waiters), default=None)
 
 
+WALL_CLOCK_START: Final = datetime(2026, 10, 16, 12, 0, 0, tzinfo=UTC)
+
+
+def instant(seconds_after_start: float) -> datetime:
+    return WALL_CLOCK_START + timedelta(seconds=seconds_after_start)
+
+
+class WallClock:
+    """An aware-UTC wall clock that moves only when a test advances or steps it."""
+
+    def __init__(self) -> None:
+        self.current = WALL_CLOCK_START
+
+    def __call__(self) -> datetime:
+        return self.current
+
+    def advance(self, seconds: float) -> None:
+        self.current += timedelta(seconds=seconds)
+
+    def set_to(self, moment: datetime) -> None:
+        self.current = moment
+
+
+def reaches_text(root: object, needles: Sequence[str]) -> bool:
+    """Whether any text reachable from ``root`` contains a needle.
+
+    The walk follows ``gc.get_referents`` and skips types, modules and
+    functions, whose reach is the program's and not the object's.
+    """
+    seen: set[int] = set()
+    pending = [root]
+    while pending:
+        candidate = pending.pop()
+        if id(candidate) in seen or isinstance(
+            candidate, type | types.ModuleType | types.FunctionType | types.BuiltinFunctionType
+        ):
+            continue
+        seen.add(id(candidate))
+        if isinstance(candidate, str) and any(needle in candidate for needle in needles):
+            return True
+        pending.extend(gc.get_referents(candidate))
+    return False
+
+
 class TokenMint:
     """Signs RS256 tokens with a throwaway key and serves that key's set, counting each fetch."""
 
@@ -300,6 +347,16 @@ def post_run(
         content=payload,
         timeout=10,
     )
+
+
+def get_run(base_url: str, headers: Mapping[str, str], segment: str) -> httpx.Response:
+    return httpx.get(f"{base_url}/runs/{segment}", headers=dict(headers), timeout=10)
+
+
+def answer_of(response: httpx.Response) -> tuple[int, bytes, dict[str, str]]:
+    """What an answer says, for identity comparisons: its status, body and headers but ``date``."""
+    headers = {name: value for name, value in response.headers.items() if name != "date"}
+    return response.status_code, response.content, headers
 
 
 def assert_rejected(response: httpx.Response, code: RejectionCode, status: int) -> None:

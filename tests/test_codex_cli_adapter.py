@@ -777,7 +777,8 @@ _MEASURED_TOKENS = (*_OPENING_TOKENS, "item.completed:agent_message*3", "turn.co
 
 
 def _item_event(event_type: str, kind: str) -> dict:
-    return {"type": event_type, "item": {"id": "item", "type": kind, "private": _A_PRIVATE_EVENT_MARKER}}
+    item = {"id": "item", "type": kind, "private": _A_PRIVATE_EVENT_MARKER}
+    return {"type": event_type, "item": item}
 
 
 def _jsonl(events: list[dict]) -> str:
@@ -839,7 +840,9 @@ def _streaming_runner(events: list[dict], state: dict[str, bool]):
 
 
 def _generate_cover(prompt: str = "prompt") -> bytes:
-    return codex_image.generate_codex_cover_image(prompt, policy=A_COVER_POLICY, deadline=10_000_000)
+    return codex_image.generate_codex_cover_image(
+        prompt, policy=A_COVER_POLICY, deadline=10_000_000,
+    )
 
 
 def _warnings(caplog) -> list[str]:
@@ -869,7 +872,11 @@ _WITH_IMAGE_GEN_ITEMS = [
         (_MEASURED_STREAM, _write_png_beside_a_text_file),
         (_jsonl(_WITH_IMAGE_GEN_ITEMS), _write_generated_file("cover.png", _png_bytes())),
     ),
-    ids=("png-nested-in-a-directory", "png-beside-a-non-png-file", "image-gen-items-around-the-png"),
+    ids=(
+        "png-nested-in-a-directory",
+        "png-beside-a-non-png-file",
+        "image-gen-items-around-the-png",
+    ),
 )
 def test_codex_cover_image_returns_the_generated_png_of_a_completed_turn(
     monkeypatch, stdout: str, create_artifacts: Callable[[Path], None],
@@ -923,7 +930,8 @@ def test_codex_cover_image_reports_a_completed_turn_without_a_png_as_not_created
     with pytest.raises(codex_image.CodexImageNotCreatedError):
         _generate_cover(_A_PRIVATE_PROMPT_MARKER)
 
-    assert _warnings(caplog) == [f"Codex image not created route=cli {_types_line(expected_tokens)}"]
+    expected_line = f"Codex image not created route=cli {_types_line(expected_tokens)}"
+    assert _warnings(caplog) == [expected_line]
     assert all(record.exc_info is None for record in caplog.records)
     assert _A_PRIVATE_PROMPT_MARKER not in caplog.text
 
@@ -937,7 +945,9 @@ def test_codex_cover_image_refuses_ambiguous_artifacts_without_logging_the_gate(
     monkeypatch, caplog, create_artifacts: Callable[[Path], None],
 ) -> None:
     monkeypatch.setattr(
-        codex_protocol, "run_cli_bounded", _image_runner(_outcome(stdout=_MEASURED_STREAM), create_artifacts),
+        codex_protocol,
+        "run_cli_bounded",
+        _image_runner(_outcome(stdout=_MEASURED_STREAM), create_artifacts),
     )
     caplog.set_level("WARNING", logger="agent_providers.codex.image")
 
@@ -948,7 +958,8 @@ def test_codex_cover_image_refuses_ambiguous_artifacts_without_logging_the_gate(
 
 
 _RECORDED_0_147_EVENTS = [
-    json.loads(line) for line in (_FIXTURES / "codex-imagegen-real-stream.jsonl").read_text().splitlines()
+    json.loads(line)
+    for line in (_FIXTURES / "codex-imagegen-real-stream.jsonl").read_text().splitlines()
 ]
 _BLOCKED_TURNS = (
     pytest.param(
@@ -989,7 +1000,11 @@ _BLOCKED_TURNS = (
         id="blocked-item-after-a-failed-turn",
     ),
     pytest.param(
-        [*_THREAD_OPENING, {"type": "error", "message": "failed"}, _item_event("item.started", "web_search")],
+        [
+            *_THREAD_OPENING,
+            {"type": "error", "message": "failed"},
+            _item_event("item.started", "web_search"),
+        ],
         codex_image.ImageToolBlockedReason.BLOCKED_ITEM,
         (*_OPENING_TOKENS, "error", "item.started:web_search"),
         id="blocked-item-after-a-top-level-error",
@@ -1013,9 +1028,11 @@ def test_codex_cover_image_aborts_a_blocked_turn_and_logs_only_closed_names(
         _generate_cover(_A_PRIVATE_PROMPT_MARKER)
 
     assert (raised.value.reason, raised.value.observed) == (expected_reason, expected_tokens)
-    assert _warnings(caplog) == [
-        f"Codex image tool rejected route=cli code={expected_reason.value} {_types_line(expected_tokens)}"
-    ]
+    expected_line = (
+        f"Codex image tool rejected route=cli code={expected_reason.value} "
+        f"{_types_line(expected_tokens)}"
+    )
+    assert _warnings(caplog) == [expected_line]
     assert all(record.exc_info is None for record in caplog.records)
     for private in (_A_PRIVATE_PROMPT_MARKER, _A_PRIVATE_EVENT_MARKER):
         assert private not in caplog.text
@@ -1046,7 +1063,11 @@ def _alternating_agent_messages(count: int) -> list[dict]:
             ),
         ),
         (
-            [*_THREAD_OPENING, *[_item_event("item.completed", "agent_message")] * 100, _TURN_COMPLETED],
+            [
+                *_THREAD_OPENING,
+                *[_item_event("item.completed", "agent_message")] * 100,
+                _TURN_COMPLETED,
+            ],
             (*_OPENING_TOKENS, "item.completed:agent_message*100", "turn.completed"),
         ),
         (

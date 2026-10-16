@@ -53,6 +53,10 @@ def test_a_valid_file_loads_with_the_documented_defaults(tmp_path):
     assert config.app_of_workload_client("songmaker-test") == "songmaker"
 
 
+def test_a_file_without_a_signing_section_has_no_signing_key(tmp_path):
+    assert load_config(_written(tmp_path, VALID_CONFIG)).signing is None
+
+
 @pytest.mark.parametrize(
     ("tool", "effect"),
     [("read_song", ToolEffect.READ_ONLY), ("unlisted_tool", ToolEffect.SIDE_EFFECTING)],
@@ -173,6 +177,17 @@ def _with_key_set_url(url: str) -> str:
             id="missing-issuer",
         ),
         pytest.param("[identity\n", "not TOML", id="not-toml"),
+        pytest.param(VALID_CONFIG + "\n[signing]\n", "signing.key_file", id="signing-without-key"),
+        pytest.param(
+            VALID_CONFIG + '\n[signing]\nkey_file = "/run/secrets/key.pem"\nkey = "x"\n',
+            "signing.key: Extra inputs are not permitted",
+            id="signing-with-a-key-member",
+        ),
+        pytest.param(
+            VALID_CONFIG + '\n[signing]\nkey = "/run/secrets/key.pem"\n',
+            "signing.key: Extra inputs are not permitted",
+            id="signing-with-only-a-key-member",
+        ),
         *[
             pytest.param(_with_runs(setting), "runs", id=f"runs-{setting.replace(' ', '')}")
             for setting in REFUSED_RUN_SETTINGS

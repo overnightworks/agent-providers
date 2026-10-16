@@ -2,7 +2,8 @@
 
 A TOML file is read once at startup into frozen models that forbid unknown
 fields. A file the models refuse stops the service with an error naming the
-field, so a typo never becomes a silently ignored policy.
+field, so a typo never becomes a silently ignored policy. The signing key file
+the TOML names is read and checked with it, in the same pass.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from typing import Annotated, Self
 from pydantic import (
     AfterValidator,
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
     StrictFloat,
@@ -27,6 +29,7 @@ from webauth.https_client import is_https_url
 
 from agent_client.tools import ToolEffect
 from agent_client.wire import MAX_EVENT_BYTES
+from agent_service.signing import SigningKey, load_signing_key, shown_path
 
 NonEmptyText = Annotated[str, Field(min_length=1)]
 
@@ -67,6 +70,28 @@ class IdentityConfig(_Section):
     subscription_group: NonEmptyText = "/ki-abo"
     group_claim: NonEmptyText = "groups"
     leeway_seconds: int = Field(default=0, ge=0, le=300)
+
+
+def _signing_key_in_file(key_file: object) -> SigningKey:
+    """Loads the key the absolute path names; a refusal stops startup as a field error."""
+    if not isinstance(key_file, str):
+        raise ValueError("must be an absolute path to the signing key file; ~ is not expanded")
+    if not Path(key_file).is_absolute():
+        raise ValueError(
+            f"{shown_path(key_file)} must be an absolute path to the signing key file;"
+            " ~ is not expanded"
+        )
+    return load_signing_key(Path(key_file))
+
+
+class SigningConfig(_Section):
+    """The one key the service signs with, read once at startup (decision record 0001, A1a4)."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    key: Annotated[SigningKey, BeforeValidator(_signing_key_in_file)] = Field(
+        validation_alias="key_file"
+    )
 
 
 class ServerConfig(_Section):
@@ -137,6 +162,7 @@ class ServiceConfig(_Section):
     identity: IdentityConfig
     server: ServerConfig = ServerConfig()
     runs: RunConfig = RunConfig()
+    signing: SigningConfig | None = None
     profiles: dict[NonEmptyText, ProfileConfig] = Field(default_factory=dict)
     purposes: dict[NonEmptyText, PurposeConfig]
     apps: dict[NonEmptyText, AppConfig]

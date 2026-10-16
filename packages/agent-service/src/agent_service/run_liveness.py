@@ -171,7 +171,8 @@ async def _finished(task: asyncio.Task[object]) -> None:
         try:
             with anyio.CancelScope(shield=True):
                 await asyncio.wait({task})
-        except asyncio.CancelledError as cancelled:
+        # NOSONAR S7497 below: the first cancellation is re-raised once the task is done (rule 10).
+        except asyncio.CancelledError as cancelled:  # NOSONAR
             interrupted = interrupted or cancelled
     if interrupted is not None:
         raise interrupted

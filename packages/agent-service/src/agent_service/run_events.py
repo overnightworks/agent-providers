@@ -18,6 +18,7 @@ from __future__ import annotations
 import copy
 import logging
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 from typing import Final
 from uuid import UUID
 
@@ -86,8 +87,9 @@ async def run_frames(
         return
     events = runner.run(admitted)
     async with SupervisedRun(admitted.run_id, wire, events, runs, clock, started_at) as supervised:
-        async for frame in supervised.frames():
-            yield frame
+        async with aclosing(supervised.frames()) as frames:
+            async for frame in frames:
+                yield frame
 
 
 class _WireRun:

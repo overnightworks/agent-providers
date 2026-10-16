@@ -1,0 +1,8 @@
+claim_id = "f5f6443bac304b6ab1c76c9d768ae741"
+agent = "Claude fe12493e-3d52-442e-b01b-4ee4336de2f0"
+role = "builder"
+base = "1045d0b52b3a272dbbf48aab1b2542bef25130a8"
+branch = "claude/issue-36-a1a3-1-herzschlag-leerlauf-abbruch-und-h"
+scope = ["README.md", "docs/decisions/0001-agent-service.md", "packages/agent-service/src/agent_service/app.py", "packages/agent-service/src/agent_service/config.py", "packages/agent-service/src/agent_service/run_events.py", "packages/agent-service/src/agent_service/run_liveness.py", "packages/agent-service/src/agent_service/runners.py", "tests/service_support.py", "tests/test_service_config.py", "tests/test_service_liveness.py", "tests/test_service_run_events.py"]
+opened_commit = "19b46401aa1f200adc4ae7853e3b50097d7b862c"
+whole_reason = "Heartbeat, idle timeout and maximum duration are one supervisor with its config, ADR ruling and tests."

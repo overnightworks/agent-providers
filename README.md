@@ -36,6 +36,7 @@ It owns the machinery that is the same in every deployment:
 | `agent_client.wire` | The one owner of the agent service's wire: the `RunRequest` body, the versioned run-event union, the `RunRejection` body and the `RunStatus` body of `GET /runs/{id}` |
 | `agent_client.run_stream` | `parse_event` and `RunStream`: the rules a run's event stream keeps, and how a cut-short run ends |
 | `agent_client.sse` | `encode_event` and `RunStreamDecoder`: one SSE frame per run event, decoded and checked against the wire and its stream rules |
+| `agent_client.capability` | The format of the run capability the service mints and an app's MCP server verifies (A1m): token type `agent-capability+jwt`, at most 8,192 characters, the strict `CapabilityClaims`, and `McpOrigin`, the one decider of an app's canonical https MCP origin |
 | `agent_providers.tools` | The `ToolCatalog` and its Anthropic/OpenAI schema projections; re-exports the identical `ToolDeclaration` |
 | `agent_providers.spawn` | `ChildProcess` and the only calls in this library that create a child process |
 | `agent_providers.process` | `run_cli_bounded`: the bounded runner over a `ChildProcess` (start, stdin, first line, deadline, process-group cleanup) |
@@ -44,8 +45,9 @@ It owns the machinery that is the same in every deployment:
 | `agent_service.app` | `POST /runs` and `GET /runs/{id}`: the order of checks, the typed rejections, the admitted run's event stream, and the run status that only the app and user that started a run may read |
 | `agent_service.identity` | The two-token check: the workload token bound to one registered app, the user token to one principal |
 | `agent_service.run_request` | The strict read of a `RunRequest` body: strict JSON, then its version, then its shape |
-| `agent_service.config` | The service's TOML: identity, listener, run pacing and limits, subscription profiles, purposes and apps, and the optional `[signing] key_file` the signing key is read from |
+| `agent_service.config` | The service's TOML: identity, listener, run pacing and limits, subscription profiles, purposes and apps, the optional `[signing] key_file` the signing key is read from, each app's optional https MCP origin (canonical, one per app, needing `[signing]`), and the startup preflight that measures every app's capability against 8,192 characters |
 | `agent_service.signing` | The service's one signing key: an RSA-3072 PEM (exponent 65537) read once at startup and never made by the service, refused when unsound; its `kid` is the RFC 7638 thumbprint, and `SigningKey.sign(claims, token_type)` writes a typed RS256 token. No capability is minted until A1a4-2b. Generation and rotation: see the A1a4 ruling in `docs/decisions/0001-agent-service.md` |
+| `agent_service.capability` | The capability's claims and signing and its 8,192-character guard (`CapabilityTooLarge`), and the startup preflight that measures each app's capability with a subject reserve of 255 quotation marks, `iat = 9_999_999_999` and `exp = floor(iat + max_duration_s)`; the actual signed-token guard remains authoritative. `capability_too_large` (422) answers an oversized capability at admission. No run receives a capability until A1a4-2b |
 | `agent_service.routing` | `route`: the one H5 decider between the CLI route, the API route and `not_enabled` |
 | `agent_service.run_events` | The mapping of the core's turn events onto the wire frames, ending every run with exactly one terminal; also the run's tool-call and byte budget |
 | `agent_service.run_liveness` | When frames go out: the heartbeat, the idle timeout and the maximum duration, enforced by a supervisor that does not depend on the client reading, and drops a client that stops taking frames |

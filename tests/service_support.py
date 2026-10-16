@@ -60,31 +60,51 @@ SUBSCRIPTION_GROUP: Final = "/ki-abo"
 SONGMAKER_GROUP: Final = "/apps/songmaker"
 CLI_PROFILE: Final = "claude-main"
 COWRITER_ALIAS: Final = "cowriter"
+SONGMAKER_ORIGIN: Final = "https://songmaker.internal"
 RUN_ID_PLACEHOLDER: Final = "00000000-0000-4000-8000-000000000000"
+
+
+def _service_config_document(issuer: str, runs: Mapping[str, object] | None) -> dict[str, Any]:
+    return {
+        **({} if runs is None else {"runs": runs}),
+        "identity": {"issuer": issuer, "jwks_url": TEST_JWKS_URL},
+        "profiles": {CLI_PROFILE: {"provider": "claude"}},
+        "purposes": {
+            COWRITER: {"cli_provider": "claude", "api_alias": COWRITER_ALIAS},
+            PRESENTER: {"api_alias": "copresenter"},
+        },
+        "apps": {
+            "songmaker": {
+                "workload_client": SONGMAKER_CLIENT,
+                "purposes": [COWRITER],
+                "tools": {"read_song": "read_only", "edit_song": "side_effecting"},
+            },
+            "presentator": {"workload_client": PRESENTATOR_CLIENT, "purposes": [PRESENTER]},
+        },
+    }
 
 
 def service_config(
     issuer: str = TEST_ISSUER, runs: Mapping[str, object] | None = None
 ) -> ServiceConfig:
-    return ServiceConfig.model_validate(
-        {
-            **({} if runs is None else {"runs": runs}),
-            "identity": {"issuer": issuer, "jwks_url": TEST_JWKS_URL},
-            "profiles": {CLI_PROFILE: {"provider": "claude"}},
-            "purposes": {
-                COWRITER: {"cli_provider": "claude", "api_alias": COWRITER_ALIAS},
-                PRESENTER: {"api_alias": "copresenter"},
-            },
-            "apps": {
-                "songmaker": {
-                    "workload_client": SONGMAKER_CLIENT,
-                    "purposes": [COWRITER],
-                    "tools": {"read_song": "read_only", "edit_song": "side_effecting"},
-                },
-                "presentator": {"workload_client": PRESENTATOR_CLIENT, "purposes": [PRESENTER]},
-            },
-        }
-    )
+    return ServiceConfig.model_validate(_service_config_document(issuer, runs))
+
+
+def capable_service_config(
+    directory: Path,
+    *,
+    issuer: str = TEST_ISSUER,
+    songmaker: Mapping[str, object] | None = None,
+) -> ServiceConfig:
+    """``service_config`` with a signing key written under ``directory`` and songmaker's origin."""
+    document = _service_config_document(issuer, None)
+    document["signing"] = {"key_file": str(written_key_file(directory, generated_rsa_key()))}
+    document["apps"]["songmaker"] = {
+        **document["apps"]["songmaker"],
+        "mcp_origin": SONGMAKER_ORIGIN,
+        **(songmaker or {}),
+    }
+    return ServiceConfig.model_validate(document)
 
 
 def run_body(**overrides: object) -> dict[str, Any]:

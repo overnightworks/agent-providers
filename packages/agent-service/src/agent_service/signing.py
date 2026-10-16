@@ -41,9 +41,9 @@ class EmptyTokenType(ValueError):
 UNSHOWABLE_PATH = "contains a control or non-printing character; a path must not"
 
 
-def shown_path(path: str) -> str:
-    """The path with control and non-printing characters escaped, so a message stays one line."""
-    return "".join(map(_shown_character, path))
+def shown_text(text: str) -> str:
+    """Operator-supplied text with control and non-printing characters escaped, one line."""
+    return "".join(map(_shown_character, text))
 
 
 def _shown_character(character: str) -> str:
@@ -96,7 +96,7 @@ class SigningKey:
 
 def load_signing_key(path: Path) -> SigningKey:
     """Reads the file through one descriptor and raises ``UnsoundSigningKey`` for any refusal."""
-    shown = shown_path(str(path))
+    shown = shown_text(str(path))
     if shown != str(path):
         raise UnsoundSigningKey(f"{shown} {UNSHOWABLE_PATH}")
     try:

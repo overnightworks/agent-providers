@@ -1,5 +1,10 @@
 """The service's one configuration: identity, listener, profiles, purposes and apps.
 
+An app may name its one https MCP origin, which no other app shares and which
+needs the signing key. At load, every such app's capability is measured against
+the 8,192-character limit with a reserved subject size and timestamp width, so
+an app whose tools do not fit stops startup instead of failing its users.
+
 A TOML file is read once at startup into frozen models that forbid unknown
 fields. A file the models refuse stops the service with an error naming the
 field, so a typo never becomes a silently ignored policy. The signing key file
@@ -27,9 +32,16 @@ from pydantic import (
 )
 from webauth.https_client import is_https_url
 
+from agent_client.capability import MAX_CAPABILITY_CHARACTERS, McpOrigin
 from agent_client.tools import ToolEffect
 from agent_client.wire import MAX_EVENT_BYTES
-from agent_service.signing import SigningKey, load_signing_key, shown_path
+from agent_service.capability import (
+    CapabilityScope,
+    CapabilityTooLarge,
+    preflight_claims,
+    signed_capability,
+)
+from agent_service.signing import SigningKey, load_signing_key, shown_text
 
 NonEmptyText = Annotated[str, Field(min_length=1)]
 
@@ -78,7 +90,7 @@ def _signing_key_in_file(key_file: object) -> SigningKey:
         raise ValueError("must be an absolute path to the signing key file; ~ is not expanded")
     if not Path(key_file).is_absolute():
         raise ValueError(
-            f"{shown_path(key_file)} must be an absolute path to the signing key file;"
+            f"{shown_text(key_file)} must be an absolute path to the signing key file;"
             " ~ is not expanded"
         )
     return load_signing_key(Path(key_file))
@@ -147,12 +159,17 @@ class PurposeConfig(_Section):
 class AppConfig(_Section):
     """One app: its workload client, the purposes it may ask for, and its tools' effects.
 
-    A tool the app does not list is treated as side-effecting.
+    A tool the app does not list is treated as side-effecting. The keys of the tools
+    table are the tools a capability permits; an empty table permits none.
     """
 
     workload_client: NonEmptyText
     purposes: tuple[NonEmptyText, ...]
     tools: dict[NonEmptyText, ToolEffect] = Field(default_factory=dict)
+    mcp_origin: McpOrigin | None = None
+
+    def granted_tools(self) -> tuple[str, ...]:
+        return tuple(sorted(self.tools))
 
     def tool_effect(self, tool_name: str) -> ToolEffect:
         return self.tools.get(tool_name, ToolEffect.SIDE_EFFECTING)
@@ -174,7 +191,8 @@ class ServiceConfig(_Section):
             owner = owners.setdefault(profile.provider, name)
             if owner != name:
                 raise ValueError(
-                    f"profiles.{name}.provider: {profile.provider} already has profile {owner!r}"
+                    f"profiles.{shown_text(name)}.provider: {profile.provider} already has"
+                    f" profile {shown_text(owner)!r}"
                 )
         return self
 
@@ -183,7 +201,10 @@ class ServiceConfig(_Section):
         for app_name, app in self.apps.items():
             for purpose in app.purposes:
                 if purpose not in self.purposes:
-                    raise ValueError(f"apps.{app_name}.purposes: unknown purpose {purpose!r}")
+                    raise ValueError(
+                        f"apps.{shown_text(app_name)}.purposes:"
+                        f" unknown purpose {shown_text(purpose)!r}"
+                    )
         return self
 
     @model_validator(mode="after")
@@ -193,10 +214,66 @@ class ServiceConfig(_Section):
             owner = owners.setdefault(app.workload_client, app_name)
             if owner != app_name:
                 raise ValueError(
-                    f"apps.{app_name}.workload_client: {app.workload_client!r} is already"
-                    f" the workload client of app {owner!r}"
+                    f"apps.{shown_text(app_name)}.workload_client:"
+                    f" {shown_text(app.workload_client)!r} is already"
+                    f" the workload client of app {shown_text(owner)!r}"
                 )
         return self
+
+    @model_validator(mode="after")
+    def _an_origin_needs_signing(self) -> Self:
+        if self.signing is not None:
+            return self
+        for app_name, app in self.apps.items():
+            if app.mcp_origin is not None:
+                raise ValueError(
+                    f"apps.{shown_text(app_name)}.mcp_origin: needs a [signing] section,"
+                    " because the app's runs carry a signed capability"
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _origins_are_unique(self) -> Self:
+        owners: dict[str, str] = {}
+        for app_name, app in self.apps.items():
+            if app.mcp_origin is None:
+                continue
+            owner = owners.setdefault(app.mcp_origin, app_name)
+            if owner != app_name:
+                raise ValueError(
+                    f"apps.{shown_text(app_name)}.mcp_origin: {app.mcp_origin} is already"
+                    f" the MCP origin of app {shown_text(owner)!r}"
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _every_capability_fits(self) -> Self:
+        for app_name, app in self.apps.items():
+            if (scope := self.capability_scope(app_name)) is None:
+                continue
+            for purpose in app.purposes:
+                claims = preflight_claims(
+                    scope,
+                    app=app_name,
+                    purpose=purpose,
+                    issuer=self.identity.issuer,
+                    max_duration_s=self.runs.max_duration_s,
+                )
+                try:
+                    signed_capability(scope, claims)
+                except CapabilityTooLarge as too_large:
+                    raise ValueError(
+                        f"apps.{shown_text(app_name)}.tools: the capability for purpose"
+                        f" {shown_text(purpose)!r} would be {too_large.length} characters;"
+                        f" the limit is {MAX_CAPABILITY_CHARACTERS}"
+                    ) from None
+        return self
+
+    def capability_scope(self, app_name: str) -> CapabilityScope | None:
+        app = self.apps[app_name]
+        if app.mcp_origin is None or self.signing is None:
+            return None
+        return CapabilityScope(app.mcp_origin, app.granted_tools(), self.signing.key)
 
     def app_of_workload_client(self, client_id: str) -> str | None:
         return self._apps_by_workload_client.get(client_id)
@@ -210,22 +287,22 @@ def load_config(path: Path) -> ServiceConfig:
     try:
         text = path.read_text(encoding="utf-8")  # NOSONAR The operator names this file.
     except OSError as error:
-        raise ConfigError(f"{path}: cannot be read: {error.strerror}") from error
+        raise ConfigError(f"{shown_text(str(path))}: cannot be read: {error.strerror}") from error
     except UnicodeDecodeError as error:
-        raise ConfigError(f"{path}: not UTF-8 TOML") from error
+        raise ConfigError(f"{shown_text(str(path))}: not UTF-8 TOML") from error
     try:
         document = tomllib.loads(text)
     except tomllib.TOMLDecodeError as error:
-        raise ConfigError(f"{path}: not TOML: {error}") from error
+        raise ConfigError(f"{shown_text(str(path))}: not TOML: {shown_text(str(error))}") from error
     try:
         return ServiceConfig.model_validate(document)
     except ValidationError as error:
-        raise ConfigError(f"{path}: {_named_fields(error)}") from error
+        raise ConfigError(f"{shown_text(str(path))}: {_named_fields(error)}") from error
 
 
 def _named_fields(error: ValidationError) -> str:
     return "; ".join(
-        f"{'.'.join(str(part) for part in problem['loc'])}: {_message(problem['msg'])}"
+        f"{'.'.join(shown_text(str(part)) for part in problem['loc'])}: {_message(problem['msg'])}"
         if problem["loc"]
         else _message(problem["msg"])
         for problem in error.errors(include_input=False, include_url=False)

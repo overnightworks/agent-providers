@@ -14,6 +14,7 @@ import sys
 import tempfile
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -24,6 +25,7 @@ from provider_test_support import (
     a_codex_login,
     a_fifo,
     call_within_deadline,
+    exception_chain,
     override_provider_runtime,
     shell_child,
     traceback_frames_hold,
@@ -2427,10 +2429,17 @@ def test_the_credential_reader_reports_a_missing_file_as_absent(tmp_path: Path) 
     assert process._read_credential_file(tmp_path / "missing") is None
 
 
-def _assert_no_frame_holds_the_credential(error: BaseException) -> None:
+def _assert_nothing_reachable_holds_the_credential(
+    error: BaseException, *, handled_by_the_caller: BaseException | None,
+) -> None:
     # Pytest's assertion rewriting would keep the literal in the test's own frame,
     # which the handled exception's traceback reaches.
     assert not traceback_frames_hold(error, "canary-")
+    for link in exception_chain(error):
+        attributes = f"{link.args} {vars(link)}"
+        assert "canary-" not in attributes
+    assert error.__cause__ is None
+    assert error.__context__ is handled_by_the_caller
 
 
 def _enter_through_the_login_decider(tmp_path: Path) -> None:
@@ -2490,18 +2499,54 @@ def _interrupt_at_line(position: int):
     return on_call
 
 
+@contextmanager
+def _a_read_that_fails_after_one_chunk():
+    real_read = os.read
+    reads = 0
+
+    def read(descriptor: int, length: int) -> bytes:
+        nonlocal reads
+        reads += 1
+        if reads > 1:
+            raise OSError(errno.EIO, "input/output error")
+        return real_read(descriptor, 16)
+
+    with patch.object(process.os, "read", read):
+        yield
+
+
+@contextmanager
+def _a_stored_login_read_whole():
+    yield
+
+
+_LOGIN_SCENARIOS = {
+    "usable": (a_codex_login(), _a_stored_login_read_whole),
+    "malformed": (b'{"token":"canary-access-token",', _a_stored_login_read_whole),
+    "incomplete": (a_codex_login(tokens={"refresh_token": ""}), _a_stored_login_read_whole),
+    "read-fails-mid-way": (a_codex_login(), _a_read_that_fails_after_one_chunk),
+}
+
+
 @pytest.fixture
 def a_stored_codex_login(tmp_path: Path) -> None:
+    store_codex_login(tmp_path, a_codex_login())
+
+
+def store_codex_login(tmp_path: Path, document: bytes) -> None:
     auth_file = tmp_path / "codex-auth.json"
-    auth_file.write_bytes(a_codex_login())
+    auth_file.write_bytes(document)
     override_provider_runtime(codex_cli_auth_file=auth_file, cli_working_directory_root=tmp_path)
 
 
-@pytest.mark.parametrize(
+_BOTH_ENTRY_POINTS = pytest.mark.parametrize(
     "enter",
     (_enter_through_the_login_decider, _enter_through_a_private_credential_home),
     ids=("login-decider", "private-credential-home"),
 )
+
+
+@_BOTH_ENTRY_POINTS
 @pytest.mark.usefixtures("a_stored_codex_login")
 def test_a_decoder_failure_propagates_unchanged_holding_no_credential_bytes(
     tmp_path: Path, enter,
@@ -2512,45 +2557,80 @@ def test_a_decoder_failure_propagates_unchanged_holding_no_credential_bytes(
         with pytest.raises(MemoryError) as raised:
             enter(tmp_path)
 
-    _assert_no_frame_holds_the_credential(raised.value)
+    _assert_nothing_reachable_holds_the_credential(raised.value, handled_by_the_caller=None)
     assert len(os.listdir("/proc/self/fd")) == open_descriptors
 
-@pytest.mark.parametrize(
-    "enter",
-    (_enter_through_the_login_decider, _enter_through_a_private_credential_home),
-    ids=("login-decider", "private-credential-home"),
+def _drive_in_the_caller(inside_a_handler: bool, call):
+    """Call with the caller's handled error (or None); return what the call returned."""
+    if not inside_a_handler:
+        return call(None)
+    try:
+        raise RuntimeError("an error the caller is already handling")
+    except RuntimeError as handled:
+        return call(handled)
+
+
+_INSIDE_A_HANDLER = pytest.mark.parametrize(
+    "inside_a_handler", (False, True), ids=("plain-call", "inside-a-handler"),
 )
-@pytest.mark.usefixtures("a_stored_codex_login")
-@pytest.mark.parametrize("inside_a_handler", (False, True), ids=("plain-call", "inside-a-handler"))
+
+
+@_BOTH_ENTRY_POINTS
+@_INSIDE_A_HANDLER
+@pytest.mark.parametrize("scenario", _LOGIN_SCENARIOS)
 def test_an_interruption_at_any_line_propagates_holding_no_credential_bytes(
-    tmp_path: Path, enter, inside_a_handler: bool,
+    tmp_path: Path, enter, inside_a_handler: bool, scenario: str,
 ) -> None:
+    document, around_the_read = _LOGIN_SCENARIOS[scenario]
+    store_codex_login(tmp_path, document)
     open_descriptors = len(os.listdir("/proc/self/fd"))
     interrupted_lines = 0
 
-    def enter_interrupted_at(position: int) -> BaseException | None:
-        sys.settrace(_interrupt_at_line(position))
-        try:
-            enter(tmp_path)
-        except KeyboardInterrupt as interruption:
-            return interruption
-        finally:
-            sys.settrace(None)
-        return None
-
-    def drive(position: int) -> BaseException | None:
-        if not inside_a_handler:
-            return enter_interrupted_at(position)
-        try:
-            raise RuntimeError("an error the caller is already handling")
-        except RuntimeError:
-            return enter_interrupted_at(position)
+    def enter_interrupted_at(position: int, handled: BaseException | None):
+        with around_the_read():
+            sys.settrace(_interrupt_at_line(position))
+            try:
+                enter(tmp_path)
+            except KeyboardInterrupt as interruption:
+                return interruption, handled
+            except Exception:
+                return None, handled
+            finally:
+                sys.settrace(None)
+        return None, handled
 
     position = 1
-    while (interruption := drive(position)) is not None:
-        _assert_no_frame_holds_the_credential(interruption)
+    while (
+        outcome := _drive_in_the_caller(
+            inside_a_handler, lambda handled: enter_interrupted_at(position, handled),
+        )
+    )[0] is not None:
+        interruption, handled = outcome
+        _assert_nothing_reachable_holds_the_credential(
+            interruption, handled_by_the_caller=handled,
+        )
         assert len(os.listdir("/proc/self/fd")) == open_descriptors
         interrupted_lines += 1
         position += 1
 
-    assert interrupted_lines > 20
+    assert interrupted_lines > 5
+
+
+@_BOTH_ENTRY_POINTS
+@_INSIDE_A_HANDLER
+def test_a_memory_error_inside_the_malformed_handler_holds_no_credential_bytes(
+    tmp_path: Path, enter, inside_a_handler: bool,
+) -> None:
+    store_codex_login(tmp_path, _LOGIN_SCENARIOS["malformed"][0])
+    open_descriptors = len(os.listdir("/proc/self/fd"))
+
+    def enter_failing(handled: BaseException | None) -> BaseException | None:
+        with patch("agent_providers.codex_login.CodexLogin", side_effect=MemoryError):
+            with pytest.raises(MemoryError) as raised:
+                enter(tmp_path)
+        return raised.value, handled
+
+    failure, handled = _drive_in_the_caller(inside_a_handler, enter_failing)
+
+    _assert_nothing_reachable_holds_the_credential(failure, handled_by_the_caller=handled)
+    assert len(os.listdir("/proc/self/fd")) == open_descriptors

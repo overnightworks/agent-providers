@@ -13,6 +13,7 @@ import selectors
 import shutil
 import signal
 import stat
+import sys
 import tempfile
 import threading
 import time
@@ -1095,7 +1096,7 @@ class PrivateCredentialHome:
             _live_homes.add(self)
         try:
             os.chmod(self._home, 0o700)
-            _run_with_credential_frames_cleared(
+            _run_without_credential_remains(
                 functools.partial(
                     _install_credential,
                     self._home,
@@ -1327,19 +1328,40 @@ def _install_credential(
         os.close(destination)
 
 
-def _run_with_credential_frames_cleared[T](step: Callable[[], T]) -> T:
+def _run_without_credential_remains[T](step: Callable[[], T]) -> T:
     """Run a step that touches credential bytes; no exception leaves it holding them.
 
     A traceback keeps every frame it passed through alive, locals included, and
-    the decoder's frames below the library hold the decoded text. This frame
-    holds no bytes itself, so it clears everything beneath it before the same
-    exception continues.
+    so does every exception chained beneath it: the decoder's error holds the
+    document itself. This frame holds no bytes, so it clears the frames of the
+    failure and of each link the step created, cuts those links off, and lets the
+    same exception continue as if raised here, still chained to what the caller
+    was handling. A refusal that deliberately carries no context keeps none.
     """
+    handled_by_the_caller = sys.exception()
     try:
         return step()
     except BaseException as failure:
-        traceback.clear_frames(failure.__traceback__.tb_next)
+        _clear_frames_of_the_links_below(failure, handled_by_the_caller)
+        failure.__cause__ = None
+        if failure.__context__ is not None:
+            failure.__context__ = handled_by_the_caller
         raise
+
+
+def _clear_frames_of_the_links_below(
+    failure: BaseException, handled_by_the_caller: BaseException | None,
+) -> None:
+    traceback.clear_frames(failure.__traceback__.tb_next)
+    pending = [failure.__cause__, failure.__context__]
+    cleared = {id(failure), id(handled_by_the_caller)}
+    while pending:
+        link = pending.pop()
+        if link is None or id(link) in cleared:
+            continue
+        cleared.add(id(link))
+        traceback.clear_frames(link.__traceback__)
+        pending.extend((link.__cause__, link.__context__))
 
 
 def _read_credential_file(path: Path) -> bytes | None:
@@ -1556,7 +1578,7 @@ def grok_cli_token_is_present() -> bool:
 
 def codex_cli_login_is_usable() -> bool:
     """Whether the Codex CLI credential mirror holds a login that can start a child."""
-    return _run_with_credential_frames_cleared(_codex_login_in_the_mirror_is_usable)
+    return _run_without_credential_remains(_codex_login_in_the_mirror_is_usable)
 
 
 def _codex_login_in_the_mirror_is_usable() -> bool:

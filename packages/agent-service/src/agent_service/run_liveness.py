@@ -315,12 +315,14 @@ class RunFailures:
     @contextmanager
     def leaving(self) -> Iterator[None]:
         """Leave a run that has no supervisor by the same decision."""
+        body_failure: BaseException | None = None
         try:
             yield
-        except BaseException as body_failure:
-            self.leave(cancellation=None, body_failure=body_failure)
+        except BaseException as failure:
+            body_failure = failure
             raise
-        self.leave(cancellation=None, body_failure=None)
+        finally:
+            self.leave(cancellation=None, body_failure=body_failure)
 
 
 def _failure_of(task: asyncio.Task[None] | None) -> BaseException | None:

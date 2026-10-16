@@ -21,7 +21,7 @@ import re
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import aclosing, asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 
 import anyio
@@ -1024,7 +1024,7 @@ def _every_ending() -> list[pytest.param]:
 
 async def _end_a_run(
     ending: _Ending, *, cancel_at_the_record_end: bool = False
-) -> tuple[asyncio.Task[object], bool, uuid.UUID]:
+) -> tuple[asyncio.Task[object], bool, Drive]:
     """End a run the way ``ending`` says; its closer, whether a cancellation reached it, the run.
 
     The run ends by itself first when its clock breaks, or when a failing
@@ -1063,7 +1063,7 @@ async def _end_a_run(
         await drive.clock.parked()
         runner.release_close()
         await asyncio.wait(closers)
-    return closers[0], delivered or cancel_at_the_record_end, drive.run_id
+    return closers[0], delivered or cancel_at_the_record_end, drive
 
 
 def _propagated(closer: asyncio.Task[object], *, delivered: bool) -> str:
@@ -1091,7 +1091,7 @@ async def _watched_loop() -> AsyncIterator[list[dict[str, object]]]:
 async def test_every_failure_of_a_run_s_ending_propagates_or_is_logged_once(caplog, ending):
     caplog.set_level(logging.DEBUG)
     async with _watched_loop() as unretrieved:
-        closer, cancelled, _run_id = await _end_a_run(ending)
+        closer, cancelled, _drive = await _end_a_run(ending)
 
     propagated = _propagated(closer, delivered=cancelled)
     assert cancelled is (ending.cancellation is not _Cancellation.NONE)
@@ -1168,32 +1168,6 @@ async def test_every_failure_of_a_run_s_ending_propagates_or_is_logged_once(capl
             [(_CLEANUP, "_EndNotRecorded")],
             id="the-first-cleanup-failure-propagates",
         ),
-        *(
-            pytest.param(
-                _Ending(_Cancellation.NONE, closer, False, frozenset({step}), frozenset({step})),
-                propagates,
-                logged,
-                id=f"a-stray-cancellation-of-{step.name.lower()}-is-its-failure",
-            )
-            for step, closer, propagates, logged in (
-                (_Step.CLOCK, _Closer.CLOSES, "returned", [(_SUPERVISION, "CancelledError")]),
-                (_Step.DROP_REPORT, _Closer.READS, "CancelledError", []),
-                (_Step.DISCONNECT_REPORT, _Closer.CLOSES, "CancelledError", []),
-                (_Step.RECORD_END, _Closer.READS, "CancelledError", []),
-            )
-        ),
-        pytest.param(
-            _Ending(
-                _Cancellation.NONE,
-                _Closer.CLOSES,
-                False,
-                frozenset({_Step.CLOCK, _Step.RECORD_END}),
-                frozenset({_Step.CLOCK}),
-            ),
-            "_EndNotRecorded",
-            [(_SUPERVISION, "CancelledError")],
-            id="a-stray-cancellation-of-the-clock-is-logged-behind-a-failed-record-end",
-        ),
     ],
 )
 @in_loop
@@ -1202,11 +1176,11 @@ async def test_which_failure_of_a_run_s_ending_propagates_and_which_are_logged(
 ):
     caplog.set_level(logging.DEBUG)
     async with _watched_loop() as unretrieved:
-        closer, delivered, run_id = await _end_a_run(ending)
+        closer, delivered, drive = await _end_a_run(ending)
 
     assert _propagated(closer, delivered=delivered) == propagates
     assert [(event, kind) for event, kind, _raiser in _failure_lines(caplog)] == [
-        (event.format(run_id), kind) for event, kind in logged
+        (event.format(drive.run_id), kind) for event, kind in logged
     ]
     assert unretrieved == []
     assert not [step for step in _Step if step.canary in caplog.text]
@@ -1217,16 +1191,77 @@ async def test_a_closer_cancelled_while_the_record_ends_is_cancelled_and_the_fai
     caplog,
 ):
     async with _watched_loop() as unretrieved:
-        closer, delivered, run_id = await _end_a_run(
+        closer, delivered, drive = await _end_a_run(
             _Ending(_Cancellation.NONE, _Closer.CLOSES, False, frozenset({_Step.RECORD_END})),
             cancel_at_the_record_end=True,
         )
 
     assert _propagated(closer, delivered=delivered) == "cancelled"
     assert [(event, kind) for event, kind, _raiser in _failure_lines(caplog)] == [
-        (_CLEANUP.format(run_id), "_EndNotRecorded")
+        (_CLEANUP.format(drive.run_id), "_EndNotRecorded")
     ]
     assert unretrieved == []
+
+
+async def _observed_ending(
+    ending: _Ending, caplog: pytest.LogCaptureFixture
+) -> tuple[str, list[tuple[str, str]], list[str], tuple[RunState, ClientLoss | None] | None]:
+    """What the client and the store see of a run ended as ``ending`` says, and what is logged."""
+    caplog.clear()
+    closer, delivered, drive = await _end_a_run(ending)
+    status = drive.status()
+    return (
+        _propagated(closer, delivered=delivered),
+        [
+            (event.replace(str(drive.run_id), "{}"), kind)
+            for event, kind, _raiser in _failure_lines(caplog)
+        ],
+        drive.types,
+        None if status is None else (status.state, status.client_lost),
+    )
+
+
+@pytest.mark.parametrize(
+    ("stray", "ending"),
+    [
+        pytest.param(
+            step,
+            _Ending(_Cancellation.NONE, closer, False, frozenset({step, *also})),
+            id="-".join([step.name.lower(), *(failing.name.lower() for failing in also)]),
+        )
+        for step, closer, also in (
+            (_Step.CLOCK, _Closer.CLOSES, ()),
+            (_Step.CLOCK, _Closer.CLOSES, (_Step.RECORD_END,)),
+            (_Step.DROP_REPORT, _Closer.READS, ()),
+            (_Step.DISCONNECT_REPORT, _Closer.CLOSES, ()),
+            (_Step.RECORD_END, _Closer.READS, ()),
+        )
+    ],
+)
+@in_loop
+async def test_a_stray_cancellation_of_a_step_ends_the_run_as_that_step_s_own_failure(
+    caplog, stray, ending
+):
+    """A ``CancelledError`` that nobody requested is the step's failure (rule 14).
+
+    The run ends exactly as it does when the step raises its own failure:
+    the same frames, the same record, the same propagated and logged
+    failures, with the cancellation in the place of the step's own class.
+    """
+    caplog.set_level(logging.DEBUG)
+    async with _watched_loop() as unretrieved:
+        own = await _observed_ending(ending, caplog)
+        cancelled = await _observed_ending(replace(ending, stray=frozenset({stray})), caplog)
+
+    def as_own(kind: str) -> str:
+        return stray.failure.__name__ if kind == "CancelledError" else kind
+
+    propagated, logged, frames, record = cancelled
+    assert (as_own(propagated), [(event, as_own(kind)) for event, kind in logged]) == own[:2]
+    assert (frames, record) == own[2:]
+    assert "CancelledError" in [propagated, *(kind for _event, kind in logged)]
+    assert unretrieved == []
+    assert not [step for step in _Step if step.canary in caplog.text]
 
 
 @pytest.mark.parametrize("spins", range(8))

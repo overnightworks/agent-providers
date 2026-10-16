@@ -253,8 +253,8 @@ def test_stream_yields_ordered_events(monkeypatch) -> None:
 
     lines = [
         _assistant_line("Hi, "),
-        _tool_use_line("mcp__songmaker__get_song", "tu-1", {"song_id": "s1"}),
-        _tool_result_line("tu-1", "song data"),
+        _tool_use_line("mcp__notes__get_note", "tu-1", {"note_id": "s1"}),
+        _tool_result_line("tu-1", "note data"),
         _assistant_line("done."),
         _result_line("Hi, done."),
     ]
@@ -504,7 +504,7 @@ def test_stream_consumes_oversized_tool_result_line(monkeypatch) -> None:
 
     huge_payload = "x" * (256 * 1024)
     lines = [
-        _tool_use_line("mcp__songmaker__get_song", "tu-1", {"song_id": "s1"}),
+        _tool_use_line("mcp__notes__get_note", "tu-1", {"note_id": "s1"}),
         _tool_result_line("tu-1", huge_payload),
         _result_line("done"),
     ]

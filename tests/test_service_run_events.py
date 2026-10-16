@@ -9,10 +9,20 @@ written, never reaches the wire. S7: a route with no runner fails as
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import uuid
 
 import pytest
+from provider_test_support import (
+    A_CANARY,
+    a_call_to_an_undeclared_tool_carrying,
+    drive_cowriter_turn,
+    formatted_log_text,
+    grok_cli_outcome,
+    grok_cli_runner,
+    grok_tool_round_lines,
+)
 from service_support import (
     ScriptedRunner,
     decoded_events,
@@ -32,6 +42,7 @@ from agent_client.wire import (
     Succeeded,
     ToolCall,
 )
+from agent_providers.errors import TextToolCallRejectedError
 from agent_providers.events import (
     AssistantTextEvent,
     FinalEvent,
@@ -39,6 +50,8 @@ from agent_providers.events import (
     ToolCallEvent,
     ToolResultEvent,
 )
+from agent_providers.grok import transport as grok_cli_adapter
+from agent_service import run_events
 from agent_service.config import RunConfig
 from agent_service.identity import Principal
 from agent_service.routing import Cli
@@ -226,3 +239,31 @@ def test_a_route_without_a_runner_fails_as_provider_unavailable_never_succeeds()
 
     assert [event.type for event in decoded_events(raw)] == ["run_started", "failed"]
     _failed_with(raw, FailureCode.PROVIDER_UNAVAILABLE)
+
+
+def test_a_refused_tool_call_reaches_neither_the_frames_nor_the_service_log(monkeypatch, caplog):
+    monkeypatch.setattr(
+        grok_cli_adapter,
+        "run_cli_bounded",
+        grok_cli_runner(
+            grok_tool_round_lines(a_call_to_an_undeclared_tool_carrying()),
+            grok_cli_outcome(),
+            [],
+        ),
+    )
+    refused = drive_cowriter_turn("grok").error
+    assert isinstance(refused, TextToolCallRejectedError)
+    caplog.set_level(logging.DEBUG)
+
+    raw = _scripted(refused)
+
+    assert [event.type for event in decoded_events(raw)] == ["run_started", "failed"]
+    terminal = _terminal(raw)
+    assert isinstance(terminal, Failed)
+    assert (terminal.code, terminal.message) == (
+        FailureCode.PROVIDER_ERROR, "The provider failed during the run.",
+    )
+    assert A_CANARY.encode() not in raw
+    service_records = [record for record in caplog.records if record.name == run_events.__name__]
+    assert [record.levelno for record in service_records] == [logging.ERROR]
+    assert A_CANARY not in formatted_log_text(service_records)

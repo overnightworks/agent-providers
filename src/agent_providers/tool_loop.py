@@ -20,6 +20,10 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from agent_providers.errors import (
+    TextToolCallRejectedError,
+    ToolProtocolRejectionCode,
+)
 from agent_providers.events import (
     AssistantTextEvent,
     FinalEvent,
@@ -27,6 +31,7 @@ from agent_providers.events import (
     ToolCallEvent,
     ToolResultEvent,
 )
+from agent_providers.text_tool_protocol import TextToolRejection
 
 log = logging.getLogger(__name__)
 
@@ -193,8 +198,33 @@ async def stream_tool_loop(
             ):
                 yield event
             next_message = ToolResultBatch(tuple(results))
+    except TextToolCallRejectedError as rejected:
+        _log_rejected_call(rejected.rejection, provider, route, round_index, correlation_id)
+        raise
     finally:
         await transport.aclose()
+
+
+def _log_rejected_call(
+    rejection: TextToolRejection,
+    provider: str,
+    route: str,
+    round_index: int,
+    correlation_id: str | None,
+) -> None:
+    """Write the one line a refused call earns: its place, never its text."""
+    log.warning(
+        "Tool call rejected provider=%s route=%s round=%s correlation_id=%s "
+        "code=%s rule=%s offset=%s length=%s",
+        provider,
+        route,
+        round_index,
+        correlation_id,
+        ToolProtocolRejectionCode.TEXT_TOOL_RESPONSE_INVALID,
+        rejection.rule,
+        rejection.offset,
+        rejection.length,
+    )
 
 
 async def _stream_response_events(

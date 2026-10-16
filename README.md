@@ -197,6 +197,15 @@ The other host obligations arrive as arguments where they are needed:
   launched and which tools it exposes.
 - `ImagePolicy` (`agent_providers.images`) — the constraints an image turn is
   held to.
+- `TextToolCallRejectedError` (`agent_providers.errors`) — a
+  `ProviderUnavailableError` a Grok or Codex turn raises when the model's text tool
+  call breaks the protocol. Its `rejection` names the rule and where the call
+  broke (`offset`, `length`), plus a piece of the refused text of at most 1,024
+  code points, masked as a `SecretStr` (`rejection.excerpt.get_secret_value()`).
+  `SecretStr` masks display and pydantic's JSON, but not pickle, copy or
+  `vars()`, and traceback locals can hold the whole response. The library logs
+  the rule and the numbers, never the text, and keeps no copy; whether the text
+  is written anywhere is the host's decision.
 - The `StreamEvent` union (`agent_providers.events`) — what a turn emits
   in-process, which a host calling the core consumes. The agent service's wire
   is `agent_client.wire`, not this union.

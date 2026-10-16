@@ -31,6 +31,7 @@ from agent_client.wire import (
 INTERRUPTED_MESSAGE: Final = "The run was cut short after a side-effecting tool call."
 _SHOWN_VERSION_LENGTH: Final = 20
 _SHOWN_PROBLEM_LENGTH: Final = 200
+_SHOWN_PROBLEM_COUNT: Final = 5
 
 _RUN_EVENT: Final[TypeAdapter[RunEvent]] = TypeAdapter(RunEvent)
 _PROTOCOL_VERSION: Final[TypeAdapter[ProtocolVersion]] = TypeAdapter(ProtocolVersion)
@@ -101,7 +102,12 @@ def _violation_from(error: ValidationError) -> StreamViolation:
         if any(problem["type"] in _UNKNOWN_TAG_ERRORS for problem in problems)
         else ViolationKind.SCHEMA_MISMATCH
     )
-    detail = "; ".join(_located(problem["loc"], problem["msg"]) for problem in problems)
+    shown = [
+        _located(problem["loc"], problem["msg"]) for problem in problems[:_SHOWN_PROBLEM_COUNT]
+    ]
+    if len(problems) > _SHOWN_PROBLEM_COUNT:
+        shown.append(f"… and {len(problems) - _SHOWN_PROBLEM_COUNT} more")
+    detail = "; ".join(shown)
     return StreamViolation(kind=kind, detail=detail)
 
 

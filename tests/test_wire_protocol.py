@@ -551,3 +551,18 @@ def test_only_a_running_run_can_be_cut_short(events: list[RunEvent]) -> None:
 
     with pytest.raises(RuntimeError):
         stream.cancellation_terminal()
+
+
+def test_a_run_request_with_an_empty_purpose_is_refused() -> None:
+    with pytest.raises(ValidationError):
+        RunRequest.model_validate({**REQUEST, "purpose": ""})
+
+
+def test_a_violation_detail_shows_the_first_problems_and_counts_the_rest() -> None:
+    raw = {**wire("heartbeat", 1), **{f"field{index}": 1 for index in range(1_000)}}
+
+    violation = parse_event(raw)
+
+    assert isinstance(violation, StreamViolation)
+    assert violation.detail.endswith("… and 995 more")
+    assert len(violation.detail) < 1_000

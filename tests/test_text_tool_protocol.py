@@ -282,9 +282,6 @@ def test_stream_parser_forwards_ordinary_text_and_keeps_only_whitespace_until_fi
         "<songmaker_tool_call>\n{\"name\":\"list_songs\",\"arguments\":{}",
         _call("not json"),
         _call("[]"),
-        _call('{"name":"list_songs","arguments":{"limit":NaN}}'),
-        _call('{"name":"list_songs","arguments":{"limit":Infinity}}'),
-        _call('{"name":"list_songs","arguments":{"limit":-Infinity}}'),
         "<songmaker_tool_call>\n"
         '{"name":"list_songs","arguments":{}}</songmaker_tool_call>\nDone!',
         "<songmaker_tool_call>\n"
@@ -295,6 +292,38 @@ def test_stream_parser_forwards_ordinary_text_and_keeps_only_whitespace_until_fi
 def test_malformed_call_shapes_are_named_protocol_errors(response):
     with pytest.raises(TextToolProtocolError):
         parse_text_tool_response(COWRITER_TOOL_CATALOG, response)
+
+
+A_CATALOG_WITH_A_NUMBER = ToolCatalog(
+    tools=(
+        ToolDeclaration(
+            name="set_tempo",
+            description="Set the tempo.",
+            parameters={
+                "type": "object",
+                "properties": {"bpm": {"type": "number"}},
+                "required": ["bpm"],
+                "additionalProperties": False,
+            },
+        ),
+    ),
+)
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_a_number_argument_that_json_has_no_word_for_is_refused(constant):
+    response = _call(f'{{"name":"set_tempo","arguments":{{"bpm":{constant}}}}}')
+
+    with pytest.raises(TextToolProtocolError):
+        parse_text_tool_response(A_CATALOG_WITH_A_NUMBER, response)
+
+
+def test_a_finite_number_argument_is_accepted():
+    response = _call('{"name":"set_tempo","arguments":{"bpm":96.5}}')
+
+    assert parse_text_tool_response(A_CATALOG_WITH_A_NUMBER, response) == TextToolCall(
+        "set_tempo", {"bpm": 96.5}
+    )
 
 
 @pytest.mark.parametrize(

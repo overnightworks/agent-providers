@@ -66,6 +66,16 @@ def _json_integer(value: object) -> object:
 ProtocolVersion = Annotated[Literal[1], BeforeValidator(_json_integer)]
 """The one decider of whether a ``v`` is the version this package speaks."""
 
+
+def refuse_non_json_constant(constant: str) -> object:
+    """The one decider of NaN and Infinity in text being parsed: JSON has no word for them.
+
+    Passed as ``parse_constant`` by every reader of untrusted JSON text: the SSE
+    frame decoder, the text tool-call protocol and the service's request body.
+    """
+    raise ValueError(f"{constant} is not a JSON value")
+
+
 def _refuse_non_json_object(value: dict[Any, Any]) -> dict[str, Any]:
     # The depth limit means depth never stops a built input from encoding:
     # pydantic's serializer refuses a value nested about 255 levels deep.

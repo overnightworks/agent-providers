@@ -20,7 +20,7 @@ from enum import Enum, auto
 from typing import Any, Final
 
 from agent_client.run_stream import RunStream, StreamViolation, ViolationKind, parse_event
-from agent_client.wire import MAX_EVENT_BYTES, RunEvent, is_run_event
+from agent_client.wire import MAX_EVENT_BYTES, RunEvent, is_run_event, refuse_non_json_constant
 
 _BYTE_ORDER_MARK: Final = b"\xef\xbb\xbf"
 _LINE_END: Final = re.compile(rb"[\r\n]")
@@ -212,11 +212,6 @@ def _json_object(data: str) -> dict[str, Any] | StreamViolation:
     if not isinstance(value, dict):
         return StreamViolation(kind=ViolationKind.INVALID_JSON, detail="data is not a JSON object")
     return value
-
-
-def refuse_non_json_constant(constant: str) -> object:
-    """The one decider of NaN and Infinity: JSON has no word for them, so no reader takes them."""
-    raise ValueError(f"{constant} is not a JSON value")
 
 
 def _malformed(detail: str) -> StreamViolation:

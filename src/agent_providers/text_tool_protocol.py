@@ -14,8 +14,8 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-from agent_client.sse import refuse_non_json_constant
 from agent_client.tools import ToolDeclaration
+from agent_client.wire import refuse_non_json_constant
 from agent_providers.tools import ToolCatalog, ToolProtocolMarkup
 
 _CALL_EXAMPLE = '{"name":"tool_name","arguments":{}}'

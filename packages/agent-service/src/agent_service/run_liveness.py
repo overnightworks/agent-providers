@@ -221,6 +221,21 @@ class FailedPart(Enum):
     CLEANUP = "cleanup"
 
 
+class RunStepCancelled(Exception):
+    """A step of a run's ending was cancelled although no cancellation was requested.
+
+    It stands in for that step's ``CancelledError``, because an ASGI server
+    below spec 2.4 swallows a ``CancelledError`` the app raises, and the
+    failure would vanish. It keeps the cancellation's stack positions, never
+    its message or chain.
+    """
+
+    def __init__(self, part: FailedPart, cancelled: asyncio.CancelledError) -> None:
+        super().__init__(f"A step of the run's {part.value} was cancelled without a request")
+        self.part = part
+        self.__traceback__ = cancelled.__traceback__
+
+
 @dataclass(frozen=True)
 class _Failure:
     part: FailedPart
@@ -251,11 +266,13 @@ def _exit_of(
     one is that step's failure, recorded among ``failures``.
 
     1. A delivered cancellation always wins: one caught while the run was
-       torn down is raised, and one that arrived in the body
-       (``body_failure``) is left to propagate. So is the body's outcome
-       while a cancellation request is on the task: that covers a close
-       (``GeneratorExit``) by a closer whose cancellation is on its way out.
-    2. Otherwise the first cleanup failure is raised.
+       torn down is raised, and the body's outcome is left to propagate
+       while a cancellation request is on the task. That covers a
+       cancellation that arrived in the body, and a close (``GeneratorExit``)
+       by a closer whose cancellation is on its way out.
+    2. Otherwise the first cleanup failure is raised. A ``CancelledError``
+       of the body without a request is the body's outcome, so a cleanup
+       failure is raised over it too.
     3. Otherwise the first supervision failure is raised, unless the body
        raised: then the body's outcome stands.
     """
@@ -265,7 +282,7 @@ def _exit_of(
             distinct.append(failure)
     if cancellation is not None:
         return _Exit(cancellation, tuple(distinct))
-    if cancel_requested or isinstance(body_failure, asyncio.CancelledError):
+    if cancel_requested:
         return _Exit(None, tuple(distinct))
     cleanup = [failure for failure in distinct if failure.part is FailedPart.CLEANUP]
     if cleanup:
@@ -304,8 +321,15 @@ class RunFailures:
                 raise
             self.add(part, cancelled)
 
-    def add(self, part: FailedPart, failure: BaseException) -> None:
+    def add(self, part: FailedPart, failure: BaseException) -> BaseException:
+        """Record ``failure`` under ``part``, a stray cancellation as ``RunStepCancelled``.
+
+        Returns the failure as recorded, for a step that raises it on.
+        """
+        if isinstance(failure, asyncio.CancelledError):
+            failure = RunStepCancelled(part, failure)
         self._failures.append(_Failure(part, failure))
+        return failure
 
     @property
     def met_any(self) -> bool:
@@ -357,14 +381,14 @@ def _cancel_requested() -> bool:
     return task is not None and task.cancelling() > 0
 
 
-def _failure_of(task: asyncio.Task[object], *, shut_down: bool) -> BaseException | None:
+def _failure_of(task: asyncio.Task[object]) -> BaseException | None:
     """The finished task's failure, retrieved so that the loop never reports it as forgotten.
 
-    A task the service cancelled (``shut_down``) and that ended cancelled was
-    shut down, which is no failure. A task that ended cancelled although the
-    service never cancelled it failed with that cancellation.
+    A task that ended cancelled with a cancellation request on it was shut
+    down, which is no failure. One that ended cancelled with no request on
+    it failed with that cancellation, whoever called ``cancel()`` before.
     """
-    if task.cancelled() and shut_down:
+    if task.cancelled() and task.cancelling() > 0:
         return None
     try:
         return task.exception()
@@ -376,16 +400,13 @@ async def _stopped(
     tasks: list[asyncio.Task[object]],
 ) -> tuple[asyncio.CancelledError | None, list[BaseException]]:
     """Cancel ``tasks`` and wait until each is done; the waiter's cancellation, their failures."""
-    shut_down = [task.cancel() for task in tasks]
+    for task in tasks:
+        task.cancel()
     interrupted: asyncio.CancelledError | None = None
     for task in tasks:
         waiter_cancelled = await _finished(task)
         interrupted = interrupted or waiter_cancelled
-    failures = [
-        failure
-        for task, cancelled in zip(tasks, shut_down, strict=True)
-        if (failure := _failure_of(task, shut_down=cancelled)) is not None
-    ]
+    failures = [failure for task in tasks if (failure := _failure_of(task)) is not None]
     return interrupted, failures
 
 
@@ -449,12 +470,12 @@ class SupervisedRun:
         exc_traceback: TracebackType | None,
     ) -> None:
         """Leave once the runner is closed, raising or logging what ``_exit_of`` decides."""
-        shut_down = self._supervisor.cancel()
+        self._supervisor.cancel()
         waited = await _finished(self._supervisor)
         reaped = await self._reaped()
-        if (failure := _failure_of(self._supervisor, shut_down=shut_down)) is not None:
+        if (failure := _failure_of(self._supervisor)) is not None:
             self._failures.add(FailedPart.SUPERVISION, failure)
-        if (failure := _failure_of(self._reaping(), shut_down=False)) is not None:
+        if (failure := _failure_of(self._reaping())) is not None:
             self._failures.add(FailedPart.CLEANUP, failure)
         self._failures.leave(cancellation=waited or reaped, body_failure=exc)
 
@@ -637,9 +658,8 @@ class SupervisedRun:
         try:
             await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         finally:
-            interrupted, failures = await _stopped(tasks)
-            for failure in failures:
-                self._failures.add(FailedPart.SUPERVISION, failure)
+            interrupted, stopped = await _stopped(tasks)
+            failures = [self._failures.add(FailedPart.SUPERVISION, failure) for failure in stopped]
         if interrupted is not None:
             raise interrupted
         if failures:
@@ -662,9 +682,9 @@ class SupervisedRun:
 
     async def _reap(self) -> None:
         self._stopping = True
-        shut_down = self._pump.cancel()
+        self._pump.cancel()
         await asyncio.wait({self._pump})
-        closing_failure = _failure_of(self._pump, shut_down=shut_down)
+        closing_failure = _failure_of(self._pump)
         if closing_failure is not None:
             log_failure(log, f"Closing the runner of run {self._run_id} failed", closing_failure)
         self._failures.attempt(FailedPart.CLEANUP, self._wire.run_over)

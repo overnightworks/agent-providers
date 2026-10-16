@@ -70,7 +70,7 @@ from agent_service.app import create_app
 from agent_service.config import RunConfig
 from agent_service.identity import Principal
 from agent_service.run_events import run_frames
-from agent_service.run_liveness import LoopClock, log_failure
+from agent_service.run_liveness import LoopClock, RunStepCancelled, log_failure
 from agent_service.run_records import RunRecorder, RunRecords
 from agent_service.runners import Runners
 
@@ -1246,7 +1246,7 @@ async def test_a_stray_cancellation_of_a_step_ends_the_run_as_that_step_s_own_fa
 
     The run ends exactly as it does when the step raises its own failure:
     the same frames, the same record, the same propagated and logged
-    failures, with the cancellation in the place of the step's own class.
+    failures, with ``RunStepCancelled`` in the place of the step's own class.
     """
     caplog.set_level(logging.DEBUG)
     async with _watched_loop() as unretrieved:
@@ -1254,13 +1254,13 @@ async def test_a_stray_cancellation_of_a_step_ends_the_run_as_that_step_s_own_fa
         cancelled = await _observed_ending(replace(ending, stray=frozenset({stray})), caplog)
 
     def as_own(kind: str) -> str:
-        return stray.failure.__name__ if kind == "CancelledError" else kind
+        return stray.failure.__name__ if kind == RunStepCancelled.__name__ else kind
 
     propagated, logged, frames, record = cancelled
     logged_as_own = [(event, as_own(kind)) for event, kind in logged]
     renamed = (as_own(propagated), logged_as_own, frames, record)
     assert renamed == own
-    assert [propagated, *(kind for _event, kind in logged)].count("CancelledError") == 1
+    assert [propagated, *(kind for _event, kind in logged)].count(RunStepCancelled.__name__) == 1
     assert unretrieved == []
     assert not [step for step in _Step if step.canary in caplog.text]
 

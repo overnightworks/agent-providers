@@ -1,8 +1,0 @@
-claim_id = "f38fccef44d84e9e85d768c87ce53b5e"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "86bb924c8cdbadb5cac1a12a16f52c83d3192a34"
-branch = "claude/issue-91-docstrings-log-lines-outside-claude"
-scope = ["README.md", "src/agent_providers/__init__.py", "src/agent_providers/catalog.py", "src/agent_providers/codex/image.py", "src/agent_providers/codex/protocol.py", "src/agent_providers/codex/transport.py", "src/agent_providers/config.py", "src/agent_providers/constants.py", "src/agent_providers/dispatch.py", "src/agent_providers/errors.py", "src/agent_providers/events.py", "src/agent_providers/grok/transport.py", "src/agent_providers/images.py", "src/agent_providers/openai_adapter.py", "src/agent_providers/text_tool_protocol.py"]
-opened_commit = "dce0da4231c50d37381aabd575e73dbdc3668ed9"
-whole_reason = "One prose and log-line pass over fourteen modules; each module's edit is a few lines and splitting would multiply the lane overhead."

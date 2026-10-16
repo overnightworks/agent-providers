@@ -578,8 +578,15 @@ Rules:
    however often a waiter is cancelled, and before any wait for frame
    delivery. `_supervise`'s finalizer guarantees that the slot closes; it is
    not the completion notification. `_stop` re-raises a failed cleanup, so a
-   recording defect surfaces as a supervision failure. With no runner, the run
-   is recorded complete before its first frame is handed out.
+   recording defect surfaces as a supervision failure. One decider
+   (`run_liveness._ending`) says which failure of a run's ending propagates: a
+   cancellation always wins, whether it was caught during teardown or arrived
+   in the body; then a cleanup failure; then a supervision failure, unless the
+   body raised. Every other failure is logged once. The service logs every
+   failure, a runner's and a failed close included, by its class and its stack
+   positions (`file:line:function`), never by its message, notes or chained
+   exceptions. With no runner, the run is recorded complete before its first
+   frame is handed out.
 9. The ending is the accepted terminal; `cancellation_terminal()` is used only
    when there is none. `run_over()` passes no fallback when a terminal was
    accepted. The fallback's state and code are all that is read: it is never

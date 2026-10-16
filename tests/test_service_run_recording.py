@@ -15,6 +15,7 @@ import enum
 import gc
 import logging
 import math
+import re
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -66,7 +67,7 @@ from agent_service.app import create_app
 from agent_service.config import RunConfig
 from agent_service.identity import Principal
 from agent_service.run_events import run_frames
-from agent_service.run_liveness import LoopClock
+from agent_service.run_liveness import LoopClock, log_failure
 from agent_service.run_records import RunRecorder, RunRecords
 from agent_service.runners import Runners
 
@@ -91,6 +92,29 @@ def _call(tool_use_id: str, name: str = "read_song") -> ToolCallEvent:
 def _release(runner: GatedRunner, script: tuple[StreamEvent | Exception | None, ...]) -> None:
     for item in script:
         runner.exhaust() if item is EXHAUSTED else runner.release(item)
+
+
+_FAILURE_LINE = re.compile(r"(?P<event>.+?): (?P<kind>\w+) at (?P<positions>.+)")
+_POSITION = re.compile(r"[\w.]+\.py:\d+:[\w<>]+")
+
+
+def _failure_lines(caplog: pytest.LogCaptureFixture) -> list[tuple[str, str, str]]:
+    """Each ERROR line as its event, its class and the function that raised.
+
+    Every line must be the event, the class and well-formed stack positions
+    alone, with nothing attached to the record.
+    """
+    lines = []
+    for record in caplog.records:
+        if record.levelno < logging.ERROR:
+            continue
+        assert record.exc_info is None
+        line = _FAILURE_LINE.fullmatch(record.getMessage())
+        assert line is not None, record.getMessage()
+        positions = line["positions"].split(", ")
+        assert all(_POSITION.fullmatch(position) for position in positions), positions
+        lines.append((line["event"], line["kind"], positions[-1].rsplit(":", 1)[1]))
+    return lines
 
 
 def _assert_recorded(
@@ -456,16 +480,55 @@ async def test_a_client_leaving_during_the_held_close_of_a_drop_stays_dropped():
 
 @in_loop
 async def test_a_close_that_raises_during_a_drop_still_records_the_ending_and_logs_once(caplog):
+    caplog.set_level(logging.DEBUG)
     runner = GatedRunner()
-    runner.close_error = OSError("the process would not die")
+    runner.close_error = OSError(RECORDING_FAILURE_CANARY)
     async with driven(runner, read=False) as drive:
         drive.took(await anext(drive.frames))
         await drive.run_to(45)
         await drive.frames.aclose()
 
     _assert_recorded(drive.status(), RunState.CANCELLED, events=2, at=45, lost=ClientLoss.DROPPED)
-    errors = [record for record in caplog.records if record.levelno >= logging.ERROR]
-    assert [str(drive.run_id) in error.getMessage() for error in errors] == [True]
+    assert _failure_lines(caplog) == [
+        (f"Closing the runner of run {drive.run_id} failed", "OSError", "_closed")
+    ]
+    assert RECORDING_FAILURE_CANARY not in caplog.text
+
+
+@in_loop
+async def test_a_runner_that_raises_is_logged_by_its_class_and_stack_never_by_its_text(caplog):
+    caplog.set_level(logging.DEBUG)
+    async with driven() as drive:
+        drive.runner.release(RuntimeError(RECORDING_FAILURE_CANARY))
+        await drive.run_to(ALL_THE_WAY_TO_THE_MAXIMUM)
+
+    assert drive.status().failure_code is FailureCode.PROVIDER_ERROR
+    assert _failure_lines(caplog) == [
+        (f"The runner of run {drive.run_id} failed", "RuntimeError", "run")
+    ]
+    assert RECORDING_FAILURE_CANARY not in caplog.text
+
+
+def test_a_failure_is_logged_by_its_class_and_stack_never_by_its_text_notes_or_chain(caplog):
+    caplog.set_level(logging.DEBUG)
+    try:
+        try:
+            raise ValueError("canary-context")
+        except ValueError:
+            raise RuntimeError("canary-message") from KeyError("canary-cause")
+    except RuntimeError as failure:
+        failure.add_note("canary-note")
+        log_failure(logging.getLogger(__name__), "The cleanup of run 7 failed", failure)
+
+    assert _failure_lines(caplog) == [
+        (
+            "The cleanup of run 7 failed",
+            "RuntimeError",
+            "test_a_failure_is_logged_by_its_class_and_stack_never_by_its_text_notes_or_chain",
+        )
+    ]
+    assert "test_service_run_recording.py:" in caplog.text
+    assert "canary" not in caplog.text
 
 
 class _WatchedRecords(RunRecords):
@@ -778,8 +841,33 @@ class _RecordsWhoseEndingFails(RunRecords):
         )
 
 
+class _LossNotRecorded(Exception):
+    pass
+
+
+class _RecorderWhoseDropFails:
+    def __init__(self, recorder: RunRecorder) -> None:
+        self._recorder = recorder
+
+    def accepted(self, event) -> None:
+        self._recorder.accepted(event)
+
+    def lost(self, reason: ClientLoss) -> None:
+        if reason is ClientLoss.DROPPED:
+            raise _LossNotRecorded(RECORDING_FAILURE_CANARY)
+        self._recorder.lost(reason)
+
+    def over(self, fallback=None) -> None:
+        self._recorder.over(fallback)
+
+
+class _RecordsWhoseDropFails(RunRecords):
+    def begin(self, started, app, principal):
+        return _RecorderWhoseDropFails(super().begin(started, app, principal))
+
+
 @in_loop
-async def test_a_recording_defect_surfaces_as_a_supervision_failure():
+async def test_a_recording_defect_surfaces_as_a_supervision_failure(caplog):
     async with driven(records=_RecordsWhoseEndingFails(), read=False) as drive:
         drive.took(await anext(drive.frames))
         drive.runner.release(FINAL)
@@ -787,37 +875,67 @@ async def test_a_recording_defect_surfaces_as_a_supervision_failure():
         with pytest.raises(RuntimeError, match=RECORDING_FAILURE_CANARY):
             await anext(drive.frames)
 
+    assert _failure_lines(caplog) == []
+
+
+class _Closer(enum.Enum):
+    """How the client ends its run: it closes the stream, or it waits for the next frame."""
+
+    CLOSES = enum.auto()
+    READS = enum.auto()
+
 
 class _CancelsTheCloser(enum.Enum):
     NEVER = enum.auto()
-    WHILE_THE_CLOSE_IS_HELD = enum.auto()
+    ONCE_IT_WAITS = enum.auto()
     WHILE_THE_RECORD_ENDS = enum.auto()
 
 
+class _RecordFails(enum.Enum):
+    NEVER = enum.auto()
+    AT_ITS_END = enum.auto()
+    AT_THE_DROP = enum.auto()
+
+
+def _records_that_fail(fails: _RecordFails, before_failing: Callable[[], None]) -> RunRecords:
+    match fails:
+        case _RecordFails.NEVER:
+            return RunRecords()
+        case _RecordFails.AT_ITS_END:
+            return _RecordsWhoseEndingFails(before_failing)
+        case _RecordFails.AT_THE_DROP:
+            return _RecordsWhoseDropFails()
+
+
 async def _close_a_run(
-    clock: StepClock, cancels: _CancelsTheCloser, *, cleanup_fails: bool
+    clock: StepClock,
+    closer: _Closer,
+    cancels: _CancelsTheCloser,
+    *,
+    holds_close: bool,
+    record_fails: _RecordFails,
 ) -> tuple[str, uuid.UUID]:
-    """Close a run whose close is held (or whose record ending fails); how its closer ended."""
-    closers: list[asyncio.Task[None]] = []
+    """End a run the way a row says; how its closer ended.
+
+    ``ONCE_IT_WAITS`` cancels the closer once it waits: on the held close when
+    it closes, on the next frame when it reads.
+    """
+    closers: list[asyncio.Task[object]] = []
     cancels_while_the_record_ends = cancels is _CancelsTheCloser.WHILE_THE_RECORD_ENDS
-    records = (
-        _RecordsWhoseEndingFails(
-            lambda: closers[0].cancel() if cancels_while_the_record_ends else None
-        )
-        if cleanup_fails
-        else None
+    records = _records_that_fail(
+        record_fails, lambda: closers[0].cancel() if cancels_while_the_record_ends else None
     )
     runner = GatedRunner()
-    holds_close = not cancels_while_the_record_ends
     if holds_close:
         runner.hold_close()
     async with driven(runner, clock=clock, records=records, read=False) as drive:
         drive.took(await anext(drive.frames))
         if holds_close:
             await drive.clock.parked()
-        closers.append(asyncio.create_task(drive.frames.aclose()))
+        ending = drive.frames.aclose() if closer is _Closer.CLOSES else anext(drive.frames)
+        closers.append(asyncio.create_task(ending))
         await drive.clock.parked()
-        if cancels is _CancelsTheCloser.WHILE_THE_CLOSE_IS_HELD:
+        if cancels is _CancelsTheCloser.ONCE_IT_WAITS:
             closers[0].cancel()
             await drive.clock.parked()
         runner.release_close()
@@ -825,53 +943,105 @@ async def _close_a_run(
     return _outcome_of(closers[0]), drive.run_id
 
 
-def _outcome_of(task: asyncio.Task[None]) -> str:
+def _outcome_of(task: asyncio.Task[object]) -> str:
     if task.cancelled():
         return "cancelled"
     failure = task.exception()
     return type(failure).__name__ if failure else "returned"
 
 
+_CLEANUP_FAILED = ("The cleanup of run {} failed", "RuntimeError", "over")
+_SUPERVISION_FAILED = ("The supervision of run {} failed", "RuntimeError", "wait_until")
+
+
 @pytest.mark.parametrize(
-    ("clock", "cancels", "cleanup_fails", "propagates", "logged"),
+    ("clock", "closer", "cancels", "holds_close", "record_fails", "propagates", "logged"),
     [
         pytest.param(
             StepClock,
+            _Closer.CLOSES,
             _CancelsTheCloser.NEVER,
             True,
+            _RecordFails.AT_ITS_END,
             "RuntimeError",
             [],
             id="cleanup-failure-propagates",
         ),
         pytest.param(
             StepClock,
+            _Closer.CLOSES,
             _CancelsTheCloser.WHILE_THE_RECORD_ENDS,
-            True,
+            False,
+            _RecordFails.AT_ITS_END,
             "cancelled",
-            ["The cleanup of run {} failed: RuntimeError"],
+            [_CLEANUP_FAILED],
             id="cancelled-while-the-record-ends",
         ),
         pytest.param(
             StepClock,
-            _CancelsTheCloser.WHILE_THE_CLOSE_IS_HELD,
+            _Closer.CLOSES,
+            _CancelsTheCloser.ONCE_IT_WAITS,
             True,
+            _RecordFails.AT_ITS_END,
             "cancelled",
-            ["The cleanup of run {} failed: RuntimeError"],
+            [_CLEANUP_FAILED],
             id="cancelled-while-the-close-is-held-and-the-cleanup-fails",
         ),
         pytest.param(
             BrokenClock,
-            _CancelsTheCloser.WHILE_THE_CLOSE_IS_HELD,
-            False,
+            _Closer.CLOSES,
+            _CancelsTheCloser.ONCE_IT_WAITS,
+            True,
+            _RecordFails.NEVER,
             "cancelled",
-            ["The supervision of run {} failed: RuntimeError"],
+            [_SUPERVISION_FAILED],
             id="cancelled-after-the-supervision-failed",
+        ),
+        pytest.param(
+            BrokenClock,
+            _Closer.CLOSES,
+            _CancelsTheCloser.NEVER,
+            True,
+            _RecordFails.AT_ITS_END,
+            "RuntimeError",
+            [_SUPERVISION_FAILED],
+            id="cleanup-failure-outranks-the-supervision-failure",
+        ),
+        pytest.param(
+            StepClock,
+            _Closer.READS,
+            _CancelsTheCloser.ONCE_IT_WAITS,
+            True,
+            _RecordFails.AT_ITS_END,
+            "cancelled",
+            [_CLEANUP_FAILED],
+            id="reader-cancelled-while-it-waits-outranks-a-cleanup-failure-behind-a-held-close",
+        ),
+        pytest.param(
+            StepClock,
+            _Closer.READS,
+            _CancelsTheCloser.ONCE_IT_WAITS,
+            False,
+            _RecordFails.AT_ITS_END,
+            "cancelled",
+            [_CLEANUP_FAILED],
+            id="reader-cancelled-while-it-waits-outranks-a-cleanup-failure",
+        ),
+        pytest.param(
+            BrokenClock,
+            _Closer.READS,
+            _CancelsTheCloser.NEVER,
+            False,
+            _RecordFails.AT_THE_DROP,
+            "_LossNotRecorded",
+            [_SUPERVISION_FAILED],
+            id="a-failing-drop-report-propagates-and-the-supervision-failure-is-logged",
         ),
     ],
 )
 @in_loop
 async def test_a_failure_that_does_not_propagate_is_logged_by_class_and_never_unretrieved(
-    caplog, clock, cancels, cleanup_fails, propagates, logged
+    caplog, clock, closer, cancels, holds_close, record_fails, propagates, logged
 ):
     caplog.set_level(logging.DEBUG)
     unretrieved: list[dict[str, object]] = []
@@ -879,15 +1049,17 @@ async def test_a_failure_that_does_not_propagate_is_logged_by_class_and_never_un
         lambda _loop, context: unretrieved.append(context)
     )
 
-    outcome, run_id = await _close_a_run(clock(), cancels, cleanup_fails=cleanup_fails)
+    outcome, run_id = await _close_a_run(
+        clock(), closer, cancels, holds_close=holds_close, record_fails=record_fails
+    )
 
     await asyncio.sleep(0)
     gc.collect()
     assert unretrieved == []
     assert outcome == propagates
-    errors = [record for record in caplog.records if record.levelno >= logging.ERROR]
-    assert [record.getMessage() for record in errors] == [line.format(run_id) for line in logged]
-    assert all(record.exc_info is None for record in errors)
+    assert _failure_lines(caplog) == [
+        (event.format(run_id), kind, raiser) for event, kind, raiser in logged
+    ]
     assert RECORDING_FAILURE_CANARY not in caplog.text
 
 

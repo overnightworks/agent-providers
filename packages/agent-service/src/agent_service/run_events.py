@@ -62,6 +62,7 @@ from agent_service.run_liveness import (
     RunnerRaised,
     RunnerYielded,
     SupervisedRun,
+    log_failure,
 )
 from agent_service.run_records import RunRecorder, RunRecords
 from agent_service.runners import AdmittedRun, Runner
@@ -175,7 +176,7 @@ class _WireRun:
             case RunnerExhausted():
                 return self.failed(FailureCode.PROVIDER_ERROR, NO_ANSWER_MESSAGE)
             case RunnerRaised(error=error):
-                log.error("The runner of run %s failed", self._run_id, exc_info=error)
+                log_failure(log, f"The runner of run {self._run_id} failed", error)
                 return self.failed(FailureCode.PROVIDER_ERROR, RUNNER_FAILED_MESSAGE)
             case RunnerYielded(event=core_event):
                 return self._frame_of_event(core_event)

@@ -1,7 +1,0 @@
-claim_id = "0176ba36d25c4769abb9edf42fa6a1ab"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "792fb268e609ecaa7a5c235724672efb50d9089c"
-branch = "docs/child-process-boundary"
-scope = ["docs/decisions/0002-child-process-boundary.md"]
-opened_commit = "cd684623529ba6f488630a89dee2bf81a624252d"

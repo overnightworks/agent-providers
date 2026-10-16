@@ -675,8 +675,9 @@ def test_an_offset_counts_from_the_block_start_past_the_opening_line_and_whitesp
     parse, newline, whitespace_before_the_value, filler_length,
 ):
     value = f'["{"x" * filler_length}",]'
+    decoder = json.JSONDecoder()
     with pytest.raises(json.JSONDecodeError) as decoder_refusal:
-        json.JSONDecoder().raw_decode(value)
+        decoder.raw_decode(value)
     row = _Refusal(
         OPEN + newline + whitespace_before_the_value + value,
         TextToolRejectionRule.CALL_NOT_JSON,

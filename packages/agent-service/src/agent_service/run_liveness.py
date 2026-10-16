@@ -175,23 +175,28 @@ class _FrameSlot:
         return frame
 
 
-async def _finished(task: asyncio.Task[object]) -> None:
+async def _finished(task: asyncio.Task[object]) -> asyncio.CancelledError | None:
     """Wait until ``task`` is done, however often the waiter is cancelled meanwhile.
 
-    The first cancellation is re-raised once the task is done. The task is
-    never cancelled by this wait, and AnyIO's level cancellation (which
-    Starlette uses on a client's disconnect) cannot cut it short.
+    Returns the first cancellation of the waiter, for the caller to raise once
+    it has retrieved the task's outcome. The task is never cancelled by this
+    wait, and AnyIO's level cancellation (which Starlette uses on a client's
+    disconnect) cannot cut it short.
     """
     interrupted: asyncio.CancelledError | None = None
     while not task.done():
         try:
             with anyio.CancelScope(shield=True):
                 await asyncio.wait({task})
-        # NOSONAR S7497 below: the first cancellation is re-raised once the task is done (rule 10).
+        # NOSONAR S7497 below: the first cancellation is returned once the task is done (rule 10).
         except asyncio.CancelledError as cancelled:  # NOSONAR
             interrupted = interrupted or cancelled
-    if interrupted is not None:
-        raise interrupted
+    return interrupted
+
+
+def _failure_of(task: asyncio.Task[None] | None) -> BaseException | None:
+    """The task's exception, retrieved so that the loop never reports it as forgotten."""
+    return None if task is None or task.cancelled() else task.exception()
 
 
 async def _cancelled(tasks: list[asyncio.Task[object]]) -> None:
@@ -244,6 +249,7 @@ class SupervisedRun:
         self._pump: asyncio.Task[None]
         self._supervisor: asyncio.Task[None]
         self._cleanup: asyncio.Task[None] | None = None
+        self._supervision_failure: Exception | None = None
 
     async def __aenter__(self) -> SupervisedRun:
         self._pump = asyncio.create_task(self._pump_runner())
@@ -251,19 +257,37 @@ class SupervisedRun:
         return self
 
     async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        """Leave once the runner is closed; the closer's cancellation wins over every failure.
+
+        Without a cancellation a cleanup failure propagates, else a supervision
+        failure unless the body raised. A failure that does not propagate is logged
+        by its class only.
+        """
         self._supervisor.cancel()
-        try:
-            try:
-                await _finished(self._supervisor)
-            finally:
-                await self._stop()
-        finally:
-            failure = None if self._supervisor.cancelled() else self._supervisor.exception()
-        if failure is None:
+        waited = await _finished(self._supervisor)
+        reaped = await self._reaped()
+        interrupted = waited or reaped
+        cleanup_failure = _failure_of(self._cleanup)
+        _failure_of(self._supervisor)
+        supervision_failure = self._supervision_failure
+        if supervision_failure is cleanup_failure:
+            supervision_failure = None
+        if interrupted is not None:
+            self._log_unraised("cleanup", cleanup_failure)
+            self._log_unraised("supervision", supervision_failure)
+            raise interrupted
+        if cleanup_failure is not None:
+            self._log_unraised("supervision", supervision_failure)
+            raise cleanup_failure
+        if supervision_failure is None:
             return
         if exc_type is None:
-            raise failure
-        log.error("The supervision of run %s failed", self._run_id, exc_info=failure)
+            raise supervision_failure
+        self._log_unraised("supervision", supervision_failure)
+
+    def _log_unraised(self, what: str, failure: BaseException | None) -> None:
+        if failure is not None:
+            log.error("The %s of run %s failed: %s", what, self._run_id, type(failure).__name__)
 
     async def frames(self) -> AsyncIterator[bytes]:
         while (frame := await self._slot.take()) is not None:
@@ -285,7 +309,8 @@ class SupervisedRun:
     async def _supervise(self) -> None:
         try:
             await self._drive()
-        except Exception:
+        except Exception as error:
+            self._supervision_failure = error
             self._wire.client_lost(ClientLoss.DROPPED)
             raise
         finally:
@@ -434,10 +459,17 @@ class SupervisedRun:
             task.result()
 
     async def _stop(self) -> None:
+        interrupted = await self._reaped()
+        failure = _failure_of(self._cleanup)
+        if interrupted is not None:
+            raise interrupted
+        if failure is not None:
+            raise failure
+
+    async def _reaped(self) -> asyncio.CancelledError | None:
         if self._cleanup is None:
             self._cleanup = asyncio.create_task(self._reap())
-        await _finished(self._cleanup)
-        self._cleanup.result()
+        return await _finished(self._cleanup)
 
     async def _reap(self) -> None:
         self._stopping = True

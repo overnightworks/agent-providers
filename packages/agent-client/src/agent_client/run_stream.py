@@ -164,22 +164,22 @@ class RunStream:
             raise RuntimeError("a run that never started cannot be cancelled")
         if self._terminal is not None:
             raise RuntimeError(f"the run already ended as {self._terminal.type}")
-        return self._due_cut_short_ending(self._run_id)
+        return self._due_cut_short_ending()
 
     @property
     def _side_effect_emitted(self) -> bool:
         return ToolEffect.SIDE_EFFECTING in self._tool_effects.values()
 
-    def _due_cut_short_ending(self, run_id: UUID) -> Failed | Cancelled:
+    def _due_cut_short_ending(self) -> Failed | Cancelled:
         if self._side_effect_emitted:
             return Failed(
                 v=PROTOCOL_VERSION,
-                run_id=run_id,
+                run_id=self._run_id,
                 seq=self._next_seq,
                 code=FailureCode.INTERRUPTED,
                 message=INTERRUPTED_MESSAGE,
             )
-        return Cancelled(v=PROTOCOL_VERSION, run_id=run_id, seq=self._next_seq)
+        return Cancelled(v=PROTOCOL_VERSION, run_id=self._run_id, seq=self._next_seq)
 
     def _broken_rule(self, event: RunEvent) -> StreamViolation | None:
         if self._terminal is not None:
@@ -223,21 +223,22 @@ class RunStream:
         return self._broken_ending_rule(event)
 
     def _broken_ending_rule(self, event: RunEvent) -> StreamViolation | None:
-        due_ending = self._due_cut_short_ending(event.run_id)
-        if isinstance(event, Cancelled) and isinstance(due_ending, Failed):
-            return StreamViolation(
-                kind=ViolationKind.CANCELLED_AFTER_SIDE_EFFECT,
-                detail="cancelled after a side-effecting call; the run must fail as interrupted",
-            )
-        if (
-            isinstance(event, Failed)
-            and event.code is FailureCode.INTERRUPTED
-            and isinstance(due_ending, Cancelled)
-        ):
-            return StreamViolation(
-                kind=ViolationKind.INTERRUPTED_WITHOUT_SIDE_EFFECT,
-                detail="interrupted without a side-effecting call; the run must end as cancelled",
-            )
+        if isinstance(event, Cancelled):
+            if isinstance(self._due_cut_short_ending(), Failed):
+                return StreamViolation(
+                    kind=ViolationKind.CANCELLED_AFTER_SIDE_EFFECT,
+                    detail=(
+                        "cancelled after a side-effecting call; the run must fail as interrupted"
+                    ),
+                )
+        elif isinstance(event, Failed) and event.code is FailureCode.INTERRUPTED:
+            if isinstance(self._due_cut_short_ending(), Cancelled):
+                return StreamViolation(
+                    kind=ViolationKind.INTERRUPTED_WITHOUT_SIDE_EFFECT,
+                    detail=(
+                        "interrupted without a side-effecting call; the run must end as cancelled"
+                    ),
+                )
         return None
 
     def _record(self, event: RunEvent) -> None:

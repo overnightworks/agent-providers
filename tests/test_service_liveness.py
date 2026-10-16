@@ -231,6 +231,20 @@ async def test_the_announced_cadence_is_the_configured_cadence():
     assert [(at, e.type) for at, e in drive.events[1:]] == [(20, "heartbeat"), (40, "heartbeat")]
 
 
+@in_loop
+async def test_the_deadlines_count_from_run_started_however_late_the_client_asks_for_more():
+    async with driven(read=False) as drive:
+        drive.took(await anext(drive.frames))
+        drive.clock.advance_to(5)
+        first_beat = asyncio.create_task(anext(drive.frames))
+
+        assert await drive.clock.parked() == 15
+        drive.clock.advance_to(15)
+        drive.took(await first_beat)
+
+    assert [at for at, _ in drive.events] == [0, 15]
+
+
 def test_the_run_started_of_a_served_run_announces_the_configured_cadence():
     mint = TokenMint()
     app = create_app(

@@ -207,6 +207,7 @@ class SupervisedRun:
         events: AsyncGenerator[StreamEvent, None],
         runs: RunConfig,
         clock: RunClock,
+        started_at: float,
     ) -> None:
         self._run_id = run_id
         self._wire = wire
@@ -218,17 +219,15 @@ class SupervisedRun:
         self._outcome_ready = asyncio.Event()
         self._outcome: RunnerOutcome | None = None
         self._stopping = False
-        self._maximum_due = 0.0
-        self._heartbeat_due = 0.0
+        self._started_at = started_at
+        self._maximum_due = started_at + runs.max_duration_s
+        self._heartbeat_due = started_at + runs.heartbeat_interval_s
         self._idle_due: float | None = None
         self._pump: asyncio.Task[None]
         self._supervisor: asyncio.Task[None]
         self._cleanup: asyncio.Task[None] | None = None
 
     async def __aenter__(self) -> SupervisedRun:
-        started_at = self._clock()
-        self._maximum_due = started_at + self._runs.max_duration_s
-        self._heartbeat_due = started_at + self._runs.heartbeat_interval_s
         self._pump = asyncio.create_task(self._pump_runner())
         self._supervisor = asyncio.create_task(self._supervise())
         return self
@@ -273,7 +272,7 @@ class SupervisedRun:
                 self._slot.close()
 
     async def _drive(self) -> None:
-        self._request_step()
+        self._request_step(self._started_at)
         while True:
             match await self._next_action():
                 case Action.EVENT:
@@ -315,11 +314,11 @@ class SupervisedRun:
             return False
         if frame is not None and not await self._deliver(frame):
             return False
-        self._request_step()
+        self._request_step(self._clock())
         return True
 
-    def _request_step(self) -> None:
-        self._idle_due = self._clock() + self._runs.idle_timeout_s
+    def _request_step(self, since: float) -> None:
+        self._idle_due = since + self._runs.idle_timeout_s
         self._step_wanted.set()
 
     def _beat(self) -> None:

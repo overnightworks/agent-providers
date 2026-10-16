@@ -174,21 +174,24 @@ def test_a_backwards_clock_step_evicts_the_record_that_ended_earliest_by_time(
 
 
 @pytest.mark.parametrize(
-    "settled_by",
+    "operation",
     [
-        pytest.param(lambda records, clock: records.begin(started(), APP, ALICE), id="begin"),
-        pytest.param(lambda records, clock: _ended_run_at(records, clock, 4600), id="over"),
+        pytest.param(lambda records, recorder: records.begin(started(), APP, ALICE), id="begin"),
+        pytest.param(lambda records, recorder: recorder.accepted(heartbeat(1)), id="accepted"),
+        pytest.param(lambda records, recorder: recorder.over(cancelled(1)), id="over"),
+        pytest.param(lambda records, recorder: recorder.lost(ClientLoss.DROPPED), id="lost"),
     ],
 )
 def test_a_write_alone_purges_expired_records(
     records: RunRecords,
     clock: WallClock,
-    settled_by: Callable[[RunRecords, WallClock], object],
+    operation: Callable[[RunRecords, RunRecorder], object],
 ) -> None:
     expired = _ended_run_at(records, clock, 10)
+    _, recorder = _begin(records)
     clock.set_to(instant(4000))
 
-    settled_by(records, clock)
+    operation(records, recorder)
 
     clock.set_to(instant(3000))
     assert not _is_readable(records, expired)
@@ -510,3 +513,29 @@ def test_no_event_text_is_reachable_from_the_store_or_its_recorder(
 
 def test_the_reachability_walk_finds_a_canary_that_is_there() -> None:
     assert reaches_text({"nested": [("deep", "xx-canary-xx")]}, ["canary"])
+
+
+class _ComparisonSpy(str):
+    def __new__(cls, text: str, compared: list[str]) -> _ComparisonSpy:
+        spy = super().__new__(cls, text)
+        spy.compared = compared
+        return spy
+
+    def __eq__(self, other: object) -> bool:
+        self.compared.append(str(self))
+        return super().__eq__(other)
+
+    __hash__ = str.__hash__
+
+
+def test_a_read_of_an_id_never_begun_still_compares_app_issuer_and_subject(
+    records: RunRecords,
+) -> None:
+    compared: list[str] = []
+    app = _ComparisonSpy("app", compared)
+    reader = Principal(_ComparisonSpy("issuer", compared), _ComparisonSpy("subject", compared))
+
+    answer = records.read(uuid4(), app, reader)
+
+    assert answer is None
+    assert sorted(compared) == ["app", "issuer", "subject"]

@@ -524,8 +524,9 @@ Rules:
    retention. A running record never expires and is never evicted; its hour
    starts when it ends. Ended records are indexed by `(ended_at,
    completion_sequence)` in timestamp order, so a backwards clock step cannot
-   hide an expired record behind one that has not expired. `begin`, `over`,
-   `read` and `lost` purge expired entries first; `over` enforces `max_ended`
+   hide an expired record behind one that has not expired. Every store operation (`begin`,
+   `accepted`, `over`, `lost` and `read`) purges expired entries before
+   anything else; `over` enforces `max_ended`
    by evicting the ended record that comes first in that order. Running
    records do not count against the bound. No task, timer or sleep exists.
 3. The writer API is `RunRecords.begin(started, app, principal) ->

@@ -225,6 +225,7 @@ def test_no_log_line_carries_token_text(service, seeded: Seeded, caplog):
             get_run(service, run_headers(workload, user), segment)
 
     logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert not [r for r in caplog.records if r.name.startswith("agent_service")]
     assert workload not in logged
     assert user not in logged
 
@@ -243,7 +244,7 @@ def test_a_post_to_a_run_path_answers_the_same_for_every_id(service, seeded: See
     ]
 
     assert answers[0].status_code == 405
-    assert answer_of(answers[0])[0] == answer_of(answers[1])[0]
+    assert answer_of(answers[0]) == answer_of(answers[1])
 
 
 def test_a_get_without_an_id_is_not_a_status_read(service):

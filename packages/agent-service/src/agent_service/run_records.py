@@ -5,7 +5,7 @@ accepted, its ending and whether the client was lost: no event text, no tool
 input or result, no failure message, no token and no group. A running record
 never expires. An ended record lives until its retention has passed or, once
 ``max_ended`` ended records are held, until it is the oldest of them; both
-removals happen on every write and every read, so nothing needs a timer. The
+removals happen first in every store operation, so nothing needs a timer. The
 store is used on the event loop only, and nothing is persisted.
 """
 
@@ -124,7 +124,17 @@ class RunRecords:
             return None
         return _status_of(record)
 
-    def finish(self, record: _Record, fallback: Failed | Cancelled | None) -> None:
+    def _accept(self, record: _Record, event: RunEvent) -> None:
+        self._purge(self._now())
+        if isinstance(event, RunStarted):
+            raise ValueError("only begin counts the opening event")
+        if record.ending is not None:
+            raise RuntimeError(f"run {record.run_id} is already over")
+        record.events += 1
+        if isinstance(event, TerminalEvent):
+            record.pending_ending = _ending_of(event)
+
+    def _finish(self, record: _Record, fallback: Failed | Cancelled | None) -> None:
         moment = self._now()
         self._purge(moment)
         if record.ending is not None:
@@ -140,7 +150,7 @@ class RunRecords:
         while len(self._ended) > self._max_ended:
             self._forget_first_ended()
 
-    def lose(self, record: _Record, reason: ClientLoss) -> None:
+    def _lose(self, record: _Record, reason: ClientLoss) -> None:
         self._purge(self._now())
         if self._records.get(record.run_id) is record and record.client_lost is None:
             record.client_lost = reason
@@ -162,19 +172,13 @@ class RunRecorder:
         self._record = record
 
     def accepted(self, event: RunEvent) -> None:
-        if isinstance(event, RunStarted):
-            raise ValueError("only begin counts the opening event")
-        if self._record.ending is not None:
-            raise RuntimeError(f"run {self._record.run_id} is already over")
-        self._record.events += 1
-        if isinstance(event, TerminalEvent):
-            self._record.pending_ending = _ending_of(event)
+        self._records._accept(self._record, event)
 
     def over(self, fallback: Failed | Cancelled | None = None) -> None:
-        self._records.finish(self._record, fallback)
+        self._records._finish(self._record, fallback)
 
     def lost(self, reason: ClientLoss) -> None:
-        self._records.lose(self._record, reason)
+        self._records._lose(self._record, reason)
 
 
 def _status_of(record: _Record) -> RunStatus:

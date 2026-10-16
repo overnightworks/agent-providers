@@ -28,6 +28,7 @@ import anyio
 import pytest
 from service_support import (
     ALICE,
+    MOST_BUSY_TURNS_BEFORE_THE_RUN_NEVER_SETTLES,
     SONGMAKER,
     STRAY_CANCELLATION_CANARY,
     BrokenClock,
@@ -967,22 +968,30 @@ class _Ending:
         return bool(self.failing & {_Step.CLOCK, _Step.DROP_REPORT})
 
     @property
+    def stalls(self) -> bool:
+        """Whether the run ends by a stall: its drop report fails while its clock holds."""
+        return _Step.DROP_REPORT in self.failing and _Step.CLOCK not in self.failing
+
+    @property
     def is_possible(self) -> bool:
-        """Whether the service can reach this combination at all.
+        """Whether the harness can drive this combination; the service reaches every other.
 
         * A close is never cancelled in the body: ``aclose`` throws into the
           stream paused at a ``yield``, where nothing awaits.
         * A reader is never cancelled in the teardown: its stream ends only
           once the runner's stop has finished, so it waits in the body.
-        * A reader of a run that ended by itself, without a held close, finds
-          its stream already over and never waits for a frame.
         * The disconnect report is made only when the stream is cut short: by
           a close, or by a cancellation in the body.
+
+        The harness cannot time one combination the service reaches: a reader
+        cancelled in the body of a run its stall dropped, without a held
+        close. The stall needs a client that takes nothing until the drop,
+        and the stop that follows ends before a reader started then waits.
         """
         match self.cancellation:
             case _Cancellation.IN_THE_BODY if self.closer is _Closer.CLOSES:
                 return False
-            case _Cancellation.IN_THE_BODY if self.ends_by_itself and not self.holds_close:
+            case _Cancellation.IN_THE_BODY if self.stalls and not self.holds_close:
                 return False
             case _Cancellation.DURING_TEARDOWN if self.closer is _Closer.READS:
                 return False
@@ -1033,16 +1042,26 @@ async def _end_a_run(
     at 45 s. A reader of a run that nothing else ends gets its answer. A
     close cut in its teardown of a run that ended by itself, without a held
     close, comes right after the drop report, while the runner's stop is
-    still under way.
+    still under way. A reader cut in the body of a run whose clock broke,
+    without a held close, waits for its next frame from the first one on and
+    is cancelled when the drop report is taken, while the runner stops.
     """
     closers: list[asyncio.Task[object]] = []
+    cancelled_by_a_step: list[bool] = []
     dropped = asyncio.Event()
+    cut_while_it_stops = (
+        ending.cancellation is _Cancellation.IN_THE_BODY
+        and ending.ends_by_itself
+        and not ending.holds_close
+    )
 
     def taking(step: _Step) -> None:
         if step is _Step.DROP_REPORT:
             dropped.set()
+            if cut_while_it_stops:
+                cancelled_by_a_step.append(drive.frames.ag_running and closers[0].cancel())
         if step is _Step.RECORD_END and cancel_at_the_record_end:
-            closers[0].cancel()
+            cancelled_by_a_step.append(closers[0].cancel())
 
     records = _RecordsThatFail(ending.failing, taking, ending.breaks)
     clock = (
@@ -1053,43 +1072,45 @@ async def _end_a_run(
     runner = GatedRunner()
     if ending.holds_close:
         runner.hold_close()
-    stalls = _Step.DROP_REPORT in ending.failing and _Step.CLOCK not in ending.failing
     cut_in_the_teardown = (
         ending.cancellation is _Cancellation.DURING_TEARDOWN and not ending.holds_close
     )
     async with driven(runner, clock=clock, records=records, read=False) as drive:
         drive.took(await anext(drive.frames))
         if cut_in_the_teardown and ending.ends_by_itself:
-            if stalls:
+            if ending.stalls:
                 await drive.run_to(44)
                 drive.clock.advance_to(45)
-            await dropped.wait()
-        else:
+            await _spun_until(dropped.is_set)
+        elif not cut_while_it_stops:
             await drive.clock.parked()
-            if stalls:
+            if ending.stalls:
                 await drive.run_to(45)
             elif not ending.ends_by_itself and ending.cancellation is _Cancellation.NONE:
                 if ending.closer is _Closer.READS:
                     runner.release(FINAL)
         closing = drive.frames.aclose() if ending.closer is _Closer.CLOSES else drive.drain()
         closers.append(asyncio.create_task(closing))
-        if cut_in_the_teardown:
-            await _until_it_waits_in_the_stream(drive.frames, closers[0])
+        if cut_while_it_stops:
+            await asyncio.wait(closers)
+        elif cut_in_the_teardown:
+            await _spun_until(lambda: drive.frames.ag_running or closers[0].done())
         else:
             await drive.clock.parked()
         delivered = ending.cancellation is not _Cancellation.NONE and closers[0].cancel()
         await drive.clock.parked()
         runner.release_close()
         await asyncio.wait(closers)
-    return closers[0], delivered or cancel_at_the_record_end, drive
+    return closers[0], delivered or any(cancelled_by_a_step), drive
 
 
-async def _until_it_waits_in_the_stream(
-    frames: AsyncGenerator[bytes, None], closer: asyncio.Task[object]
-) -> None:
-    """Spin until ``closer`` awaits inside the stream, which a close does only in its teardown."""
-    while not (frames.ag_running or closer.done()):
+async def _spun_until(done: Callable[[], bool]) -> None:
+    """Spin the loop until ``done``, failing once the run would never get there."""
+    for _turn in range(MOST_BUSY_TURNS_BEFORE_THE_RUN_NEVER_SETTLES):
+        if done():
+            return
         await asyncio.sleep(0)
+    raise AssertionError("the run never got there")
 
 
 def _propagated(closer: asyncio.Task[object], *, delivered: bool) -> str:

@@ -50,17 +50,25 @@ LIMIT_EXCEEDED_MESSAGE: Final = "The run reached its maximum duration."
 def log_failure(logger: logging.Logger, event: str, failure: BaseException) -> None:
     """Log ``event`` at ERROR with the failure's class and the stack positions it passed.
 
-    Each position is ``file:line:function`` from the failure's traceback, the
-    file by its name. The failure's message, notes and chained exceptions are
-    never logged, because any of them may carry a run's provider text.
+    Each position is ``file:line:function``, the file by its name: from the
+    failure's traceback, or for a ``RunStepCancelled`` the positions its
+    cancellation passed. The failure's message, notes and chained exceptions
+    are never logged, because any of them may carry a run's provider text.
     """
-    positions = ", ".join(
-        f"{Path(frame.filename).name}:{frame.lineno}:{frame.name}"
-        for frame in traceback.StackSummary.extract(
-            traceback.walk_tb(failure.__traceback__), lookup_lines=False
-        )
+    positions = (
+        failure.positions
+        if isinstance(failure, RunStepCancelled)
+        else _stack_positions(failure.__traceback__)
     )
-    logger.error("%s: %s at %s", event, type(failure).__name__, positions)
+    logger.error("%s: %s at %s", event, type(failure).__name__, ", ".join(positions))
+
+
+def _stack_positions(stack: TracebackType | None) -> tuple[str, ...]:
+    """The ``file:line:function`` positions a traceback passed, detached from its frames."""
+    return tuple(
+        f"{Path(frame.filename).name}:{frame.lineno}:{frame.name}"
+        for frame in traceback.StackSummary.extract(traceback.walk_tb(stack), lookup_lines=False)
+    )
 
 
 class RunClock(Protocol):
@@ -208,8 +216,7 @@ async def _finished(task: asyncio.Task[object]) -> asyncio.CancelledError | None
         try:
             with anyio.CancelScope(shield=True):
                 await asyncio.wait({task})
-        # NOSONAR S7497 below: the first cancellation is returned once the task is done (rule 10).
-        except asyncio.CancelledError as cancelled:  # NOSONAR
+        except asyncio.CancelledError as cancelled:  # NOSONAR(S7497) returned once done (rule 10)
             interrupted = interrupted or cancelled
     return interrupted
 
@@ -226,14 +233,14 @@ class RunStepCancelled(Exception):
 
     It stands in for that step's ``CancelledError``, because an ASGI server
     below spec 2.4 swallows a ``CancelledError`` the app raises, and the
-    failure would vanish. It keeps the cancellation's stack positions, never
-    its message or chain.
+    failure would vanish. It keeps the stack positions the cancellation
+    passed, never its frames, message or chain.
     """
 
     def __init__(self, part: FailedPart, cancelled: asyncio.CancelledError) -> None:
         super().__init__(f"A step of the run's {part.value} was cancelled without a request")
         self.part = part
-        self.__traceback__ = cancelled.__traceback__
+        self.positions = _stack_positions(cancelled.__traceback__)
 
 
 @dataclass(frozen=True)
@@ -305,6 +312,7 @@ class RunFailures:
     def __init__(self, run_id: UUID) -> None:
         self._run_id = run_id
         self._failures: list[_Failure] = []
+        self._converted: dict[asyncio.CancelledError, RunStepCancelled] = {}
 
     def attempt(self, part: FailedPart, step: Callable[[], None]) -> None:
         """Take ``step``, recording its failure instead of raising it.
@@ -317,17 +325,21 @@ class RunFailures:
         except Exception as failure:
             self.add(part, failure)
         except asyncio.CancelledError as cancelled:
-            if _cancel_requested():
+            if _cancel_requested(asyncio.current_task()):
                 raise
             self.add(part, cancelled)
 
     def add(self, part: FailedPart, failure: BaseException) -> BaseException:
         """Record ``failure`` under ``part``, a stray cancellation as ``RunStepCancelled``.
 
-        Returns the failure as recorded, for a step that raises it on.
+        Returns the failure as recorded, for a step that raises it on. A
+        cancellation recorded again is the same ``RunStepCancelled``, so that
+        it still counts once, at its first part.
         """
         if isinstance(failure, asyncio.CancelledError):
-            failure = RunStepCancelled(part, failure)
+            if failure not in self._converted:
+                self._converted[failure] = RunStepCancelled(part, failure)
+            failure = self._converted[failure]
         self._failures.append(_Failure(part, failure))
         return failure
 
@@ -353,7 +365,7 @@ class RunFailures:
             self._failures,
             cancellation=cancellation,
             body_failure=body_failure,
-            cancel_requested=_cancel_requested(),
+            cancel_requested=_cancel_requested(asyncio.current_task()),
         )
         for failure in decided.logged:
             log_failure(
@@ -375,9 +387,8 @@ class RunFailures:
             self.leave(cancellation=None, body_failure=body_failure)
 
 
-def _cancel_requested() -> bool:
-    """Whether a cancellation request is on the running task: a cancellation is delivered."""
-    task = asyncio.current_task()
+def _cancel_requested(task: asyncio.Task[object] | None) -> bool:
+    """Whether a cancellation request is on ``task``: a cancellation it meets is delivered."""
     return task is not None and task.cancelling() > 0
 
 
@@ -388,7 +399,7 @@ def _failure_of(task: asyncio.Task[object]) -> BaseException | None:
     down, which is no failure. One that ended cancelled with no request on
     it failed with that cancellation, whoever called ``cancel()`` before.
     """
-    if task.cancelled() and task.cancelling() > 0:
+    if task.cancelled() and _cancel_requested(task):
         return None
     try:
         return task.exception()
@@ -502,7 +513,7 @@ class SupervisedRun:
         except Exception as failure:
             self._supervision_failed(failure)
         except asyncio.CancelledError as cancelled:
-            if _cancel_requested():
+            if _cancel_requested(asyncio.current_task()):
                 raise
             self._supervision_failed(cancelled)
         finally:

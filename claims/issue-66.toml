@@ -1,0 +1,8 @@
+claim_id = "4e6bb7c8afc1477eb699afd628476a0e"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "479d09dbac4ba033b8da5c3d6b091a4b9a898f7e"
+branch = "claude/issue-66-signing-key"
+scope = ["README.md", "docs/decisions/0001-agent-service.md", "packages/agent-service/pyproject.toml", "packages/agent-service/src/agent_service/config.py", "packages/agent-service/src/agent_service/signing.py", "tests/service_support.py", "tests/test_service_config.py", "tests/test_service_signing.py", "uv.lock"]
+opened_commit = "e4006ee1d6aaaae08533cca6139753fc33ceddf6"
+whole_reason = "The signing key loads at config validation; the loader, its config field, its dependency pins and its tests land together."

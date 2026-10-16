@@ -195,8 +195,10 @@ def test_tool_input_at_the_depth_limit_survives_encoding_and_decoding() -> None:
 
 
 def test_tool_input_deeper_than_the_limit_is_not_built() -> None:
+    too_deep = _tool_input_nested(MAX_TOOL_INPUT_DEPTH + 1)
+
     with pytest.raises(ValidationError):
-        call(1, "call-1", tool_input=_tool_input_nested(MAX_TOOL_INPUT_DEPTH + 1))
+        call(1, "call-1", tool_input=too_deep)
 
 
 @pytest.mark.parametrize(
@@ -266,8 +268,10 @@ def test_a_frame_one_byte_over_the_limit_is_refused_both_ways() -> None:
     at_limit = encode_event(_text_of_frame_size(MAX_EVENT_BYTES))
     over_limit = at_limit.replace(b'"text":"', b'"text":"x', 1)
 
+    oversized_event = _text_of_frame_size(MAX_EVENT_BYTES + 1)
+
     with pytest.raises(EventTooLarge):
-        encode_event(_text_of_frame_size(MAX_EVENT_BYTES + 1))
+        encode_event(oversized_event)
     *_, violation = RunStreamDecoder().feed(OPENING + over_limit)
     assert isinstance(violation, StreamViolation)
     assert violation.kind is ViolationKind.OVERSIZED_FRAME

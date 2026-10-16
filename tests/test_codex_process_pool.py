@@ -19,10 +19,11 @@ def test_the_process_wide_pool_admits_only_as_many_runs_as_the_runtime_allows() 
         codex_max_concurrent_image_runs=1,
     )
 
-    get_codex_process_pool().reserve(CodexProcessKind.IMAGE)
+    pool = get_codex_process_pool()
+    pool.reserve(CodexProcessKind.IMAGE)
 
     with pytest.raises(CodexProcessPoolSaturatedError) as raised:
-        get_codex_process_pool().reserve(CodexProcessKind.IMAGE)
+        pool.reserve(CodexProcessKind.IMAGE)
 
     assert raised.value.scope == "image"
 

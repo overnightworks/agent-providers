@@ -515,10 +515,11 @@ async def _spin() -> None:
 
 @in_loop
 async def test_a_supervisor_that_never_settles_fails_the_stepped_clock_instead_of_hanging():
+    clock = StepClock()
     spinner = asyncio.create_task(_spin())
     try:
         with pytest.raises(AssertionError, match="the run never settled"):
-            await StepClock().parked()
+            await clock.parked()
     finally:
         spinner.cancel()
         await asyncio.gather(spinner, return_exceptions=True)

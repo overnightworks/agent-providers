@@ -301,7 +301,7 @@ def _execute_tool(tool_round: _ToolRound, call: ToolCall) -> ToolOutcome:
         # raised past it is a defect or an infrastructure failure, not an
         # answer. The turn survives it; the class is named so it is findable,
         # and the message never is — it may quote the song.
-        log.error("Co-writer tool executor raised %s", type(exc).__name__)
+        log.error("Co-writer tool executor raised %s", type(exc).__name__, exc_info=False)
         outcome = ToolOutcome(tool_round.tool_failure_message, True)
     duration_ms = round((time.monotonic() - started_at) * 1000)
     log.info(

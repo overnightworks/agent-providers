@@ -283,7 +283,7 @@ def _parse_call(catalog: ToolCatalog, candidate: str, original_response: str) ->
     if boundary is None:
         raise TextToolProtocolError()
     payload, call_end = boundary
-    if call_content[call_end:] != "":
+    if call_content[call_end:]:
         raise TextToolProtocolError()
     if candidate != original_response.strip():
         raise TextToolProtocolError()

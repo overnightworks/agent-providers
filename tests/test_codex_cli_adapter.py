@@ -14,6 +14,7 @@ import pytest
 from PIL import Image
 from provider_test_support import (
     COWRITER_TOOL_CATALOG,
+    assert_a_multi_result_batch_is_rejected,
     override_provider_runtime,
     use_codex_process_pool,
 )
@@ -34,8 +35,6 @@ from agent_providers.tool_loop import (
     InitialTurn,
     ToolCallBatch,
     ToolOutcome,
-    ToolResult,
-    ToolResultBatch,
     stream_tool_loop,
 )
 
@@ -360,19 +359,7 @@ def test_codex_tool_transport_rejects_a_multi_result_batch_without_a_resume(monk
     ], _outcome(), calls))
     transport = _transport()
 
-    async def reject_batch() -> None:
-        assert [item async for item in transport.stream(InitialTurn("system", []))]
-        batch = ToolResultBatch((
-            ToolResult("one", "1", False),
-            ToolResult("two", "2", False),
-        ))
-        with pytest.raises(ProviderUnavailableError) as raised:
-            async for _ in transport.stream(batch):
-                pass
-        assert raised.value.reason.code is SafeRouteReasonCode.TOOL_PROTOCOL_ERROR
-        await transport.aclose()
-
-    asyncio.run(reject_batch())
+    assert_a_multi_result_batch_is_rejected(transport)
     assert len(calls) == 1
 
 

@@ -18,6 +18,8 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StrictFloat,
+    StrictInt,
     ValidationError,
     model_validator,
 )
@@ -71,6 +73,28 @@ class ServerConfig(_Section):
     port: int = Field(default=8080, ge=1, le=65535)
 
 
+class RunConfig(_Section):
+    """How a run's pace and length are limited (decision record 0001, H6).
+
+    Strict numbers: TOML ``true`` is not a heartbeat of 1 second and ``15.5``
+    is not a heartbeat of 15. The heartbeat is announced on the wire, whose
+    bound is 1..300.
+    """
+
+    heartbeat_interval_s: StrictInt = Field(default=15, ge=1, le=300)
+    idle_timeout_s: StrictFloat = Field(default=120.0, gt=0, allow_inf_nan=False)
+    max_duration_s: StrictFloat = Field(default=600.0, gt=0, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def _heartbeat_before_idle_before_maximum(self) -> Self:
+        if not self.heartbeat_interval_s < self.idle_timeout_s < self.max_duration_s:
+            raise ValueError(
+                "must satisfy heartbeat_interval_s < idle_timeout_s < max_duration_s"
+                f" (got {self.heartbeat_interval_s}, {self.idle_timeout_s}, {self.max_duration_s})"
+            )
+        return self
+
+
 class ProfileConfig(_Section):
     """One subscription login the CLI route may run under."""
 
@@ -101,6 +125,7 @@ class AppConfig(_Section):
 class ServiceConfig(_Section):
     identity: IdentityConfig
     server: ServerConfig = ServerConfig()
+    runs: RunConfig = RunConfig()
     profiles: dict[NonEmptyText, ProfileConfig] = Field(default_factory=dict)
     purposes: dict[NonEmptyText, PurposeConfig]
     apps: dict[NonEmptyText, AppConfig]

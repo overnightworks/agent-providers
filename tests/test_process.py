@@ -2708,11 +2708,7 @@ def test_a_log_handler_that_raises_does_not_strand_the_hand_off_or_the_backgroun
 
     callbacks["on_reaped"] = release_and_signal
 
-    class RaisingHandler(logging.Handler):
-        def emit(self, record: logging.LogRecord) -> None:
-            raise OSError("log handler cannot write")
-
-    handler = RaisingHandler()
+    handler = RaisingLogHandler(then=OSError)
     process_logger = logging.getLogger("agent_providers.process")
     process_logger.addHandler(handler)
     monkeypatch.setattr(process, "_reap_process_group", _raising(
@@ -3101,11 +3097,7 @@ def test_control_flow_raised_by_the_log_handler_while_reporting_propagates_after
     fail_to_start_the_runner_thread(monkeypatch, RuntimeError(A_RUNNER_FAILURE_CANARY))
     channel = CliLineChannel(maximum_lines=1)
 
-    class ExitingHandler(logging.Handler):
-        def emit(self, record: logging.LogRecord) -> None:
-            raise SystemExit
-
-    handler = ExitingHandler()
+    handler = RaisingLogHandler(then=SystemExit)
     process_logger = logging.getLogger("agent_providers.process")
     process_logger.addHandler(handler)
     try:

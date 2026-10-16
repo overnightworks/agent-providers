@@ -1109,7 +1109,12 @@ def test_a_failed_runner_whose_outcome_cannot_be_published_leaks_nothing_through
 
     assert type(turn.error) is codex_image.CodexImageTimeoutError
     image_turn.watch.wait_for_the_runner_threads_to_end()
-    image_turn.watch.assert_nothing_leaked(turn.error)
+    image_turn.assert_ended(
+        turn,
+        runner_steps=(
+            "start SystemExit", "close RuntimeError", "run SystemExit", "publish RuntimeError",
+        ),
+    )
 
 
 def test_a_failed_runner_whose_report_raises_leaks_nothing_through_the_thread(

@@ -1840,6 +1840,60 @@ run that received the unexpected reply would not be driven); the cost of a think
 block (haiku emitted none); any model request the CLI makes outside the stream, and
 `MCP_TOOL_TIMEOUT`'s default; why `num_turns` is `N + 1`.
 
+#### A1b-4a the turn counter in the 2.1.302 bundle (read, not run)
+
+`ClaudeRun` (`agent_providers.claude.provider`) passes `--max-turns = max_tool_calls + 1`
+(`TURNS_BEYOND_TOOL_CALLS`), the relation A1b-0b2 measured. This section settles the three
+conditions that section left open. Nothing here was executed: it is a read of the pinned
+`linux-x64` bundle of 2.1.302 (SHA-256 `60d7eb7f...e29a5`), whose JavaScript is plain text
+inside the Bun executable. Offsets are byte offsets in that file.
+
+The query loop:
+
+- It starts with `guards:{...Gs,...,turnCount:1}` (251675819).
+- The normal drain of `_e.streamingToolExecutor.getRemainingResults()` (251737344) runs every
+  tool call of a response before the limit is checked.
+- Only then it computes `rr=Bo+1,ts=E&&rr>E?E:void 0` (251743418), `Bo` being `turnCount` and
+  `E` being `maxTurns`.
+- If `ts` is set, it emits `max_turns_reached` and returns `{reason:"max_turns",turnCount:rr}`
+  (251746191). Otherwise it recurses with `transition:{reason:"next_turn"}` and `turnCount:rr`
+  (251746565).
+- Only `next_turn` and `stop_hook_blocking` (`turnCount:V`, `V=Bo+1`, 251735883) raise the
+  counter. `refusal_retry`, `max_output_tokens_recovery`, `truncated_response_recovery`,
+  `malformed_tool_use_retry`, `thinking_only_retry` and the assignment at 251730657 (which selects
+  `precomputed_compact_swap` or `reactive_compact_retry`) keep the old `turnCount`.
+- The guard sets (`xr`, `Gs`, 251660178) carry no counter.
+- The result serializer (251898628) copies `turnCount` into `num_turns` for `error_max_turns`, so
+  the reported `num_turns` is `N + 1`, the figure A1b-0b2 could not explain.
+
+Reproduce the reading with:
+
+```text
+python3 -I -c 'import mmap,sys;f=open(sys.argv[1],"rb");m=mmap.mmap(f.fileno(),0,access=mmap.ACCESS_READ);[print(o,m[o-300:o+300].decode("utf-8","replace")) for o in map(int,sys.argv[2:])]' <binary> 251660178 251675819 251730657 251735883 251737344 251743418 251746191 251746565 251898628
+```
+
+**Condition 1, the whole-response rejection gap: resolved for 2.1.302.** The CLI counts one turn
+per model response whose tool calls ran, never one per call, and checks the limit after all of
+that response's calls ran. A call-counting CLI that refuses a whole response crossing `N` (the
+A1b-0b2 c4 case) does not exist on the pinned version. The service's call limit fires first only
+while every counter-raising transition includes a service-counted call; a blocking Stop hook and
+a locally answered unknown-tool call break that, which condition 3 states. Parallel calls (A1b-0b2
+S2) stay not run. A change of the pin reopens this reading (line 7, A1b-7a).
+
+**Condition 2, no `--model` in production: resolved for the count.** The counter belongs to the
+loop, not to the model. A thinking-only answer is retried without a turn, and output-limit
+continuations do not count. What the default model emits stays model-dependent and falls under
+condition 3; the first live runs on it are A1b-12a (tool-free) and A1b-12b (tools).
+
+**Condition 3, k = 1 leaves no slack: a residual of line 13, with k kept at 1.** Turns the
+service does not count can exhaust the CLI limit at any service call count, including zero. Two
+kinds are known: a call to a name the CLI does not know, which it answers locally, and a blocking
+Stop hook (`--setting-sources ""` drops settings hooks; whether the built-in plugins that init
+lists register one was not read). The run then ends `error_max_turns`, which
+`_raise_for_error_result` turns into `failed: provider_error`, never into a success. No call runs
+that the service has not accepted, because the relay holds every call. The end-to-end proof is
+A1b-8's. A larger k would be a guess no measurement supports and would weaken the backstop.
+
 ## H8 atelier-2
 
 **Context.** The "one location" invariant could be read to cover the operator's

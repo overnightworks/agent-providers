@@ -22,13 +22,16 @@ from provider_test_support import (
     SAMPLE_TOOL_CATALOG,
     RunnerFailureWatch,
     a_call_nested_too_deeply_to_decode,
+    a_call_to_a_declared_tool,
     a_call_to_an_undeclared_tool_carrying,
     a_credential_destination_that_fails,
     a_symlink_to_a_login,
     a_usable_login_over_the_bound,
     assert_a_multi_result_batch_is_rejected,
+    assert_a_tool_round_then_its_resume,
     assert_private_credential_child,
     assert_the_canary_reaches_only_the_host,
+    cli_rounds_runner,
     drive_turn,
     fail_to_start_the_runner_thread,
     formatted_log_text,
@@ -192,14 +195,6 @@ def test_grok_credential_home_is_a_direct_child_of_the_root_named_by_its_prefix(
     assert not home.exists()
 
 
-def _tool_call_text() -> str:
-    return (
-        '<notes_tool_call>\n'
-        '{"name":"list_notes","arguments":{}}\n'
-        '</notes_tool_call>'
-    )
-
-
 def _recorded_grok_tool_round_lines() -> list[bytes]:
     fixture = Path(__file__).with_name("fixtures") / "grok_cli_real_tool_stream.jsonl"
     return [line.encode() + b"\n" for line in fixture.read_text().splitlines()]
@@ -247,6 +242,47 @@ def test_grok_tool_command_pins_native_tool_and_web_isolation() -> None:
     )
 
 
+@pytest.mark.parametrize("session_id", [None, "3e04bf5b-4e1c-4f26-8e1e-2f17c5f6d9cf"])
+def test_grok_arguments_leave_out_model_without_one(session_id) -> None:
+    arguments = grok_cli_adapter._grok_cli_tool_arguments(None, session_id)
+
+    assert "--model" not in arguments
+    assert ("--resume" in arguments) is (session_id is not None)
+
+
+@pytest.mark.parametrize("model", [None, "grok-4.5"])
+def test_stream_turn_runs_the_grok_cli_across_rounds(monkeypatch, model) -> None:
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        grok_cli_adapter,
+        "run_cli_bounded",
+        cli_rounds_runner(
+            [grok_tool_round_lines(a_call_to_a_declared_tool()), grok_tool_round_lines("done")],
+            grok_cli_outcome(),
+            calls,
+        ),
+    )
+
+    turn = drive_turn("grok", model=model)
+
+    assert_a_tool_round_then_its_resume(
+        turn, calls, resumed_with=GROK_SESSION_ID, model=model,
+    )
+
+
+def test_grok_transport_refuses_an_empty_model_before_any_home(monkeypatch) -> None:
+    def fail_if_a_home_is_made(*_args, **_kwargs):
+        raise AssertionError("a credential home was made")
+
+    monkeypatch.setattr(grok_cli_adapter, "PrivateCredentialHome", fail_if_a_home_is_made)
+    monkeypatch.setattr(grok_cli_adapter, "run_cli_bounded", fail_if_a_home_is_made)
+
+    with pytest.raises(ProviderUnavailableError) as refusal:
+        grok_cli_adapter.GrokCliToolTransport(model="", catalog=SAMPLE_TOOL_CATALOG)
+
+    assert refusal.value.reason.code is SafeRouteReasonCode.ROUTE_FAILED
+
+
 def test_grok_tool_transport_starts_then_resumes_in_one_private_credential_home(
     monkeypatch,
     tmp_path: Path,
@@ -255,7 +291,7 @@ def test_grok_tool_transport_starts_then_resumes_in_one_private_credential_home(
     homes: list[Path] = []
     source = current_config().grok_cli_auth_file
     rounds = iter([
-        grok_tool_round_lines(_tool_call_text()),
+        grok_tool_round_lines(a_call_to_a_declared_tool()),
         grok_tool_round_lines("done"),
         grok_tool_round_lines("another turn"),
     ])
@@ -577,7 +613,9 @@ def test_grok_tool_transport_rejects_a_multi_result_batch(monkeypatch, caplog) -
     monkeypatch.setattr(
         grok_cli_adapter,
         "run_cli_bounded",
-        grok_cli_runner(grok_tool_round_lines(_tool_call_text()), grok_cli_outcome(), calls),
+        grok_cli_runner(
+            grok_tool_round_lines(a_call_to_a_declared_tool()), grok_cli_outcome(), calls,
+        ),
     )
     transport = _transport()
 
@@ -766,7 +804,9 @@ def test_a_grok_tool_result_nested_too_deeply_is_passed_on_in_the_next_prompt(
     calls = []
     monkeypatch.setattr(
         grok_cli_adapter, "run_cli_bounded",
-        grok_cli_runner(grok_tool_round_lines(_tool_call_text()), grok_cli_outcome(), calls),
+        grok_cli_runner(
+            grok_tool_round_lines(a_call_to_a_declared_tool()), grok_cli_outcome(), calls,
+        ),
     )
     transport = _transport()
 

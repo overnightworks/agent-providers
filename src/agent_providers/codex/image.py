@@ -40,6 +40,7 @@ from agent_providers.codex.protocol import (
     CodexTurnHome,
     codex_child_process,
     codex_cli_failure_reason,
+    codex_model_arguments,
     create_codex_turn_home,
     error_item_message,
     event_item_type,
@@ -50,7 +51,12 @@ from agent_providers.codex.protocol import (
     top_level_error_message,
 )
 from agent_providers.config import current_config, current_turn_config
-from agent_providers.errors import SafeRouteReasonCode, raise_without_chain
+from agent_providers.errors import (
+    ProviderUnavailableError,
+    SafeRouteReasonCode,
+    raise_without_chain,
+    refuse_empty_model,
+)
 from agent_providers.images import ImagePolicy
 from agent_providers.process import (
     ClaimedStartThread,
@@ -194,7 +200,7 @@ def generate_codex_image(
     policy: ImagePolicy,
     deadline: float,
     abort_signal: threading.Event | None = None,
-    model: str = "",
+    model: str | None = None,
 ) -> bytes:
     """Run one isolated Codex image turn and return its normalized PNG.
 
@@ -203,6 +209,10 @@ def generate_codex_image(
     spawned through ``run_cli_bounded``.  Its temporary ``CODEX_HOME`` is the
     only place where a generated artifact may be discovered.
     """
+    try:
+        refuse_empty_model("codex", "cli", model)
+    except ProviderUnavailableError:
+        raise_without_chain(CodexImageCliError())
     if not image_encoder_is_installed():
         raise CodexImageEncoderUnavailableError(_IMAGE_ENCODER_MISSING_DETAIL)
     try:
@@ -247,7 +257,7 @@ def _run_codex_image_cli(
     deadline: float,
     turn_home: CodexTurnHome,
     abort_signal: threading.Event | None = None,
-    model: str = "",
+    model: str | None = None,
 ) -> CliRunOutcome:
     """Reap the CLI promptly when its streamed events leave the image gate."""
     channel = CliLineChannel(CODEX_CLI_LINE_CHANNEL_CAPACITY)
@@ -353,7 +363,7 @@ def _receive_within(channel: CliLineChannel, settle_by: float) -> bytes | CliRun
         return None
 
 
-def _codex_image_arguments(model: str) -> tuple[str, ...]:
+def _codex_image_arguments(model: str | None) -> tuple[str, ...]:
     """Return the fixed arguments for the image-only Codex route."""
     return (
         "exec",
@@ -361,7 +371,7 @@ def _codex_image_arguments(model: str) -> tuple[str, ...]:
         "--sandbox",
         "read-only",
         *_CODEX_IMAGE_ISOLATION_ARGS,
-        *(("--model", model) if model else ()),
+        *codex_model_arguments(model),
         "-",
     )
 

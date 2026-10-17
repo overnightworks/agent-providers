@@ -92,7 +92,7 @@ _PROVIDER_ROUTES = [
     for route in (ProviderRoute.CLI, ProviderRoute.API)
 ]
 _ROUTES_WITHOUT_A_MODEL_DEFAULT = [
-    pair for pair in _PROVIDER_ROUTES if pair != ("claude", ProviderRoute.CLI)
+    pair for pair in _PROVIDER_ROUTES if pair[1] is ProviderRoute.API
 ]
 
 

@@ -53,7 +53,7 @@ from agent_providers.errors import (
     ToolProtocolRejectionCode,
     normalize_route_failure,
 )
-from agent_providers.events import AssistantTextEvent, StreamEvent
+from agent_providers.events import AssistantTextEvent, FinalEvent, StreamEvent
 from agent_providers.process import CliRunOutcome, CliRunReason
 from agent_providers.spawn import ChildProcess, closed_environment
 from agent_providers.text_tool_protocol import TextToolRejectionRule
@@ -550,6 +550,38 @@ def grok_cli_runner(lines, outcome, calls):
     return run_cli_bounded
 
 
+def cli_rounds_runner(rounds, outcome, calls):
+    """A runner whose n-th spawn streams ``rounds[n]``; ``calls`` records each argv."""
+    remaining = iter(rounds)
+
+    def run_cli_bounded(child, **kwargs):
+        calls.append(child.command)
+        if "on_spawned" in kwargs:
+            kwargs["on_spawned"](1)
+        for line in next(remaining):
+            assert kwargs["stdout_line_channel"]._send(line)
+        kwargs["stdout_line_channel"]._close(outcome)
+        if "on_reaped" in kwargs:
+            kwargs["on_reaped"](1, False)
+        return outcome
+
+    return run_cli_bounded
+
+
+def assert_a_tool_round_then_its_resume(turn, calls, *, resumed_with, model) -> None:
+    """Two spawns that carry ``model`` on both rounds, or on neither when ``None``."""
+    assert turn.error is None
+    assert turn.executed
+    assert len(calls) == 2
+    assert [("--model" in command) for command in calls] == [model is not None] * 2
+    if model is not None:
+        assert [command[command.index("--model") + 1] for command in calls] == [model] * 2
+    assert resumed_with in calls[1]
+    assert resumed_with not in calls[0]
+    assert isinstance(turn.events[-1], FinalEvent)
+    assert turn.events[-1].text == "done"
+
+
 def grok_tool_round_lines(text: str, session_id: str = GROK_SESSION_ID) -> list[bytes]:
     return [
         json.dumps({"type": "text", "data": text}).encode() + b"\n",
@@ -577,6 +609,14 @@ def a_call_to_an_undeclared_tool_carrying(canary: str = A_CANARY) -> str:
     return (
         f"{PROSE_BEFORE_THE_CALL}<notes_tool_call>\n"
         f'{{"name":"delete_everything","arguments":{{"text":"{canary}"}}}}\n'
+        "</notes_tool_call>"
+    )
+
+
+def a_call_to_a_declared_tool() -> str:
+    return (
+        "<notes_tool_call>\n"
+        '{"name":"list_notes","arguments":{}}\n'
         "</notes_tool_call>"
     )
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import contextlib
 import errno
 import gc
@@ -51,6 +52,7 @@ from provider_test_support import (
     fail_the_home_chmod,
     fail_the_work_directory,
     fail_to_start_the_runner_thread,
+    order_the_thread_start_claims,
     override_provider_runtime,
     pool_callbacks,
     shell_child,
@@ -80,6 +82,7 @@ from agent_providers.process import (
     CliEnvironmentCause,
     CliEnvironmentUnavailableError,
     CliLineChannel,
+    CliLogin,
     CliLoginUnusableError,
     CliProbeBudgetExceeded,
     CliRun,
@@ -508,6 +511,154 @@ def test_clearing_a_probe_does_not_restore_its_pre_clear_result() -> None:
 
     assert first_answer == ["before clear"]
     assert cached.get() == "after clear"
+
+
+_PROBE_THREAD_BOUND_SECONDS = 5
+
+
+class _ProbeUnderWatch:
+    """A probe that waits on a gate and counts its calls."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.release = threading.Event()
+
+    def __call__(self) -> str:
+        self.calls += 1
+        self.release.wait(timeout=_PROBE_THREAD_BOUND_SECONDS)
+        return "answer"
+
+
+def _probe_threads() -> list[threading.Thread]:
+    return [
+        thread for thread in threading.enumerate() if thread.name.endswith("(_run_and_resolve)")
+    ]
+
+
+def _announce_the_follower(monkeypatch) -> threading.Event:
+    """Set the returned event once the thread named ``follower`` waits on a flight."""
+    follower_waits = threading.Event()
+
+    class AnnouncingFuture(concurrent.futures.Future):
+        def result(self, timeout=None):
+            if threading.current_thread().name == "follower":
+                follower_waits.set()
+            return super().result(timeout)
+
+    monkeypatch.setattr(concurrent.futures, "Future", AnnouncingFuture)
+    return follower_waits
+
+
+def _answer_on_the_follower_thread(cached: CachedProbe, answers: list[str]) -> threading.Thread:
+    follower = threading.Thread(
+        target=lambda: answers.append(cached.get()), name="follower", daemon=True,
+    )
+    follower.start()
+    return follower
+
+
+def test_a_probe_thread_that_cannot_start_leaves_no_flight_behind(monkeypatch) -> None:
+    probe = _ProbeUnderWatch()
+    probe.release.set()
+    cached = CachedProbe(probe)
+    cannot_start = RuntimeError("can't start new thread")
+
+    with monkeypatch.context() as failing:
+        fail_to_start_the_runner_thread(failing, cannot_start, target=cached._run_and_resolve)
+        with pytest.raises(RuntimeError) as raised:
+            cached.get()
+
+    assert raised.value is cannot_start
+    assert probe.calls == 0
+    monkeypatch.setattr("agent_providers.process.CLI_PROBE_CALLER_TIMEOUT_SECONDS", 0.05)
+    assert cached.get() == "answer"
+    assert probe.calls == 1
+
+
+def test_a_login_probe_that_cannot_start_a_thread_is_retried_by_the_next_call(
+    monkeypatch,
+) -> None:
+    probed = CachedProbe(lambda: CliLogin(logged_in=True, auth_method="chatgpt"))
+    monkeypatch.setattr(process, "_codex_login_probe", probed)
+    monkeypatch.setattr("agent_providers.process.CLI_PROBE_CALLER_TIMEOUT_SECONDS", 0.05)
+    cannot_start = RuntimeError("can't start new thread")
+
+    with monkeypatch.context() as failing:
+        fail_to_start_the_runner_thread(failing, cannot_start, target=probed._run_and_resolve)
+        with pytest.raises(RuntimeError) as raised:
+            codex_cli_login()
+
+    assert raised.value is cannot_start
+    assert codex_cli_login().logged_in is True
+
+
+@pytest.mark.parametrize("thread_claims_first", [False, True])
+def test_a_probe_start_that_raises_leaves_one_owner_of_the_flight(
+    monkeypatch, thread_claims_first: bool,
+) -> None:
+    probe = _ProbeUnderWatch()
+    cached = CachedProbe(probe)
+    follower_waits = _announce_the_follower(monkeypatch)
+    interruption = KeyboardInterrupt()
+    follower_answers: list[str] = []
+    follower: threading.Thread | None = None
+
+    try:
+        with monkeypatch.context() as failing:
+            gate = start_then_raise(
+                failing,
+                interruption,
+                target=cached._run_and_resolve,
+                thread_claims_first=thread_claims_first,
+            )
+            with pytest.raises(KeyboardInterrupt) as raised:
+                cached.get()
+            assert raised.value is interruption
+            if thread_claims_first:
+                follower = _answer_on_the_follower_thread(cached, follower_answers)
+                assert follower_waits.wait(timeout=_PROBE_THREAD_BOUND_SECONDS)
+                assert probe.calls == 1
+            else:
+                owned_threads = _probe_threads()
+                gate.set()
+                for thread in owned_threads:
+                    thread.join(timeout=_PROBE_THREAD_BOUND_SECONDS)
+                    assert not thread.is_alive()
+                assert probe.calls == 0
+    finally:
+        probe.release.set()
+        if follower is not None:
+            follower.join(timeout=_PROBE_THREAD_BOUND_SECONDS)
+
+    assert follower_answers == (["answer"] if thread_claims_first else [])
+    assert cached.get() == "answer"
+    assert probe.calls == 1
+
+
+def test_a_started_probe_thread_owns_its_flight_before_it_claims(monkeypatch) -> None:
+    probe = _ProbeUnderWatch()
+    cached = CachedProbe(probe)
+    follower_waits = _announce_the_follower(monkeypatch)
+    gate, _ = order_the_thread_start_claims(monkeypatch, thread_claims_first=False)
+    answers: list[str] = []
+    starter = threading.Thread(target=lambda: answers.append(cached.get()), daemon=True)
+    follower: threading.Thread | None = None
+
+    try:
+        starter.start()
+        follower = _answer_on_the_follower_thread(cached, answers)
+        assert follower_waits.wait(timeout=_PROBE_THREAD_BOUND_SECONDS)
+        assert probe.calls == 0
+        gate.set()
+    finally:
+        gate.set()
+        probe.release.set()
+        starter.join(timeout=_PROBE_THREAD_BOUND_SECONDS)
+        if follower is not None:
+            follower.join(timeout=_PROBE_THREAD_BOUND_SECONDS)
+
+    assert answers == ["answer", "answer"]
+    assert probe.calls == 1
 
 
 def test_a_cli_that_floods_us_is_read_only_up_to_the_limit() -> None:

@@ -36,7 +36,8 @@ from service_support import (
     served,
     service_config,
 )
-from webauth.jwt_verification import KEY_SET_REFRESH_COOLDOWN_SECONDS, KeySetFetchError
+from webauth.https_client import KeySetFetchError
+from webauth.jwt_verification import KEY_SET_REFRESH_COOLDOWN_SECONDS
 
 from agent_client.wire import Failed, FailureCode, RejectionCode, RunRejection
 from agent_providers.events import AssistantTextEvent, FinalEvent
@@ -195,6 +196,38 @@ def test_a_token_with_an_unknown_kid_answers_by_whether_the_key_set_can_be_refre
         response = post_run(base_url, run_headers(forged.workload(), MINT.user()))
 
     assert_rejected(response, code, status)
+
+
+@pytest.mark.parametrize(
+    ("extra_signing_keys", "key_set_fetchable", "code", "status"),
+    [
+        pytest.param(0, True, None, 200, id="sole-rs256-key"),
+        pytest.param(1, True, RejectionCode.UNAUTHORIZED, 401, id="two-rs256-keys"),
+        pytest.param(0, False, RejectionCode.UNAVAILABLE, 503, id="no-fetchable-key-set"),
+    ],
+)
+def test_a_token_without_a_kid_is_admitted_only_against_a_sole_rs256_key(
+    extra_signing_keys, key_set_fetchable, code, status
+):
+    mint = TokenMint(kidless=True, extra_signing_keys=extra_signing_keys)
+
+    def fetch_key_set(url: str) -> bytes:
+        if not key_set_fetchable:
+            raise KeySetFetchError("the issuer cannot be reached")
+        return mint.fetch_key_set(url)
+
+    app = create_app(
+        service_config(),
+        runners=Runners(cli=ScriptedRunner(CLI_SCRIPT), api=ScriptedRunner(API_SCRIPT)),
+        fetch_key_set=fetch_key_set,
+    )
+    with served(app) as base_url:
+        response = post_run(base_url, run_headers(mint.workload(), mint.user()))
+
+    if code is None:
+        assert _admitted_events(response) == ["run_started", "assistant_text", "succeeded"]
+    else:
+        assert_rejected(response, code, status)
 
 
 def test_one_key_set_fetch_serves_every_request_of_the_process():

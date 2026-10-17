@@ -456,23 +456,49 @@ def everything_a_refusal_holds(refusal: BaseException) -> list[object]:
 
 
 class TokenMint:
-    """Signs RS256 tokens with a throwaway key and serves that key's set, counting each fetch."""
+    """Signs RS256 tokens with a throwaway key and serves that key's set, counting each fetch.
 
-    def __init__(self, key_id: str = "test-signing-key") -> None:
+    ``kidless`` signs tokens without a ``kid`` header; ``extra_signing_keys`` publishes that
+    many more RS256 keys beside the signing key.
+    """
+
+    def __init__(
+        self,
+        key_id: str = "test-signing-key",
+        *,
+        kidless: bool = False,
+        extra_signing_keys: int = 0,
+    ) -> None:
         self.key_id = key_id
+        self._kidless = kidless
         self._key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        self._published_keys = [
+            self._published(self._key, key_id),
+            *(
+                self._published(
+                    rsa.generate_private_key(public_exponent=65537, key_size=2048),
+                    f"extra-{number}",
+                )
+                for number in range(extra_signing_keys)
+            ),
+        ]
         self.key_set_fetches = 0
 
+    @staticmethod
+    def _published(key: rsa.RSAPrivateKey, key_id: str) -> dict[str, Any]:
+        public = json.loads(RSAAlgorithm.to_jwk(key.public_key()))
+        return {**public, "kid": key_id, "use": "sig", "alg": "RS256"}
+
     def key_set(self) -> dict[str, Any]:
-        public = json.loads(RSAAlgorithm.to_jwk(self._key.public_key()))
-        return {"keys": [{**public, "kid": self.key_id, "use": "sig", "alg": "RS256"}]}
+        return {"keys": list(self._published_keys)}
 
     def fetch_key_set(self, _url: str) -> bytes:
         self.key_set_fetches += 1
         return json.dumps(self.key_set()).encode()
 
     def token(self, claims: Mapping[str, object]) -> str:
-        return jwt.encode(dict(claims), self._key, algorithm="RS256", headers={"kid": self.key_id})
+        headers = None if self._kidless else {"kid": self.key_id}
+        return jwt.encode(dict(claims), self._key, algorithm="RS256", headers=headers)
 
     def workload(self, client: str = SONGMAKER_CLIENT, **overrides: object) -> str:
         now = int(time.time())

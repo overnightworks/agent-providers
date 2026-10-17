@@ -13,14 +13,19 @@ import h11
 
 from agent_client.capability import MCP_ENDPOINT_PATH
 from agent_client.wire import MAX_EVENT_BYTES
+from agent_providers.errors import raise_without_chain
 from agent_service.mcp_wire import HttpAnswer
-from agent_service.run_liveness import log_failure
+from agent_service.run_liveness import RunClock, log_failure
 
 log = logging.getLogger(__name__)
 
 LOOPBACK_HOST: Final = "127.0.0.1"
 MAX_HEAD_BYTES: Final = 16_384
 RECEIVE_CHUNK_BYTES: Final = 8_192
+MAX_RELAY_CONNECTIONS: Final = 4
+HEAD_RECEIVE_SECONDS: Final = 5.0
+BODY_RECEIVE_SECONDS: Final = 10.0
+RELAY_CLOSE_SECONDS: Final = 1.0
 _SECRET_BYTES: Final = 32
 _BEARER_SCHEME: Final = b"Bearer "
 _ENDPOINT_TARGET: Final = MCP_ENDPOINT_PATH.encode()
@@ -44,6 +49,13 @@ class RelayOwner(Protocol):
         ...
 
 
+class RelayCleanupIncomplete(Exception):
+    """The close ended with relay tasks still running; they stay tracked for the next attempt."""
+
+    def __init__(self, outstanding: int) -> None:
+        super().__init__(f"{outstanding} relay tasks outlived the close")
+
+
 class _Refusal(Exception):
     def __init__(self, status: HTTPStatus) -> None:
         super().__init__(status)
@@ -64,6 +76,12 @@ def _declares_no_body(request: h11.Request) -> bool:
     return not _field_values(request, b"transfer-encoding") and _declared_length(request) == 0
 
 
+def _declares_both_framings(request: h11.Request) -> bool:
+    return bool(_field_values(request, b"transfer-encoding")) and bool(
+        _field_values(request, b"content-length")
+    )
+
+
 def _declared_length(request: h11.Request) -> int:
     return max((int(length) for length in _field_values(request, b"content-length")), default=0)
 
@@ -77,22 +95,59 @@ def _empty(status: HTTPStatus) -> HttpAnswer:
     return HttpAnswer(status, None, b"")
 
 
+class _ReceiveDeadline:
+    """Aborts the connection when a receive phase outlasts its bound on the run's clock."""
+
+    def __init__(
+        self, clock: RunClock, seconds: float, transport: asyncio.Transport, task_name: str
+    ) -> None:
+        self.expired = False
+        self._clock = clock
+        self._seconds = seconds
+        self._transport = transport
+        self._task_name = task_name
+        self._timer: asyncio.Task[None] | None = None
+
+    def start(self) -> None:
+        if self._timer is None:
+            instant = self._clock() + self._seconds
+            self._timer = asyncio.get_running_loop().create_task(
+                self._abort_at(instant), name=self._task_name
+            )
+
+    def stop(self) -> None:
+        if self._timer is not None:
+            self._timer.cancel()
+
+    async def _abort_at(self, instant: float) -> None:
+        await self._clock.wait_until(instant)
+        self.expired = True
+        self._transport.abort()
+
+
+def _unfinished(tasks: set[asyncio.Task[None]]) -> set[asyncio.Task[None]]:
+    return {task for task in tasks if not task.done()}
+
+
 class Relay:
-    def __init__(self, run_id: str, secret: str, owner: RelayOwner) -> None:
+    def __init__(self, run_id: str, secret: str, owner: RelayOwner, clock: RunClock) -> None:
         self._run_id = run_id
         self._owner = owner
+        self._clock = clock
         self._bearer = _BEARER_SCHEME + secret.encode()
         self._secret = secret
         self._expected_host = b""
         self._connection_numbers = count(1)
         self._connections: dict[asyncio.Task[None], asyncio.Transport] = {}
         self._closing = False
+        self._closed = False
+        self._close_attempt: asyncio.Task[None] | None = None
         self._server: asyncio.Server
         self.access: RelayAccess
 
     @classmethod
-    async def start(cls, run_id: str, owner: RelayOwner) -> "Relay":
-        relay = cls(run_id, secrets.token_urlsafe(_SECRET_BYTES), owner)
+    async def start(cls, run_id: str, owner: RelayOwner, clock: RunClock) -> "Relay":
+        relay = cls(run_id, secrets.token_urlsafe(_SECRET_BYTES), owner, clock)
         relay._server = await asyncio.start_server(relay._accept, LOOPBACK_HOST, 0)
         port = relay._server.sockets[0].getsockname()[1]
         relay._expected_host = f"{LOOPBACK_HOST}:{port}".encode()
@@ -101,8 +156,28 @@ class Relay:
         return relay
 
     async def close(self) -> None:
-        if self._closing:
+        """End the relay within ``RELAY_CLOSE_SECONDS`` or raise ``RelayCleanupIncomplete``.
+
+        A raise keeps the outstanding tasks tracked; calling again retries with a new budget.
+        """
+        if self._closed:
             return
+        if self._close_attempt is None or self._close_attempt.done():
+            self._close_attempt = asyncio.get_running_loop().create_task(
+                self._close_once(), name=f"relay:{self._run_id}:close"
+            )
+            self._close_attempt.add_done_callback(self._close_attempt_ended)
+        await asyncio.shield(self._close_attempt)
+
+    def _close_attempt_ended(self, attempt: asyncio.Task[None]) -> None:
+        if self._close_attempt is attempt:
+            self._close_attempt = None
+        if not attempt.cancelled():
+            attempt.exception()
+
+    async def _close_once(self) -> None:
+        loop = asyncio.get_running_loop()
+        deadline = self._clock() + RELAY_CLOSE_SECONDS
         self._closing = True
         self._server.close()
         connections = dict(self._connections)
@@ -110,10 +185,29 @@ class Relay:
             transport.abort()
         for task in connections:
             task.cancel()
-        await asyncio.gather(*connections, return_exceptions=True)
-        await self._server.wait_closed()
+        wait_closed = loop.create_task(
+            self._server.wait_closed(), name=f"relay:{self._run_id}:wait-closed"
+        )
+        expiry = loop.create_task(
+            self._clock.wait_until(deadline), name=f"relay:{self._run_id}:close-deadline"
+        )
+        observed = {*connections, wait_closed}
+        try:
+            while not expiry.done() and (outstanding := _unfinished(observed)):
+                await asyncio.wait({expiry, *outstanding}, return_when=asyncio.FIRST_COMPLETED)
+            outstanding = _unfinished(observed)
+        finally:
+            for own in (expiry, wait_closed):
+                own.cancel()
+            await asyncio.gather(expiry, wait_closed, return_exceptions=True)
+        if outstanding:
+            raise_without_chain(RelayCleanupIncomplete(len(outstanding)))
+        self._closed = True
 
     def _accept(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        if self._closing or len(self._connections) >= MAX_RELAY_CONNECTIONS:
+            writer.transport.abort()
+            return
         name = f"relay:{self._run_id}:conn-{next(self._connection_numbers)}"
         task = asyncio.get_running_loop().create_task(self._serve(reader, writer), name=name)
         self._connections[task] = writer.transport
@@ -138,23 +232,25 @@ class Relay:
         self, connection: h11.Connection, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> bool:
         try:
-            request = await self._read_head(connection, reader)
+            request = await self._read_head(
+                connection, reader, self._receive_deadline(HEAD_RECEIVE_SECONDS, writer, "head")
+            )
             if request is None:
                 return False
             if (status := self._head_status(request)) is not None:
                 return await self._refuse(connection, writer, request, status)
             if _declared_length(request) > MAX_EVENT_BYTES:
                 raise _Refusal(HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
-            body = await self._read_body(connection, reader)
+            body = await self._read_body(
+                connection, reader, self._receive_deadline(BODY_RECEIVE_SECONDS, writer, "body")
+            )
         except _Refusal as refusal:
             await self._answer(connection, writer, _empty(refusal.status), closing=True)
             return False
         if body is None:
             return False
         answer = await self._owner_answer(RelayRequest(body, _protocol_version(request)))
-        mixed_framing = bool(_field_values(request, b"transfer-encoding")) and bool(
-            _field_values(request, b"content-length")
-        )
+        mixed_framing = _declares_both_framings(request)
         await self._answer(connection, writer, answer, closing=mixed_framing)
         return not mixed_framing and _ready_for_next_cycle(connection)
 
@@ -181,8 +277,15 @@ class Relay:
             log_failure(log, f"The owner of the relay of run {self._run_id} failed", failure)
             return _empty(HTTPStatus.INTERNAL_SERVER_ERROR)
 
+    def _receive_deadline(
+        self, seconds: float, writer: asyncio.StreamWriter, phase: str
+    ) -> _ReceiveDeadline:
+        return _ReceiveDeadline(
+            self._clock, seconds, writer.transport, f"relay-deadline:{self._run_id}:{phase}"
+        )
+
     async def _next_event(
-        self, connection: h11.Connection, reader: asyncio.StreamReader
+        self, connection: h11.Connection, reader: asyncio.StreamReader, deadline: _ReceiveDeadline
     ) -> h11.Event | type[h11.NEED_DATA] | None:
         while True:
             try:
@@ -192,30 +295,40 @@ class Relay:
             if event is not h11.NEED_DATA:
                 return event
             chunk = await reader.read(RECEIVE_CHUNK_BYTES)
-            if not chunk:
+            if not chunk or deadline.expired:
                 return None
+            deadline.start()
             connection.receive_data(chunk)
 
     async def _read_head(
-        self, connection: h11.Connection, reader: asyncio.StreamReader
+        self, connection: h11.Connection, reader: asyncio.StreamReader, deadline: _ReceiveDeadline
     ) -> h11.Request | None:
-        event = await self._next_event(connection, reader)
+        if connection.trailing_data[0]:
+            deadline.start()
+        try:
+            event = await self._next_event(connection, reader, deadline)
+        finally:
+            deadline.stop()
         return event if isinstance(event, h11.Request) else None
 
     async def _read_body(
-        self, connection: h11.Connection, reader: asyncio.StreamReader
+        self, connection: h11.Connection, reader: asyncio.StreamReader, deadline: _ReceiveDeadline
     ) -> bytes | None:
         body = bytearray()
-        while True:
-            event = await self._next_event(connection, reader)
-            if isinstance(event, h11.Data):
-                body += event.data
-                if len(body) > MAX_EVENT_BYTES:
-                    raise _Refusal(HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
-            elif isinstance(event, h11.EndOfMessage):
-                return bytes(body)
-            elif event is None:
-                return None
+        deadline.start()
+        try:
+            while True:
+                event = await self._next_event(connection, reader, deadline)
+                if isinstance(event, h11.Data):
+                    body += event.data
+                    if len(body) > MAX_EVENT_BYTES:
+                        raise _Refusal(HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+                elif isinstance(event, h11.EndOfMessage):
+                    return bytes(body)
+                elif event is None:
+                    return None
+        finally:
+            deadline.stop()
 
     def _head_status(self, request: h11.Request) -> HTTPStatus | None:
         if _field_values(request, b"host") != [self._expected_host]:

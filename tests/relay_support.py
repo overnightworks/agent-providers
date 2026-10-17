@@ -1,16 +1,21 @@
 import asyncio
+import contextlib
+import contextvars
 import re
 import socket
 import struct
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
+from enum import Enum
 from http import HTTPStatus
 from urllib.parse import urlsplit
 
 import h11
 from mcp_app_fake import WAIT_SECONDS
+from service_support import StepClock, SteppedLoop
 
 from agent_service.mcp_wire import JSON_MEDIA_TYPE, HttpAnswer
+from agent_service.run_liveness import LoopClock, RunClock
 from agent_service.tool_relay import LOOPBACK_HOST, Relay, RelayRequest
 
 RUN_ID = "run-under-test"
@@ -47,14 +52,17 @@ class ScriptedOwner:
     async def answer(self, request: RelayRequest) -> HttpAnswer:
         self.requests.append(request)
         self.entered.set()
+        await self._wait_for_gate()
+        if self._failure is not None:
+            raise self._failure
+        return self._answers.pop(0) if self._answers else OWNER_ANSWER
+
+    async def _wait_for_gate(self) -> None:
         try:
             await self._gate.wait()
         except asyncio.CancelledError:
             self.cancelled = True
             raise
-        if self._failure is not None:
-            raise self._failure
-        return self._answers.pop(0) if self._answers else OWNER_ANSWER
 
     @property
     def bodies(self) -> list[bytes]:
@@ -63,6 +71,42 @@ class ScriptedOwner:
     async def wait_entered(self) -> None:
         async with asyncio.timeout(WAIT_SECONDS):
             await self.entered.wait()
+
+
+class SuppressingOwner(ScriptedOwner):
+    """Breaks the ``RelayOwner`` contract: swallows every cancellation until released."""
+
+    def __init__(self) -> None:
+        super().__init__(gated=True)
+
+    async def _wait_for_gate(self) -> None:
+        while not self._gate.is_set():
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._gate.wait()
+
+
+class AbsorbingOwner(ScriptedOwner):
+    """Breaks the ``RelayOwner`` contract once: absorbs the first cancellation, then waits."""
+
+    def __init__(self) -> None:
+        super().__init__(gated=True)
+
+    async def _wait_for_gate(self) -> None:
+        with contextlib.suppress(asyncio.CancelledError):
+            await self._gate.wait()
+        await super()._wait_for_gate()
+
+
+class Delivery(Enum):
+    ANSWERED = "answered"
+    INTERRUPTED = "interrupted"
+    ABSENT = "absent"
+
+
+class ConnectionEnded(AssertionError):
+    def __init__(self, delivery: Delivery) -> None:
+        super().__init__(f"connection ended before an answer: {delivery.value}")
+        self.delivery = delivery
 
 
 @dataclass(frozen=True)
@@ -125,11 +169,18 @@ class RawClient:
         self._reader = reader
         self._writer = writer
         self._parser = self._new_parser()
+        self._received = 0
 
     @classmethod
     async def connect(cls, port: int, host: str = LOOPBACK_HOST) -> "RawClient":
         async with asyncio.timeout(WAIT_SECONDS):
             reader, writer = await asyncio.open_connection(host, port)
+        return cls(reader, writer)
+
+    @classmethod
+    async def adopt(cls, connected: socket.socket) -> "RawClient":
+        connected.setblocking(False)
+        reader, writer = await asyncio.open_connection(sock=connected)
         return cls(reader, writer)
 
     @staticmethod
@@ -152,11 +203,11 @@ class RawClient:
         status = 0
         headers: dict[str, str] = {}
         body = b""
+        self._received = 0
         while True:
             event = self._parser.next_event()
             if event is h11.NEED_DATA:
-                async with asyncio.timeout(WAIT_SECONDS):
-                    self._parser.receive_data(await self._reader.read(_READ_BYTES))
+                self._parser.receive_data(await self._read_response_bytes())
             elif isinstance(event, h11.Response):
                 status = event.status_code
                 headers = {name.decode(): value.decode() for name, value in event.headers}
@@ -168,7 +219,28 @@ class RawClient:
                     self._prime(self._parser)
                 return Answer(status, headers, body)
             else:
-                raise AssertionError(f"connection ended before an answer: {event!r}")
+                raise AssertionError(f"unexpected {event!r}")
+
+    async def _read_response_bytes(self) -> bytes:
+        try:
+            async with asyncio.timeout(WAIT_SECONDS):
+                chunk = await self._reader.read(_READ_BYTES)
+        except ConnectionResetError:
+            chunk = b""
+        if not chunk:
+            raise ConnectionEnded(Delivery.INTERRUPTED if self._received else Delivery.ABSENT)
+        self._received += len(chunk)
+        return chunk
+
+    async def delivery(self) -> Delivery:
+        try:
+            await self.answer()
+        except ConnectionEnded as ended:
+            return ended.delivery
+        return Delivery.ANSWERED
+
+    def has_ended(self) -> bool:
+        return self._reader.at_eof()
 
     async def at_eof(self) -> bool:
         try:
@@ -186,6 +258,43 @@ class RawClient:
         sock = self._writer.get_extra_info("socket")
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
         self._writer.close()
+
+
+def blocking_connect(port: int) -> socket.socket:
+    """Connect in the kernel without yielding to the event loop."""
+    return socket.create_connection((LOOPBACK_HOST, port), timeout=WAIT_SECONDS)
+
+
+def post(relay: Relay, body: bytes = b"") -> bytes:
+    return RequestHead.standard(relay, len(body)).encode() + body
+
+
+def chunked_head(relay: Relay) -> RequestHead:
+    return (
+        RequestHead.standard(relay).without("Content-Length").adding("Transfer-Encoding", "chunked")
+    )
+
+
+def chunk(data: bytes) -> bytes:
+    return f"{len(data):x}\r\n".encode() + data + b"\r\n"
+
+
+def record_task_names() -> list[str]:
+    """Names of every task created on the running loop from now on, in creation order."""
+    names: list[str] = []
+
+    class RecordingTask(asyncio.Task):
+        def set_name(self, value: object) -> None:
+            names.append(str(value))
+            super().set_name(value)
+
+    def factory(
+        loop: asyncio.AbstractEventLoop, coro: object, **kwargs: contextvars.Context
+    ) -> asyncio.Task:
+        return RecordingTask(coro, loop=loop, **kwargs)
+
+    asyncio.get_running_loop().set_task_factory(factory)
+    return names
 
 
 def relay_tasks(run_id: str = RUN_ID) -> list[str]:
@@ -210,19 +319,91 @@ async def close_bounded(relay: Relay) -> None:
         await relay.close()
 
 
+class HoldingSteppedLoop(SteppedLoop):
+    """A stepped loop that can hold the acceptance callback of one listening port."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._held_port: int | None = None
+        self._held: list[
+            tuple[Callable[..., object], tuple[object, ...], contextvars.Context | None]
+        ] = []
+
+    @property
+    def held_acceptances(self) -> int:
+        return len(self._held)
+
+    def hold_acceptance(self, port: int) -> None:
+        self._held_port = port
+
+    def release_acceptance(self) -> None:
+        self._held_port = None
+        held, self._held = self._held, []
+        for callback, args, context in held:
+            super().call_soon(callback, *args, context=context)
+
+    def call_soon(
+        self,
+        callback: Callable[..., object],
+        *args: object,
+        context: contextvars.Context | None = None,
+    ) -> asyncio.Handle:
+        if self._accepts_on_held_port(callback, args):
+            self._held.append((callback, args, context))
+            return asyncio.Handle(lambda: None, (), self)
+        return super().call_soon(callback, *args, context=context)
+
+    def _accepts_on_held_port(
+        self, callback: Callable[..., object], args: tuple[object, ...]
+    ) -> bool:
+        if self._held_port is None or getattr(callback, "__name__", "") != "connection_made":
+            return False
+        transport = args[0]
+        return (
+            isinstance(transport, asyncio.Transport)
+            and transport.get_extra_info("sockname")[1] == self._held_port
+        )
+
+
 def drive(
     scenario: Callable[[Relay], Awaitable[None]],
     run_id: str = RUN_ID,
     owner: ScriptedOwner | None = None,
+    clock: RunClock | None = None,
+    loop_factory: Callable[[], asyncio.AbstractEventLoop] | None = None,
 ) -> None:
     async def main() -> None:
         scripted = owner or ScriptedOwner()
-        relay = await Relay.start(run_id, scripted)
+        relay = await Relay.start(run_id, scripted, clock or LoopClock())
         try:
             async with asyncio.timeout(WAIT_SECONDS * 3):
                 await scenario(relay)
         finally:
             scripted.release()
+            loop = asyncio.get_running_loop()
+            if isinstance(loop, HoldingSteppedLoop):
+                loop.release_acceptance()
             await close_bounded(relay)
 
-    asyncio.run(main())
+    with asyncio.Runner(loop_factory=loop_factory) as runner:
+        runner.run(main())
+
+
+def drive_stepped(
+    scenario: Callable[[Relay, StepClock], Awaitable[None]],
+    owner: ScriptedOwner | None = None,
+    loop_factory: Callable[[], asyncio.AbstractEventLoop] = SteppedLoop,
+) -> None:
+    clock = StepClock()
+
+    async def with_clock(relay: Relay) -> None:
+        await scenario(relay, clock)
+
+    drive(with_clock, owner=owner, clock=clock, loop_factory=loop_factory)
+
+
+async def parked_at(clock: StepClock, instant: float | None) -> None:
+    """Wait until the relay's next clock wait is ``instant``, letting real socket I/O land."""
+    async with asyncio.timeout(WAIT_SECONDS):
+        while await clock.parked() != instant:
+            await asyncio.sleep(0)

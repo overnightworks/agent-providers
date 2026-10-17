@@ -15,16 +15,20 @@ from relay_support import (
     RawClient,
     RequestHead,
     ScriptedOwner,
+    chunk,
+    chunked_head,
     close_bounded,
     connection_numbers,
     drive,
     port_of,
+    post,
     relay_tasks,
     yield_until,
 )
 
 from agent_client.wire import MAX_EVENT_BYTES
 from agent_service.mcp_wire import ACKNOWLEDGEMENT, JSON_MEDIA_TYPE, HttpAnswer
+from agent_service.run_liveness import LoopClock
 from agent_service.tool_relay import LOOPBACK_HOST, RECEIVE_CHUNK_BYTES, Relay
 
 CANARY = "canary-4c9e1b7a"
@@ -111,8 +115,8 @@ def test_binds_loopback_and_hands_an_authorised_post_to_the_owner() -> None:
 
 def test_two_relays_differ_and_show_no_secret_in_repr() -> None:
     async def main() -> None:
-        first = await Relay.start("run-a", ScriptedOwner())
-        second = await Relay.start("run-b", ScriptedOwner())
+        first = await Relay.start("run-a", ScriptedOwner(), LoopClock())
+        second = await Relay.start("run-b", ScriptedOwner(), LoopClock())
         try:
             assert port_of(first) != port_of(second)
             assert first.access.secret != second.access.secret
@@ -134,7 +138,7 @@ def test_leaves_signal_handlers_unchanged_while_serving_and_after_close() -> Non
 
     async def main() -> None:
         before = handlers()
-        relay = await Relay.start(RUN_ID, ScriptedOwner())
+        relay = await Relay.start(RUN_ID, ScriptedOwner(), LoopClock())
         try:
             client = await RawClient.connect(port_of(relay))
             await client.send(b"POST /mcp HTTP/1.1\r\nHost:")
@@ -417,10 +421,10 @@ def test_keeps_the_connection_after_a_bodyless_not_found_or_method_refusal(
 
 def test_a_closed_relays_secret_is_refused_by_a_new_relay_of_the_same_run() -> None:
     async def main() -> None:
-        old = await Relay.start(RUN_ID, ScriptedOwner())
+        old = await Relay.start(RUN_ID, ScriptedOwner(), LoopClock())
         old_secret = old.access.secret
         await close_bounded(old)
-        new = await Relay.start(RUN_ID, ScriptedOwner())
+        new = await Relay.start(RUN_ID, ScriptedOwner(), LoopClock())
         try:
             client = await RawClient.connect(port_of(new))
             stale = standard(new).with_field("Authorization", f"Bearer {old_secret}")
@@ -436,8 +440,8 @@ def test_a_closed_relays_secret_is_refused_by_a_new_relay_of_the_same_run() -> N
 def test_two_open_relays_each_refuse_the_other_secret_and_hand_their_own_to_their_owner() -> None:
     async def main() -> None:
         owners = {"run-a": ScriptedOwner(), "run-b": ScriptedOwner()}
-        first = await Relay.start("run-a", owners["run-a"])
-        second = await Relay.start("run-b", owners["run-b"])
+        first = await Relay.start("run-a", owners["run-a"], LoopClock())
+        second = await Relay.start("run-b", owners["run-b"], LoopClock())
         try:
             for own, foreign in ((first, second), (second, first)):
                 client = await RawClient.connect(port_of(own))
@@ -488,18 +492,6 @@ def test_an_unexpected_connection_failure_logs_its_class_and_no_request_content(
     assert "OSError" in logged
     assert CANARY not in logged
     assert secrets_seen[0] not in logged
-
-
-def post(relay: Relay, body: bytes = b"") -> bytes:
-    return standard(relay, len(body)).encode() + body
-
-
-def chunked_head(relay: Relay) -> RequestHead:
-    return standard(relay).without("Content-Length").adding("Transfer-Encoding", "chunked")
-
-
-def chunk(data: bytes) -> bytes:
-    return f"{len(data):x}\r\n".encode() + data + b"\r\n"
 
 
 def pieces_of(data: bytes) -> list[bytes]:
@@ -590,9 +582,7 @@ def test_a_body_that_is_not_json_reaches_the_owner_unparsed() -> None:
 
 BOUND_BODY_REQUESTS = [
     pytest.param(lambda r, body: post(r, body), id="C8"),
-    pytest.param(
-        lambda r, body: chunked_head(r).encode() + chunk(body) + b"0\r\n\r\n", id="C9"
-    ),
+    pytest.param(lambda r, body: chunked_head(r).encode() + chunk(body) + b"0\r\n\r\n", id="C9"),
 ]
 
 
@@ -837,14 +827,18 @@ def mixed_framing_head(relay: Relay) -> RequestHead:
 
 
 @pytest.mark.parametrize(
-    "owner",
+    ("owner", "status"),
     [
-        pytest.param(ScriptedOwner, id="answered"),
-        pytest.param(lambda: ScriptedOwner(failure=RuntimeError("failing owner")), id="failing"),
+        pytest.param(ScriptedOwner, HTTPStatus.OK, id="answered"),
+        pytest.param(
+            lambda: ScriptedOwner(failure=RuntimeError("failing owner")),
+            HTTPStatus.INTERNAL_SERVER_ERROR,
+            id="failing",
+        ),
     ],
 )
 def test_a_request_with_both_framings_is_answered_and_the_connection_closes(
-    owner: Callable[[], ScriptedOwner],
+    owner: Callable[[], ScriptedOwner], status: HTTPStatus
 ) -> None:
     scripted = owner()
 
@@ -854,11 +848,27 @@ def test_a_request_with_both_framings_is_answered_and_the_connection_closes(
             mixed_framing_head(relay).encode() + b"2\r\n{}\r\n0\r\n\r\n" + post(relay, b"second")
         )
         answer = await client.answer()
+        assert answer.status == status
         assert answer.headers["connection"] == "close"
         assert await client.at_eof()
         assert scripted.bodies == [b"{}"]
 
     drive(scenario, owner=scripted)
+
+
+def test_a_chunked_only_request_keeps_its_connection() -> None:
+    owner = ScriptedOwner()
+
+    async def scenario(relay: Relay) -> None:
+        client = await RawClient.connect(port_of(relay))
+        await client.send(
+            chunked_head(relay).encode() + b"2\r\n{}\r\n0\r\n\r\n" + post(relay, b"second")
+        )
+        assert "connection" not in (await client.answer()).headers
+        assert (await client.answer()).status == HTTPStatus.OK
+        assert owner.bodies == [b"{}", b"second"]
+
+    drive(scenario, owner=owner)
 
 
 def oversized_declaration_with_canary(relay: Relay) -> bytes:
@@ -986,7 +996,7 @@ def test_signal_handlers_stay_unchanged_while_a_request_is_in_the_owner() -> Non
     async def main() -> None:
         owner = ScriptedOwner(gated=True)
         before = handlers()
-        relay = await Relay.start(RUN_ID, owner)
+        relay = await Relay.start(RUN_ID, owner, LoopClock())
         try:
             client = await RawClient.connect(port_of(relay))
             await client.send(post(relay, b"{}"))

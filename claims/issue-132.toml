@@ -1,0 +1,8 @@
+claim_id = "a12cbd8cc8934de29a473b767f729b91"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "9b78f3a0928a625413aef7b032282122615ece48"
+branch = "claude/issue-132-a1b-rulings-and-transport"
+scope = ["docs/decisions/0001-agent-service.md"]
+opened_commit = "dfe710494d4c247f15228a902a633e01b5d2f47f"
+whole_reason = "A1b-R (lead) and A1b-9v (#133) are two docs-only cards that edit one file, the ADR, in a fixed order (R's H3 bullet, then 9v's section)"

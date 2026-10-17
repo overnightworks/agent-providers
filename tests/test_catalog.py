@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import enum
 import json
 import threading
 from collections.abc import Iterator
@@ -512,15 +513,7 @@ CLAUDE_LISTING_FAULTS = [
 
 @pytest.mark.parametrize(
     ("make_fault", "expected_code"),
-    [
-        pytest.param(
-            _cli_root_removed, SafeRouteReasonCode.CLI_UNAVAILABLE, id="home-not-made",
-        ),
-        pytest.param(
-            _claude_credential_replaced_by_a_link,
-            SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED, id="credential-source-a-link",
-        ),
-    ],
+    [pytest.param(*fault.values[:2], id=fault.id) for fault in CLAUDE_LISTING_FAULTS],
 )
 def test_the_claude_cli_listing_names_the_meaning_of_the_fault_that_stopped_it(
     tmp_path: Path, make_fault, expected_code: SafeRouteReasonCode,
@@ -603,6 +596,27 @@ def test_an_unreadable_codex_login_leaves_the_api_key_in_charge(tmp_path: Path) 
     assert configuration.method is ProviderSetupMethod.API_KEY
 
 
+class _Credential(enum.Enum):
+    VALID = "valid"
+    ABSENT = "absent"
+    WRONG_TYPED = "wrong-typed"
+    NOT_UTF8 = "not-utf8"
+
+
+class _Binary(enum.Enum):
+    RUNNABLE = "runnable"
+    NOT_EXECUTABLE = "not-executable"
+    MISSING = "missing"
+
+
+class _Outcome(enum.Enum):
+    CLI_UNAVAILABLE = "cli-unavailable"
+    CLI_READY = "cli-ready"
+    NOT_LOGGED_IN = "not-logged-in"
+    API_READY = "api-ready"
+    NEEDS_KEY = "needs-key"
+
+
 @dataclasses.dataclass(frozen=True)
 class _CliSetupInstall:
     provider: str
@@ -611,7 +625,7 @@ class _CliSetupInstall:
     api_key_setting: str
     method: ProviderSetupMethod
     environment_key: str
-    credentials: dict[str, bytes | None]
+    credentials: dict[_Credential, bytes | None]
 
 
 CLI_SETUP_INSTALLS = [
@@ -620,10 +634,10 @@ CLI_SETUP_INSTALLS = [
             "grok", "grok_cli_auth_file", "grok_cli_binary", "xai_api_key",
             ProviderSetupMethod.GROK_CLI, "XAI_API_KEY",
             {
-                "valid": b'{"realm": {"key": "synthetic-grok-key"}}',
-                "absent": None,
-                "wrong-typed": b'{"realm": {"key": 3}}',
-                "not-utf8": b"\xff\xfe",
+                _Credential.VALID: b'{"realm": {"key": "synthetic-grok-key"}}',
+                _Credential.ABSENT: None,
+                _Credential.WRONG_TYPED: b'{"realm": {"key": 3}}',
+                _Credential.NOT_UTF8: b"\xff\xfe",
             },
         ),
         id="grok",
@@ -633,10 +647,10 @@ CLI_SETUP_INSTALLS = [
             "codex", "codex_cli_auth_file", "codex_cli_binary", "openai_api_key",
             ProviderSetupMethod.CODEX_CLI, "OPENAI_API_KEY",
             {
-                "valid": a_codex_login(),
-                "absent": None,
-                "wrong-typed": a_codex_login(tokens={"account_id": 7}),
-                "not-utf8": A_CODEX_LOGIN_WITH_INVALID_UTF8,
+                _Credential.VALID: a_codex_login(),
+                _Credential.ABSENT: None,
+                _Credential.WRONG_TYPED: a_codex_login(tokens={"account_id": 7}),
+                _Credential.NOT_UTF8: A_CODEX_LOGIN_WITH_INVALID_UTF8,
             },
         ),
         id="codex",
@@ -645,7 +659,7 @@ CLI_SETUP_INSTALLS = [
 
 
 def _a_cli_install(
-    tmp_path: Path, install: _CliSetupInstall, credential: str, binary: str,
+    tmp_path: Path, install: _CliSetupInstall, credential: _Credential, binary: _Binary,
     *, api_key: bool = False,
 ) -> Path:
     auth_file = tmp_path / "auth.json"
@@ -653,15 +667,15 @@ def _a_cli_install(
     if document is not None:
         auth_file.write_bytes(document)
     calls_log = tmp_path / "calls"
-    if binary == "runnable":
+    if binary is _Binary.RUNNABLE:
         fake_cli_executable(tmp_path, {}, calls_log=calls_log)
-    if binary == "not-executable":
+    if binary is _Binary.NOT_EXECUTABLE:
         (tmp_path / "fake-cli").write_text("#!/bin/sh\n")
     override_provider_runtime(
         cli_binary_search_path=(tmp_path,),
         **{
             install.auth_file_setting: auth_file,
-            install.binary_setting: "absent-cli" if binary == "missing" else "fake-cli",
+            install.binary_setting: "absent-cli" if binary is _Binary.MISSING else "fake-cli",
             install.api_key_setting: SecretStr("a-key") if api_key else None,
         },
     )
@@ -673,30 +687,42 @@ def _a_cli_install(
     ("credential", "binary", "api_key", "outcome", "warned_class"),
     [
         pytest.param(
-            "valid", "missing", False, "cli-unavailable", "CliEnvironmentUnavailableError",
+            _Credential.VALID, _Binary.MISSING, False,
+            _Outcome.CLI_UNAVAILABLE, "CliEnvironmentUnavailableError",
             id="a-credential-without-its-binary",
         ),
         pytest.param(
-            "valid", "not-executable", False, "cli-unavailable", "CliEnvironmentUnavailableError",
+            _Credential.VALID, _Binary.NOT_EXECUTABLE, False,
+            _Outcome.CLI_UNAVAILABLE, "CliEnvironmentUnavailableError",
             id="a-credential-with-a-binary-that-cannot-execute",
         ),
-        pytest.param("valid", "runnable", False, "cli-ready", None, id="a-runnable-cli"),
-        pytest.param("absent", "missing", False, "not-logged-in", None, id="no-credential"),
         pytest.param(
-            "wrong-typed", "missing", False, "not-logged-in", "CliLoginUnusableError",
+            _Credential.VALID, _Binary.RUNNABLE, False, _Outcome.CLI_READY, None,
+            id="a-runnable-cli",
+        ),
+        pytest.param(
+            _Credential.ABSENT, _Binary.MISSING, False, _Outcome.NOT_LOGGED_IN, None,
+            id="no-credential",
+        ),
+        pytest.param(
+            _Credential.WRONG_TYPED, _Binary.MISSING, False,
+            _Outcome.NOT_LOGGED_IN, "CliLoginUnusableError",
             id="a-wrong-typed-credential",
         ),
         pytest.param(
-            "not-utf8", "missing", False, "not-logged-in", None, id="a-credential-of-invalid-utf8",
+            _Credential.NOT_UTF8, _Binary.MISSING, False,
+            _Outcome.NOT_LOGGED_IN, None, id="a-credential-of-invalid-utf8",
         ),
         pytest.param(
-            "valid", "missing", True, "api-ready", None, id="an-api-key-without-the-binary",
+            _Credential.VALID, _Binary.MISSING, True,
+            _Outcome.API_READY, None, id="an-api-key-without-the-binary",
         ),
     ],
 )
 def test_cli_setup_tells_whether_the_cli_can_run_here(
     tmp_path: Path, caplog: pytest.LogCaptureFixture, install: _CliSetupInstall,
-    credential: str, binary: str, api_key: bool, outcome: str, warned_class: str | None,
+    credential: _Credential, binary: _Binary, api_key: bool,
+    outcome: _Outcome, warned_class: str | None,
 ) -> None:
     caplog.set_level("WARNING", logger="agent_providers.catalog")
     calls_log = _a_cli_install(tmp_path, install, credential, binary, api_key=api_key)
@@ -704,12 +730,12 @@ def test_cli_setup_tells_whether_the_cli_can_run_here(
     configuration = provider_configuration(install.provider, frozenset({install.method}))
 
     assert configuration == {
-        "cli-unavailable": ProviderCliUnavailable(
+        _Outcome.CLI_UNAVAILABLE: ProviderCliUnavailable(
             install.provider, CliEnvironmentCause.BINARY_MISSING, install.environment_key,
         ),
-        "cli-ready": ProviderReady(install.provider, install.method),
-        "not-logged-in": ProviderNotLoggedIn(install.provider, install.environment_key),
-        "api-ready": ProviderReady(
+        _Outcome.CLI_READY: ProviderReady(install.provider, install.method),
+        _Outcome.NOT_LOGGED_IN: ProviderNotLoggedIn(install.provider, install.environment_key),
+        _Outcome.API_READY: ProviderReady(
             install.provider, ProviderSetupMethod.API_KEY, install.environment_key,
         ),
     }[outcome]
@@ -722,20 +748,25 @@ def test_cli_setup_tells_whether_the_cli_can_run_here(
 @pytest.mark.parametrize(
     ("binary", "expected"),
     [
-        pytest.param("runnable", "needs-key", id="a-signed-in-cli-the-surface-does-not-accept"),
-        pytest.param("missing", "cli-unavailable", id="the-same-without-its-binary"),
+        pytest.param(
+            _Binary.RUNNABLE, _Outcome.NEEDS_KEY,
+            id="a-signed-in-cli-the-surface-does-not-accept",
+        ),
+        pytest.param(_Binary.MISSING, _Outcome.CLI_UNAVAILABLE, id="the-same-without-its-binary"),
     ],
 )
 def test_cli_setup_for_a_surface_that_excludes_the_cli_names_the_binary_fault_first(
-    tmp_path: Path, install: _CliSetupInstall, binary: str, expected: str,
+    tmp_path: Path, install: _CliSetupInstall, binary: _Binary, expected: _Outcome,
 ) -> None:
-    _a_cli_install(tmp_path, install, "valid", binary)
+    _a_cli_install(tmp_path, install, _Credential.VALID, binary)
 
     configuration = provider_configuration(install.provider, frozenset())
 
     assert configuration == {
-        "needs-key": ProviderNeedsKey(install.provider, install.method, install.environment_key),
-        "cli-unavailable": ProviderCliUnavailable(
+        _Outcome.NEEDS_KEY: ProviderNeedsKey(
+            install.provider, install.method, install.environment_key,
+        ),
+        _Outcome.CLI_UNAVAILABLE: ProviderCliUnavailable(
             install.provider, CliEnvironmentCause.BINARY_MISSING, install.environment_key,
         ),
     }[expected]

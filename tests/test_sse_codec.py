@@ -238,6 +238,12 @@ def test_a_frame_whose_tool_input_nests_past_the_limit_is_a_schema_mismatch() ->
     assert violation.kind is ViolationKind.SCHEMA_MISMATCH
 
 
+def test_a_frame_nested_far_past_the_parser_stack_ends_in_a_violation() -> None:
+    violation = _violation_of(_frame_nested(100_000))
+
+    assert violation.kind in {ViolationKind.INVALID_JSON, ViolationKind.SCHEMA_MISMATCH}
+
+
 def test_a_frame_the_json_parser_cannot_recurse_into_is_invalid_json(monkeypatch) -> None:
     def exhausted(*args: Any, **kwargs: Any) -> Any:
         raise RecursionError

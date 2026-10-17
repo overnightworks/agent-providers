@@ -1,5 +1,13 @@
 [gate]
-mandatory_jobs = ["checks", "keycloak-token-shapes", "dependency-floors"]
+mandatory_jobs = [
+  "test (3.12)",
+  "test (3.13)",
+  "test (3.14)",
+  "test (3.15)",
+  "checks",
+  "keycloak-token-shapes",
+  "dependency-floors",
+]
 
 [secrets]
 allow = [

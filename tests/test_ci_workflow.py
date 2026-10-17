@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -48,7 +49,7 @@ def test_checks_is_the_one_aggregate_of_the_test_matrix():
     checks = _job_body("checks")
     assert "    name: checks\n" in checks
     assert "    needs: [test]\n" in checks
-    assert "    if: always()\n" in checks
+    assert "if:" not in checks
     assert "strategy:" not in checks
     assert "TEST_RESULT: ${{ needs.test.result }}" in checks
     assert 'run: test "$TEST_RESULT" = success' in checks
@@ -82,3 +83,12 @@ def test_the_quality_verdict_requires_the_dependency_floors():
     assert "dependency-floors" in needs.group(1)
     config = (_REPOSITORY / "quality" / "config.toml").read_text(encoding="utf-8")
     assert '"dependency-floors"' in config.split("[secrets]")[0]
+
+
+def test_every_test_matrix_leg_is_a_mandatory_job_of_the_verdict():
+    config = tomllib.loads((_REPOSITORY / "quality" / "config.toml").read_text(encoding="utf-8"))
+    matrix = re.search(r'^        python-version: \[(.*)\]$', _job_body("test"), re.M)
+    assert matrix
+    legs = {f"test ({minor})" for minor in re.findall(r'"([\d.]+)"', matrix.group(1))}
+
+    assert {job for job in config["gate"]["mandatory_jobs"] if job.startswith("test (")} == legs

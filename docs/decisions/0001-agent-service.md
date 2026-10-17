@@ -898,6 +898,301 @@ queue.
 **Consequence.** Subscription runs are strictly serial, and a busy service says
 so instead of waiting.
 
+### A1b measured: claude 2.1.302
+
+Measured on 17.10.2026 on `/home/felix-hummert/.local/share/claude/versions/2.1.302`
+(`claude --version` prints `2.1.302 (Claude Code)`), a 285,793,528-byte Bun
+executable. No cell used a login, a token or an Anthropic account. Nothing here
+reads `~/.claude`.
+
+**Harness (every cell).** Each run is the CLI under `bwrap` with the network
+unshared (loopback only), an empty environment and a throwaway home and working
+directory in scratch, and the system directories bound read-only:
+
+```text
+bwrap --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/lib /lib \
+  --symlink usr/lib64 /lib64 --ro-bind /etc /etc --tmpfs /home \
+  --ro-bind <2.1.302> /opt/claude --proc /proc --dev /dev --tmpfs /tmp \
+  --bind <scratch> <scratch> --unshare-net --die-with-parent --chdir <empty-work> \
+  env -i PATH=/usr/bin:/bin HOME=<scratch>/home TMPDIR=<scratch>/home/tmp \
+  DISABLE_AUTOUPDATER=1 /opt/claude ARGS
+```
+
+Unless a cell says otherwise, `ARGS` is `-p --input-format stream-json
+--output-format stream-json --verbose`, and a small driver writes one
+`{"type":"user","message":{"role":"user","content":"hello"}}` line to stdin 0.5 s
+after the start and closes stdin 5 s later. "Init" is the `system/init` event.
+Every run held `/tmp/probe-stack.lock`. The fake servers and proxies of the
+cells below are scratch scripts on `127.0.0.1` inside the same unshared network.
+
+#### A1b-0a flags and stream, no login
+
+**c1 Flags.** Each flag below was added to `ARGS`. Every one reached init and the
+unauthenticated result (c4); none printed an error. The control
+`--invented-flag` exits 1 with `error: unknown option '--invented-flag'`, so an
+accepted flag is not a silently ignored one.
+
+| Flag | Result | Observable effect |
+|---|---|---|
+| `--max-turns 1` | accepted | none observable without a model; enforcement is A1b-0b2's |
+| `--no-session-persistence` | accepted | see c5 |
+| `--system-prompt-file F` | accepted | a missing `F` aborts before init with `Error: System prompt file not found: <path>`, so the file is read; its effect on the model is not observable without a login |
+| `--strict-mcp-config` | accepted | no effect without `--mcp-config` |
+| `--input-format stream-json` | accepted | needs `-p` and `--output-format stream-json`, which every run here sets |
+| `--tools ""` | accepted | init `tools` is `[]` (22 entries without it) |
+| `--setting-sources ""` | accepted | the empty value is taken; see c7 for what it does |
+
+With all of `--tools "" --strict-mcp-config --setting-sources ""
+--no-session-persistence --max-turns 1 --system-prompt-file F` init still lists
+5 `agents`, 18 `skills`, 48 `slash_commands` and 3 `plugins` (all `builtin`)
+beside `tools: []`. They are not tools, but a check that init is empty must say
+which fields it means.
+
+**c2 Init fields.** The init event carries these keys: `type`, `subtype`, `cwd`,
+`session_id`, `tools`, `mcp_servers`, `model`, `permissionMode`,
+`slash_commands`, `terminal_slash_commands`, `apiKeySource`,
+`claude_code_version`, `output_style`, `agents`, `skills`, `plugins`,
+`capabilities`, `analytics_disabled`, `product_feedback_disabled`, `uuid`,
+`memory_paths`, `original_cwd`, `additional_directories`,
+`messaging_socket_path`, `fast_mode_state`, `fast_mode_disabled_reason`,
+`per_turn_effort_active`, `view_mode`. Values without a login: `apiKeySource`
+`"none"`, `claude_code_version` `"2.1.302"`, `model` `"claude-opus-5-5"`,
+`permissionMode` `"default"`, `mcp_servers` `[]`. The 22 default tools are
+`Task, Bash, CronCreate, CronDelete, CronList, DesignSync, Edit, EnterWorktree,
+ExitWorktree, ListAgents, NotebookEdit, Read, ReportFindings, ScheduleWakeup,
+SendMessage, Skill, TaskStop, ToolSearch, WebFetch, WebSearch, Workflow, Write`.
+`messaging_socket_path` is `/tmp/cc-socks-<uid>/<pid>.sock`: it is under `/tmp`,
+not under `TMPDIR` or the home.
+
+**c3 Init timing.** With stdin open and no message for 6 s, nothing was printed
+on stdout or stderr. The driver wrote the message at 6.001 s; init arrived at
+6.030 s (29 ms), then the `assistant` event at 6.054 s and the `result` at
+6.056 s. With a 0.5 s delay init arrived 25 to 55 ms after the write in every run (0.523 to 0.556 s). The CLI prints init only after it holds the first
+message (body fact 11 holds on 2.1.302). Section A1b-0c shows that it contacts a
+configured MCP server before that message.
+
+**c4 The unauthenticated run.** The events in order are `system/init`,
+`assistant`, `result`. The `assistant` event has `error: "authentication_failed"`,
+`is_api_error_message: true`, `model: "<synthetic>"`, zero token usage and the
+text `Not logged in · Please run /login`. The `result` has `subtype: "success"`,
+`is_error: true`, `terminal_reason: "api_error"`, `total_cost_usd: 0`,
+`duration_api_ms: 0` and the same text. With `--input-format stream-json` the
+process does not end after the `result`: it was still running 5 s later and
+exited with code 1 when stdin was closed. `-p hello --output-format
+stream-json --verbose` with stdin from `/dev/null` exits 1 after the same three
+events; `-p hello` prints `Not logged in · Please run /login` and exits 1. No
+network was needed for any of this (the network was unshared).
+
+**c5 Files written with `--no-session-persistence`.** The working directory
+stays empty. The home gained (names and sizes as measured):
+
+```text
+.claude.json                           852 B  (keys: firstStartTime, firstStartVersion,
+                                               hasResetAutoModeOptInForDefaultOffer, machineID,
+                                               migrationVersion, opusProMigrationComplete,
+                                               pluginUsage, seenNotifications,
+                                               sonnet1m45MigrationComplete, userID)
+.claude/backups/.claude.json.backup.<ms>   84 B
+.claude/sessions/                      empty directory
+.claude/projects/<cwd>/memory/         empty directory
+.claude/telemetry/1p_failed_events.<uuid>.<uuid>.json   224,562 B
+$TMPDIR/claude-<uid>/                  empty directory
+/tmp/cc-socks-<uid>/                   empty directory (outside the home and TMPDIR)
+```
+
+With `--tools "" --strict-mcp-config --setting-sources ""` added, the
+`.claude/projects/<cwd>/memory` directory was not created; the other entries
+were. No session transcript (`.jsonl`) was written in either run. A control
+without the flag (the A1b-0c runs) did write
+`.claude/projects/<cwd>/<session-uuid>.jsonl` although the run was unauthenticated.
+
+**c6 Telemetry switches.** Same run, `--no-session-persistence`, under `strace -f -e
+trace=connect,sendto,sendmsg,sendmmsg`. The network was unshared, so every
+connection failed, but the lookups show the hosts:
+
+| `DISABLE_TELEMETRY` | `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | Hosts looked up | `telemetry/1p_failed_events.*.json` | `.claude.json` |
+|---|---|---|---|---|
+| unset | unset | `api.anthropic.com` only (DNS queries to the resolver `127.0.0.1:53`) | written (230,590 B) | 852 B |
+| `1` | unset | `api.anthropic.com` | not written | 719 B |
+| unset | `1` | none; no `connect` or send at all | not written | 719 B |
+| `1` | `1` | none | not written | 719 B |
+
+`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` also changes init: 21 tools instead
+of 22 (`DesignSync` is gone), 16 `skills` instead of 18, 44 `slash_commands` instead of 48, and
+`analytics_disabled` and `product_feedback_disabled` become `true`. Under
+`DISABLE_TELEMETRY` alone only `analytics_disabled` becomes `true`; the tool,
+skill and command counts stay 22, 18 and 48. The same hosts appear as `CONNECT`
+targets in A1b-0d.
+
+**c7 Managed settings and `--setting-sources ""`.** The host's `/etc` was not
+touched. A scratch directory was bound read-only at `/etc/claude-code` inside
+`bwrap` (with `--tmpfs /etc` plus read-only binds of `/etc/ssl`, `/etc/passwd`
+and `/etc/hosts`), holding `managed-settings.json` =
+`{"model":"managed-marker-model","permissions":{"defaultMode":"plan"}}` and
+`managed-mcp.json` = `{"mcpServers":{"managed-srv":{"type":"http","url":"http://127.0.0.1:9/mcp"}}}`.
+
+| Flags | init `model` | `permissionMode` | `mcp_servers` |
+|---|---|---|---|
+| none | `managed-marker-model` | `plan` | `managed-srv`, `failed`, source `enterprise` |
+| `--setting-sources ""` | `managed-marker-model` | `plan` | `managed-srv`, `failed`, source `enterprise` |
+| `--strict-mcp-config` | refused: `You cannot use --strict-mcp-config when an enterprise MCP config is present` (before init) | | |
+| `--setting-sources "" --strict-mcp-config` | refused with the same sentence | | |
+
+So a managed-settings file and a managed MCP config survive
+`--setting-sources ""`, and `--strict-mcp-config` does not hide the managed MCP
+server: with one present the CLI refuses to start. The image must hold neither
+file (A1d conditions). Not measured: other managed locations (macOS, Windows,
+`managed-settings.d`), which are outside the Linux image.
+
+#### A1b-0c the CLI as an MCP client, no login
+
+The fake Streamable HTTP server is a scratch script on `127.0.0.1:18765` inside
+the unshared network. It logs every request. It answers `initialize`,
+`tools/list` and `ping` with `application/json`, answers notifications with
+202 and an empty body, answers `GET` with 405 and a `DELETE` with 405 (200 in
+the session variant), and answers any other method with a JSON-RPC
+`-32601` error. `ARGS` also carries `--mcp-config F` where `F` is
+`{"mcpServers":{"fake":{"type":"http","url":"http://127.0.0.1:18765/mcp","headers":{"Authorization":"Bearer dummy-0c-token"}}}}`.
+Times are relative to the stdin write of the first message.
+
+Request order at the server, identical in every run that connected (three
+plain runs and the variants with an `Mcp-Session-Id`, a 400 or a 404 answer to
+the first request):
+
+| # | Time | Request | `MCP-Protocol-Version` |
+|---|---|---|---|
+| 1 | -0.18 s | `POST server/discover` | `2026-07-28` (plus header `mcp-method: server/discover`) |
+| 2 | -0.17 s | `POST initialize` | absent |
+| 3 | -0.13 s | `POST notifications/initialized` | `2025-11-25` |
+| 4 | -0.13 s | `GET` | `2025-11-25` |
+| 5 | -0.12 s | `POST tools/list` | `2025-11-25` |
+
+**The CLI connects before the first message and without a login**, about 0.18 s
+before the message was written, which is also before init. Without a login the
+CLI still contacts a configured MCP server and calls `tools/list`.
+
+- **c1 Authorization.** Every request, including `GET`, carries the `Authorization`
+  value from the config's `headers` unchanged (checked by length and equality;
+  the value is not recorded here).
+- **c2 `initialize`.** `protocolVersion` `2025-11-25`; `capabilities`
+  `{"roots":{"listChanged":true},"elicitation":{"form":{},"url":{}}}`; `clientInfo`
+  `{"name":"claude-code","title":"Claude Code","version":"2.1.302","description":"Anthropic's agentic coding tool","websiteUrl":"https://claude.com/claude-code"}`.
+  Before it, request 1 (`server/discover`, protocol `2026-07-28`, the same client
+  info and capabilities in `params._meta`) is a probe. The CLI fell back to
+  `initialize` and connected when the probe got a JSON-RPC error with status 200,
+  400 or 404.
+- **Version negotiation.** If the server answers `initialize` with
+  `2025-06-18` or `2025-03-26`, the CLI connects and sends that version in
+  `MCP-Protocol-Version` afterwards. With `1999-01-01` it stops after request 2
+  and init reports the server `failed`.
+- **c3 `Accept`.** `Accept: application/json, text/event-stream` on every `POST`,
+  `Accept: text/event-stream` on `GET`; `Content-Type: application/json`; `User-Agent:
+  claude-code/2.1.302 (sdk-cli)`. A plain `application/json` answer is accepted:
+  init reports the server `connected` and `tools/list` follows.
+- **c4 `GET` and 405.** The CLI sends one `GET` right after `notifications/initialized`
+  (with `MCP-Protocol-Version`, and with `Mcp-Session-Id` when the server issued
+  one). After the 405 it neither retried within 5 s nor counted it as a failure:
+  the server stayed `connected`.
+- **c5 `tools/list` and `connected`.** `tools/list` is called once, after the
+  `GET`. Init then reports `mcp_servers: [{"name":"fake","status":"connected","source":"dynamic"}]`
+  and lists the tool as `mcp__fake__echo` (23 tools; with `--tools ""
+  --strict-mcp-config --setting-sources ""` the list is exactly `["mcp__fake__echo"]`).
+- **c6 After a 401.** When every `POST` answers 401 (with `WWW-Authenticate: Bearer`),
+  the CLI sends requests 1 and 2 only, no retry, and init reports the server
+  `failed` (22 tools). No further request was seen, so no OAuth flow ran
+  against this server.
+- **c7 No stdio process.** `strace -f -e trace=execve` on the HTTP run shows only
+  the CLI's own children: `rg` (the CLI re-executing itself), `git`, `sh -c
+  "uname -s ..."` and `uname`. A control run with
+  `{"type":"stdio","command":"/usr/bin/sleep","args":["31"]}` shows an extra
+  `execve("/usr/bin/sleep", ["/usr/bin/sleep", "31"])`. So the HTTP server config
+  starts no process for the server. The CLI does start `git` and `rg`, so a
+  sandbox must allow them. In the stdio control the CLI had not exited 20 s after
+  stdin closed (killed by the driver; exit code not recorded).
+- **c8 End of the session.** No `DELETE` and no `notifications/cancelled` reached
+  the server when stdin closed (exit 1), nor on `SIGTERM` with stdin open (exit
+  143), with or without an `Mcp-Session-Id` issued. In the session variant the
+  CLI echoed `Mcp-Session-Id` on requests 3 to 5, so a server that issues one
+  gets it back but is never told the session ended.
+- **c9 `MCP-Protocol-Version` and 202.** The header is absent on `initialize` and
+  present with the negotiated version on every later request (`POST` and `GET`).
+  A 202 with an empty body for `notifications/initialized` is accepted: the CLI
+  went on to `GET` and `tools/list`.
+
+#### A1b-0d egress and the pinned binary, no login
+
+**c1 and c2 Hosts of an unauthenticated `-p` run.** `HTTPS_PROXY` and
+`HTTP_PROXY` point at a scratch proxy on `127.0.0.1:18766` inside the unshared
+network that records the request line and answers every `CONNECT` with 403.
+`ARGS` is the default plus `--no-session-persistence`. The run ends with the same
+unauthenticated result as A1b-0a in all four cases.
+
+| `DISABLE_TELEMETRY` | `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | `CONNECT` targets in 5 s |
+|---|---|---|
+| unset | unset | `api.anthropic.com:443` (2 requests) |
+| `1` | unset | `api.anthropic.com:443` (1 request) |
+| unset | `1` | none |
+| `1` | `1` | none |
+
+A longer run (15 s, updater variants below) made 5 requests, all to
+`api.anthropic.com:443`. No other host was contacted in any run. With the proxy
+unset and the network unshared (A1b-0a c6), the lookups were also only
+`api.anthropic.com`. Not measured: hosts a logged-in run contacts (inference,
+authentication); they need a login.
+
+**c3 `--version`.** Under the same proxy `claude --version` printed `2.1.302
+(Claude Code)`, exited 0 and sent no request.
+
+**c4 Download URL and checksum source of exactly 2.1.302.** The binary's strings
+name `https://downloads.claude.ai/claude-code-releases`, a per-version
+`/manifest.json` and a `/manifest.json.raw-sig.json` sidecar (RSASSA-PKCS1-v1_5
+with SHA-512; the schema is `{version, platforms: {<platform>: {checksum, size,
+binary}}}`). A read-only `curl` of the vendor's public storage, needing no
+account, login or token, gave:
+
+```text
+curl -sS https://downloads.claude.ai/claude-code-releases/2.1.302/manifest.json
+curl -sS https://downloads.claude.ai/claude-code-releases/2.1.302/manifest.json.raw-sig.json
+curl -sSI https://downloads.claude.ai/claude-code-releases/2.1.302/linux-x64/claude        # 200, 285793528 bytes
+curl -sSI https://downloads.claude.ai/claude-code-releases/2.1.302/linux-x64/claude.zst    # 200, 100901808 bytes
+curl -sS  https://downloads.claude.ai/claude-code-releases/latest   # 2.1.302
+curl -sS  https://downloads.claude.ai/claude-code-releases/stable   # 2.1.292
+```
+
+The manifest of 2.1.302 (commit `2ef144e6f98c1c99d082b735e4b38f50e3391e55`, build
+date `2026-10-16T16:13:51Z`) lists, among eight platforms:
+
+| Platform | SHA-256 | Size |
+|---|---|---|
+| `linux-x64` | `60d7eb7f12fbb28a52533fe8be5884097403562aa02dc73991a021c7067e29a5` | 285,793,528 |
+| `linux-arm64` | `2bd4f4e5ed5cb09955b490098f745321cb5491e7ea8c752ba1e3bb010cdadb10` | 285,335,616 |
+| `linux-x64-musl` | `39395c4d6fef3e38bf59d75890593a5474181c8e96534b54562312503685f787` | 279,426,576 |
+| `linux-arm64-musl` | `58dd401b704351f4b70a0bb6faecbc1eb1405057b4dd4cf48a7beae93b4ca143` | 277,560,568 |
+
+`sha256sum` of the local file is `60d7eb7f...e29a5`, the `linux-x64` entry, and its
+size matches. The manifest says `manifestSignatureEnforcement: "flag"`. The
+signature in the sidecar was not verified: the public key is inside the binary and
+the check was not reproduced here. The pinned URL for CI and the image is therefore
+`https://downloads.claude.ai/claude-code-releases/2.1.302/linux-x64/claude`, checked
+against the manifest checksum above (the `-musl` entries are for a musl image;
+the host binary is glibc-linked, body fact 11). `latest` and `stable` move, so
+they must not be used for the pin. Not measured: whether the vendor keeps old
+version directories for ever.
+
+**c5 The binary path stays fixed with `DISABLE_AUTOUPDATER`.** The CLI was installed in
+a throwaway home in the native layout (`~/.local/bin/claude` linked to
+`~/.local/share/claude/versions/2.1.302`, a copy of the file) and run for 15 s
+under the refusing proxy and the unshared network, once with `DISABLE_AUTOUPDATER=1`
+and once with it unset. In both runs the link target, the contents of `versions/`
+(one file, 285,793,528 B) and its SHA-256 were identical before and after, and the
+only host contacted was `api.anthropic.com:443`. The unset run shows no update
+attempt either, so this measurement does not show the updater acting; it shows
+that with the switch set nothing changed. The updater's own behaviour with a
+network and a newer release is not measured. The host's `versions/` directory
+itself holds five versions (2.1.296, 2.1.299 to 2.1.302), so a self-updating
+install keeps old binaries, which is why the image pins the file and sets the
+switch.
+
 ## H8 atelier-2
 
 **Context.** The "one location" invariant could be read to cover the operator's

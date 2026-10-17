@@ -472,6 +472,8 @@ def assert_rejected(response: httpx.Response, code: RejectionCode, status: int) 
         assert response.headers["www-authenticate"] == "Bearer"
     if code is RejectionCode.UNAVAILABLE:
         assert response.headers["retry-after"] == "30"
+    if code is RejectionCode.BUSY:
+        assert response.headers["retry-after"] == "10"
 
 
 def decoded_events(raw: bytes) -> list[RunEvent]:
@@ -720,12 +722,12 @@ class ClientSocket:
 
 
 @functools.cache
-def _shared_mint() -> TokenMint:
+def shared_mint() -> TokenMint:
     return TokenMint()
 
 
 def _run_scope(spec_version: str) -> dict[str, Any]:
-    mint = _shared_mint()
+    mint = shared_mint()
     headers = run_headers(mint.workload(), mint.user())
     return {
         "type": "http",
@@ -762,7 +764,7 @@ async def respond_through_the_app(
         service_config(runs=drive.runs.model_dump()),
         runners=runners or Runners(cli=drive.runner),
         records=drive.records,
-        fetch_key_set=_shared_mint().fetch_key_set,
+        fetch_key_set=shared_mint().fetch_key_set,
     )
     response = asyncio.create_task(app(client.scope, client.receive, client.send))
     answering = asyncio.create_task(client.answering.wait())

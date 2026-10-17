@@ -1,0 +1,8 @@
+claim_id = "73def024920e411b979558ac4623b964"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "59690ecf6072f72262229a0139ea83ef6e5350c9"
+branch = "claude/issue-193-a1b-10a2-1-mcp-relay-owner"
+scope = ["README.md", "packages/agent-service/src/agent_service/tool_relay.py", "tests/capability_support.py", "tests/relay_support.py", "tests/test_service_tool_relay_protocol.py"]
+opened_commit = "6cc2dfd3c186e40e60ed7bb1722bd98aaf3a47b5"
+whole_reason = "One owner: the MCP answers, the narrowing and the leak gate share answer()'s single exit in tool_relay, with one new test module, its two support builders and the one README row; splitting the gate from the messages would leave bodies that reach the CLI ungated."

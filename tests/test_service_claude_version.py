@@ -5,6 +5,7 @@ from __future__ import annotations
 import errno
 import json
 import os
+import shutil
 import stat
 import tempfile
 from pathlib import Path
@@ -296,3 +297,58 @@ def test_a_private_home_that_cannot_be_made_refuses_the_start_as_unstarted(
 )
 def test_only_the_exact_version_line_is_parsed(stdout, version):
     assert parse_version_output(stdout) == version
+
+
+@pytest.fixture
+def home_that_cannot_be_removed(monkeypatch):
+    removal = shutil.rmtree
+
+    def remove_then_fail(path, *_arguments, **_keywords):
+        removal(path)
+        raise OSError(errno.EBUSY, "device busy")
+
+    monkeypatch.setattr(shutil, "rmtree", remove_then_fail)
+
+
+def test_a_home_that_cannot_be_removed_refuses_a_valid_probe_and_serves_nothing(
+    tmp_path, capsys, served, home_that_cannot_be_removed
+):
+    program = _printing(tmp_path, PRINTS_THE_PIN)
+
+    refusal = _refused_on_one_line(_config_file_naming(tmp_path, program), capsys)
+
+    assert refusal == "cli.claude_version: probe home could not be removed: device busy"
+    assert served == []
+
+
+@pytest.mark.parametrize(
+    ("program_name", "stdout", "refusal"),
+    [
+        pytest.param(
+            "absent-claude",
+            None,
+            lambda program: _no_version_line(
+                program, "probe could not start or its start deadline expired"
+            ),
+            id="unstarted",
+        ),
+        pytest.param(
+            "claude",
+            "2.1.303 (Claude Code)\n",
+            lambda program: (
+                f"cli.claude_version: {program} reports 2.1.303,"
+                f" not the pinned {PINNED_CLAUDE_VERSION}"
+            ),
+            id="mismatch",
+        ),
+    ],
+)
+def test_a_home_that_cannot_be_removed_never_replaces_the_probe_refusal(
+    tmp_path, capsys, served, home_that_cannot_be_removed, program_name, stdout, refusal
+):
+    program = tmp_path / program_name if stdout is None else _printing(tmp_path, stdout)
+
+    printed = _refused_on_one_line(_config_file_naming(tmp_path, program), capsys)
+
+    assert printed == refusal(program)
+    assert served == []

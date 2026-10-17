@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Annotated, Final
@@ -62,34 +63,57 @@ def _what_was_printed(stdout: str) -> str:
     return f"printed {shown_text(first_line[:SHOWN_OUTPUT_CHARACTERS])}"
 
 
-def _probe(binary: Path) -> CliRun | None:
+def _remove_home(home: Path) -> str | None:
+    """Why the probe's disposable home could not be removed, or ``None`` when it is gone."""
     try:
-        home = tempfile.TemporaryDirectory(prefix="agent-service-claude-version-")
+        shutil.rmtree(home)
+    except OSError as failure:
+        return f"probe home could not be removed: {shown_text(failure.strerror or 'unknown')}"
+    return None
+
+
+def _probe(binary: Path) -> tuple[CliRun | None, str | None]:
+    """The probe's run and, separately, why its home could not be removed."""
+    try:
+        home = Path(tempfile.mkdtemp(prefix="agent-service-claude-version-"))
     except OSError:
-        return None
-    with home:
+        return None, None
+    try:
         child = ChildProcess(
             binary=binary,
             arguments=("--version",),
-            environment=closed_environment(Path(home.name)),
-            working_directory=Path(home.name),
+            environment=closed_environment(home),
+            working_directory=home,
         )
-        return run_catalog_cli(child)
+        run = run_catalog_cli(child)
+    finally:
+        removal_failure = _remove_home(home)
+    return run, removal_failure
 
 
-def require_pinned_version(binary: Path, pinned: str) -> None:
-    """Run ``binary --version`` in a throwaway home and refuse unless it reports ``pinned``."""
-    run = _probe(binary)
+def _refusal(binary: Path, pinned: str, run: CliRun | None) -> str | None:
     shown_binary = shown_text(str(binary))
     reason = _unusable_run(run)
     reported = parse_version_output(run.stdout) if run is not None and reason is None else None
     if reported is None:
         why = reason or _what_was_printed(run.stdout)
-        raise ClaudeVersionRefused(
+        return (
             f"cli.claude_version: {shown_binary} did not print a version ({why});"
             f" the pinned version is {pinned}"
         )
     if reported != pinned:
-        raise ClaudeVersionRefused(
-            f"cli.claude_version: {shown_binary} reports {reported}, not the pinned {pinned}"
-        )
+        return f"cli.claude_version: {shown_binary} reports {reported}, not the pinned {pinned}"
+    return None
+
+
+def require_pinned_version(binary: Path, pinned: str) -> None:
+    """Run ``binary --version`` in a throwaway home and refuse unless it reports ``pinned``.
+
+    A home that cannot be removed never replaces the probe's own refusal.
+    """
+    run, removal_failure = _probe(binary)
+    refusal = _refusal(binary, pinned, run)
+    if refusal is not None:
+        raise ClaudeVersionRefused(refusal)
+    if removal_failure is not None:
+        raise ClaudeVersionRefused(f"cli.claude_version: {removal_failure}")

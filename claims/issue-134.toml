@@ -1,0 +1,8 @@
+claim_id = "e997ba5453a14b708ae99621fdb9afad"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "9b78f3a0928a625413aef7b032282122615ece48"
+branch = "claude/issue-134-profile-token-file"
+scope = ["README.md", "packages/agent-service/src/agent_service/config.py", "packages/agent-service/src/agent_service/secret_file.py", "packages/agent-service/src/agent_service/signing.py", "tests/test_service_config.py", "tests/test_service_signing.py"]
+opened_commit = "940cf25f616789db4d59d66d7e15ba99d09d6e8e"
+whole_reason = "One secret-file reader moved out of signing.py, shared by the signing key and the profile token; the new module, its two callers, their tests and the README rows form one change and do not split."

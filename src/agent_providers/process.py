@@ -374,6 +374,11 @@ log = logging.getLogger(__name__)
 
 GROK_CLI_CREDENTIALS_INVALID_DETAIL: Final = "could not parse Grok CLI credentials"
 CODEX_CLI_CREDENTIALS_INVALID_DETAIL: Final = "could not parse Codex CLI credentials"
+CLAUDE_CLI_BINARY_MISSING_DETAIL: Final = (
+    "the configured Claude CLI binary is not on the search path"
+)
+GROK_CLI_BINARY_MISSING_DETAIL: Final = "the configured Grok CLI binary is not on the search path"
+CODEX_CLI_BINARY_MISSING_DETAIL: Final = "the configured Codex CLI binary is not on the search path"
 _CATALOG_HOME_PREFIX: Final = "agent-cli-catalog-"
 _CATALOG_AUTH_FILE_PATH: Final = Path("auth.json")
 CredentialCopy = Callable[[bytes], bytes | None]
@@ -1263,11 +1268,14 @@ def _catalog_cli_output(
     *,
     credential_home_variable: str,
     auth_file: Path,
+    missing_binary_detail: str,
     credential_copy: CredentialCopy | None = None,
 ) -> str | None:
     binary = resolve_cli_binary(binary_name)
     if binary is None:
-        return None
+        raise CliEnvironmentUnavailableError(
+            missing_binary_detail, cause=CliEnvironmentCause.BINARY_MISSING,
+        )
     run = _run_credentialed_catalog_cli(
         binary,
         args,
@@ -1860,6 +1868,7 @@ def _probe_grok_status() -> GrokCliStatus:
         GROK_CLI_STATUS_ARGS,
         credential_home_variable=_GROK_CREDENTIAL_HOME_VARIABLE,
         auth_file=current_config().grok_cli_auth_file,
+        missing_binary_detail=GROK_CLI_BINARY_MISSING_DETAIL,
     )
     if output is None:
         return GrokCliStatus(login=LOGGED_OUT, model_names=())
@@ -1953,6 +1962,7 @@ def _probe_codex_login() -> CliLogin:
         CODEX_CLI_STATUS_ARGS,
         credential_home_variable=_CODEX_CREDENTIAL_HOME_VARIABLE,
         auth_file=current_config().codex_cli_auth_file,
+        missing_binary_detail=CODEX_CLI_BINARY_MISSING_DETAIL,
         credential_copy=blanked_copy,
     )
     if output is None:
@@ -1964,7 +1974,9 @@ def codex_cli_model_catalog() -> str:
     """Return the current JSON catalog emitted by ``codex debug models``."""
     binary = resolve_cli_binary(current_config().codex_cli_binary)
     if binary is None:
-        raise AgentCliUnavailableError("codex debug models did not return a catalog")
+        raise CliEnvironmentUnavailableError(
+            CODEX_CLI_BINARY_MISSING_DETAIL, cause=CliEnvironmentCause.BINARY_MISSING,
+        )
     run = _run_credentialed_catalog_cli(
         binary,
         CODEX_CLI_MODELS_ARGS,
@@ -2000,7 +2012,9 @@ _claude_login_probes_lock = threading.Lock()
 
 def claude_cli_login(binary: Path | None) -> CliLogin:
     if binary is None:
-        return LOGGED_OUT
+        raise CliEnvironmentUnavailableError(
+            CLAUDE_CLI_BINARY_MISSING_DETAIL, cause=CliEnvironmentCause.BINARY_MISSING,
+        )
     with _claude_login_probes_lock:
         probe = _claude_login_probes.setdefault(
             str(binary),

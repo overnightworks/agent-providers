@@ -20,7 +20,9 @@ from agent_providers.codex_login import blanked_copy
 from agent_providers.config import current_config
 from agent_providers.errors import SafeRouteReasonCode, raise_without_chain
 from agent_providers.process import (
-    AgentCliUnavailableError,
+    CODEX_CLI_BINARY_MISSING_DETAIL,
+    CliEnvironmentCause,
+    CliEnvironmentUnavailableError,
     CliLineChannel,
     PrivateCredentialHome,
     PrivateCredentialHomeReservation,
@@ -93,7 +95,9 @@ def codex_child_process(arguments: tuple[str, ...], turn_home: CodexTurnHome) ->
     """
     binary = resolve_cli_binary(current_config().codex_cli_binary)
     if binary is None:
-        raise AgentCliUnavailableError("the configured Codex CLI binary is not on the search path")
+        raise CliEnvironmentUnavailableError(
+            CODEX_CLI_BINARY_MISSING_DETAIL, cause=CliEnvironmentCause.BINARY_MISSING,
+        )
     return ChildProcess(
         binary=binary,
         arguments=arguments,

@@ -60,7 +60,7 @@ from provider_test_support import (
 
 from agent_providers import process
 from agent_providers.codex.pool import CodexProcessKind, CodexProcessPool
-from agent_providers.codex.protocol import create_codex_turn_home
+from agent_providers.codex.protocol import codex_child_process, create_codex_turn_home
 from agent_providers.codex_login import _blanked_document, assess_codex_login, blanked_copy
 from agent_providers.config import current_config
 from agent_providers.constants import (
@@ -69,7 +69,10 @@ from agent_providers.constants import (
     CLI_OUTPUT_READ_LIMIT_BYTES,
 )
 from agent_providers.process import (
+    CLAUDE_CLI_BINARY_MISSING_DETAIL,
+    CODEX_CLI_BINARY_MISSING_DETAIL,
     CODEX_CLI_CREDENTIALS_INVALID_DETAIL,
+    GROK_CLI_BINARY_MISSING_DETAIL,
     GROK_CLI_CREDENTIALS_INVALID_DETAIL,
     AgentCliUnavailableError,
     CachedProbe,
@@ -264,16 +267,6 @@ def test_codex_model_catalog_reads_past_the_login_probe_limit(monkeypatch) -> No
     )
 
     assert codex_cli_model_catalog() == "x" * catalog_length
-
-
-def test_codex_model_catalog_without_a_binary_raises(monkeypatch) -> None:
-    monkeypatch.setattr(process, "resolve_cli_binary", lambda _binary: None)
-
-    with pytest.raises(
-        AgentCliUnavailableError,
-        match="did not return a catalog",
-    ):
-        codex_cli_model_catalog()
 
 
 @pytest.mark.parametrize(
@@ -1386,9 +1379,50 @@ def test_claude_does_not_accept_a_failed_or_incomplete_run(run: CliRun) -> None:
     assert login.logged_in is False
 
 
-def test_a_cli_that_is_not_installed_cannot_be_asked() -> None:
-    with patch("agent_providers.process.resolve_cli_binary", return_value=None):
-        assert grok_cli_status().login.logged_in is False
+def _codex_child_for_a_turn_home() -> None:
+    current_config().codex_cli_auth_file.write_bytes(a_codex_login())
+    turn_home = create_codex_turn_home(CODEX_TOOL_TURN_DIRECTORY_PREFIX)
+    try:
+        codex_child_process(("exec",), turn_home)
+    finally:
+        turn_home.home.close()
+
+
+BINARY_SITES = (
+    pytest.param(
+        "claude", lambda: claude_cli_login(None), CLAUDE_CLI_BINARY_MISSING_DETAIL,
+        id="claude-login",
+    ),
+    pytest.param("grok", grok_cli_status, GROK_CLI_BINARY_MISSING_DETAIL, id="grok-status"),
+    pytest.param("codex", codex_cli_login, CODEX_CLI_BINARY_MISSING_DETAIL, id="codex-login"),
+    pytest.param(
+        "codex", codex_cli_model_catalog, CODEX_CLI_BINARY_MISSING_DETAIL,
+        id="codex-model-catalog",
+    ),
+    pytest.param(
+        "codex", _codex_child_for_a_turn_home, CODEX_CLI_BINARY_MISSING_DETAIL,
+        id="codex-child-process",
+    ),
+)
+
+
+@pytest.mark.parametrize(("provider", "ask", "detail"), BINARY_SITES)
+def test_a_missing_binary_is_an_environment_fault_naming_the_provider(
+    provider: str, ask: Callable[[], object], detail: str, tmp_path: Path,
+) -> None:
+    configured_value = "a-secret-binary-name"
+    override_provider_runtime(
+        cli_binary_search_path=(tmp_path,), **{f"{provider}_cli_binary": configured_value},
+    )
+
+    with pytest.raises(CliEnvironmentUnavailableError) as raised:
+        ask()
+
+    assert raised.value.cause is CliEnvironmentCause.BINARY_MISSING
+    assert str(raised.value) == detail
+    assert provider.capitalize() in detail
+    assert configured_value not in str(raised.value)
+    assert raised.value.__cause__ is None
 
 
 def _expected_closed_names(credential_home_variable: str) -> list[str]:

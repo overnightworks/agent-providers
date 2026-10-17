@@ -25,6 +25,8 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
 
 from agent_providers.claude.provider import (
     CLAUDE_CLI_MODEL_CATALOG_ERROR,
+    CliLoginNotConfiguredError,
+    CliUnavailableError,
     cli_login_status,
     list_cli_model_aliases,
 )
@@ -54,6 +56,9 @@ from agent_providers.errors import (
 )
 from agent_providers.process import (
     AgentCliUnavailableError,
+    CliEnvironmentCause,
+    CliEnvironmentUnavailableError,
+    CliLoginUnusableError,
     codex_cli_login,
     codex_cli_login_is_usable,
     codex_cli_model_catalog,
@@ -131,6 +136,15 @@ class ProviderNotLoggedIn:
 
 
 @dataclass(frozen=True)
+class ProviderCliUnavailable:
+    """No API key is set, and this provider's CLI cannot run here."""
+
+    provider: str
+    cause: CliEnvironmentCause
+    missing_environment_key: str
+
+
+@dataclass(frozen=True)
 class ProviderCapabilityMissing:
     """A key is set, but the distribution its route needs is not installed."""
 
@@ -142,6 +156,7 @@ type ProviderConfiguration = (
     ProviderReady
     | ProviderNeedsKey
     | ProviderNotLoggedIn
+    | ProviderCliUnavailable
     | ProviderCapabilityMissing
 )
 
@@ -252,15 +267,28 @@ def _cli_route_preflight(
     try:
         if _cli_is_logged_in(provider):
             return None
-    except AgentCliUnavailableError:
+    except AgentCliUnavailableError as exc:
+        reason_code = _cli_fault_reason_code(exc)
+        readiness = (
+            ProviderRouteReadinessState.NOT_CONFIGURED
+            if reason_code is SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED
+            else ProviderRouteReadinessState.DISTURBED
+        )
         return _route_preflight_snapshot(
-            capability, now, ProviderRouteReadinessState.DISTURBED,
-            SafeRouteReasonCode.CLI_BINARY_UNAVAILABLE, _CLI_LOGIN_SETUP_LABEL,
+            capability, now, readiness, reason_code, _CLI_LOGIN_SETUP_LABEL,
         )
     return _route_preflight_snapshot(
         capability, now, ProviderRouteReadinessState.NOT_CONFIGURED,
         SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED, _CLI_LOGIN_SETUP_LABEL,
     )
+
+
+def _cli_fault_reason_code(fault: Exception) -> SafeRouteReasonCode:
+    if isinstance(fault, CliLoginUnusableError | CliLoginNotConfiguredError):
+        return SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED
+    if isinstance(fault, CliEnvironmentUnavailableError | CliUnavailableError):
+        return SafeRouteReasonCode.CLI_BINARY_UNAVAILABLE
+    return SafeRouteReasonCode.CATALOGUE_PROTOCOL_ERROR
 
 
 def _route_preflight_snapshot(
@@ -391,12 +419,14 @@ def provider_configuration(
         )
     if cli_method is None:
         return ProviderNotLoggedIn(provider, credential.environment_key)
+    if isinstance(cli_method, CliEnvironmentCause):
+        return ProviderCliUnavailable(provider, cli_method, credential.environment_key)
     if cli_method in cli_methods:
         return ProviderReady(provider, cli_method)
     return ProviderNeedsKey(provider, cli_method, credential.environment_key)
 
 
-def _cli_setup_method(provider: str) -> ProviderSetupMethod | None:
+def _cli_setup_method(provider: str) -> ProviderSetupMethod | CliEnvironmentCause | None:
     try:
         if provider == ProviderName.CLAUDE and cli_login_status().logged_in:
             return ProviderSetupMethod.CLAUDE_CLI
@@ -406,6 +436,8 @@ def _cli_setup_method(provider: str) -> ProviderSetupMethod | None:
             return ProviderSetupMethod.CODEX_CLI
     except AgentCliUnavailableError as exc:
         log.warning("%s CLI probe unavailable: %s", provider, type(exc).__name__)
+        if isinstance(exc, CliEnvironmentUnavailableError):
+            return exc.cause
     return None
 
 
@@ -500,15 +532,21 @@ def _list_grok_models(key: str) -> list[str]:
 
 def _list_grok_cli_models() -> list[str]:
     try:
-        model_names = grok_cli_status().model_names
+        status = grok_cli_status()
     except AgentCliUnavailableError as exc:
         raise ProviderModelCatalogUnavailableError(
             ProviderName.GROK,
             "could not list grok CLI models",
-            normalize_route_failure(SafeRouteReasonCode.CATALOGUE_PROTOCOL_ERROR),
+            normalize_route_failure(_cli_fault_reason_code(exc)),
         ) from exc
+    if not status.login.logged_in:
+        raise ProviderModelCatalogUnavailableError(
+            ProviderName.GROK,
+            "could not list grok CLI models",
+            normalize_route_failure(SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED),
+        )
     chat = [
-        model_id for model_id in model_names
+        model_id for model_id in status.model_names
         if _is_provider_model_id(ProviderName.GROK, model_id)
     ]
     if not chat:
@@ -527,7 +565,7 @@ def _list_codex_cli_models() -> list[str]:
         raise ProviderModelCatalogUnavailableError(
             ProviderName.CODEX,
             "could not list codex CLI models",
-            normalize_route_failure(SafeRouteReasonCode.CATALOGUE_PROTOCOL_ERROR),
+            normalize_route_failure(_cli_fault_reason_code(exc)),
         ) from exc
     try:
         payload = json.loads(output)
@@ -582,7 +620,7 @@ def _list_claude_cli_models() -> list[str]:
         raise ProviderModelCatalogUnavailableError(
             ProviderName.CLAUDE,
             CLAUDE_CLI_MODEL_CATALOG_ERROR,
-            normalize_route_failure(SafeRouteReasonCode.CATALOGUE_PROTOCOL_ERROR),
+            normalize_route_failure(_cli_fault_reason_code(exc)),
         ) from exc
     if not aliases:
         raise ProviderModelCatalogUnavailableError(

@@ -1,0 +1,8 @@
+claim_id = "1d82ea5c21174f74bd1161d4c3f49485"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "4c8e25407305c7d924e5c26aaf446fd112d0804e"
+branch = "claude/issue-150-a1b-9b2a-upstream-client-ablehnungen-fri"
+scope = ["README.md", "packages/agent-service/src/agent_service/app_tools.py", "packages/agent-service/src/agent_service/mcp_wire.py", "tests/mcp_app_fake.py", "tests/test_service_app_tools.py", "tests/test_service_mcp_wire.py"]
+opened_commit = "ed56c99dd0d6df0057b5671ca6ac952f1544fec0"
+whole_reason = "One client slice: the module and its one extracted wire rule, its test fake and tests, and the README row that describes them; the files only make sense together and each non-test change is a few lines apart from the module."

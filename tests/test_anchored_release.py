@@ -459,18 +459,32 @@ def test_a_cleanup_during_a_held_release_keeps_the_zombie_for_the_late_reap(
 
 @pytest.mark.parametrize("loses_at", ["wait", "consume"])
 def test_a_waitpid_after_a_scripted_loss_is_refused_and_never_forwarded(loses_at: str) -> None:
-    unrelated_pid = 2**22 + 1
+    a_pid_no_process_can_hold = 2**22 + 1
     kernel = KernelModel(stops=1, loses_at=loses_at)
-    kernel.bind(unrelated_pid)
+    kernel.bind(a_pid_no_process_can_hold)
     options = OBSERVE_EXIT if loses_at == "wait" else CONSUME_STOP_REPORT
+    losing_outcome: list[BaseException | None] = []
+
+    def lose_the_wait() -> None:
+        try:
+            kernel(os.P_PID, a_pid_no_process_can_hold, options)
+            losing_outcome.append(None)
+        except Exception as raised:
+            losing_outcome.append(raised)
+
     losing_call = threading.Thread(
-        target=lambda: pytest.raises(ChildProcessError, kernel, os.P_PID, unrelated_pid, options),
-        name=f"{WATCHER_THREAD_PREFIX}{unrelated_pid}",
+        target=lose_the_wait,
+        name=f"{WATCHER_THREAD_PREFIX}{a_pid_no_process_can_hold}",
     )
     losing_call.start()
     losing_call.join(TEST_WAIT_SECONDS)
 
-    with pytest.raises(ChildProcessError):
-        kernel.waitpid(unrelated_pid, os.WNOHANG)
+    assert not losing_call.is_alive()
+    assert [type(outcome) for outcome in losing_outcome] == [ChildProcessError]
 
-    assert kernel.violations == [f"a call named pid {unrelated_pid} after it was reaped"]
+    with pytest.raises(ChildProcessError):
+        kernel.waitpid(a_pid_no_process_can_hold, os.WNOHANG)
+
+    assert kernel.violations == [
+        f"a call named pid {a_pid_no_process_can_hold} after it was reaped"
+    ]

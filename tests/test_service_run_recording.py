@@ -1371,29 +1371,44 @@ def _cancelled_after_passing_a_step(_step: _Step) -> asyncio.CancelledError:
     return stray.value
 
 
+def _stray_only_at_the_clock(step: _Step) -> BaseException:
+    return _cancelled_after_passing_a_step(step) if step is _Step.CLOCK else step.fails()
+
+
 @pytest.mark.parametrize(
-    "failing",
+    ("failing", "breaks"),
     [
-        pytest.param(frozenset({_Step.RECORD_END}), id="record_end"),
         pytest.param(
-            frozenset({_Step.DISCONNECT_REPORT, _Step.RECORD_END}), id="disconnect-record_end"
+            frozenset({_Step.RECORD_END}), _cancelled_after_passing_a_step, id="record_end"
+        ),
+        pytest.param(
+            frozenset({_Step.DISCONNECT_REPORT, _Step.RECORD_END}),
+            _cancelled_after_passing_a_step,
+            id="disconnect-record_end",
+        ),
+        pytest.param(
+            frozenset({_Step.CLOCK, _Step.DROP_REPORT}),
+            _stray_only_at_the_clock,
+            id="stray_clock-raising_drop_report",
         ),
     ],
 )
 @in_loop
-async def test_a_propagated_stray_cancellation_keeps_no_frame_of_the_step_it_left(failing):
+async def test_a_propagated_stray_cancellation_keeps_no_frame_of_the_step_it_left(failing, breaks):
     """Rule 14: nothing reachable from the failure a close raises keeps the stray's frames."""
-    records = _RecordsThatFail(failing, breaks=_cancelled_after_passing_a_step)
-    async with driven(GatedRunner(), records=records, read=False) as drive:
+    records = _RecordsThatFail(failing, breaks=breaks)
+    clock = BrokenClock(lambda: breaks(_Step.CLOCK)) if _Step.CLOCK in failing else StepClock()
+    async with driven(GatedRunner(), clock=clock, records=records, read=False) as drive:
         drive.took(await anext(drive.frames))
         await drive.clock.parked()
-        closer = asyncio.create_task(drive.frames.aclose())
+        ending = drive.drain() if _Step.CLOCK in failing else drive.frames.aclose()
+        closer = asyncio.create_task(ending)
         await asyncio.wait({closer})
     propagated = closer.exception()
     del drive, records, closer
     gc.collect()
 
-    assert type(propagated) is RunStepCancelled
+    assert propagated is not None
     assert not _reaches_a_frame_of(propagated, _a_step_cancelled_unasked)
 
 
@@ -1447,6 +1462,25 @@ async def test_two_equal_but_distinct_stray_cancellations_stay_two_failures(capl
     assert [(event, kind) for event, kind, _raiser in _failure_lines(caplog)] == [
         (_SUPERVISION.format(run_id), RunStepCancelled.__name__)
     ]
+
+
+@in_loop
+async def test_a_stray_cancellation_reusing_a_freed_ones_identity_is_a_failure_of_its_own():
+    failures = RunFailures(uuid.uuid4())
+    first = _raised(_CancelledLikeAnyOther())
+    freed_identity = id(first)
+    failures.add(FailedPart.SUPERVISION, first)
+    del first
+    reuser = _raised(_CancelledLikeAnyOther())
+    for _attempt in range(1000):
+        if id(reuser) == freed_identity:
+            break
+        reuser = _raised(_CancelledLikeAnyOther())
+    assert id(reuser) == freed_identity, "the allocator did not reuse the freed identity"
+
+    second = failures.add(FailedPart.CLEANUP, reuser)
+
+    assert second.part is FailedPart.CLEANUP
 
 
 @in_loop

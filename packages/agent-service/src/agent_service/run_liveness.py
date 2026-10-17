@@ -349,14 +349,17 @@ class RunFailures:
     ) -> RunStepCancelled:
         """The one ``RunStepCancelled`` of ``cancelled``, told apart by identity alone.
 
-        The stray is held weakly, because a propagated failure reaches this
-        collection through its traceback, and the stray's frames must not
-        live on through it.
+        The stray is held weakly and made inert once converted: a failure that
+        later propagates reaches this collection through its traceback, and a
+        second failure raised while the stray was handled links it as its
+        context, so the stray's frames must not live on through either.
         """
         known = self._converted.get(id(cancelled))
         if known is not None and known[0]() is cancelled:
             return known[1]
         converted = RunStepCancelled(part, cancelled)
+        traceback.clear_frames(cancelled.__traceback__)
+        cancelled.__traceback__ = None
         self._converted[id(cancelled)] = (weakref.ref(cancelled), converted)
         return converted
 

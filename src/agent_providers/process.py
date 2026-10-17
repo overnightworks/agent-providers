@@ -8,6 +8,7 @@ import errno
 import functools
 import json
 import logging
+import operator
 import os
 import selectors
 import shutil
@@ -378,7 +379,6 @@ _CATALOG_AUTH_FILE_PATH: Final = Path("auth.json")
 CredentialCopy = Callable[[bytes], bytes | None]
 _PRIVATE_HOME_COPY_MODE: Final = 0o400
 _DESCRIPTOR_LINKS: Final = Path("/proc/self/fd")
-_NON_FOLLOWING_DIRECTORY_FLAGS: Final = os.O_NOFOLLOW | os.O_DIRECTORY | os.O_CLOEXEC
 _CREDENTIAL_COPY_FAILED_DETAIL: Final = "could not prepare the private CLI credential copy"
 # Measured on claude 2.1.266: the CLI reports its subscription login from
 # this file below HOME alone, without a network call.
@@ -1501,41 +1501,64 @@ def _make_tree_removable(root: Path) -> None:
 
     Every directory is acquired without following a link and repaired on the
     acquired object. This needs Linux's O_PATH and a mounted /proc/self/fd.
+    Only the directories on the current path stay open, so the descriptors
+    in use grow with the tree's depth and not its width.
     """
-    if not hasattr(os, "O_PATH"):
-        raise OSError(errno.ENOTSUP, "the permission repair needs O_PATH")
-    acquired: list[int] = []
+    acquisition_flags = _directory_flags("O_PATH", "O_NOFOLLOW", "O_DIRECTORY", "O_CLOEXEC")
+    listing_flags = _directory_flags("O_DIRECTORY", "O_CLOEXEC") | os.O_RDONLY
+    frames: list[_DirectoryFrame] = []
     try:
-        acquired.append(os.open(root, os.O_PATH | _NON_FOLLOWING_DIRECTORY_FLAGS))
-        while acquired:
-            handle = acquired.pop()
-            try:
-                _repair_directory_and_acquire_subdirectories(handle, acquired)
-            finally:
-                os.close(handle)
+        frames.append(_open_frame(os.open(root, acquisition_flags), listing_flags))
+        while frames:
+            child = _next_subdirectory(frames[-1], acquisition_flags)
+            if child is None:
+                frames.pop().close()
+            else:
+                frames.append(_open_frame(child, listing_flags))
     finally:
-        for handle in acquired:
-            os.close(handle)
+        for frame in frames:
+            frame.close()
 
 
-def _repair_directory_and_acquire_subdirectories(handle: int, acquired: list[int]) -> None:
-    link = _DESCRIPTOR_LINKS / str(handle)
-    os.chmod(link, 0o700)
-    listing = os.open(link, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+def _directory_flags(*names: str) -> int:
+    missing = [name for name in names if not hasattr(os, name)]
+    if missing:
+        raise OSError(errno.ENOTSUP, f"the permission repair needs {', '.join(missing)}")
+    return functools.reduce(operator.or_, (getattr(os, name) for name in names))
+
+
+@dataclass(frozen=True)
+class _DirectoryFrame:
+    listing: int
+    entries: os._ScandirIterator[str]
+
+    def close(self) -> None:
+        try:
+            self.entries.close()
+        finally:
+            os.close(self.listing)
+
+
+def _open_frame(handle: int, listing_flags: int) -> _DirectoryFrame:
     try:
-        with os.scandir(listing) as entries:
-            for entry in entries:
-                if entry.is_dir(follow_symlinks=False):
-                    with suppress(NotADirectoryError, FileNotFoundError):
-                        acquired.append(
-                            os.open(
-                                entry.name,
-                                os.O_PATH | _NON_FOLLOWING_DIRECTORY_FLAGS,
-                                dir_fd=listing,
-                            )
-                        )
+        link = _DESCRIPTOR_LINKS / str(handle)
+        os.chmod(link, 0o700)
+        listing = os.open(link, listing_flags)
     finally:
+        os.close(handle)
+    try:
+        return _DirectoryFrame(listing, os.scandir(listing))
+    except BaseException:
         os.close(listing)
+        raise
+
+
+def _next_subdirectory(frame: _DirectoryFrame, acquisition_flags: int) -> int | None:
+    for entry in frame.entries:
+        if entry.is_dir(follow_symlinks=False):
+            with suppress(NotADirectoryError, FileNotFoundError):
+                return os.open(entry.name, acquisition_flags, dir_fd=frame.listing)
+    return None
 
 
 @contextmanager

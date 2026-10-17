@@ -1,0 +1,7 @@
+claim_id = "93b47259eb204bed857698424dec63ee"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "3c9c055e56c157c508b7856a400a64380607d415"
+branch = "claude/issue-174-a1b-3t2-streaming-fake-kind"
+scope = ["tests/test_async_claude_spawn_seam.py", "tests/test_claude_provider_streaming.py", "tests/test_spawn_owner.py"]
+opened_commit = "ad08d413ebda2d0fd4825bf5e0ecd191296117cf"

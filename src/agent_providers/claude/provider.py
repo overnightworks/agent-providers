@@ -17,10 +17,12 @@ import tempfile
 import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal
+
+import anyio
 
 from agent_providers import process
 from agent_providers.config import McpServerSpec, current_config, current_turn_config
@@ -271,15 +273,12 @@ async def acall_claude_with_mcp(
                     proc.communicate(stdin_body.encode()),
                     timeout=timeout_seconds,
                 )
-                _release_zombie_reservation(proc.pid)
             except asyncio.TimeoutError:
-                await _reap_process_group(proc)
                 raise UnavailableError(
                     f"Claude CLI timed out after {timeout_seconds}s",
                 )
-            except BaseException:
-                await _reap_process_group(proc)
-                raise
+            finally:
+                await _reap_behind_shield(proc)
     finally:
         home.close()
 
@@ -347,7 +346,7 @@ async def acall_claude_with_mcp_stream(
                 async for event in _consume_stream(proc, timeout_seconds, correlation_id):
                     yield event
             finally:
-                await _reap_stream_process_after_cancellation(proc)
+                await _reap_behind_shield(proc)
     finally:
         home.close()
 
@@ -1622,43 +1621,31 @@ def _probe_cli_surface_sync(
 # ── reap: async ──────────────────────────────────────────────────────
 
 
-async def _reap_stream_process_after_cancellation(
-    proc: AsyncPipedProcess,
-) -> None:
-    """Finish a streaming CLI reap even if its consumer was cancelled.
+async def _reap_behind_shield(proc: AsyncPipedProcess) -> None:
+    """Run the one bounded reap of ``proc`` to completion, whatever cancels the caller.
 
-    ASGI 2.3 cancels the response-stream task when it receives a client
-    disconnect.  That cancellation closes this async generator, but a second
-    cancellation can otherwise interrupt the first await in its ``finally``
-    block.  Run the bounded reap in its own task and shield that task until it
-    completes; the caller still receives its cancellation once cleanup is
-    complete.
+    The reap runs in its own task, started once, and is awaited behind an
+    AnyIO shield (ASGI cancel scopes) and ``asyncio.shield`` (direct
+    ``Task.cancel()``).  Every direct cancellation that arrives meanwhile is
+    absorbed until the task is done.  The reap's own exception then wins over
+    any cancellation; otherwise the cancellation is delivered afterwards.
     """
-    # The non-streaming provider is also used where the host's ASGI
-    # dependencies are intentionally not installed. This helper is exclusive
-    # to streaming turns served under an ASGI host, where AnyIO is provided.
-    import anyio
-
     reap_task = asyncio.create_task(_reap_process_group(proc))
     try:
-        # Starlette uses AnyIO's level cancellation: after its cancel scope
-        # fires, every await outside a shield raises again.  asyncio.shield()
-        # only protects the child task, so retrying it in a loop spins without
-        # ever letting the reaper run.  An AnyIO shield protects this wait from
-        # the active ASGI cancel scope instead.
         with anyio.CancelScope(shield=True):
             await asyncio.shield(reap_task)
     except asyncio.CancelledError:
-        # Direct asyncio Task.cancel() is not governed by an AnyIO scope.  It
-        # may interrupt the first wait, so finish cleanup behind the same
-        # shield before re-delivering that cancellation to the caller.
         with anyio.CancelScope(shield=True):
-            await asyncio.shield(reap_task)
+            await _outlast_direct_cancellations(reap_task)
         raise
-
-    # Re-deliver an ASGI cancellation that was deferred by the shield only
-    # after the process has been reaped.
     await anyio.lowlevel.checkpoint_if_cancelled()
+
+
+async def _outlast_direct_cancellations(reap_task: asyncio.Task[bool]) -> None:
+    while not reap_task.done():
+        with suppress(asyncio.CancelledError):
+            await asyncio.shield(reap_task)
+    reap_task.result()
 
 
 async def _reap_process_group(proc: AsyncPipedProcess) -> bool:
@@ -2041,25 +2028,23 @@ async def _acall_cli(
     stdin_body = stdin_prompt(system, flat_prompt)
     home = _claude_private_home()
     try:
-        child = _claude_child_process(binary, _cli_arguments(model), home.path)
-        proc = await _spawn_reserved_async_cli_process(
-            child,
-            home_reservation=home.reserve(),
-        )
+        try:
+            child = _claude_child_process(binary, _cli_arguments(model), home.path)
+            proc = await _spawn_reserved_async_cli_process(
+                child,
+                home_reservation=home.reserve(),
+            )
+        except FileNotFoundError:
+            raise CliUnavailableError(CLAUDE_CLI_BINARY_NOT_FOUND_DETAIL)
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
                 proc.communicate(stdin_body.encode()),
                 timeout=120,
             )
-            _release_zombie_reservation(proc.pid)
         except asyncio.TimeoutError:
-            await _reap_process_group(proc)
             raise UnavailableError("Claude CLI timed out after 120s")
-        except BaseException:
-            await _reap_process_group(proc)
-            raise
-    except FileNotFoundError:
-        raise CliUnavailableError(CLAUDE_CLI_BINARY_NOT_FOUND_DETAIL)
+        finally:
+            await _reap_behind_shield(proc)
     finally:
         home.close()
 

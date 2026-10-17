@@ -15,6 +15,7 @@ the input: a body, a header or a result may carry the capability.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
@@ -30,6 +31,8 @@ from agent_providers.errors import raise_without_chain
 JSON_MEDIA_TYPE: Final = "application/json"
 EVENT_STREAM_MEDIA_TYPE: Final = "text/event-stream"
 PROTOCOL_VERSION_HEADER: Final = "MCP-Protocol-Version"
+SESSION_ID_HEADER: Final = "Mcp-Session-Id"
+_SESSION_ID: Final = re.compile(r"[\x21-\x7e]+")
 _ASSUMED_PROTOCOL_VERSION: Final = "2025-03-26"
 _SERVER_NAME: Final = "agent-service"
 _SERVER_VERSION: Final = "1"
@@ -45,7 +48,7 @@ class ProtocolVersion(StrEnum):
 
 
 SUPPORTED_PROTOCOL_VERSIONS: Final = frozenset(ProtocolVersion)
-_LATEST_PROTOCOL_VERSION: Final = ProtocolVersion.V2025_11_25
+LATEST_PROTOCOL_VERSION: Final = ProtocolVersion.V2025_11_25
 
 
 class McpMethod(StrEnum):
@@ -69,6 +72,7 @@ class WireRefusal(StrEnum):
     NOT_JSON_ANSWER = "not_json_answer"
     NOT_ACKNOWLEDGED = "not_acknowledged"
     UNSUPPORTED_VERSION = "unsupported_version"
+    INVALID_SESSION_ID = "invalid_session_id"
 
 
 class McpWireError(Exception):
@@ -213,7 +217,7 @@ def negotiate_protocol_version(requested: str) -> ProtocolVersion:
     """A requested version inside the set is kept; any other gets the latest one."""
     if requested in SUPPORTED_PROTOCOL_VERSIONS:
         return ProtocolVersion(requested)
-    return _LATEST_PROTOCOL_VERSION
+    return LATEST_PROTOCOL_VERSION
 
 
 def require_supported_version(offered: str) -> ProtocolVersion:
@@ -221,6 +225,13 @@ def require_supported_version(offered: str) -> ProtocolVersion:
     if offered not in SUPPORTED_PROTOCOL_VERSIONS:
         _refuse(WireRefusal.UNSUPPORTED_VERSION)
     return ProtocolVersion(offered)
+
+
+def require_session_id(value: str) -> str:
+    """The client's check of a session id before it is echoed: visible ASCII, never empty."""
+    if _SESSION_ID.fullmatch(value) is None:
+        _refuse(WireRefusal.INVALID_SESSION_ID)
+    return value
 
 
 def protocol_header_status(header_value: str | None) -> HTTPStatus:

@@ -1257,7 +1257,8 @@ def _resolve_inflight_async(
     exception: BaseException | None = None,
 ) -> None:
     with _tool_surface_lock:
-        _tool_surface_inflight_async.pop(key, None)
+        if _tool_surface_inflight_async.get(key) is future:
+            del _tool_surface_inflight_async[key]
     if future.done():
         return
     if exception is not None:
@@ -1340,7 +1341,8 @@ def _resolve_inflight_sync(
     exception: BaseException | None = None,
 ) -> None:
     with _tool_surface_lock:
-        _tool_surface_inflight_sync.pop(key, None)
+        if _tool_surface_inflight_sync.get(key) is future:
+            del _tool_surface_inflight_sync[key]
     if future.done():
         return
     if exception is not None:

@@ -250,6 +250,8 @@ The other host obligations arrive as arguments where they are needed:
   in-process, which a host calling the core consumes. The agent service's wire
   is `agent_client.wire`, not this union.
 
+**Interruptions.** Python can raise an exception asynchronously inside a library call: a signal handler raises one between two bytecode instructions of the main thread, as the default `SIGINT` handler raises `KeyboardInterrupt`, and `PyThreadState_SetAsyncExc` injects one into any thread. Python's documentation says that most code, the standard library included, cannot be made robust against this ([Note on Signal Handlers and Exceptions](https://docs.python.org/3/library/signal.html#note-on-signal-handlers-and-exceptions)), and this library is no exception. A host that needs orderly shutdown or continued service uses signal handlers that do not raise for the whole time library calls can run, its startup included, and never injects an exception into a thread that runs library code. After such an interruption, stop using the library and end the process: a later call may wait forever on a lock the interruption left held, and graceful shutdown may stall. Normal interpreter exit attempts the private-home cleanup without taking any of this library's locks, but the cleanup is not guaranteed when shutdown cannot complete or a removal fails.
+
 ## Migrating to 0.3.0
 
 A host migrates at its pin bump to 0.3.0; both configuration models refuse unknown fields.

@@ -1039,7 +1039,7 @@ def fail_to_start_the_runner_thread(
     real_start = threading.Thread.start
 
     def start(worker: threading.Thread) -> None:
-        if worker._target is target:
+        if worker._target == target:
             raise error
         real_start(worker)
 
@@ -1064,6 +1064,32 @@ def start_then_raise(
     the test sets the gate.
     """
     real_start = threading.Thread.start
+    gate, thread_has_claimed = order_the_thread_start_claims(
+        monkeypatch, thread_claims_first=thread_claims_first,
+    )
+
+    def start(worker: threading.Thread) -> None:
+        is_target = worker._target == target
+        real_start(worker)
+        if is_target:
+            if thread_claims_first:
+                assert thread_has_claimed.wait(timeout=_START_CLAIM_WAIT_SECONDS), (
+                    "the started thread never took its claim"
+                )
+            raise error
+
+    monkeypatch.setattr(threading.Thread, "start", start)
+    return gate
+
+
+def order_the_thread_start_claims(
+    monkeypatch, *, thread_claims_first: bool,
+) -> tuple[threading.Event, threading.Event]:
+    """Hold every started ``ClaimedStartThread`` at its claim until the returned gate opens.
+
+    The gate is open from the start with ``thread_claims_first``. The second
+    event is set once a thread has taken its claim.
+    """
     real_claim = process.ClaimedStartThread.take_start_claim
     thread_has_claimed = threading.Event()
     gate = threading.Event()
@@ -1078,19 +1104,8 @@ def start_then_raise(
         thread_has_claimed.set()
         return won
 
-    def start(worker: threading.Thread) -> None:
-        is_target = worker._target is target
-        real_start(worker)
-        if is_target:
-            if thread_claims_first:
-                assert thread_has_claimed.wait(timeout=_START_CLAIM_WAIT_SECONDS), (
-                    "the started thread never took its claim"
-                )
-            raise error
-
     monkeypatch.setattr(process.ClaimedStartThread, "take_start_claim", claim)
-    monkeypatch.setattr(threading.Thread, "start", start)
-    return gate
+    return gate, thread_has_claimed
 
 
 class FailingLogHandler(logging.Handler):

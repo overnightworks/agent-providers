@@ -287,11 +287,14 @@ class StepFailures:
         try:
             yield
         except BaseException as error:  # NOSONAR(S5754) every exit publishes; callers re-raise
-            self._errors[step] = error
-            if self._first_control_flow is None and not isinstance(error, Exception):
-                self._first_control_flow = error
-            if reported:
-                self._failed.append(f"{step} {type(error).__name__}")
+            self.record(step, error, reported=reported)
+
+    def record(self, step: str, error: BaseException, *, reported: bool = True) -> None:
+        self._errors[step] = error
+        if self._first_control_flow is None and not isinstance(error, Exception):
+            self._first_control_flow = error
+        if reported:
+            self._failed.append(f"{step} {type(error).__name__}")
 
     def failed(self, step: str) -> bool:
         return step in self._errors
@@ -445,13 +448,7 @@ class CachedProbe[T]:
                 return self._answer()
             future = self._inflight
             if future is None:
-                future = concurrent.futures.Future()
-                self._inflight = future
-                threading.Thread(
-                    target=self._run_and_resolve,
-                    args=(future, self._generation),
-                    daemon=True,
-                ).start()
+                future = self._start_flight()
 
         deadline = time.monotonic() + CLI_PROBE_CALLER_TIMEOUT_SECONDS
         try:
@@ -460,6 +457,23 @@ class CachedProbe[T]:
             raise CliProbeBudgetExceeded(
                 "agent CLI probe did not answer within its caller budget",
             ) from exc
+
+    def _start_flight(self) -> concurrent.futures.Future[T]:
+        future: concurrent.futures.Future[T] = concurrent.futures.Future()
+        worker = ClaimedStartThread(
+            target=self._run_and_resolve,
+            args=(future, self._generation),
+            daemon=True,
+        )
+        try:
+            worker.start()
+        except BaseException:
+            if worker.take_start_claim():
+                raise
+            self._inflight = future
+            raise
+        self._inflight = future
+        return future
 
     def clear(self) -> None:
         with self._lock:
@@ -681,8 +695,7 @@ def _settle_unstarted_run(
     start_failure: BaseException,
 ) -> CliRunOutcome:
     failures = StepFailures()
-    with failures.contained("start"):
-        raise start_failure
+    failures.record("start", start_failure)
     with failures.contained("on_spawn_failed"):
         _notify_spawn_failed(request.on_spawn_failed)
     outcome = _settle(

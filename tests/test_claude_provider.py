@@ -4635,6 +4635,128 @@ def test_no_builtin_gate_sync_single_flight_waits_for_the_real_result_not_a_plac
     assert not any(isinstance(r, CliToolSurfaceError) for r in results)
 
 
+_FLIGHT_BOUND_SECONDS = 5
+
+
+class _HeldProbes:
+    """Tool-surface probes that each wait for their release; the first one fails."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._started = [threading.Event() for _ in range(3)]
+        self._released = [threading.Event() for _ in range(3)]
+        self.count = 0
+        self.follower_joined = threading.Event()
+
+    def run(self) -> provider._AnnouncedSurface:
+        with self._lock:
+            index = self.count
+            self.count += 1
+        self._started[index].set()
+        assert self._released[index].wait(timeout=_FLIGHT_BOUND_SECONDS), "probe never released"
+        if index == 0:
+            raise RuntimeError("the first flight fails without a cached verdict")
+        return provider._AnnouncedSurface(tools=(), slash_commands=(), mcp_connected=None)
+
+    def wait_until_started(self, index: int) -> None:
+        assert self._started[index].wait(timeout=_FLIGHT_BOUND_SECONDS)
+
+    def release(self, index: int) -> None:
+        self._released[index].set()
+
+    def release_all(self) -> None:
+        for released in self._released:
+            released.set()
+
+
+def _drive_the_cleared_flight_on_threads(held: _HeldProbes) -> list[object]:
+    outcomes: list[object] = [None, None, None]
+
+    def caller(index: int) -> None:
+        try:
+            outcomes[index] = verify_no_builtin_cli_tools()
+        except Exception as exc:  # noqa: BLE001 - captured, asserted by the caller
+            outcomes[index] = exc
+
+    threads = [threading.Thread(target=caller, args=(index,), daemon=True) for index in range(3)]
+    try:
+        threads[0].start()
+        held.wait_until_started(0)
+        clear_cli_tool_surface_cache()
+        threads[1].start()
+        held.wait_until_started(1)
+        held.release(0)
+        threads[0].join(timeout=_FLIGHT_BOUND_SECONDS)
+        threads[2].start()
+        assert held.follower_joined.wait(timeout=_FLIGHT_BOUND_SECONDS)
+        held.release(1)
+    finally:
+        held.release_all()
+        for thread in threads:
+            if thread.ident is not None:
+                thread.join(timeout=_FLIGHT_BOUND_SECONDS)
+    return outcomes
+
+
+def _drive_the_cleared_flight_on_tasks(held: _HeldProbes) -> list[object]:
+    async def scenario() -> list[object]:
+        tasks: list[asyncio.Task] = []
+        try:
+            tasks.append(asyncio.create_task(averify_no_builtin_cli_tools()))
+            await asyncio.to_thread(held.wait_until_started, 0)
+            clear_cli_tool_surface_cache()
+            tasks.append(asyncio.create_task(averify_no_builtin_cli_tools()))
+            await asyncio.to_thread(held.wait_until_started, 1)
+            held.release(0)
+            await asyncio.gather(tasks[0], return_exceptions=True)
+            tasks.append(asyncio.create_task(averify_no_builtin_cli_tools()))
+            await asyncio.to_thread(held.follower_joined.wait, _FLIGHT_BOUND_SECONDS)
+            assert held.follower_joined.is_set()
+            held.release(1)
+        finally:
+            held.release_all()
+        return await asyncio.gather(*tasks, return_exceptions=True)
+
+    return asyncio.run(asyncio.wait_for(scenario(), _FLIGHT_BOUND_SECONDS * 2))
+
+
+@pytest.mark.parametrize(
+    ("drive", "claim_name"),
+    (
+        (_drive_the_cleared_flight_on_threads, "_claim_or_join_inflight_sync"),
+        (_drive_the_cleared_flight_on_tasks, "_claim_or_join_inflight_async"),
+    ),
+    ids=("sync", "async"),
+)
+def test_a_cleared_tool_surface_flight_does_not_retire_its_replacement(
+    claude_binary, monkeypatch, drive, claim_name,
+) -> None:
+    held = _HeldProbes()
+
+    async def held_async_probe(*_args, **_kwargs) -> provider._AnnouncedSurface:
+        return await asyncio.to_thread(held.run)
+
+    monkeypatch.setattr(
+        provider, "_probe_cli_surface_sync", lambda *_args, **_kwargs: held.run(),
+    )
+    monkeypatch.setattr(provider, "_probe_cli_surface_async", held_async_probe)
+    real_claim = getattr(provider, claim_name)
+
+    def instrumented_claim(key):
+        future, is_leader = real_claim(key)
+        if not is_leader:
+            held.follower_joined.set()
+        return future, is_leader
+
+    monkeypatch.setattr(provider, claim_name, instrumented_claim)
+
+    outcomes = drive(held)
+
+    assert isinstance(outcomes[0], Exception)
+    assert outcomes[1:] == [claude_binary, claude_binary]
+    assert held.count == 2
+
+
 def test_no_builtin_gate_sync_and_async_share_one_cache(
     claude_binary,
     monkeypatch,

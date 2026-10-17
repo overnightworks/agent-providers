@@ -17,7 +17,7 @@ import tempfile
 import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal
@@ -1631,17 +1631,21 @@ async def _reap_behind_shield(proc: AsyncPipedProcess) -> None:
     any cancellation; otherwise the cancellation is delivered afterwards.
     """
     reap_task = asyncio.create_task(_reap_process_group(proc))
-    direct_cancellation: asyncio.CancelledError | None = None
-    with anyio.CancelScope(shield=True):
-        while not reap_task.done():
-            try:
-                await asyncio.shield(reap_task)
-            except asyncio.CancelledError as cancellation:
-                direct_cancellation = cancellation
-    reap_task.result()
-    if direct_cancellation is not None:
-        raise direct_cancellation
+    try:
+        with anyio.CancelScope(shield=True):
+            await asyncio.shield(reap_task)
+    except asyncio.CancelledError:
+        with anyio.CancelScope(shield=True):
+            await _outlast_direct_cancellations(reap_task)
+        raise
     await anyio.lowlevel.checkpoint_if_cancelled()
+
+
+async def _outlast_direct_cancellations(reap_task: asyncio.Task[bool]) -> None:
+    while not reap_task.done():
+        with suppress(asyncio.CancelledError):
+            await asyncio.shield(reap_task)
+    reap_task.result()
 
 
 async def _reap_process_group(proc: AsyncPipedProcess) -> bool:

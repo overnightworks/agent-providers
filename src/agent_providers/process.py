@@ -1885,7 +1885,7 @@ def _probe_grok_status() -> GrokCliStatus:
 def grok_cli_token_is_present() -> bool:
     """Whether the Grok CLI credential mirror contains a non-empty access token."""
     try:
-        document = json.loads(current_config().grok_cli_auth_file.read_text())
+        document = json.loads(current_config().grok_cli_auth_file.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return False
     except OSError as exc:

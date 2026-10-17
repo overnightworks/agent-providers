@@ -26,7 +26,7 @@ from service_support import (
     reaches_private_key,
     written_key_file,
 )
-from test_service_config import VALID_CONFIG, _written
+from test_service_config import SIGNING_KEY_LINE, VALID_CONFIG, _written
 from webauth.jwt_verification import JwtVerifier, Rejected, RejectionReason, VerifiedClaims
 
 from agent_service.cli import EXIT_BAD_CONFIG, main
@@ -60,7 +60,7 @@ def _pem_of_unknown_algorithm() -> bytes:
 
 
 def _config_text(key_file: str) -> str:
-    return f"{VALID_CONFIG}\n[signing]\nkey_file = {json.dumps(key_file)}\n"
+    return VALID_CONFIG.replace(SIGNING_KEY_LINE, f"key_file = {json.dumps(key_file)}")
 
 
 def _loaded(tmp_path: Path, key_file: Path) -> ServiceConfig:

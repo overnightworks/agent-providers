@@ -12,10 +12,12 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack
 from pathlib import Path
+from types import SimpleNamespace
 from typing import BinaryIO
 
 import pytest
 
+from agent_providers import procfs
 from agent_providers.procfs import (
     GroupCensus,
     ProcessStat,
@@ -37,6 +39,12 @@ PROC_DEVICE = "0:25"
 PROC_MOUNT_POINT = "/proc"
 STAT_FIELDS_AFTER_COMMAND = 50
 WAIT_FOR_STDIN = "import sys; sys.stdin.read()"
+NON_UTF8_NAME_THEN_WAIT_FOR_STDIN = (
+    "import ctypes, os, sys\n"
+    "ctypes.CDLL(None).prctl(15, b'ab\\xff\\xfe')\n"
+    "os.write(1, b'r')\n"
+    "sys.stdin.read()"
+)
 CLOSE_STDOUT_THEN_WAIT_FOR_STDIN = "import os, sys; os.close(1); sys.stdin.read()"
 
 requires_linux_proc = pytest.mark.skipif(
@@ -47,14 +55,15 @@ requires_linux_proc = pytest.mark.skipif(
 
 def stat_text(
     *,
-    comm: str = "worker",
+    comm: str | bytes = "worker",
     state: str = "S",
     pgrp: int | str = PGID,
     threads: int | str = 1,
-) -> str:
+) -> bytes:
     fields = ["0"] * STAT_FIELDS_AFTER_COMMAND
     fields[0], fields[2], fields[17] = state, str(pgrp), str(threads)
-    return f"{OWN_PID} ({comm}) {' '.join(fields)}\n"
+    command = comm.encode() if isinstance(comm, str) else comm
+    return f"{OWN_PID} (".encode() + command + f") {' '.join(fields)}\n".encode()
 
 
 def mountinfo_line(
@@ -84,7 +93,7 @@ class ScriptedView:
         default_factory=lambda: own_status(f"NSpid:\t{OWN_PID}"),
     )
     listing: tuple[int, ...] | OSError = (PGID,)
-    stats: dict[int, str | OSError] = dataclasses.field(
+    stats: dict[int, bytes | OSError] = dataclasses.field(
         default_factory=lambda: {PGID: stat_text(state="Z")},
     )
 
@@ -103,7 +112,7 @@ class ScriptedView:
     def process_ids(self) -> tuple[int, ...]:
         return _delivered(self.listing)
 
-    def stat(self, pid: int) -> str:
+    def stat(self, pid: int) -> bytes:
         return _delivered(self.stats.get(pid, FileNotFoundError(pid)))
 
 
@@ -117,7 +126,7 @@ def scripted_view(**overrides: object) -> ScriptedView:
     return dataclasses.replace(ScriptedView(), **overrides)
 
 
-def view_with_members(*members: tuple[int, str]) -> ScriptedView:
+def view_with_members(*members: tuple[int, bytes | OSError]) -> ScriptedView:
     return scripted_view(
         listing=(PGID, *(pid for pid, _ in members)),
         stats={PGID: stat_text(state="Z"), **dict(members)},
@@ -130,6 +139,8 @@ COMMAND_NAMES = {
     "an opening parenthesis": "a(b",
     "a newline": "a\nb",
     "a fake tail": "x) S 9 9 (y",
+    "bytes that are not UTF-8": b"ab\xff\xfe",
+    "bytes that are not UTF-8 beside a parenthesis": b"\xff)\n(\xfe",
 }
 
 
@@ -150,12 +161,15 @@ def test_a_stat_whose_group_is_gone_reads_as_minus_one():
 
 
 UNPARSABLE_STATS = {
-    "a truncated file": "42 (worker) S 1 1",
-    "a file without a closing parenthesis": "42 worker S " + "0 " * 50,
+    "a truncated file": b"42 (worker) S 1 1",
+    "exactly one field short of the thread count": b"42 (worker) " + b" ".join([b"0"] * 17),
+    "a file without a closing parenthesis": b"42 worker S " + b"0 " * 50,
+    "a non-ASCII digit group": stat_text(pgrp="\u0663"),
+    "non-ASCII text after the command name": stat_text(state="\u00e9"),
     "an empty state field": stat_text(state=""),
     "a non-number group": stat_text(pgrp="x"),
     "a non-number thread count": stat_text(threads="x"),
-    "an empty file": "",
+    "an empty file": b"",
 }
 
 
@@ -176,7 +190,7 @@ DEAD_STATES = [("Z", 0), ("Z", 1), ("X", 0), ("X", 1)]
 LIVE_STATES = [
     ("Z", 2),
     ("X", 2),
-    *((state, threads) for state in "RSDTtIPKW" for threads in (1, 3)),
+    *((state, threads) for state in "RSDTtIPKW?q" for threads in (1, 3)),
 ]
 
 
@@ -222,8 +236,12 @@ PRECONDITION_ROWS = {
         )
         for value in HIDEPID_VALUES
     },
-    "two namespace fields": (
+    "two namespace fields, own pid first": (
         {"status_text": own_status("NSpid:\t42\t1")},
+        GroupCensus.OTHER_PID_NAMESPACE,
+    ),
+    "two namespace fields, own pid last": (
+        {"status_text": own_status("NSpid:\t9042\t42")},
         GroupCensus.OTHER_PID_NAMESPACE,
     ),
     "another own pid": (
@@ -343,6 +361,24 @@ SCAN_ROWS = {
         ),
         GroupCensus.PIDS_HIDDEN,
     ),
+    "a foreign pid namespace beside a live member": (
+        scripted_view(
+            status_text=own_status("NSpid:\t9042\t42"),
+            stats={PGID: stat_text(state="S")},
+        ),
+        GroupCensus.OTHER_PID_NAMESPACE,
+    ),
+    "a non-procfs mount beside a live member": (
+        scripted_view(
+            mountinfo_text=mountinfo_line(filesystem_type="tmpfs"),
+            stats={PGID: stat_text(state="S")},
+        ),
+        GroupCensus.NOT_PROCFS,
+    ),
+    "an unrelated process whose name is not UTF-8": (
+        view_with_members((OTHER_GROUP, stat_text(comm=b"ab\xff\xfe", pgrp=OTHER_GROUP))),
+        GroupCensus.EMPTY,
+    ),
     "a missing anchor beside a live member": (
         scripted_view(
             listing=(PGID + 1,),
@@ -396,6 +432,14 @@ class ChildDidNotEndError(Exception):
     """The child neither ended nor reported within the observation deadline."""
 
 
+class StdoutStillOpenError(ChildDidNotEndError):
+    """The child kept its stdout open past the deadline."""
+
+
+class ExitNotReportedError(ChildDidNotEndError):
+    """The child closed stdout but reported no exit before the deadline."""
+
+
 def wait_for_exit_report(
     stdout: BinaryIO,
     pid: int,
@@ -408,7 +452,7 @@ def wait_for_exit_report(
     while True:
         readable, _, _ = select.select([fd], [], [], max(deadline - clock(), 0))
         if not readable:
-            raise ChildDidNotEndError(f"child {pid} kept its stdout open past the deadline")
+            raise StdoutStillOpenError(f"child {pid} kept its stdout open past the deadline")
         if os.read(fd, 4096) == b"":
             break
     while True:
@@ -416,15 +460,19 @@ def wait_for_exit_report(
         if report is not None:
             return report
         if clock() >= deadline:
-            raise ChildDidNotEndError(f"child {pid} reported no exit before the deadline")
+            raise ExitNotReportedError(f"child {pid} reported no exit before the deadline")
 
 
 class ChildNotReapedError(Exception):
     """The child outlived the cleanup allowance."""
 
 
-def reap_group(process: subprocess.Popen[bytes]) -> None:
-    cleanup_deadline = time.monotonic() + CLEANUP_ALLOWANCE_SECONDS
+def reap_group(
+    process: subprocess.Popen[bytes],
+    *,
+    clock: Callable[[], float] = time.monotonic,
+) -> None:
+    cleanup_deadline = clock() + CLEANUP_ALLOWANCE_SECONDS
     try:
         if process.returncode is None:
             try:
@@ -438,7 +486,7 @@ def reap_group(process: subprocess.Popen[bytes]) -> None:
                     pipe.close()
         finally:
             try:
-                process.wait(timeout=max(cleanup_deadline - time.monotonic(), 0))
+                process.wait(timeout=max(cleanup_deadline - clock(), 0))
             except subprocess.TimeoutExpired as expired:
                 raise ChildNotReapedError(f"child {process.pid} outlived its cleanup") from expired
 
@@ -491,7 +539,7 @@ def test_waiting_for_a_child_that_never_reports_ends_at_the_deadline_after_one_p
     waitid = ScriptedWaitid(*reports)
     clock = SteppingClock()
 
-    with pytest.raises(ChildDidNotEndError):
+    with pytest.raises(ExitNotReportedError):
         wait_for_exit_report(
             ended_stdout,
             7,
@@ -537,6 +585,45 @@ def test_a_child_that_was_already_reaped_fails_the_wait_loudly(ended_stdout):
             waitid=waitid,
             deadline=SOON,
         )
+
+
+class ScriptedWait:
+    def __init__(self, *, expires: bool) -> None:
+        self.expires = expires
+        self.timeouts: list[float] = []
+
+    def __call__(self, *, timeout: float) -> int:
+        self.timeouts.append(timeout)
+        if self.expires:
+            raise subprocess.TimeoutExpired("child", timeout)
+        return 0
+
+
+def finished_process(wait: ScriptedWait) -> subprocess.Popen[bytes]:
+    return SimpleNamespace(pid=7, returncode=0, stdin=None, stdout=None, wait=wait)
+
+
+def test_cleanup_waits_only_for_the_allowance_left_since_its_own_start():
+    wait = ScriptedWait(expires=False)
+
+    reap_group(finished_process(wait), clock=SteppingClock(start=100.0, step=3.0))
+
+    assert wait.timeouts == [CLEANUP_ALLOWANCE_SECONDS - 3.0]
+
+
+def test_cleanup_gives_a_child_no_time_once_its_allowance_is_used_up():
+    wait = ScriptedWait(expires=False)
+
+    reap_group(finished_process(wait), clock=SteppingClock(step=CLEANUP_ALLOWANCE_SECONDS * 2))
+
+    assert wait.timeouts == [0]
+
+
+def test_cleanup_fails_loudly_when_the_child_outlives_the_allowance():
+    wait = ScriptedWait(expires=True)
+
+    with pytest.raises(ChildNotReapedError):
+        reap_group(finished_process(wait), clock=SteppingClock())
 
 
 @dataclasses.dataclass(frozen=True)
@@ -591,6 +678,13 @@ def keep_running(child: RunningChild) -> None:
     del child
 
 
+def read_one_byte(child: RunningChild) -> bytes:
+    stdout = child.process.stdout
+    readable, _, _ = select.select([stdout], [], [], child.remaining_observation_time())
+    assert readable
+    return os.read(stdout.fileno(), 1)
+
+
 @requires_linux_proc
 @pytest.mark.parametrize(
     ("end_the_child", "expected"),
@@ -618,9 +712,10 @@ def test_a_child_that_closed_stdout_and_stays_alive_is_killed_and_reaped_after_t
     start_child,
 ):
     child = start_child(CLOSE_STDOUT_THEN_WAIT_FOR_STDIN)
+    assert read_one_byte(child) == b""
     deadline = time.monotonic() + STUCK_CHILD_DEADLINE_SECONDS
 
-    with pytest.raises(ChildDidNotEndError):
+    with pytest.raises(ExitNotReportedError):
         wait_for_exit_report(
             child.process.stdout,
             child.pid,
@@ -632,3 +727,64 @@ def test_a_child_that_closed_stdout_and_stays_alive_is_killed_and_reaped_after_t
 
     assert child.process.returncode == -signal.SIGKILL
     assert not Path(f"/proc/{child.pid}").exists()
+
+
+def start_child_named_in_non_utf8(start_child) -> RunningChild:
+    child = start_child(NON_UTF8_NAME_THEN_WAIT_FOR_STDIN)
+    assert read_one_byte(child) == b"r"
+    assert Path(f"/proc/{child.pid}/comm").read_bytes().startswith(b"ab\xff\xfe")
+    return child
+
+
+@requires_linux_proc
+def test_a_running_group_whose_process_name_is_not_utf8_counts_as_live(start_child):
+    child = start_child_named_in_non_utf8(start_child)
+
+    assert group_census(RealProcView(), child.pid) is GroupCensus.LIVE
+
+
+@requires_linux_proc
+def test_an_unrelated_process_named_in_non_utf8_does_not_stop_the_census_of_an_anchor(
+    start_child,
+):
+    start_child_named_in_non_utf8(start_child)
+    anchor = start_child(WAIT_FOR_STDIN)
+    wait_until_a_zombie(anchor)
+
+    assert group_census(RealProcView(), anchor.pid) is GroupCensus.EMPTY
+
+
+@pytest.fixture
+def fake_proc_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    root = tmp_path / "proc"
+    (root / "self").mkdir(parents=True)
+    monkeypatch.setattr(procfs, "PROC_ROOT", root)
+    return root
+
+
+@pytest.mark.parametrize(
+    ("file_name", "read"),
+    [
+        ("mountinfo", lambda view: view.mountinfo()),
+        ("status", lambda view: view.own_status()),
+    ],
+)
+def test_the_real_view_reads_text_files_with_non_utf8_bytes_without_loss(
+    fake_proc_root,
+    file_name,
+    read,
+):
+    contents = b"/mnt/\xff\xfe name\n"
+    (fake_proc_root / "self" / file_name).write_bytes(contents)
+
+    text = read(RealProcView())
+
+    assert text.encode(errors="surrogateescape") == contents
+
+
+def test_the_real_view_reads_a_stat_with_a_non_utf8_command_name_as_raw_bytes(fake_proc_root):
+    (fake_proc_root / "9").mkdir()
+    raw = stat_text(comm=b"ab\xff\xfe")
+    (fake_proc_root / "9" / "stat").write_bytes(raw)
+
+    assert RealProcView().stat(9) == raw

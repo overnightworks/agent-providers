@@ -31,7 +31,7 @@ STAT_PGRP_INDEX = 2
 STAT_THREADS_INDEX = 17
 EXITED_STATES = frozenset({"Z", "X"})
 VANISHED_ENTRY_ERRORS = (FileNotFoundError, ProcessLookupError)
-_INTEGER = re.compile(r"-?\d+", re.ASCII)
+_INTEGER = re.compile(r"-?\d+")
 
 
 class GroupCensus(Enum):
@@ -68,7 +68,9 @@ class ProcView(Protocol):
 
     def process_ids(self) -> tuple[int, ...]: ...
 
-    def stat(self, pid: int) -> str: ...
+    def stat(self, pid: int) -> bytes:
+        """The raw file: a command name may hold any byte."""
+        ...
 
 
 class RealProcView:
@@ -82,16 +84,20 @@ class RealProcView:
         return f"{os.major(device)}:{os.minor(device)}"
 
     def mountinfo(self) -> str:
-        return (PROC_ROOT / "self" / "mountinfo").read_text()
+        return _read_lossless(PROC_ROOT / "self" / "mountinfo")
 
     def own_status(self) -> str:
-        return (PROC_ROOT / "self" / "status").read_text()
+        return _read_lossless(PROC_ROOT / "self" / "status")
 
     def process_ids(self) -> tuple[int, ...]:
         return tuple(int(name) for name in os.listdir(PROC_ROOT) if name.isdecimal())
 
-    def stat(self, pid: int) -> str:
-        return (PROC_ROOT / str(pid) / "stat").read_text()
+    def stat(self, pid: int) -> bytes:
+        return (PROC_ROOT / str(pid) / "stat").read_bytes()
+
+
+def _read_lossless(path: Path) -> str:
+    return path.read_bytes().decode(errors="surrogateescape")
 
 
 class UnparsableStatError(ValueError):
@@ -109,16 +115,20 @@ class ProcessStat:
         return not (self.state in EXITED_STATES and self.threads <= 1)
 
 
-def parse_stat(contents: str) -> ProcessStat:
+def parse_stat(contents: bytes) -> ProcessStat:
     """Read state, pgrp and thread count after the last ``)`` of the whole file.
 
-    The command name may hold spaces, parentheses and newlines, so only the
-    text after the last ``)`` is split. Only the numeric fields are validated.
+    The command name may hold any byte, so only the ASCII text after the last
+    ``)`` is decoded and split. Only the numeric fields are validated.
     """
-    closing = contents.rfind(")")
+    closing = contents.rfind(b")")
     if closing < 0:
         raise UnparsableStatError("no closing parenthesis")
-    fields = contents[closing + 1 :].removeprefix(" ").rstrip("\n").split(" ")
+    try:
+        tail = contents[closing + 1 :].decode("ascii")
+    except UnicodeDecodeError as error:
+        raise UnparsableStatError("non-ASCII text after the command name") from error
+    fields = tail.removeprefix(" ").rstrip("\n").split(" ")
     if len(fields) <= STAT_THREADS_INDEX:
         raise UnparsableStatError("too few fields")
     state = fields[STAT_STATE_INDEX]

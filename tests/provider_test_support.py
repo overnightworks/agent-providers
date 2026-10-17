@@ -670,23 +670,24 @@ def grok_cli_outcome(
     )
 
 
-def grok_cli_runner(lines, outcome, calls):
-    def run_cli_bounded(child, **kwargs):
-        calls.append((child.command, kwargs))
-        for line in lines:
-            assert kwargs["stdout_line_channel"]._send(line)
-        kwargs["stdout_line_channel"]._close(outcome)
-        return outcome
+@dataclass(frozen=True)
+class CliCall:
+    child: ChildProcess
+    kwargs: Mapping[str, Any]
 
-    return run_cli_bounded
+    @property
+    def command(self) -> tuple[str, ...]:
+        return self.child.command
 
 
-def cli_rounds_runner(rounds, outcome, calls):
-    """A runner whose n-th spawn streams ``rounds[n]``; ``calls`` records each argv."""
+def cli_rounds_runner(rounds, outcome, calls, *, on_child=None):
+    """A runner whose n-th spawn streams ``rounds[n]``; ``calls`` records each spawn."""
     remaining = iter(rounds)
 
     def run_cli_bounded(child, **kwargs):
-        calls.append(child.command)
+        calls.append(CliCall(child, kwargs))
+        if on_child is not None:
+            on_child(child)
         if "on_spawned" in kwargs:
             kwargs["on_spawned"](1)
         for line in next(remaining):
@@ -707,11 +708,12 @@ def assert_a_tool_round_then_its_resume(turn, calls, *, resume_follows, model) -
     assert turn.error is None
     assert turn.executed
     assert len(calls) == 2
-    assert [("--model" in command) for command in calls] == [model is not None] * 2
+    commands = [call.command for call in calls]
+    assert [("--model" in command) for command in commands] == [model is not None] * 2
     if model is not None:
-        assert [command[command.index("--model") + 1] for command in calls] == [model] * 2
-    assert resume_follows(calls[1])
-    assert not resume_follows(calls[0])
+        assert [command[command.index("--model") + 1] for command in commands] == [model] * 2
+    assert resume_follows(commands[1])
+    assert not resume_follows(commands[0])
     assert isinstance(turn.events[-1], FinalEvent)
     assert turn.events[-1].text == "done"
 

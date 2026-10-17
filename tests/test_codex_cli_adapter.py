@@ -33,6 +33,7 @@ from provider_test_support import (
     DEEPLY_NESTED_JSON,
     SAMPLE_TOOL_CATALOG,
     CallerCanaryError,
+    CliCall,
     FailingLogHandler,
     RaisingLogHandler,
     RunnerFailureWatch,
@@ -222,20 +223,6 @@ def _outcome(
     )
 
 
-def _runner(lines: list[bytes], outcome: CliRunOutcome, calls: list) -> object:
-    def run_cli_bounded(child, **kwargs):
-        calls.append((child.command, kwargs))
-        for line in lines:
-            if not kwargs["stdout_line_channel"]._send(line):
-                break
-        kwargs["stdout_line_channel"]._close(outcome)
-        kwargs["on_spawned"](1)
-        kwargs["on_reaped"](1, False)
-        return outcome
-
-    return run_cli_bounded
-
-
 def _tool_round_lines(text: str) -> list[bytes]:
     return [
         b'{"type":"thread.started","thread_id":"52700000-0000-4000-8000-000000000000"}\n',
@@ -345,7 +332,7 @@ def test_codex_tool_command_pins_read_only_isolation_for_start_and_resume(model)
 
 @pytest.mark.parametrize("model", [None, "gpt-x"])
 def test_stream_turn_runs_the_codex_cli_across_rounds(monkeypatch, model) -> None:
-    calls: list[tuple[str, ...]] = []
+    calls: list[CliCall] = []
     monkeypatch.setattr(
         codex_protocol,
         "run_cli_bounded",
@@ -520,11 +507,11 @@ def test_codex_tool_transport_rejects_a_multi_result_batch_without_a_resume(
     monkeypatch, caplog,
 ) -> None:
     calls: list = []
-    monkeypatch.setattr(codex_protocol, "run_cli_bounded", _runner([
+    monkeypatch.setattr(codex_protocol, "run_cli_bounded", cli_rounds_runner([[
         b'{"type":"thread.started","thread_id":"52700000-0000-4000-8000-000000000000"}\n',
         b'{"type":"item.completed","item":{"type":"agent_message","text":"done"}}\n',
         b'{"type":"turn.completed","usage":{}}\n',
-    ], _outcome(), calls))
+    ]], _outcome(), calls))
     transport = _transport()
 
     error = assert_a_multi_result_batch_is_rejected(transport)
@@ -545,8 +532,8 @@ def test_codex_tool_transport_ignores_its_code_mode_host_isolation_notice(
     monkeypatch.setattr(
         codex_protocol,
         "run_cli_bounded",
-        _runner(
-            _fixture_lines(fixture_name),
+        cli_rounds_runner(
+            [_fixture_lines(fixture_name)],
             _outcome(),
             calls,
         ),
@@ -1851,7 +1838,9 @@ def test_a_refused_codex_call_hands_its_text_only_to_the_host(
     monkeypatch.setattr(
         codex_protocol,
         "run_cli_bounded",
-        _runner(_tool_round_lines(a_call_to_an_undeclared_tool_carrying()), _outcome(), []),
+        cli_rounds_runner(
+            [_tool_round_lines(a_call_to_an_undeclared_tool_carrying())], _outcome(), [],
+        ),
     )
     caplog.set_level(logging.DEBUG)
 
@@ -1877,7 +1866,9 @@ def test_a_codex_call_nested_too_deeply_is_refused_not_a_failed_route(
     monkeypatch.setattr(
         codex_protocol,
         "run_cli_bounded",
-        _runner(_tool_round_lines(a_call_nested_too_deeply_to_decode()), _outcome(), []),
+        cli_rounds_runner(
+            [_tool_round_lines(a_call_nested_too_deeply_to_decode())], _outcome(), [],
+        ),
     )
     caplog.set_level(logging.DEBUG)
 
@@ -1902,7 +1893,9 @@ def test_a_codex_event_line_nested_too_deeply_is_refused_as_a_cli_protocol_error
 ) -> None:
     calls: list = []
     lines = [DEEPLY_NESTED_JSON.encode() + b"\n"]
-    monkeypatch.setattr(codex_protocol, "run_cli_bounded", _runner(lines, _outcome(), calls))
+    monkeypatch.setattr(
+        codex_protocol, "run_cli_bounded", cli_rounds_runner([lines], _outcome(), calls),
+    )
     transport = _transport()
 
     async def collect() -> None:
@@ -1921,7 +1914,9 @@ def test_a_codex_tool_result_nested_too_deeply_is_passed_on_in_the_next_prompt(
 ) -> None:
     calls: list = []
     lines = _tool_round_lines(a_call_to_a_declared_tool())
-    monkeypatch.setattr(codex_protocol, "run_cli_bounded", _runner(lines, _outcome(), calls))
+    monkeypatch.setattr(
+        codex_protocol, "run_cli_bounded", cli_rounds_runner([lines] * 2, _outcome(), calls),
+    )
     transport = _transport()
 
     async def collect() -> None:
@@ -1932,7 +1927,7 @@ def test_a_codex_tool_result_nested_too_deeply_is_passed_on_in_the_next_prompt(
 
     asyncio.run(collect())
 
-    assert DEEPLY_NESTED_JSON.encode() in calls[1][1]["stdin_payload"]
+    assert DEEPLY_NESTED_JSON.encode() in calls[1].kwargs["stdin_payload"]
 
 
 _UNDECODABLE_EVENT_LINES = pytest.mark.parametrize(
@@ -1959,7 +1954,9 @@ def test_the_codex_line_reader_refuses_an_undecodable_line_without_chaining_it(e
 def test_a_codex_event_line_the_cli_cannot_decode_leaves_no_chain_to_its_text(
     monkeypatch, event_line, while_the_caller_handles_an_exception,
 ) -> None:
-    monkeypatch.setattr(codex_protocol, "run_cli_bounded", _runner([event_line], _outcome(), []))
+    monkeypatch.setattr(
+        codex_protocol, "run_cli_bounded", cli_rounds_runner([[event_line]], _outcome(), []),
+    )
     transport = _transport()
 
     async def stream_the_turn() -> BaseException:
@@ -2037,7 +2034,7 @@ def _drive_the_login_probe(monkeypatch, copies, files) -> None:
 
 
 def _drive_the_tool_turn(monkeypatch, copies, files) -> None:
-    runner = _runner(_tool_round_lines("done"), _outcome(), [])
+    runner = cli_rounds_runner([_tool_round_lines("done")], _outcome(), [])
     monkeypatch.setattr(codex_protocol, "run_cli_bounded", _recording_runner(copies, runner, files))
     asyncio.run(_collect_tool_events(_codex_tool_events(
         _transport(), lambda _name, _arguments: ToolOutcome("{}", False),
@@ -2250,7 +2247,7 @@ def test_the_codex_catalog_probe_starts_without_an_unusable_login(
 
 
 def _the_tool_turn_is_started(monkeypatch, seen: list) -> None:
-    runner = _runner(_tool_round_lines("done"), _outcome(), [])
+    runner = cli_rounds_runner([_tool_round_lines("done")], _outcome(), [])
     monkeypatch.setattr(codex_protocol, "run_cli_bounded", _stating_runner(seen, runner))
     asyncio.run(_collect_tool_events(_codex_tool_events(
         _transport(), lambda _name, _arguments: ToolOutcome("{}", False),
@@ -2529,7 +2526,7 @@ def test_codex_turns_refuse_a_login_that_is_not_a_plain_file(
     )
     children: list = []
     monkeypatch.setattr(
-        codex_protocol, "run_cli_bounded", _runner([], _outcome(), children),
+        codex_protocol, "run_cli_bounded", cli_rounds_runner([[]], _outcome(), children),
     )
 
     refusal = call_within_deadline(turn)
@@ -2560,7 +2557,7 @@ def test_a_failed_turn_copy_keeps_no_credential_in_its_error(
     )
     children: list = []
     monkeypatch.setattr(
-        codex_protocol, "run_cli_bounded", _runner([], _outcome(), children),
+        codex_protocol, "run_cli_bounded", cli_rounds_runner([[]], _outcome(), children),
     )
     open_descriptors = len(os.listdir("/proc/self/fd"))
 

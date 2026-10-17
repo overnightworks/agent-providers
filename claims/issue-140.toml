@@ -1,0 +1,8 @@
+claim_id = "0dc0e089b7c24ee7bdad144419c97970"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "30fe23b2e5deb57d602d05e1e7ca34be5163aed7"
+branch = "claude/issue-140-eigene-sprache-10-eine-bedeutung-je-cli"
+scope = ["README.md", "src/agent_providers/catalog.py", "src/agent_providers/claude/adapter.py", "src/agent_providers/claude/provider.py", "src/agent_providers/codex/image.py", "src/agent_providers/codex/protocol.py", "src/agent_providers/codex/transport.py", "src/agent_providers/dispatch.py", "src/agent_providers/errors.py", "src/agent_providers/grok/transport.py", "src/agent_providers/process.py", "tests/test_catalog.py", "tests/test_claude_adapter.py", "tests/test_claude_provider.py", "tests/test_codex_cli_adapter.py", "tests/test_dispatch.py", "tests/test_grok_cli_adapter.py", "tests/test_process.py", "tests/test_route_failures.py"]
+opened_commit = "c9c965d33435abf8b1a59d6f3a1689d257116553"
+whole_reason = "One failure contract: one meaning per code holds only when every surface maps the same two classes in the same change; a surface left behind keeps the old meaning under the new name or breaks on a deleted class, and the code rename with its README row must land with the first surface that stops giving the old code."

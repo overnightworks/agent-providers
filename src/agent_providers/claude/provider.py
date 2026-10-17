@@ -72,6 +72,7 @@ _NO_SETTING_SOURCES: Final = ""
 CLAUDE_CLI_MODEL_CATALOG_ERROR: Final = "Claude CLI could not list models."
 CLAUDE_CLI_BINARY_NOT_FOUND_DETAIL: Final = "Claude CLI binary not found"
 CLAUDE_CLI_UNAVAILABLE_DETAIL: Final = "Claude CLI is unavailable. Check server logs for details."
+CLAUDE_CLI_LOGIN_REFUSED_DETAIL: Final = "Claude CLI login was refused."
 
 # The CLI is a bind-mounted, self-updating binary reading a prompt that carries
 # untrusted content (host data, @-mentions, tool results). These flags make its
@@ -100,6 +101,7 @@ _NO_TOOLS_EXPECTED: Final[frozenset[str]] = frozenset()
 # it never invokes one, so no request in its name ever touches a user's data.
 _TOOL_SURFACE_PROBE_USER_ID: Final = "tool-surface-probe"
 
+_CLI_AUTHENTICATION_FAILED: Final = "authentication_failed"
 _CLI_INIT_EVENT_TYPE: Final = "system"
 _CLI_INIT_EVENT_SUBTYPE: Final = "init"
 _TOOL_SURFACE_PROBE_PROMPT: Final = "."
@@ -125,6 +127,13 @@ class UnavailableError(Exception):
 
 class CliBinaryUnavailableError(UnavailableError):
     """Raised when the Claude CLI executable cannot be found or started."""
+
+
+class CliLoginRefusedError(UnavailableError):
+    """Raised when the Claude CLI reports that its login was refused.
+
+    The message is fixed: the CLI's own words never reach a caller or a log.
+    """
 
 
 class CliToolSurfaceError(UnavailableError):
@@ -338,13 +347,11 @@ async def _consume_stream(
                 parsed = _safe_json_loads(raw_line)
                 if parsed is None:
                     continue
-                event = _parse_stream_event(parsed, text_chunks, correlation_id)
-                if event is None:
-                    continue
-                if isinstance(event, FinalEvent):
-                    final_text = event.text
-                    continue
-                yield event
+                for event in _parse_stream_event(parsed, text_chunks, correlation_id):
+                    if isinstance(event, FinalEvent):
+                        final_text = event.text
+                        continue
+                    yield event
         except asyncio.TimeoutError:
             raise UnavailableError(
                 f"Claude CLI timed out after {timeout_seconds}s",
@@ -417,47 +424,63 @@ def _parse_stream_event(
     payload: dict,
     text_chunks: list[str],
     correlation_id: str | None,
-) -> StreamEvent | None:
+) -> list[StreamEvent]:
     kind = payload.get("type")
     if kind == "assistant":
-        return _parse_assistant_event(payload, text_chunks, correlation_id)
+        return _parse_assistant_events(payload, text_chunks, correlation_id)
     if kind == "user":
-        return _parse_user_event(payload, correlation_id)
+        return _parse_user_events(payload, correlation_id)
     if kind == "result":
-        text = payload.get("result")
-        if isinstance(text, str):
-            return FinalEvent(text=text, correlation_id=correlation_id)
-        return None
-    return None
+        return _parse_result_events(payload, correlation_id)
+    return []
 
 
-def _parse_assistant_event(
+def _parse_result_events(payload: dict, correlation_id: str | None) -> list[StreamEvent]:
+    if payload.get("is_error"):
+        raise UnavailableError(CLAUDE_CLI_UNAVAILABLE_DETAIL)
+    text = payload.get("result")
+    if isinstance(text, str):
+        return [FinalEvent(text=text, correlation_id=correlation_id)]
+    return []
+
+
+def _raise_for_api_error_message(payload: dict) -> None:
+    fields = {**(payload.get("message") or {}), **payload}
+    if not fields.get("is_api_error_message"):
+        return
+    if fields.get("error") == _CLI_AUTHENTICATION_FAILED:
+        raise CliLoginRefusedError(CLAUDE_CLI_LOGIN_REFUSED_DETAIL)
+    raise UnavailableError(CLAUDE_CLI_UNAVAILABLE_DETAIL)
+
+
+def _parse_assistant_events(
     payload: dict,
     text_chunks: list[str],
     correlation_id: str | None,
-) -> StreamEvent | None:
+) -> list[StreamEvent]:
     message = payload.get("message") or {}
-    blocks = message.get("content") or []
-    for block in blocks:
+    _raise_for_api_error_message(payload)
+    events: list[StreamEvent] = []
+    for block in message.get("content") or []:
         btype = block.get("type")
         if btype == "text":
             text = block.get("text") or ""
             text_chunks.append(text)
-            return AssistantTextEvent(text=text, correlation_id=correlation_id)
-        if btype == "tool_use":
-            return ToolCallEvent(
+            events.append(AssistantTextEvent(text=text, correlation_id=correlation_id))
+        elif btype == "tool_use":
+            events.append(ToolCallEvent(
                 tool_use_id=block.get("id") or "",
                 name=block.get("name") or "",
                 input=block.get("input") or {},
                 correlation_id=correlation_id,
-            )
-    return None
+            ))
+    return events
 
 
-def _parse_user_event(payload: dict, correlation_id: str | None) -> StreamEvent | None:
+def _parse_user_events(payload: dict, correlation_id: str | None) -> list[StreamEvent]:
     message = payload.get("message") or {}
-    blocks = message.get("content") or []
-    for block in blocks:
+    events: list[StreamEvent] = []
+    for block in message.get("content") or []:
         if block.get("type") == "tool_result":
             content = block.get("content")
             if isinstance(content, list):
@@ -467,13 +490,13 @@ def _parse_user_event(payload: dict, correlation_id: str | None) -> StreamEvent 
                 content_str = content
             else:
                 content_str = ""
-            return ToolResultEvent(
+            events.append(ToolResultEvent(
                 tool_use_id=block.get("tool_use_id") or "",
                 content=content_str,
                 is_error=bool(block.get("is_error", False)),
                 correlation_id=correlation_id,
-            )
-    return None
+            ))
+    return events
 
 
 def is_available(api_key: str | None = None) -> bool:

@@ -11,6 +11,7 @@ import pytest
 
 from agent_providers.claude import provider
 from agent_providers.claude.provider import (
+    CliLoginRefusedError,
     UnavailableError,
     _parse_stream_event,
     _safe_json_loads,
@@ -151,12 +152,27 @@ def test_safe_json_loads_non_object_skipped(caplog) -> None:
 # ── _parse_stream_event ──────────────────────────────────────────────
 
 
+def _assistant_payload(*blocks: dict) -> dict:
+    return {"type": "assistant", "message": {"content": list(blocks)}}
+
+
+def _user_payload(*blocks: dict) -> dict:
+    return {"type": "user", "message": {"content": list(blocks)}}
+
+
+def _a_tool_use_block(use_id: str, name: str = "foo", **arguments: Any) -> dict:
+    return {"type": "tool_use", "id": use_id, "name": name, "input": arguments}
+
+
+def _a_tool_result_block(use_id: str, content: Any = "ok", **extra: Any) -> dict:
+    return {"type": "tool_result", "tool_use_id": use_id, "content": content, **extra}
+
+
 def test_parse_assistant_text_event() -> None:
     chunks: list[str] = []
-    ev = _parse_stream_event({
-        "type": "assistant",
-        "message": {"content": [{"type": "text", "text": "hello"}]},
-    }, chunks, A_CORRELATION_ID)
+    [ev] = _parse_stream_event(
+        _assistant_payload({"type": "text", "text": "hello"}), chunks, A_CORRELATION_ID,
+    )
     assert isinstance(ev, AssistantTextEvent)
     assert ev.text == "hello"
     assert ev.correlation_id == A_CORRELATION_ID
@@ -164,83 +180,87 @@ def test_parse_assistant_text_event() -> None:
 
 
 def test_parse_assistant_tool_use_event() -> None:
-    chunks: list[str] = []
-    ev = _parse_stream_event({
-        "type": "assistant",
-        "message": {"content": [{
-            "type": "tool_use", "id": "tu-1", "name": "foo", "input": {"x": 1},
-        }]},
-    }, chunks, A_CORRELATION_ID)
+    [ev] = _parse_stream_event(
+        _assistant_payload(_a_tool_use_block("tu-1", x=1)), [], A_CORRELATION_ID,
+    )
     assert isinstance(ev, ToolCallEvent)
     assert ev.tool_use_id == "tu-1"
     assert ev.name == "foo"
     assert ev.input == {"x": 1}
 
 
+def test_parse_assistant_text_and_two_tool_uses_yield_three_events_in_order() -> None:
+    chunks: list[str] = []
+    events = _parse_stream_event(
+        _assistant_payload(
+            {"type": "text", "text": "looking"},
+            _a_tool_use_block("tu-1"),
+            _a_tool_use_block("tu-2"),
+        ),
+        chunks,
+        A_CORRELATION_ID,
+    )
+    assert [e.type for e in events] == ["assistant_text", "tool_call", "tool_call"]
+    assert [e.tool_use_id for e in events[1:]] == ["tu-1", "tu-2"]
+    assert chunks == ["looking"]
+
+
+def test_parse_user_two_tool_results_yield_two_events_in_order() -> None:
+    events = _parse_stream_event(
+        _user_payload(_a_tool_result_block("tu-1", "a"), _a_tool_result_block("tu-2", "b")),
+        [],
+        A_CORRELATION_ID,
+    )
+    assert [(e.type, e.tool_use_id, e.content) for e in events] == [
+        ("tool_result", "tu-1", "a"),
+        ("tool_result", "tu-2", "b"),
+    ]
+
+
 def test_parse_user_tool_result_event() -> None:
-    ev = _parse_stream_event({
-        "type": "user",
-        "message": {"content": [{
-            "type": "tool_result",
-            "tool_use_id": "tu-1",
-            "content": [{"type": "text", "text": "ok"}],
-            "is_error": False,
-        }]},
-    }, [], A_CORRELATION_ID)
+    [ev] = _parse_stream_event(
+        _user_payload(_a_tool_result_block(
+            "tu-1", [{"type": "text", "text": "ok"}], is_error=False,
+        )),
+        [],
+        A_CORRELATION_ID,
+    )
     assert isinstance(ev, ToolResultEvent)
     assert ev.tool_use_id == "tu-1"
     assert ev.content == "ok"
     assert ev.is_error is False
 
 
-def test_parse_user_tool_result_string_content() -> None:
-    ev = _parse_stream_event({
-        "type": "user",
-        "message": {"content": [{
-            "type": "tool_result",
-            "tool_use_id": "tu-1",
-            "content": "plain",
-        }]},
-    }, [], A_CORRELATION_ID)
-    assert isinstance(ev, ToolResultEvent)
-    assert ev.content == "plain"
-
-
-def test_parse_user_tool_result_missing_content() -> None:
-    ev = _parse_stream_event({
-        "type": "user",
-        "message": {"content": [{
-            "type": "tool_result", "tool_use_id": "tu-1",
-        }]},
-    }, [], A_CORRELATION_ID)
-    assert isinstance(ev, ToolResultEvent)
-    assert ev.content == ""
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [("plain", "plain"), (None, "")],
+    ids=["string-content", "missing-content"],
+)
+def test_parse_user_tool_result_content_shapes(content, expected) -> None:
+    [ev] = _parse_stream_event(
+        _user_payload(_a_tool_result_block("tu-1", content)), [], A_CORRELATION_ID,
+    )
+    assert ev.content == expected
 
 
 def test_parse_result_event_returns_final() -> None:
-    ev = _parse_stream_event({"type": "result", "result": "done"}, [], A_CORRELATION_ID)
+    [ev] = _parse_stream_event({"type": "result", "result": "done"}, [], A_CORRELATION_ID)
     assert isinstance(ev, FinalEvent)
     assert ev.text == "done"
 
 
-def test_parse_result_event_without_text_returns_none() -> None:
-    assert _parse_stream_event({"type": "result"}, [], A_CORRELATION_ID) is None
-
-
-def test_parse_assistant_empty_content_returns_none() -> None:
-    assert _parse_stream_event(
-        {"type": "assistant", "message": {"content": []}}, [], A_CORRELATION_ID,
-    ) is None
-
-
-def test_parse_user_empty_content_returns_none() -> None:
-    assert _parse_stream_event(
-        {"type": "user", "message": {"content": []}}, [], A_CORRELATION_ID,
-    ) is None
-
-
-def test_parse_unknown_type_ignored() -> None:
-    assert _parse_stream_event({"type": "system"}, [], A_CORRELATION_ID) is None
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"type": "result"},
+        _assistant_payload(),
+        _user_payload(),
+        {"type": "system"},
+    ],
+    ids=["result-without-text", "empty-assistant", "empty-user", "unknown-type"],
+)
+def test_parse_payload_without_content_yields_no_events(payload) -> None:
+    assert _parse_stream_event(payload, [], A_CORRELATION_ID) == []
 
 
 # ── acall_claude_with_mcp_stream integration ─────────────────────────
@@ -521,3 +541,106 @@ def test_stream_consumes_oversized_tool_result_line(monkeypatch) -> None:
     assert len(tool_results) == 1
     assert tool_results[0].content == huge_payload
     assert isinstance(events[-1], FinalEvent)
+
+
+# ── error messages and error results ─────────────────────────────────
+
+LOGIN_REFUSED_TEXT = "Not logged in · Please run /login"
+
+
+def _api_error_assistant_line(error: str, text: str = LOGIN_REFUSED_TEXT) -> bytes:
+    return json.dumps({
+        "type": "assistant",
+        "error": error,
+        "message": {
+            "is_api_error_message": True,
+            "content": [{"type": "text", "text": text}],
+        },
+    }).encode() + b"\n"
+
+
+def _error_result_line(text: str = LOGIN_REFUSED_TEXT) -> bytes:
+    return json.dumps({
+        "type": "result",
+        "subtype": "success",
+        "is_error": True,
+        "terminal_reason": "api_error",
+        "result": text,
+    }).encode() + b"\n"
+
+
+def _stream_outcome(monkeypatch, lines: list[bytes], returncode: int = 0):
+    monkeypatch.setattr(provider, "_require_claude_binary", lambda: "/bin/claude")
+
+    async def fake_exec(*_cmd, **_kw):
+        return _make_fake_proc(lines, returncode=returncode)
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    seen: list[StreamEvent] = []
+
+    async def drive() -> None:
+        async for event in acall_claude_with_mcp_stream(prompt="hi", user_id="u"):
+            seen.append(event)
+
+    try:
+        asyncio.run(drive())
+    except UnavailableError as failure:
+        return seen, failure
+    return seen, None
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_class"),
+    [
+        ("authentication_failed", CliLoginRefusedError),
+        ("rate_limit", UnavailableError),
+    ],
+    ids=["login-refused", "other-api-error"],
+)
+def test_api_error_message_raises_before_any_text_is_yielded(
+    monkeypatch, caplog, error, expected_class,
+) -> None:
+    caplog.set_level("DEBUG")
+    lines = [_api_error_assistant_line(error), _error_result_line()]
+
+    seen, failure = _stream_outcome(monkeypatch, lines, returncode=1)
+
+    assert type(failure) is expected_class
+    assert seen == []
+    assert "Not logged in" not in f"{failure} {caplog.text}"
+
+
+def test_error_result_with_clean_exit_raises_without_final_event(monkeypatch) -> None:
+    lines = [_assistant_line("partial "), _error_result_line("boom")]
+
+    seen, failure = _stream_outcome(monkeypatch, lines, returncode=0)
+
+    assert isinstance(failure, UnavailableError)
+    assert not any(isinstance(e, FinalEvent) for e in seen)
+
+
+def test_error_result_with_failing_exit_raises(monkeypatch) -> None:
+    seen, failure = _stream_outcome(monkeypatch, [_error_result_line("boom")], returncode=1)
+
+    assert isinstance(failure, UnavailableError)
+    assert not any(isinstance(e, FinalEvent) for e in seen)
+
+
+def test_unauthenticated_run_as_recorded_raises_login_refused_without_its_text(
+    monkeypatch, caplog,
+) -> None:
+    caplog.set_level("DEBUG")
+    recorded_assistant = json.dumps({
+        "type": "assistant",
+        "error": "authentication_failed",
+        "is_api_error_message": True,
+        "message": {"content": [{"type": "text", "text": LOGIN_REFUSED_TEXT}]},
+    }).encode() + b"\n"
+
+    seen, failure = _stream_outcome(
+        monkeypatch, [recorded_assistant, _error_result_line()], returncode=1,
+    )
+
+    assert isinstance(failure, CliLoginRefusedError)
+    assert seen == []
+    assert "Not logged in" not in f"{failure} {caplog.text}"

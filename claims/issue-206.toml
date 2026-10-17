@@ -1,0 +1,8 @@
+claim_id = "bcda021e703a4602a152d666a1abbe4f"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "fec05d3b5be8b4bbd78db3ba09395adca44f758b"
+branch = "claude/issue-206-release-030"
+scope = [".github/workflows/ci.yml", ".github/workflows/release.yml", "AGENTS.md", "README.md", "packages/agent-client/pyproject.toml", "packages/agent-service/pyproject.toml", "pyproject.toml", "quality/config.toml", "src/agent_providers/__init__.py", "tests/test_ci_workflow.py", "tests/test_release_workflow.py", "uv.lock"]
+opened_commit = "e8225f000cb93abc65b0716081ee881a7867b59c"
+whole_reason = "One release pull request: the version bump, the notice that points at the migration section, the rows that complete that section, and the CI legs and floors the release claims belong to the one tag; split, a version would ship without its proof, its notice or its rows."

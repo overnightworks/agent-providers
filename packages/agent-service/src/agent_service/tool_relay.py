@@ -61,9 +61,7 @@ def _field_values(request: h11.Request, name: bytes) -> list[bytes]:
 
 
 def _declares_no_body(request: h11.Request) -> bool:
-    if _field_values(request, b"transfer-encoding"):
-        return False
-    return all(int(length) == 0 for length in _field_values(request, b"content-length"))
+    return not _field_values(request, b"transfer-encoding") and _declared_length(request) == 0
 
 
 def _declared_length(request: h11.Request) -> int:
@@ -154,8 +152,11 @@ class Relay:
         if body is None:
             return False
         answer = await self._owner_answer(RelayRequest(body, _protocol_version(request)))
-        await self._answer(connection, writer, answer, closing=False)
-        return _ready_for_next_cycle(connection)
+        mixed_framing = bool(_field_values(request, b"transfer-encoding")) and bool(
+            _field_values(request, b"content-length")
+        )
+        await self._answer(connection, writer, answer, closing=mixed_framing)
+        return not mixed_framing and _ready_for_next_cycle(connection)
 
     async def _refuse(
         self,

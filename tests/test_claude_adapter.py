@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent_providers.claude import adapter as claude_adapter
+from agent_providers.claude.provider import CliLoginRefusedError, UnavailableError
 from agent_providers.errors import ProviderUnavailableError, SafeRouteReasonCode
 from agent_providers.events import AssistantTextEvent, StreamEvent
 from agent_providers.tool_loop import ToolOutcome
@@ -107,6 +108,37 @@ def test_claude_api_turn_fails_with_a_safe_code_when_the_sdk_is_unusable(
             pass
 
     turn = _drive_turn()
+    with pytest.raises(ProviderUnavailableError) as failure:
+        asyncio.run(turn)
+
+    assert failure.value.reason.code is safe_code
+
+
+@pytest.mark.parametrize(
+    ("provider_error", "safe_code"),
+    [
+        (CliLoginRefusedError("refused"), SafeRouteReasonCode.CLI_AUTH_REJECTED),
+        (UnavailableError("other"), SafeRouteReasonCode.CLI_PROTOCOL_ERROR),
+    ],
+    ids=["login-refused", "other-api-error"],
+)
+def test_claude_cli_turn_reports_a_provider_failure_with_its_safe_code(
+    monkeypatch, provider_error, safe_code
+) -> None:
+    async def failing_stream(**_kwargs: object) -> AsyncIterator[StreamEvent]:
+        raise provider_error
+        yield
+
+    monkeypatch.setattr(claude_adapter, "acall_claude_with_mcp_stream", failing_stream)
+
+    async def _drive_turn() -> None:
+        async for _event in claude_adapter.stream_claude_turn(
+            user_id="user-1", system="system", model="claude-test", messages=[],
+        ):
+            pass
+
+    turn = _drive_turn()
+
     with pytest.raises(ProviderUnavailableError) as failure:
         asyncio.run(turn)
 

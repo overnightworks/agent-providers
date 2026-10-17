@@ -6,6 +6,7 @@ import errno
 import fcntl
 import gc
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -28,6 +29,7 @@ from anchored_support import (
     IdentityUnavailable,
     OwnedChild,
     ZombieAnchor,
+    child_cleanup_scope,
     popen_bare,
     state,
 )
@@ -281,7 +283,7 @@ def test_a_pidfd_refused_after_the_child_exists_is_reported_and_the_child_ends_b
     monkeypatch.undo()
     popen = refusal.value.popen
 
-    assert str(popen.pid) in str(refusal.value)
+    assert re.search(rf"\bpid {popen.pid}:", str(refusal.value))
     assert popen.poll() is None
     assert child_cleanup.listed() == ()
     child_cleanup.cleanup()
@@ -323,31 +325,57 @@ def test_the_hand_over_keeps_a_deferred_child_until_its_handle_lets_go(
     tmp_path: Path, zombie_anchor: ZombieAnchor
 ) -> None:
     anchor = ZombieAnchor()
-    cleanup = ChildCleanup(anchor)
-    scripts = ScriptChildren(tmp_path, cleanup)
     try:
-        failing_start = scripts.start_then(raise_start_failure)
-        with pytest.raises(RuntimeError):
-            cleanup.capture(failing_start)
-        captured = cleanup.capture(scripts.start_then(lambda: FakeHandle(done_with_pid=False)))
-        (unreported,) = cleanup.listed()[:1]
-        (reported,) = captured.children
+        with child_cleanup_scope(anchor) as cleanup:
+            scripts = ScriptChildren(tmp_path, cleanup)
+            failing_start = scripts.start_then(raise_start_failure)
+            with pytest.raises(RuntimeError):
+                cleanup.capture(failing_start)
+            captured = cleanup.capture(scripts.start_then(lambda: FakeHandle(done_with_pid=False)))
+            (unreported,) = cleanup.listed()[:1]
+            (reported,) = captured.children
 
-        cleanup.cleanup()
-        assert [state(o) for o in (unreported, reported)] == [Exited(SIGKILLED)] * 2
-        assert [o.popen.returncode for o in (unreported, reported)] == [None, None]
+            cleanup.cleanup()
+            assert [state(o) for o in (unreported, reported)] == [Exited(SIGKILLED)] * 2
+            assert [o.popen.returncode for o in (unreported, reported)] == [None, None]
 
-        cleanup.hand_over()
+            cleanup.hand_over()
+            assert cleanup.listed() == ()
+            with pytest.raises(AssertionError):
+                cleanup.state(unreported)
+            cleanup.cleanup()
+            assert [state(o) for o in (unreported, reported)] == [Exited(SIGKILLED)] * 2
+
+            del captured
+            gc.collect()
+            anchor.finalize()
+
+            assert [o.popen.returncode for o in (unreported, reported)] == [SIGKILLED] * 2
+    finally:
+        anchor.hand_over(zombie_anchor)
+
+
+def test_leaving_the_cleanup_scope_ends_children_closes_descriptors_and_defers_to_the_anchor(
+    tmp_path: Path, zombie_anchor: ZombieAnchor
+) -> None:
+    anchor = ZombieAnchor()
+    try:
+        before = open_descriptors()
+        with child_cleanup_scope(anchor) as cleanup:
+            scripts = ScriptChildren(tmp_path, cleanup)
+            running = scripts.start()
+            captured = cleanup.capture(scripts.start_then(lambda: FakeHandle(done_with_pid=False)))
+            (deferred,) = captured.children
+
+        assert running.owned.resolved
+        assert running.owned.popen.returncode == SIGKILLED
         assert cleanup.listed() == ()
-        with pytest.raises(AssertionError):
-            cleanup.state(unreported)
-        cleanup.cleanup()
-        assert [state(o) for o in (unreported, reported)] == [Exited(SIGKILLED)] * 2
-
+        assert state(deferred) == Exited(SIGKILLED)
+        assert deferred.popen.returncode is None
+        assert open_descriptors() == before | {str(deferred.pidfd)}
         del captured
         gc.collect()
         anchor.finalize()
-
-        assert [o.popen.returncode for o in (unreported, reported)] == [SIGKILLED] * 2
+        assert deferred.popen.returncode == SIGKILLED
     finally:
         anchor.hand_over(zombie_anchor)

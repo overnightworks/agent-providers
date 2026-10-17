@@ -26,6 +26,7 @@ import subprocess
 import time
 import weakref
 from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 from unittest import mock
@@ -530,3 +531,13 @@ def _prove_signal_and_wait(pidfd: int) -> None:
     except OSError as refusal:
         raise IdentityUnavailable(f"waitid refused: {refusal}") from refusal
     raise IdentityUnavailable("waitid reported a child for the test process itself")
+
+
+@contextmanager
+def child_cleanup_scope(anchor: ZombieAnchor) -> Iterator[ChildCleanup]:
+    cleanup = ChildCleanup(anchor)
+    try:
+        yield cleanup
+        cleanup.cleanup()
+    finally:
+        cleanup.hand_over()

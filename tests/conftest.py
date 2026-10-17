@@ -17,7 +17,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from anchored_support import ChildCleanup, ZombieAnchor, zombie_anchor_session
+from anchored_support import ZombieAnchor, child_cleanup_scope, zombie_anchor_session
 from provider_test_support import MCP_TOOL_NAMES, close_fake_cli_pipes
 
 from agent_providers.config import (
@@ -103,12 +103,8 @@ def zombie_anchor():
 
 @pytest.fixture
 def child_cleanup(zombie_anchor: ZombieAnchor):
-    cleanup = ChildCleanup(zombie_anchor)
-    try:
+    with child_cleanup_scope(zombie_anchor) as cleanup:
         yield cleanup
-        cleanup.cleanup()
-    finally:
-        cleanup.hand_over()
 
 
 @pytest.fixture(autouse=True)

@@ -318,22 +318,34 @@ def _catalog_read_from(stdout: str) -> provider.ClaudeCliModelCatalog:
 
 
 @pytest.mark.parametrize(
-    ("stdout", "label"),
+    ("stdout", "label", "aliases"),
     (
-        (CLAUDE_MODEL_CATALOG_STDOUT, "Opus 5 (1M context)"),
-        ("Current model: `Opus 5.5 (default)`\n" + AVAILABLE_LINE, "Opus 5.5 (default)"),
+        (
+            CLAUDE_MODEL_CATALOG_STDOUT, "Opus 5 (1M context)",
+            (
+                "sonnet", "opus", "haiku", "fable", "best", "sonnet[1m]", "opus[1m]",
+                "fable[1m]", "opusplan", "default",
+            ),
+        ),
+        (
+            "Current model: `Opus 5.5 (default)`\n" + AVAILABLE_LINE,
+            "Opus 5.5 (default)", ("sonnet", "opus"),
+        ),
+        (
+            "Current model: `Opus 5` (effort: `high`)\n" + AVAILABLE_LINE,
+            "Opus 5", ("sonnet", "opus"),
+        ),
     ),
-    ids=("fixture-with-effort", "measured-2.1.302-shape"),
+    ids=("fixture-with-effort", "measured-2.1.302-shape", "several-backtick-pairs"),
 )
 def test_claude_catalog_names_the_current_model(
-    stdout: str, label: str, caplog: pytest.LogCaptureFixture,
+    stdout: str, label: str, aliases: tuple[str, ...], caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.DEBUG)
     catalog = _catalog_read_from(stdout)
 
     assert catalog.current_model_label == label
-    assert label not in catalog.aliases
-    assert catalog.aliases[0] == "sonnet"
+    assert catalog.aliases == aliases
     assert label not in caplog.text
 
 
@@ -345,8 +357,12 @@ def test_claude_catalog_names_the_current_model(
         "Current model: `Opus 5.5 (default)\n",
         "Current model: ``\n",
         "Current model: `Opus\x1b[31m 5`\n",
+        "Note: Current model: `Opus 5`\n",
     ),
-    ids=("no-line", "two-lines", "no-closing-backtick", "empty-text", "control-character"),
+    ids=(
+        "no-line", "two-lines", "no-closing-backtick", "empty-text", "control-character",
+        "marker-mid-line",
+    ),
 )
 def test_claude_catalog_without_one_readable_current_model_has_no_label(
     current_model_text: str, caplog: pytest.LogCaptureFixture,
@@ -362,21 +378,6 @@ def test_claude_catalog_without_one_readable_current_model_has_no_label(
 def test_a_current_model_line_alone_is_not_a_catalog() -> None:
     with pytest.raises(UnavailableError, match="did not contain a parseable"):
         _catalog_read_from("Current model: `Opus 5.5 (default)`\n")
-
-
-def test_a_model_text_without_an_available_line_raises_named_error() -> None:
-    with (
-        patch(
-            "agent_providers.claude.provider._find_claude_binary",
-            return_value=Path("/usr/bin/claude"),
-        ),
-        patch(
-            "agent_providers.claude.provider.run_claude_catalog_cli",
-            return_value=_catalog_run(CLAUDE_MODEL_CATALOG_STDOUT.splitlines()[0] + "\n"),
-        ),
-    ):
-        with pytest.raises(UnavailableError, match="did not contain a parseable"):
-            cli_model_catalog()
 
 
 def test_the_model_catalog_timeout_raises_named_error() -> None:
@@ -1432,11 +1433,25 @@ _HOME_ENTRYPOINTS = {
 }
 
 
+@pytest.fixture
+def collection_only_when_forced():
+    gc.disable()
+    yield
+    gc.enable()
+
+
+@pytest.mark.parametrize(
+    "collected_while_refused",
+    (True, False),
+    ids=("collected-while-refused", "collected-once-permitted"),
+)
 @pytest.mark.parametrize("entrypoint", _HOME_ENTRYPOINTS)
 def test_a_refused_home_removal_never_replaces_a_failed_calls_error(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    collection_only_when_forced,
     entrypoint: str,
+    collected_while_refused: bool,
 ) -> None:
     run, failure, _result = _HOME_ENTRYPOINTS[entrypoint]
     removal = _RefusedHomeRemoval(monkeypatch)
@@ -1448,10 +1463,13 @@ def test_a_refused_home_removal_never_replaces_a_failed_calls_error(
     assert removal.refused
     assert all(home.exists() for home in removal.refused)
     _assert_logged_by_class_alone(caplog, removal.refused)
-    removal.lift()
     raised.value.__traceback__ = None
     del raised
+    if collected_while_refused:
+        gc.collect()
+    removal.lift()
     gc.collect()
+    process._sweep_failed_homes_at_exit()
     assert not any(home.exists() for home in removal.refused)
 
 

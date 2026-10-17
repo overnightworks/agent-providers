@@ -191,7 +191,7 @@ class ProviderRouteSnapshot:
 
 @dataclass(frozen=True)
 class _RouteOffer:
-    models: list[str]
+    models: tuple[str, ...]
     default_model_label: str | None
 
 
@@ -364,7 +364,7 @@ def list_provider_models(provider: str, route: ProviderRoute) -> list[str]:
     list, and ProviderUnavailableError for an unknown provider or a missing API
     key.
     """
-    return _route_offer(provider, route).models
+    return list(_route_offer(provider, route).models)
 
 
 def _route_offer(provider: str, route: ProviderRoute) -> _RouteOffer:
@@ -372,17 +372,17 @@ def _route_offer(provider: str, route: ProviderRoute) -> _RouteOffer:
     if provider not in ProviderName:
         raise ProviderUnavailableError(provider, _unknown_provider_message(provider))
     if route is ProviderRoute.CLI:
-        if provider == ProviderName.CLAUDE:
-            return _claude_cli_offer()
         method = _cli_setup_method_for(provider)
-        return _RouteOffer(_models_for_setup_method(provider, method, config), None)
+        if method is ProviderSetupMethod.CLAUDE_CLI:
+            return _claude_cli_offer()
+        return _RouteOffer(tuple(_models_for_setup_method(provider, method, config)), None)
     key = _secret(_provider_api_credential(provider, config).secret)
     if not key:
         raise ProviderUnavailableError(
             provider, route.value, normalize_route_failure(SafeRouteReasonCode.API_KEY_NOT_SET),
         )
     models = _models_for_setup_method(provider, ProviderSetupMethod.API_KEY, config)
-    return _RouteOffer(models, None)
+    return _RouteOffer(tuple(models), None)
 
 
 def _cli_setup_method_for(provider: str) -> ProviderSetupMethod:
@@ -411,6 +411,8 @@ def _models_for_setup_method(
         return _list_grok_cli_models()
     if method is ProviderSetupMethod.CODEX_CLI:
         return _list_codex_cli_models()
+    if method is ProviderSetupMethod.CLAUDE_CLI:
+        raise ValueError("the Claude CLI listing carries a default label; use _claude_cli_offer")
 
     key = _secret(_provider_api_credential(provider, config).secret)
     if provider == ProviderName.GROK:
@@ -653,7 +655,7 @@ def _claude_cli_offer() -> _RouteOffer:
             CLAUDE_CLI_MODEL_CATALOG_ERROR,
             normalize_route_failure(_cli_fault_reason_code(exc)),
         ) from exc
-    return _RouteOffer(sorted(catalog.aliases), catalog.current_model_label)
+    return _RouteOffer(tuple(sorted(catalog.aliases)), catalog.current_model_label)
 
 
 def _list_claude_models(key: str) -> list[str]:

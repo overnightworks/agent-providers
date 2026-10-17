@@ -227,6 +227,7 @@ def _stub_a_ready_api_listing(
     monkeypatch: pytest.MonkeyPatch, key_setting: str, listed_id: str,
 ) -> None:
     override_provider_runtime(**{key_setting: SecretStr("a-key")})
+    monkeypatch.setattr("agent_providers.catalog._anthropic_sdk_available", lambda: True)
     monkeypatch.setattr(httpx, "get", lambda url, **_: httpx.Response(
         200, json={"data": [{"id": listed_id}]}, request=httpx.Request("GET", url),
     ))
@@ -273,35 +274,48 @@ def _a_claude_cli_route_without_a_binary(
     return ProviderRoute.CLI
 
 
+_READY = ProviderRouteReadinessState.READY
+_DISTURBED = ProviderRouteReadinessState.DISTURBED
+
 ROUTES_WITHOUT_A_STATED_DEFAULT = [
-    pytest.param(_a_ready_cli_route("codex"), "codex", id="codex-cli"),
-    pytest.param(_a_ready_cli_route("grok"), "grok", id="grok-cli"),
-    pytest.param(_a_logged_out_claude_cli_route, "claude", id="claude-logged-out"),
-    pytest.param(_a_claude_cli_route_without_a_binary, "claude", id="claude-binary-gone"),
+    pytest.param(_a_ready_cli_route("codex"), "codex", _READY, id="codex-cli"),
+    pytest.param(_a_ready_cli_route("grok"), "grok", _READY, id="grok-cli"),
     pytest.param(
-        _a_claude_cli_route_with_a_broken_catalogue, "claude", id="claude-broken-catalogue",
+        _a_logged_out_claude_cli_route, "claude", ProviderRouteReadinessState.NOT_CONFIGURED,
+        id="claude-logged-out",
     ),
     pytest.param(
-        _a_ready_api_route("claude", "anthropic_api_key", "claude-opus-5"), "claude",
+        _a_claude_cli_route_without_a_binary, "claude", _DISTURBED,
+        id="claude-binary-gone",
+    ),
+    pytest.param(
+        _a_claude_cli_route_with_a_broken_catalogue, "claude", _DISTURBED,
+        id="claude-broken-catalogue",
+    ),
+    pytest.param(
+        _a_ready_api_route("claude", "anthropic_api_key", "claude-opus-5"), "claude", _READY,
         id="claude-api",
     ),
     pytest.param(
-        _a_ready_api_route("grok", "xai_api_key", "grok-4.6"), "grok", id="grok-api",
+        _a_ready_api_route("grok", "xai_api_key", "grok-4.6"), "grok", _READY, id="grok-api",
     ),
     pytest.param(
-        _a_ready_api_route("codex", "openai_api_key", "gpt-5.6"), "codex", id="codex-api",
+        _a_ready_api_route("codex", "openai_api_key", "gpt-5.6"), "codex", _READY,
+        id="codex-api",
     ),
 ]
 
 
-@pytest.mark.parametrize(("arrange", "provider"), ROUTES_WITHOUT_A_STATED_DEFAULT)
+@pytest.mark.parametrize(("arrange", "provider", "readiness"), ROUTES_WITHOUT_A_STATED_DEFAULT)
 def test_a_route_without_a_stated_default_names_none(
-    arrange, provider: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    arrange, provider: str, readiness: ProviderRouteReadinessState,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     route = arrange(tmp_path, monkeypatch)
 
     snapshot = probe_provider_route(provider, route)
 
+    assert snapshot.readiness is readiness
     assert snapshot.default_model_label is None
 
 

@@ -17,6 +17,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from anchored_support import zombie_anchor_session
 from provider_test_support import MCP_TOOL_NAMES, close_fake_cli_pipes
 
 from agent_providers.config import (
@@ -93,6 +94,11 @@ def _worker_dumpable_flag() -> int:
     prctl = ctypes.CDLL(None).prctl
     prctl.argtypes = [ctypes.c_int] + [ctypes.c_ulong] * 4
     return prctl(PR_GET_DUMPABLE, 0, 0, 0, 0)
+
+
+@pytest.fixture(scope="session")
+def zombie_anchor():
+    yield from zombie_anchor_session()
 
 
 @pytest.fixture(autouse=True)

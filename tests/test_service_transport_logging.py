@@ -73,7 +73,7 @@ class RecordingHandler(logging.Handler):
 @pytest.fixture
 def record_creation(
     monkeypatch: pytest.MonkeyPatch, logging_state_restored: None
-) -> Iterator[list[str]]:
+) -> list[str]:
     created: list[str] = []
     build_record = logging.getLogRecordFactory()
 
@@ -83,7 +83,7 @@ def record_creation(
 
     logging.setLogRecordFactory(noting)
     monkeypatch.setattr(logging, "lastResort", RecordingHandler())
-    yield created
+    return created
 
 
 @contextmanager

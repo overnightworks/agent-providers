@@ -39,7 +39,7 @@ from agent_providers import spawn
 from agent_providers.spawn import ChildIdentityLost
 
 START_WORKER_NAME = "bounded-start"
-STOP_STATUS_REPORT: WaitpidAnswer = (1, 0x57F)
+STOP_STATUS = 0x57F
 KILLED = -9
 
 
@@ -59,6 +59,14 @@ class RecordingGate(InstrumentedLock):
     def release(self) -> None:
         self.released_by.append(threading.current_thread().name)
         super().release()
+
+
+class StopReportingKernel(PassThroughKernel):
+    """Answers the first reap of the bound leader with a stop report naming that leader."""
+
+    def bind(self, leader_pid: int) -> None:
+        super().bind(leader_pid)
+        self._waitpid_answer = (leader_pid, STOP_STATUS)
 
 
 class GateFactory:
@@ -239,13 +247,20 @@ class BoundedStartup:
             return
         for gate in self._gates.created:
             if not gate.released_by:
-                gate.release()
                 failures.append("the start left its watcher undecided")
+                try:
+                    gate.release()
+                except RuntimeError as decided_meanwhile:
+                    failures.append(
+                        f"the gate was decided while the exit opened it: {decided_meanwhile}"
+                    )
 
     def _join_the_worker(self, failures: list[str]) -> None:
         self._worker.join(TEST_WAIT_SECONDS)
         if self._worker.is_alive():
             failures.append("the start worker was still alive at the bound")
+        if isinstance(self._failure, AssertionError):
+            failures.append(str(self._failure))
 
     def _join_the_launches(self, failures: list[str]) -> None:
         for watcher in self._seam.launches:
@@ -253,6 +268,7 @@ class BoundedStartup:
                 self._seam.await_ready(watcher)
             except AssertionError as not_ready:
                 failures.append(str(not_ready))
+                continue
             watcher.join(TEST_WAIT_SECONDS)
             if watcher.is_alive():
                 failures.append(f"{watcher.name} was still alive at the bound")
@@ -299,9 +315,13 @@ def start_cell(
     monkeypatch: pytest.MonkeyPatch, leaders: Leaders, child_cleanup: ChildCleanup
 ) -> Callable[..., StartCell]:
     def build(
-        *, waitpid_answer: WaitpidAnswer | None = None, kill_failure: OSError | None = None
+        *,
+        waitpid_answer: WaitpidAnswer | None = None,
+        stop_report: bool = False,
+        kill_failure: OSError | None = None,
     ) -> StartCell:
-        kernel = PassThroughKernel(reap_options=0, waitpid_answer=waitpid_answer)
+        kernel_type = StopReportingKernel if stop_report else PassThroughKernel
+        kernel = kernel_type(reap_options=0, waitpid_answer=waitpid_answer)
         gates = GateFactory()
         killer = GroupSignalModel(
             failure=kill_failure, during=lambda call: assert_abandoned_before_the_kill(gates, call)
@@ -393,7 +413,7 @@ def test_a_loss_during_the_rollback_raises_identity_lost_from_the_launch_error(
 def test_a_stop_report_at_the_rollback_reap_is_followed_by_the_exit_report(
     start_cell, thread_failures, caplog: pytest.LogCaptureFixture
 ) -> None:
-    cell = start_cell(waitpid_answer=STOP_STATUS_REPORT)
+    cell = start_cell(stop_report=True)
     refusal = RuntimeError("can't start new thread")
     cell.seam.refuse(refusal)
 

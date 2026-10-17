@@ -46,7 +46,7 @@ async def stream_claude_turn(
     *,
     user_id: str,
     system: str,
-    model: str,
+    model: str | None,
     messages: list[dict[str, str]],
     correlation_id: str | None = None,
 ) -> AsyncIterator[StreamEvent]:
@@ -251,7 +251,7 @@ def _claude_cli_failure_reason(error: UnavailableError) -> SafeRouteReasonCode:
 
 
 def call_claude_once(
-    *, model: str, prompt: str, timeout: int, system: str | None = None,
+    *, model: str | None, prompt: str, timeout: int, system: str | None = None,
 ) -> str:
     """Synchronous, tool-free, single-turn completion.
 

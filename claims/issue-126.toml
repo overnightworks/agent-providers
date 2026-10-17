@@ -1,0 +1,8 @@
+claim_id = "27dce929cb014e21a61140984230280a"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "13c0a4417f7d1c8dcfa7200a02382170fe5b66e7"
+branch = "claude/issue-126-codex-homes-follow-reap"
+scope = ["README.md", "src/agent_providers/claude/provider.py", "src/agent_providers/codex/image.py", "src/agent_providers/codex/protocol.py", "src/agent_providers/codex/transport.py", "src/agent_providers/grok/transport.py", "src/agent_providers/process.py", "tests/provider_test_support.py", "tests/test_codex_cli_adapter.py", "tests/test_grok_cli_adapter.py", "tests/test_process.py"]
+opened_commit = "875f83f83c53b281147eb6c5a6ecde60b9b788b3"
+whole_reason = "The two Codex turns, their one shared runner step and the shared runner containment are one cut: a turn whose home follows the reap while its round keeps its own fallback would release the home under a late spawn, the consumer bound is the last unbounded wait on the same seam, the Grok round is the containment's other caller, and the layout type rewrites the same turn constructors and codex_child_process; the Claude annotations, the test-support target name and the two test_process lines are pins of that cut."

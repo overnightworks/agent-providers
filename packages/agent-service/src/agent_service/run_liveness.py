@@ -725,7 +725,14 @@ class SupervisedRun:
         self._stopping = True
         self._pump.cancel()
         await asyncio.wait({self._pump})
-        closing_failure = _failure_of(self._pump)
-        if closing_failure is not None:
-            log_failure(log, f"Closing the runner of run {self._run_id} failed", closing_failure)
+        self._log_runner_close()
         self._failures.attempt(FailedPart.CLEANUP, self._wire.run_over)
+
+    def _log_runner_close(self) -> None:
+        """Log how the runner closed in a frame of its own, so no later failure keeps it alive."""
+        closing_failure = _failure_of(self._pump)
+        if closing_failure is None:
+            return
+        log_failure(log, f"Closing the runner of run {self._run_id} failed", closing_failure)
+        if isinstance(closing_failure, asyncio.CancelledError):
+            _make_inert(closing_failure)

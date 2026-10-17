@@ -14,6 +14,7 @@ import asyncio
 import collections
 import enum
 import gc
+import inspect
 import itertools
 import logging
 import math
@@ -21,7 +22,7 @@ import re
 import traceback
 import types
 import uuid
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine, Generator
 from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -31,6 +32,7 @@ import pytest
 from service_support import (
     ALICE,
     MOST_BUSY_TURNS_BEFORE_THE_RUN_NEVER_SETTLES,
+    QUIET,
     SONGMAKER,
     STRAY_CANCELLATION_CANARY,
     BrokenClock,
@@ -1422,6 +1424,78 @@ async def test_a_propagated_stray_cancellation_keeps_no_frame_of_the_step_it_lef
     assert type(propagated) is RunStepCancelled
     assert not _reaches_a_frame_of(propagated, _a_step_cancelled_unasked)
     assert not _reaches_a_frame_of(propagated, _a_lookup_that_fails)
+
+
+@pytest.mark.parametrize(
+    "after_its_stop",
+    [
+        pytest.param(False, id="a-runner-cancelled-unasked"),
+        pytest.param(True, id="a-runner-that-withdraws-its-stop"),
+    ],
+)
+@in_loop
+async def test_a_failed_record_end_keeps_no_frame_of_how_a_runner_was_cancelled_unasked(
+    after_its_stop,
+):
+    """Rule 14: no frame of the service that holds the runner's stray outlives its step."""
+    records = _RecordsThatFail(frozenset({_Step.RECORD_END}))
+    runner = StrayCancelledRunner(after_its_stop=after_its_stop)
+    async with driven(runner, records=records, read=False) as drive:
+        closer = asyncio.create_task(_closed_while_it_waits(drive))
+        await asyncio.wait({closer})
+    propagated = closer.exception()
+    del drive, closer, runner
+    gc.collect()
+
+    assert type(propagated) is _EndNotRecorded
+    assert not _reaches_a_frame_of(propagated, stray_cancellation)
+
+
+class _RunnerRaisingThisStray(GatedRunner):
+    def __init__(self, stray: asyncio.CancelledError) -> None:
+        super().__init__()
+        self._stray = stray
+
+    async def run(self, admitted):
+        try:
+            raise self._stray
+            yield QUIET
+        finally:
+            await self._closed()
+
+
+@in_loop
+async def test_a_runner_cancelled_unasked_is_made_inert_once_its_close_is_logged():
+    """Rule 14: the stray the runner's close met keeps neither its traceback nor its chain."""
+    stray = asyncio.CancelledError(STRAY_CANCELLATION_CANARY)
+    async with driven(_RunnerRaisingThisStray(stray), read=False) as drive:
+        closer = asyncio.create_task(_closed_while_it_waits(drive))
+        await asyncio.wait({closer})
+
+    assert stray.__traceback__ is None
+
+
+def _a_generator_suspended_after_catching_a_cancellation() -> Generator[None, None, None]:
+    try:
+        raise asyncio.CancelledError
+    except asyncio.CancelledError:
+        yield
+    yield
+
+
+@in_loop
+async def test_recording_a_stray_cancellation_leaves_a_suspended_generator_of_its_traceback_open():
+    """Rule 14: cutting a traceback must not close the generators it passed (``clear_frames``)."""
+    suspended = _a_generator_suspended_after_catching_a_cancellation()
+    next(suspended)
+    stray = asyncio.CancelledError()
+    stray.__traceback__ = types.TracebackType(
+        None, suspended.gi_frame, suspended.gi_frame.f_lasti, suspended.gi_frame.f_lineno
+    )
+
+    RunFailures(uuid.uuid4()).add(FailedPart.SUPERVISION, stray)
+
+    assert inspect.getgeneratorstate(suspended) == inspect.GEN_SUSPENDED
 
 
 def _raised_again_by_a_function_holding_a_payload(

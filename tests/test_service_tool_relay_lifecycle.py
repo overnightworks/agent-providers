@@ -278,6 +278,27 @@ def test_a_trickled_request_is_aborted_at_the_absolute_deadline_without_the_owne
     drive_stepped(scenario, owner)
 
 
+@pytest.mark.parametrize(
+    "opening",
+    [
+        pytest.param(partial_head, id="head"),
+        pytest.param(partial_length_body, id="length-body"),
+        pytest.param(partial_chunked_body, id="chunked-body"),
+    ],
+)
+def test_a_client_that_stops_sending_mid_request_is_dropped_unanswered(opening: Opening) -> None:
+    owner = ScriptedOwner()
+
+    async def scenario(relay: Relay, clock: StepClock) -> None:
+        client = await RawClient.connect(port_of(relay))
+        await client.send(opening(relay))
+        client.finish_sending()
+        assert await client.delivery() is Delivery.ABSENT
+        assert owner.requests == []
+
+    drive_stepped(scenario, owner)
+
+
 def head_split_before_its_last_bytes(relay: Relay) -> tuple[bytes, bytes]:
     request = post(relay, b"{}")
     return request[:10], request[10:]

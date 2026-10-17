@@ -252,6 +252,9 @@ class RawClient:
             pass
         return True
 
+    def finish_sending(self) -> None:
+        self._writer.write_eof()
+
     def disconnect(self) -> None:
         self._writer.close()
 

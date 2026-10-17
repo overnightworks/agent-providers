@@ -1,0 +1,8 @@
+claim_id = "0c894b7fe07e471a94ee1d92e7400913"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "adff305b1cef24a12795af1dc6c1b9959cf43607"
+branch = "claude/issue-168-a1b-3t1-fake-claude-kind"
+scope = ["tests/provider_test_support.py", "tests/test_async_claude_spawn_seam.py", "tests/test_claude_adapter.py", "tests/test_claude_provider.py"]
+opened_commit = "14016ba2e23a01ccff0c8b5a752d1517739d94ab"
+whole_reason = "One fake Claude child: the builder, the installer, the provider module's migrated sites and the guard over that module only make sense together."

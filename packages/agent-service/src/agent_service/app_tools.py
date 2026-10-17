@@ -20,7 +20,7 @@ retransmitted, so a lost connection ends that call as ``UpstreamCallLost``.
 from __future__ import annotations
 
 import ssl
-from collections.abc import AsyncIterator, Callable, Iterator, Mapping
+from collections.abc import AsyncIterator, Callable, Generator, Iterator, Mapping
 from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass
 from enum import StrEnum
@@ -204,7 +204,7 @@ class _Conversation:
                 try:
                     return await self._received(sent, require_answer_headers)
                 except UpstreamError:
-                    await _close_refused(sent)
+                    await _close_quietly(sent)
                     raise
         except httpx.HTTPError as failure:
             _transport_failure(failure)
@@ -307,10 +307,10 @@ async def _handshake(conversation: _Conversation) -> AppToolsSession:
     return AppToolsSession(conversation, negotiated, session_id)
 
 
-async def _close_refused(response: httpx.Response) -> None:
-    """Close a refused response; a failing close never replaces the refusal."""
+async def _close_quietly(closable: httpx.Response | httpx.AsyncClient) -> None:
+    """Close while a failure is established; a failing close never replaces it."""
     with suppress(httpx.HTTPError):
-        await response.aclose()
+        await closable.aclose()
 
 
 class _BearerCapability(httpx.Auth):
@@ -319,7 +319,9 @@ class _BearerCapability(httpx.Auth):
     def __init__(self, capability: Capability) -> None:
         self._capability = capability
 
-    def auth_flow(self, request: httpx.Request) -> Iterator[httpx.Request]:
+    def auth_flow(
+        self, request: httpx.Request
+    ) -> Generator[httpx.Request, httpx.Response, None]:
         request.headers["Authorization"] = f"Bearer {self._capability.token}"
         yield request
 
@@ -328,7 +330,7 @@ async def _refuse_redirect(response: httpx.Response) -> None:
     """Decide a 3xx before httpx parses its ``Location``; a failing close never replaces it."""
     if not 300 <= response.status_code < 400:
         return
-    await _close_refused(response)
+    await _close_quietly(response)
     raise_without_chain(UpstreamRedirected(response.status_code))
 
 
@@ -348,13 +350,11 @@ def _http_client(capability: Capability, tls_context: ssl.SSLContext) -> httpx.A
     )
 
 
-async def _close_client(http: httpx.AsyncClient, *, body_completed: bool) -> None:
-    """Close the client; its failure maps to a closed error unless one is already leaving."""
+async def _close_completed_client(http: httpx.AsyncClient) -> None:
     try:
         await http.aclose()
     except httpx.HTTPError as failure:
-        if body_completed:
-            _transport_failure(failure)
+        _transport_failure(failure)
 
 
 @asynccontextmanager
@@ -367,6 +367,6 @@ async def open_app_tools(
         conversation = _Conversation(http, f"{origin}{MCP_ENDPOINT_PATH}", count(_FIRST_REQUEST_ID))
         yield await _handshake(conversation)
     except BaseException:
-        await _close_client(http, body_completed=False)
+        await _close_quietly(http)
         raise
-    await _close_client(http, body_completed=True)
+    await _close_completed_client(http)

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import errno
 import json
 import os
+import signal
 import subprocess
 import sys
 import textwrap
@@ -17,24 +19,35 @@ import uvicorn
 from test_service_claude_version import _config_file_naming, _logged_program
 from test_service_config import CLI_SECTION, NO_PROFILE, _written
 
+import agent_service.config as service_config
 import agent_service.process_hardening as hardening
 from agent_service.cli import main
 
 REAL_SET_NOT_DUMPABLE = hardening.set_not_dumpable
+REAL_LOAD_LIBC = hardening.load_libc
 
 MISSING_CONFIG_ARGUMENTS = ["--config", "/nonexistent/agent-service.toml"]
+REFUSAL_PREFIX = "agent-service: refusing to start: "
 ROOT_REFUSAL = (
-    "agent-service: refusing to start: running as root (effective uid 0);"
-    " run the service as an unprivileged user\n"
+    REFUSAL_PREFIX + "running as root (effective uid 0); run the service as an unprivileged user\n"
 )
-PERMISSION_REFUSAL = (
-    "agent-service: refusing to start: cannot make the process non-dumpable:"
-    " Operation not permitted\n"
+PLATFORM_REFUSAL = REFUSAL_PREFIX + "needs Linux (/proc and prctl); this platform is darwin\n"
+EXPECTED_PRCTL_CALL = (4, 0, 0, 0, 0)
+INVALID_PRCTL_OPTION = 0
+DISPOSABLE_BOUND_SECONDS = 30
+
+NON_LINUX_START = textwrap.dedent(
+    """
+    import os, sys
+
+    del os.O_CLOEXEC
+    sys.platform = "darwin"
+
+    from agent_service.cli import main
+
+    sys.exit(main(["--config", sys.argv[1]]))
+    """
 )
-PLATFORM_REFUSAL = (
-    "agent-service: refusing to start: needs Linux (/proc and prctl); this platform is darwin\n"
-)
-EXPECTED_PRCTL_CALL = (hardening.PR_SET_DUMPABLE, 0, 0, 0, 0)
 
 
 @pytest.fixture
@@ -45,19 +58,25 @@ def served(monkeypatch):
 
 
 @pytest.fixture
+def valid_config(tmp_path):
+    return _written(tmp_path, NO_PROFILE.replace(CLI_SECTION, ""))
+
+
+@pytest.fixture
 def boundary_calls(monkeypatch):
     calls = []
 
-    def recording(name, fake):
+    def recording(name, fake, module=hardening):
         def call(*arguments):
             calls.append(name)
             return fake(*arguments)
 
-        monkeypatch.setattr(hardening, name, call)
+        monkeypatch.setattr(module, name, call)
 
     recording(
         "load_libc", lambda: pytest.fail("libc is opened only after the platform and root checks")
     )
+    recording("load_config", service_config.load_config, module=service_config)
     return calls, recording
 
 
@@ -91,22 +110,23 @@ def _one_line_refusal(capsys) -> str:
     ],
 )
 def test_a_root_or_non_linux_start_ends_in_one_line_before_the_config_is_read(
-    monkeypatch, served, capsys, boundary_calls, running_platform, effective_user, refusal
+    served, capsys, boundary_calls, valid_config, running_platform, effective_user, refusal
 ):
     calls, recording = boundary_calls
     recording("running_platform", lambda: running_platform)
     recording("effective_user_id", lambda: effective_user)
     recording("set_not_dumpable", lambda: None)
 
-    assert main(MISSING_CONFIG_ARGUMENTS) == 2
+    assert main(["--config", str(valid_config)]) == 2
 
     assert _one_line_refusal(capsys) == refusal
     assert served == []
     assert "load_libc" not in calls
     assert "set_not_dumpable" not in calls
+    assert "load_config" not in calls
 
 
-def test_a_non_linux_start_does_not_ask_for_the_user(monkeypatch, served, capsys, boundary_calls):
+def test_a_non_linux_start_does_not_ask_for_the_user(served, boundary_calls):
     calls, recording = boundary_calls
     recording("running_platform", lambda: "darwin")
     recording("effective_user_id", lambda: 1000)
@@ -116,14 +136,26 @@ def test_a_non_linux_start_does_not_ask_for_the_user(monkeypatch, served, capsys
     assert "effective_user_id" not in calls
 
 
-def test_an_unprivileged_start_hardens_before_it_reads_the_config(monkeypatch, served, capsys):
-    hardened = []
-    monkeypatch.setattr(hardening, "set_not_dumpable", lambda: hardened.append(True))
+def test_a_non_linux_interpreter_prints_the_refusal_before_any_unix_only_import(valid_config):
+    done = subprocess.run(
+        [sys.executable, "-I", "-c", NON_LINUX_START, str(valid_config)],
+        capture_output=True,
+        text=True,
+        timeout=DISPOSABLE_BOUND_SECONDS,
+    )
 
-    assert main(MISSING_CONFIG_ARGUMENTS) == 2
+    assert (done.returncode, done.stderr) == (2, PLATFORM_REFUSAL)
 
-    assert hardened == [True]
-    assert "/nonexistent/agent-service.toml" in capsys.readouterr().err
+
+def test_an_unprivileged_start_hardens_before_it_reads_the_config(
+    served, boundary_calls, valid_config
+):
+    calls, recording = boundary_calls
+    recording("set_not_dumpable", lambda: None)
+
+    assert main(["--config", str(valid_config)]) == 0
+
+    assert calls == ["set_not_dumpable", "load_config"]
 
 
 @pytest.mark.parametrize("with_cli_section", [False, True], ids=["no-cli", "with-cli"])
@@ -144,21 +176,46 @@ def test_an_unprivileged_start_serves_and_still_probes_the_program(
         assert probe_log.read_text() == "--version\n"
 
 
+@pytest.mark.parametrize(
+    ("error_number", "error_text"),
+    [
+        pytest.param(errno.EPERM, "Operation not permitted", id="N3-EPERM"),
+        pytest.param(errno.EINVAL, "Invalid argument", id="N3-EINVAL"),
+    ],
+)
 def test_a_failing_prctl_ends_in_one_line_with_the_error_text_before_the_config_is_read(
-    monkeypatch, served, capsys
+    monkeypatch, served, capsys, boundary_calls, valid_config, error_number, error_text
 ):
+    calls, _ = boundary_calls
     monkeypatch.setattr(hardening, "set_not_dumpable", REAL_SET_NOT_DUMPABLE)
     monkeypatch.setattr(
-        hardening, "load_libc", lambda: _fake_libc_whose_prctl_fails_with(errno.EPERM)
+        hardening, "load_libc", lambda: _fake_libc_whose_prctl_fails_with(error_number)
     )
     errno_before = ctypes.get_errno()
     try:
-        assert main(MISSING_CONFIG_ARGUMENTS) == 2
+        assert main(["--config", str(valid_config)]) == 2
     finally:
         ctypes.set_errno(errno_before)
 
-    assert _one_line_refusal(capsys) == PERMISSION_REFUSAL
+    assert _one_line_refusal(capsys) == (
+        f"{REFUSAL_PREFIX}cannot make the process non-dumpable: {error_text}\n"
+    )
     assert served == []
+    assert "load_config" not in calls
+
+
+def test_the_loaded_libc_reports_a_failing_prctl_through_errno():
+    prctl = REAL_LOAD_LIBC().prctl
+    prctl.argtypes = [ctypes.c_int] + [ctypes.c_ulong] * 4
+    errno_before = ctypes.get_errno()
+    try:
+        ctypes.set_errno(0)
+        result = prctl(INVALID_PRCTL_OPTION, 0, 0, 0, 0)
+        reported = ctypes.get_errno()
+    finally:
+        ctypes.set_errno(errno_before)
+
+    assert (result, reported) == (-1, errno.EINVAL)
 
 
 def test_the_wrapper_calls_prctl_with_native_width_arguments(monkeypatch):
@@ -209,7 +266,7 @@ READER = textwrap.dedent(
 
 SERVICE_UNDER_READER = textwrap.dedent(
     """
-    import ctypes, json, subprocess, sys
+    import ctypes, json, os, subprocess, sys
 
     import uvicorn
 
@@ -218,14 +275,15 @@ SERVICE_UNDER_READER = textwrap.dedent(
     reader, environment_canary, memory_canary, bound = sys.argv[1:5]
     libc = ctypes.CDLL(None, use_errno=True)
     libc.prctl.argtypes = [ctypes.c_int] + [ctypes.c_ulong] * 4
-    assert libc.prctl(%d, %d, 0, 0, 0) == 0
+    if os.path.exists("/proc/sys/kernel/yama/ptrace_scope"):
+        assert libc.prctl(%d, %d, 0, 0, 0) == 0
     canary = ctypes.create_string_buffer(memory_canary.encode())
     address = ctypes.addressof(canary)
 
     def read_from_a_child():
         done = subprocess.run(
             [sys.executable, "-c", reader, str(address), environment_canary, memory_canary],
-            capture_output=True, text=True, timeout=float(bound),
+            capture_output=True, text=True, timeout=float(bound), check=True,
         )
         return json.loads(done.stdout)
 
@@ -254,18 +312,23 @@ def test_a_same_user_child_granted_ptracer_permission_cannot_read_the_service_af
     config_file = _written(tmp_path, NO_PROFILE.replace(CLI_SECTION, ""))
     arguments = [READER, ENVIRONMENT_CANARY, MEMORY_CANARY.decode(), str(BOUND_SECONDS // 3)]
 
-    done = subprocess.run(
+    service = subprocess.Popen(
         [sys.executable, "-c", SERVICE_UNDER_READER, *arguments, str(config_file)],
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=BOUND_SECONDS,
+        start_new_session=True,
         env={**os.environ, "SERVICE_ENVIRONMENT_CANARY": ENVIRONMENT_CANARY},
     )
+    try:
+        stdout, stderr = service.communicate(timeout=BOUND_SECONDS)
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(service.pid, signal.SIGKILL)
+        service.wait()
 
-    report = json.loads(done.stdout.strip().splitlines()[-1]) if done.stdout.strip() else {}
-    assert report.get("control") == {"environ": "match", "mem": "match"}, (done.stdout, done.stderr)
-    assert report.get("treatment") == {"environ": "denied", "mem": "denied"}, (
-        done.stdout,
-        done.stderr,
-    )
+    assert service.returncode == 0, (stdout, stderr)
+    report = json.loads(stdout.strip().splitlines()[-1])
+    assert report["control"] == {"environ": "match", "mem": "match"}, (stdout, stderr)
+    assert report["treatment"] == {"environ": "denied", "mem": "denied"}, (stdout, stderr)
     assert report["exit"] == 0

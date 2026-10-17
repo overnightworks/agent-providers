@@ -32,7 +32,7 @@ from service_support import (
 )
 
 from agent_client.tools import ToolEffect
-from agent_service import cli
+from agent_service import app as app_module
 from agent_service.cli import EXIT_BAD_CONFIG, main
 from agent_service.config import (
     AppConfig,
@@ -858,9 +858,9 @@ def test_a_document_with_no_profile_or_one_sound_claude_profile_reaches_serving(
     tmp_path, served_apps, monkeypatch, text
 ):
     app_configs = []
-    create_app = cli.create_app
+    create_app = app_module.create_app
     monkeypatch.setattr(
-        cli, "create_app", lambda config: app_configs.append(config) or create_app(config)
+        app_module, "create_app", lambda config: app_configs.append(config) or create_app(config)
     )
 
     assert main(["--config", str(config_file := _written(tmp_path, text))]) == 0

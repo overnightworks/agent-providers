@@ -1,8 +1,10 @@
-"""The service's first startup step: refuse root, then make the process non-dumpable.
+"""The service's first startup step: refuse a non-Linux platform and root, then make the process
+non-dumpable.
 
-A non-dumpable process owns its ``/proc/<pid>/environ`` and ``/proc/<pid>/mem`` as root, so a
-same-UID child of the Claude program cannot read the signing key or the token the service holds.
-This runs before the configuration is read, so no secret is in memory when it closes.
+A non-dumpable process owns its ``/proc/<pid>/environ`` and ``/proc/<pid>/mem`` as root, so the
+Claude program and anything it starts as the same user cannot read the signing key or the token
+the service holds. A process that cannot be made non-dumpable is refused. This runs before the
+configuration is read, so no secret is in memory when it closes.
 """
 
 from __future__ import annotations

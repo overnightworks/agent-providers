@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import logging
 import os
 import shlex
 import signal
+import stat
 import threading
 import time
 import traceback
@@ -25,6 +27,7 @@ from provider_test_support import (
     A_TOOL_FAILURE_MESSAGE,
     CALLER_CONTEXTS,
     CANARY_ACCESS_TOKEN,
+    CREDENTIAL_FILE_BOUND_BYTES,
     DEEPLY_NESTED_JSON,
     SAMPLE_TOOL_CATALOG,
     CallerCanaryError,
@@ -34,12 +37,21 @@ from provider_test_support import (
     a_call_nested_too_deeply_to_decode,
     a_call_to_an_undeclared_tool_carrying,
     a_codex_login,
+    a_credential_destination_that_fails,
+    a_dangling_symlink,
+    a_directory,
+    a_fifo,
+    a_path_through_a_regular_file,
+    a_symlink_to_a_login,
+    a_usable_login_over_the_bound,
     assert_a_multi_result_batch_is_rejected,
     assert_the_canary_reaches_only_the_host,
+    call_within_deadline,
     drive_turn,
     exception_chain,
     fail_to_start_the_runner_thread,
     formatted_log_text,
+    live_frames_holding,
     override_provider_runtime,
     override_turn_runtime,
     shell_child,
@@ -53,6 +65,7 @@ from agent_providers.codex import image as codex_image
 from agent_providers.codex import protocol as codex_protocol
 from agent_providers.codex import transport as codex_transport
 from agent_providers.codex.pool import CodexProcessKind, CodexProcessPool
+from agent_providers.codex_login import blanked_copy
 from agent_providers.errors import (
     CodexProcessPoolSaturatedError,
     ProviderModelCatalogUnavailableError,
@@ -167,13 +180,13 @@ def test_a_deployment_without_the_image_encoder_refuses_before_it_spawns(
 
 
 @pytest.fixture(autouse=True)
-def codex_login_mirror(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    mirror = tmp_path / "auth.json"
-    mirror.write_text(json.dumps(_A_CODEX_LOGIN))
-    override_provider_runtime(codex_cli_auth_file=mirror)
+def codex_login_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    source = tmp_path / "auth.json"
+    source.write_text(json.dumps(_A_CODEX_LOGIN))
+    override_provider_runtime(codex_cli_auth_file=source)
     process_pool = CodexProcessPool(maximum_processes=8, maximum_image_runs=1)
     use_codex_process_pool(monkeypatch, process_pool)
-    return mirror
+    return source
 
 
 def _outcome(
@@ -1580,7 +1593,7 @@ def test_a_deviating_transcript_raises_the_blocked_error_with_its_tokens(tmp_pat
     ),
     ids=("missing", "incomplete", "wrong-typed"),
 )
-def test_codex_public_adapters_reject_unusable_login_mirrors(
+def test_codex_public_adapters_reject_unusable_logins(
     tmp_path: Path,
     document: dict | None,
 ) -> None:
@@ -1815,10 +1828,10 @@ def _drive_the_image_turn(monkeypatch, copies, files) -> None:
     ids=("catalog", "login-status", "tool-turn", "image-turn"),
 )
 def test_no_codex_child_is_handed_the_operators_live_refresh_token(
-    monkeypatch, caplog, codex_login_mirror: Path, drive,
+    monkeypatch, caplog, codex_login_source: Path, drive,
 ) -> None:
-    codex_login_mirror.write_text(json.dumps(_OPERATORS_LIVE_LOGIN))
-    operators_file = codex_login_mirror.read_bytes()
+    codex_login_source.write_text(json.dumps(_OPERATORS_LIVE_LOGIN))
+    operators_file = codex_login_source.read_bytes()
     monkeypatch.setattr(process, "resolve_cli_binary", lambda _binary: Path("/usr/bin/codex"))
     clear_agent_cli_caches()
     caplog.set_level(logging.DEBUG)
@@ -1830,45 +1843,45 @@ def test_no_codex_child_is_handed_the_operators_live_refresh_token(
     (command, child_login), = copies
     assert json.loads(child_login)["tokens"]["refresh_token"] == ""
     assert json.loads(child_login)["tokens"]["access_token"] == CANARY_ACCESS_TOKEN
-    assert codex_login_mirror.read_bytes() == operators_file
+    assert codex_login_source.read_bytes() == operators_file
     assert _CANARY_REFRESH_TOKEN not in child_login
     assert not any(_CANARY_REFRESH_TOKEN.encode() in content for content in files)
     assert not any(_CANARY_REFRESH_TOKEN in argument for argument in command)
     assert _CANARY_REFRESH_TOKEN not in formatted_log_text(caplog.records)
 
 
-def _drive_the_image_path(_codex_login_mirror: Path) -> BaseException:
+def _drive_the_image_path(_codex_login_source: Path) -> BaseException:
     with pytest.raises(codex_image.CodexImageLoginError) as raised:
         codex_image.generate_codex_image("prompt", policy=AN_IMAGE_POLICY, deadline=10_000_000)
     return raised.value
 
 
-def _drive_the_probe_path(_codex_login_mirror: Path) -> BaseException:
-    with pytest.raises(process.CodexLoginMirrorError) as raised:
-        process.blank_codex_refresh_token(_MALFORMED_LOGIN_WITH_CANARY)
+def _drive_the_tool_turn_path(_codex_login_source: Path) -> BaseException:
+    with pytest.raises(ProviderUnavailableError) as raised:
+        _transport()
     return raised.value
 
 
 _MALFORMED_LOGIN_WITH_CANARY = f'{{"refresh_token": "{_CANARY_REFRESH_TOKEN}", '.encode()
 
 
-def _drive_the_reader_with_an_oversize_source(codex_login_mirror: Path) -> BaseException:
-    codex_login_mirror.write_bytes(
-        _CANARY_REFRESH_TOKEN.encode() + b" " * (256 * 1024),
+def _drive_the_reader_with_an_oversize_source(codex_login_source: Path) -> BaseException:
+    codex_login_source.write_bytes(
+        _CANARY_REFRESH_TOKEN.encode() + b" " * CREDENTIAL_FILE_BOUND_BYTES,
     )
     with pytest.raises(AgentCliUnavailableError) as raised:
-        process._read_credential_file(codex_login_mirror)
+        process._read_credential_file(codex_login_source)
     return raised.value
 
 
-def _drive_the_credential_seam(codex_login_mirror: Path) -> BaseException:
+def _drive_the_credential_seam(codex_login_source: Path) -> BaseException:
     with pytest.raises(process.CliCredentialNotConfiguredError) as raised:
         process.PrivateCredentialHome(
-            codex_login_mirror,
+            codex_login_source,
             Path("auth.json"),
             prefix="seam-",
             missing_credential_is_error=True,
-            credential_copy=process.blank_codex_refresh_token,
+            credential_copy=blanked_copy,
         )
     return raised.value
 
@@ -1876,20 +1889,20 @@ def _drive_the_credential_seam(codex_login_mirror: Path) -> BaseException:
 @pytest.mark.parametrize(
     "drive",
     (
-        _drive_the_probe_path,
+        _drive_the_tool_turn_path,
         _drive_the_image_path,
         _drive_the_credential_seam,
         _drive_the_reader_with_an_oversize_source,
     ),
-    ids=("probe", "image", "seam", "reader-oversize"),
+    ids=("tool-turn", "image", "seam", "reader-oversize"),
 )
 def test_a_malformed_login_leaves_no_credential_content_in_the_error_chain(
-    monkeypatch, codex_login_mirror: Path, drive,
+    monkeypatch, codex_login_source: Path, drive,
 ) -> None:
-    codex_login_mirror.write_bytes(_MALFORMED_LOGIN_WITH_CANARY)
+    codex_login_source.write_bytes(_MALFORMED_LOGIN_WITH_CANARY)
     monkeypatch.setattr(process, "resolve_cli_binary", lambda _binary: Path("/usr/bin/codex"))
 
-    error = drive(codex_login_mirror)
+    error = drive(codex_login_source)
 
     chain = exception_chain(error)
     assert not any(
@@ -1899,33 +1912,76 @@ def test_a_malformed_login_leaves_no_credential_content_in_the_error_chain(
     assert not traceback_frames_hold(error, _CANARY_REFRESH_TOKEN)
 
 
-def _a_refused_symbolic_link(codex_login_mirror: Path) -> BaseException:
-    link = codex_login_mirror.with_name("link.json")
-    link.symlink_to(codex_login_mirror)
+def _a_refused_symbolic_link(codex_login_source: Path) -> BaseException:
+    link = codex_login_source.with_name("link.json")
+    link.symlink_to(codex_login_source)
     with pytest.raises(AgentCliUnavailableError) as raised:
         process._read_credential_file(link)
     return raised.value
 
 
-def _a_malformed_login_judged_usable_or_not(codex_login_mirror: Path) -> BaseException:
-    codex_login_mirror.write_bytes(_MALFORMED_LOGIN_WITH_CANARY)
+def _a_malformed_login_judged_usable_or_not(codex_login_source: Path) -> BaseException:
+    codex_login_source.write_bytes(_MALFORMED_LOGIN_WITH_CANARY)
     with pytest.raises(AgentCliUnavailableError) as raised:
         process.codex_cli_login_is_usable()
     return raised.value
 
 
+def _a_turn_refused_for_a_login_source(
+    turn, codex_login_source: Path, make_source,
+) -> BaseException:
+    override_provider_runtime(codex_cli_auth_file=make_source(codex_login_source.parent))
+    return turn()
+
+
+def _the_tool_turn_refusal() -> BaseException:
+    with pytest.raises(ProviderUnavailableError) as raised:
+        _transport()
+    return raised.value
+
+
+def _the_image_turn_refusal() -> BaseException:
+    with pytest.raises(codex_image.CodexImageLoginError) as raised:
+        _generate_image()
+    return raised.value
+
+
+def _a_login_source_that_is_malformed(directory: Path) -> Path:
+    path = directory / "malformed.json"
+    path.write_bytes(_MALFORMED_LOGIN_WITH_CANARY)
+    return path
+
+
 @pytest.mark.parametrize(
     "refuse",
-    (_a_refused_symbolic_link, _a_malformed_login_judged_usable_or_not),
-    ids=("reader-symlink", "decider-malformed"),
+    (
+        _a_refused_symbolic_link,
+        _a_malformed_login_judged_usable_or_not,
+        lambda source: _a_turn_refused_for_a_login_source(
+            _the_tool_turn_refusal, source, a_symlink_to_a_login,
+        ),
+        lambda source: _a_turn_refused_for_a_login_source(
+            _the_image_turn_refusal, source, a_symlink_to_a_login,
+        ),
+        lambda source: _a_turn_refused_for_a_login_source(
+            _the_tool_turn_refusal, source, _a_login_source_that_is_malformed,
+        ),
+        lambda source: _a_turn_refused_for_a_login_source(
+            _the_image_turn_refusal, source, _a_login_source_that_is_malformed,
+        ),
+    ),
+    ids=(
+        "reader-symlink", "decider-malformed", "tool-turn-symlink", "image-turn-symlink",
+        "tool-turn-malformed", "image-turn-malformed",
+    ),
 )
 def test_a_credential_refusal_carries_no_chain_inside_a_handler(
-    codex_login_mirror: Path, refuse,
+    codex_login_source: Path, refuse,
 ) -> None:
     try:
         raise RuntimeError("the caller's own failure")
     except RuntimeError:
-        refusal = refuse(codex_login_mirror)
+        refusal = refuse(codex_login_source)
 
     assert refusal.__cause__ is None
     assert refusal.__context__ is None
@@ -1941,9 +1997,9 @@ def test_a_credential_refusal_carries_no_chain_inside_a_handler(
     ids=("incomplete", "wrong-typed"),
 )
 def test_the_codex_catalog_probe_starts_without_an_unusable_login(
-    monkeypatch, codex_login_mirror: Path, document: dict,
+    monkeypatch, codex_login_source: Path, document: dict,
 ) -> None:
-    codex_login_mirror.write_text(json.dumps(document))
+    codex_login_source.write_text(json.dumps(document))
     monkeypatch.setattr(process, "resolve_cli_binary", lambda _binary: Path("/usr/bin/codex"))
     clear_agent_cli_caches()
     copies: list[tuple[tuple[str, ...], str]] = []
@@ -1958,3 +2014,133 @@ def test_the_codex_catalog_probe_starts_without_an_unusable_login(
     (_command, child_login), = copies
     assert child_login == ""
     assert raised.value.reason.code is SafeRouteReasonCode.CATALOGUE_PROTOCOL_ERROR
+
+
+def _the_tool_turn_is_started(monkeypatch, seen: list) -> None:
+    runner = _runner(_tool_round_lines("done"), _outcome(), [])
+    monkeypatch.setattr(codex_protocol, "run_cli_bounded", _stating_runner(seen, runner))
+    asyncio.run(_collect_tool_events(_codex_tool_events(
+        _transport(), lambda _name, _arguments: ToolOutcome("{}", False),
+    )))
+
+
+def _the_image_turn_is_started(monkeypatch, seen: list) -> None:
+    monkeypatch.setattr(
+        codex_protocol, "run_cli_bounded", _stating_runner(seen, _generated_png_runner()),
+    )
+    codex_image.generate_codex_image("prompt", policy=AN_IMAGE_POLICY, deadline=10_000_000)
+
+
+def _stating_runner(seen: list, runner) -> object:
+    def run_cli_bounded(child, **kwargs):
+        login = Path(child.environment["CODEX_HOME"]) / "auth.json"
+        seen.append((stat.S_IMODE(login.stat().st_mode), login.read_bytes()))
+        return runner(child, **kwargs)
+
+    return run_cli_bounded
+
+
+@pytest.mark.parametrize(
+    "start_the_turn", (_the_tool_turn_is_started, _the_image_turn_is_started),
+    ids=("tool-turn", "image-turn"),
+)
+def test_the_codex_turn_copy_is_private_writable_and_blanked(
+    monkeypatch, codex_login_source: Path, start_the_turn,
+) -> None:
+    seen: list[tuple[int, bytes]] = []
+
+    start_the_turn(monkeypatch, seen)
+
+    [(mode, copy)] = seen
+    assert mode == 0o600
+    assert copy == blanked_copy(codex_login_source.read_bytes())
+    assert json.loads(copy)["tokens"]["refresh_token"] == ""
+
+
+def _a_login_through_a_dev_null_device(_directory: Path) -> Path:
+    return Path("/dev/null")
+
+
+_SOURCES_A_TURN_REFUSES = pytest.mark.parametrize(
+    "make_source",
+    (
+        a_symlink_to_a_login,
+        a_dangling_symlink,
+        a_usable_login_over_the_bound,
+        a_fifo,
+        a_directory,
+        _a_login_through_a_dev_null_device,
+        a_path_through_a_regular_file,
+    ),
+    ids=(
+        "symlink", "dangling-symlink", "over-the-bound", "fifo", "directory", "device", "enotdir",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    "turn", (_the_tool_turn_refusal, _the_image_turn_refusal), ids=("tool-turn", "image-turn"),
+)
+@_SOURCES_A_TURN_REFUSES
+def test_codex_turns_refuse_a_login_that_is_not_a_plain_file(
+    tmp_path: Path, monkeypatch, make_source, turn,
+) -> None:
+    turns = tmp_path / "turns"
+    turns.mkdir()
+    sources = tmp_path / "sources"
+    sources.mkdir()
+    override_provider_runtime(
+        codex_cli_auth_file=make_source(sources), cli_working_directory_root=turns,
+    )
+    children: list = []
+    monkeypatch.setattr(
+        codex_protocol, "run_cli_bounded", _runner([], _outcome(), children),
+    )
+
+    refusal = call_within_deadline(turn)
+
+    assert children == []
+    assert list(turns.iterdir()) == []
+    assert refusal.__cause__ is None
+    assert refusal.__context__ is None
+    if isinstance(refusal, ProviderUnavailableError):
+        assert refusal.reason.code is SafeRouteReasonCode.CLI_AUTH_REJECTED
+
+
+@pytest.mark.parametrize(
+    "turn", (_the_tool_turn_refusal, _the_image_turn_refusal), ids=("tool-turn", "image-turn"),
+)
+def test_a_failed_turn_copy_keeps_no_credential_in_its_error(
+    tmp_path: Path, monkeypatch, codex_login_source: Path, turn,
+) -> None:
+    turns = tmp_path / "turns"
+    turns.mkdir()
+    override_provider_runtime(
+        codex_cli_auth_file=codex_login_source, cli_working_directory_root=turns,
+    )
+    children: list = []
+    monkeypatch.setattr(
+        codex_protocol, "run_cli_bounded", _runner([], _outcome(), children),
+    )
+    open_descriptors = len(os.listdir("/proc/self/fd"))
+
+    gc.collect()
+    gc.disable()
+    try:
+        with a_credential_destination_that_fails("write"):
+            refusal = turn()
+        frames_left_holding_it = live_frames_holding(CANARY_ACCESS_TOKEN)
+    finally:
+        gc.enable()
+
+    assert refusal.__cause__ is None
+    assert refusal.__context__ is None
+    assert not traceback_frames_hold(refusal, CANARY_ACCESS_TOKEN)
+    assert not any(
+        CANARY_ACCESS_TOKEN in "".join(traceback.format_exception(link))
+        for link in exception_chain(refusal)
+    )
+    assert not frames_left_holding_it
+    assert children == []
+    assert list(turns.iterdir()) == []
+    assert len(os.listdir("/proc/self/fd")) == open_descriptors

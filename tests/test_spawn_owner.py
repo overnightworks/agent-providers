@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from anchored_support import ChildCleanup
 
 from agent_providers import spawn
 from agent_providers.spawn import (
@@ -47,6 +48,7 @@ from agent_providers.spawn import (
     open_async_pipes,
     open_pipes,
     run_capturing,
+    start_anchored_leader,
 )
 
 REPOSITORY_ROOT = Path(spawn.__file__).parents[2]
@@ -463,15 +465,7 @@ def _stdout_of_open_async_pipes(child: ChildProcess) -> str:
     return asyncio.run(run())
 
 
-@pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="needs /proc/self/fd")
-@pytest.mark.parametrize(
-    "stdout_of",
-    [_stdout_of_run_capturing, _stdout_of_open_pipes, _stdout_of_open_async_pipes],
-    ids=["run_capturing", "open_pipes", "open_async_pipes"],
-)
-def test_a_child_inherits_no_descriptor_the_parent_holds_open(
-    tmp_path: Path, stdout_of: Callable[[ChildProcess], str],
-) -> None:
+def _run_descriptor_probe(tmp_path: Path, stdout_of: Callable[[ChildProcess], str]) -> None:
     probe = (
         "import os, sys\n"
         "print(os.path.exists(f'/proc/self/fd/{sys.argv[1]}'))\n"
@@ -492,6 +486,53 @@ def test_a_child_inherits_no_descriptor_the_parent_holds_open(
         os.close(write_end)
 
     assert output.strip() == "False"
+
+
+needs_proc_fd = pytest.mark.skipif(
+    not Path("/proc/self/fd").is_dir(), reason="needs /proc/self/fd"
+)
+
+
+@needs_proc_fd
+@pytest.mark.parametrize(
+    "stdout_of",
+    [_stdout_of_run_capturing, _stdout_of_open_pipes, _stdout_of_open_async_pipes],
+    ids=["run_capturing", "open_pipes", "open_async_pipes"],
+)
+def test_a_child_inherits_no_descriptor_the_parent_holds_open(
+    tmp_path: Path, stdout_of: Callable[[ChildProcess], str],
+) -> None:
+    _run_descriptor_probe(tmp_path, stdout_of)
+
+
+@needs_proc_fd
+def test_an_anchored_leader_inherits_no_descriptor_the_parent_holds_open(
+    tmp_path: Path, child_cleanup: ChildCleanup,
+) -> None:
+    def stdout_of_anchored_leader(child: ChildProcess) -> str:
+        output_read, output_write = os.pipe()
+        nothing = os.open(os.devnull, os.O_RDWR)
+        try:
+            child_cleanup.capture(
+                lambda: start_anchored_leader(
+                    child,
+                    stdin=nothing,
+                    stdout=output_write,
+                    stderr=nothing,
+                    on_exit=lambda: None,
+                )
+            )
+            os.close(output_write)
+            output_write = -1
+            with os.fdopen(output_read) as output:
+                output_read = -1
+                return output.read()
+        finally:
+            for descriptor in (nothing, output_read, output_write):
+                if descriptor >= 0:
+                    os.close(descriptor)
+
+    _run_descriptor_probe(tmp_path, stdout_of_anchored_leader)
 
 
 @pytest.mark.parametrize(

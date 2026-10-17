@@ -18,19 +18,45 @@ working directory, or the network. UID, GID, umask, resource limits,
 namespaces and mounts are inherited whatever this module does, and
 ``start_new_session`` moves only the session and process group. A host that
 needs containment adds a sandbox around this spawn.
+
+An anchored leader is a child whose exit nothing but its own handle observes
+and, from the release on, reaps. The anchor: an exited, unreaped leader keeps
+its pid, pgid and sid from being reused, which is what lets a later group
+signal reach only this run.
+
+The host obligation: the anchor holds only while nothing else reaps this
+child. Forbidden are ``waitpid(-1)``, ``os.wait()``, ``wait3`` and ``wait4``
+on any child, ``SIGCHLD`` set to ``SIG_IGN``, ``SA_NOCLDWAIT``, the deprecated
+``FastChildWatcher`` of Python 3.12 and 3.13, and any ptrace request of the
+service. Per-pid asyncio watchers do not consume this unregistered child. A
+foreign reap after a successful observation can invalidate the anchor without
+timely detection; :class:`ChildIdentityLost` is a best-effort signal, not a
+guarantee.
+
+The theorem interval: the anchor claims the number, not the census. A group
+SIGKILL ``K`` reaches the members present during its walk. A reached process
+can no longer attach a new child by fork or clone, but it can still finish an
+in-flight ``setpgid``, ``setsid`` or ``exec``, and an eligible parent can move
+such a child. So membership can change from ``K``'s walk through the end of
+any later scan, and a later scan's "no live member" is read with the anchor
+intact and ``/proc`` unmasked.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import subprocess
-from collections.abc import Mapping
+import threading
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
 from typing import Final, Literal
+
+log = logging.getLogger(__name__)
 
 HOME_VARIABLE: Final = "HOME"
 SEARCH_PATH_VARIABLE: Final = "PATH"
@@ -327,3 +353,139 @@ def admit_release(state: AnchorState) -> bool:
     if state is AnchorState.LOST:
         raise ChildIdentityLost("the leader was reaped elsewhere; there is nothing left to release")
     return state in _ANCHORED_STATES
+
+
+_IDENTITY_LOST: Final = object()
+
+
+def _wait_for_exit(pid: int) -> tuple[int, int]:
+    reported = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT)
+    return reported.si_code, reported.si_status
+
+
+def _consume_stop_report(pid: int) -> tuple[int, int] | None:
+    reported = os.waitid(os.P_PID, pid, os.WSTOPPED | os.WNOHANG)
+    if reported is None:
+        return None
+    return reported.si_code, reported.si_status
+
+
+class AnchoredLeader:
+    """A leader that only this handle observes; its exit leaves an unreaped zombie.
+
+    One ``child-exit:<pid>`` thread waits without reaping. Its commit of the exit
+    (or of a loss) is its last act on the pid, so whatever reaps later finds the
+    watcher gone. Every status change goes through :func:`advance` under one lock;
+    ``on_exit`` is called after the commit, outside the lock, exactly when the
+    transition announces.
+
+    A loss writes a private sentinel into ``Popen.returncode``. ``Popen``'s
+    destructor and ``subprocess._cleanup`` poll only while it is ``None``, so a
+    lost handle never lets them wait on a number that may name another process.
+    Dropping a handle that is still RUNNING or EXITED is a caller defect: CPython
+    then reaps the leader as an ordinary child.
+
+    ``done_with_pid`` is a conservative certificate. True certifies that the
+    handle is RELEASED or LOST and its watcher ended, so it will never act on its
+    pid again. False certifies nothing: it never waits, so a held lifecycle lock
+    reads false even for a handle that is already done.
+    """
+
+    def __init__(self, popen: subprocess.Popen[bytes], on_exit: Callable[[], None]) -> None:
+        self.pid = popen.pid
+        self._popen = popen
+        self._on_exit = on_exit
+        self._lock = threading.Lock()
+        self._status = LEADER_STARTED
+        self._stop_warned = False
+        self._watcher = threading.Thread(
+            target=self._watch, name=f"child-exit:{self.pid}", daemon=True
+        )
+
+    @property
+    def state(self) -> AnchorState:
+        with self._lock:
+            return self._status.state
+
+    @property
+    def returncode(self) -> int | None:
+        with self._lock:
+            return self._status.returncode
+
+    @property
+    def done_with_pid(self) -> bool:
+        if not self._lock.acquire(blocking=False):
+            return False
+        try:
+            terminal = self._status.state in (AnchorState.RELEASED, AnchorState.LOST)
+        finally:
+            self._lock.release()
+        return terminal and not self._watcher.is_alive()
+
+    def _begin_watching(self) -> None:
+        self._watcher.start()
+
+    def _watch(self) -> None:
+        try:
+            while True:
+                observation = exit_observation(*_wait_for_exit(self.pid))
+                if isinstance(observation, LeaderExited):
+                    break
+                self._warn_once_that_the_leader_is_stopped()
+                _consume_stop_report(self.pid)
+        except ChildProcessError:
+            self._commit(LeaderGone())
+            return
+        self._commit(observation)
+
+    def _warn_once_that_the_leader_is_stopped(self) -> None:
+        if self._stop_warned:
+            return
+        self._stop_warned = True
+        log.warning(
+            "anchored leader %d is stopped or traced; it stays anchored and "
+            "SIGTERM is not delivered while it is stopped",
+            self.pid,
+        )
+
+    def _commit(self, event: LeaderEvent) -> None:
+        with self._lock:
+            transition = advance(self._status, event)
+            if transition.status.state is AnchorState.LOST:
+                self._popen.returncode = _IDENTITY_LOST
+            self._status = transition.status
+        if transition.announces:
+            self._announce()
+
+    def _announce(self) -> None:
+        try:
+            self._on_exit()
+        except Exception as failure:
+            log.warning("on_exit of anchored leader %d raised %s", self.pid, type(failure).__name__)
+
+
+def start_anchored_leader(
+    child: ChildProcess,
+    *,
+    stdin: int,
+    stdout: int,
+    stderr: int,
+    on_exit: Callable[[], None],
+) -> AnchoredLeader:
+    """Start one child in its own session that no asyncio watcher knows.
+
+    The descriptors are the caller's and stay open. A failed start raises the
+    ``Popen`` error unchanged and starts no thread.
+    """
+    popen = subprocess.Popen(
+        child.command,
+        stdin=stdin,
+        stdout=stdout,
+        stderr=stderr,
+        env=dict(child.environment),
+        cwd=str(child.working_directory),
+        start_new_session=True,
+    )
+    leader = AnchoredLeader(popen, on_exit)
+    leader._begin_watching()
+    return leader

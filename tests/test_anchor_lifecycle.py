@@ -94,9 +94,19 @@ def test_reap_releases_the_leader_only_for_a_collected_exit_or_kill(
         assert reap_outcome(reaped_pid, wait_status) == expected
 
 
-def status_in(state: AnchorState) -> LeaderStatus:
+def events_with(code: int) -> list[LeaderEvent]:
+    return [
+        LeaderExited(code),
+        LeaderStopped(),
+        LeaderReaped(code),
+        LeaderNotReaped(),
+        LeaderGone(),
+    ]
+
+
+def status_in(state: AnchorState, code: int) -> LeaderStatus:
     carries_code = state in (EXITED, RELEASED)
-    return LeaderStatus(state, 7 if carries_code else None)
+    return LeaderStatus(state, code if carries_code else None)
 
 
 def transition(state: AnchorState, returncode: int | None, announces: bool = False):
@@ -105,29 +115,35 @@ def transition(state: AnchorState, returncode: int | None, announces: bool = Fal
 
 UNCHANGED = None
 
-TRANSITIONS = {
-    (RUNNING, LeaderExited(3)): transition(EXITED, 3, True),
-    (RUNNING, LeaderStopped()): UNCHANGED,
-    (RUNNING, LeaderReaped(3)): transition(RELEASED, 3, True),
-    (RUNNING, LeaderNotReaped()): UNCHANGED,
-    (RUNNING, LeaderGone()): transition(LOST, None, True),
-    (EXITED, LeaderExited(3)): UNCHANGED,
-    (EXITED, LeaderStopped()): UNCHANGED,
-    (EXITED, LeaderReaped(3)): transition(RELEASED, 3),
-    (EXITED, LeaderNotReaped()): UNCHANGED,
-    (EXITED, LeaderGone()): transition(LOST, 7),
-    **{(state, event): UNCHANGED for state in (RELEASED, LOST) for event in ALL_EVENTS_WITH_THREE},
-}
+
+def designed_transitions(code: int):
+    exited, stopped, reaped, not_reaped, gone = events_with(code)
+    return {
+        (RUNNING, exited): transition(EXITED, code, True),
+        (RUNNING, stopped): UNCHANGED,
+        (RUNNING, reaped): transition(RELEASED, code, True),
+        (RUNNING, not_reaped): UNCHANGED,
+        (RUNNING, gone): transition(LOST, None, True),
+        (EXITED, exited): UNCHANGED,
+        (EXITED, stopped): UNCHANGED,
+        (EXITED, reaped): transition(RELEASED, code),
+        (EXITED, not_reaped): UNCHANGED,
+        (EXITED, gone): transition(LOST, code),
+        **{(state, event): UNCHANGED for state in (RELEASED, LOST) for event in events_with(code)},
+    }
 
 
+@pytest.mark.parametrize("code", [0, 3, -9], ids=["zero", "positive", "negative"])
+@pytest.mark.parametrize("state", list(AnchorState), ids=lambda state: state.name)
 @pytest.mark.parametrize(
-    ("state", "event"),
-    list(itertools.product(AnchorState, ALL_EVENTS_WITH_THREE)),
-    ids=lambda value: type(value).__name__ if not isinstance(value, AnchorState) else value.name,
+    "event_index",
+    range(len(ALL_EVENTS_WITH_THREE)),
+    ids=lambda i: type(ALL_EVENTS_WITH_THREE[i]).__name__,
 )
-def test_every_state_meets_every_event_with_the_designed_transition(state, event):
-    before = status_in(state)
-    expected = TRANSITIONS[(state, event)]
+def test_every_state_meets_every_event_with_the_designed_transition(state, event_index, code):
+    event = events_with(code)[event_index]
+    before = status_in(state, code)
+    expected = designed_transitions(code)[(state, event)]
     expected_status, expected_announces = (before, False) if expected is UNCHANGED else expected
 
     result = advance(before, event)

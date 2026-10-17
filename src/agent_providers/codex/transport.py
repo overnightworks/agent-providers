@@ -17,6 +17,7 @@ from agent_providers.claude.provider import (
 )
 from agent_providers.codex.pool import (
     CodexProcessKind,
+    CodexProcessReservation,
     get_codex_process_pool,
 )
 from agent_providers.codex.protocol import (
@@ -52,10 +53,12 @@ from agent_providers.process import (
     AgentCliUnavailableError,
     CliLineChannel,
     CliRunOutcome,
+    PrivateCredentialHomeReservation,
     PrivateHomeNotCreatedError,
     cli_settle_deadline,
 )
 from agent_providers.sandbox.paths import CODEX_TOOL_TURN_DIRECTORY_PREFIX
+from agent_providers.spawn import ChildProcess
 from agent_providers.text_tool_protocol import (
     FinalText as ParsedFinalText,
 )
@@ -113,8 +116,8 @@ class CodexCliToolTransport:
     """One private, resumable Codex CLI session for the shared tool loop.
 
     Codex receives each round on stdin. Its private home and persisted session
-    are siblings of an empty private working directory and removed by
-    :meth:`aclose`.
+    are siblings of an empty private working directory. :meth:`aclose`
+    requests their removal; it happens once the last round's child is reaped.
     """
 
     def __init__(self, *, model: str, catalog: ToolCatalog) -> None:
@@ -159,29 +162,7 @@ class CodexCliToolTransport:
         )
         self._round_index += 1
         channel = CliLineChannel(CODEX_CLI_LINE_CHANNEL_CAPACITY)
-        try:
-            child = codex_child_process(arguments, self._turn_home)
-        except AgentCliUnavailableError:
-            raise_without_chain(
-                ProviderUnavailableError(
-                    "codex",
-                    "cli",
-                    normalize_route_failure(SafeRouteReasonCode.CLI_PROTOCOL_ERROR),
-                )
-            )
-        home_reservation = self._turn_home.home.reserve()
-        try:
-            reservation = get_codex_process_pool().reserve(CodexProcessKind.TEXT)
-        except CodexProcessPoolSaturatedError as exc:
-            home_reservation.release()
-            raise ProviderUnavailableError(
-                "codex",
-                "cli",
-                normalize_route_failure(SafeRouteReasonCode.CLI_CAPACITY_EXHAUSTED),
-            ) from exc
-        except BaseException:  # NOSONAR(S5754) the home token is released, re-raises
-            home_reservation.release()
-            raise
+        child, home_reservation, reservation = self._reserve_round(arguments)
         runner = asyncio.create_task(
             asyncio.to_thread(
                 run_reserved_codex_cli,
@@ -256,8 +237,39 @@ class CodexCliToolTransport:
                 ),
             )
 
+    def _reserve_round(
+        self, arguments: tuple[str, ...]
+    ) -> tuple[ChildProcess, PrivateCredentialHomeReservation, CodexProcessReservation]:
+        try:
+            child = codex_child_process(arguments, self._turn_home)
+        except AgentCliUnavailableError:
+            raise_without_chain(
+                ProviderUnavailableError(
+                    "codex",
+                    "cli",
+                    normalize_route_failure(SafeRouteReasonCode.CLI_PROTOCOL_ERROR),
+                )
+            )
+        home_reservation = self._turn_home.home.reserve()
+        try:
+            reservation = get_codex_process_pool().reserve(CodexProcessKind.TEXT)
+        except CodexProcessPoolSaturatedError as exc:
+            home_reservation.release()
+            raise ProviderUnavailableError(
+                "codex",
+                "cli",
+                normalize_route_failure(SafeRouteReasonCode.CLI_CAPACITY_EXHAUSTED),
+            ) from exc
+        except BaseException:  # NOSONAR(S5754) the home token is released, re-raises
+            home_reservation.release()
+            raise
+        return child, home_reservation, reservation
+
     async def aclose(self) -> None:
-        """Remove all private session and prompt material after reaping a round."""
+        """Request removal of the private session and prompt material.
+
+        The home goes when the last child's token is released.
+        """
         if self._closed:
             return
         self._closed = True

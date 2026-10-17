@@ -324,8 +324,9 @@ def test_a_tool_consumer_ends_at_the_settle_instant(monkeypatch, caplog, capfd) 
     built_by = time.monotonic()
 
     async def stream_and_close() -> ProviderUnavailableError:
+        responses = asyncio.wait_for(_collect_transport_responses(transport), timeout=10)
         with pytest.raises(ProviderUnavailableError) as raised:
-            await asyncio.wait_for(_collect_transport_responses(transport), timeout=10)
+            await responses
         await transport.aclose()
         return raised.value
 

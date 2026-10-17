@@ -78,6 +78,7 @@ from agent_providers.errors import (
     ProviderUnavailableError,
     SafeRouteReasonCode,
     TextToolCallRejectedError,
+    normalize_route_failure,
 )
 from agent_providers.events import AssistantTextEvent, FinalEvent, ToolCallEvent
 from agent_providers.images import ImagePolicy
@@ -950,19 +951,28 @@ def _types_line(tokens: tuple[str, ...]) -> str:
 
 
 class _HomeReleases:
-    """Counts the turn reservations released, on whichever thread releases them."""
+    """Counts the home tokens and turn reservations released, on whichever thread releases them."""
 
     def __init__(self, monkeypatch) -> None:
         self._released = threading.Semaphore(0)
-        release = codex_protocol.release_turn_reservations
+        self.token_releases = 0
+        release_token = process.PrivateCredentialHomeReservation.release
+        release_turn = codex_protocol.release_turn_reservations
 
-        def release_and_count(home_reservation, release_slot) -> None:
+        def count_a_token_release(token) -> None:
+            self.token_releases += 1
+            release_token(token)
+
+        def release_and_signal(home_reservation, release_slot) -> None:
             try:
-                release(home_reservation, release_slot)
+                release_turn(home_reservation, release_slot)
             finally:
                 self._released.release()
 
-        monkeypatch.setattr(codex_protocol, "release_turn_reservations", release_and_count)
+        monkeypatch.setattr(
+            process.PrivateCredentialHomeReservation, "release", count_a_token_release,
+        )
+        monkeypatch.setattr(codex_protocol, "release_turn_reservations", release_and_signal)
 
     def wait_for_one(self) -> None:
         assert self._released.acquire(timeout=_HANG_BOUND_SECONDS), "no reservation was released"
@@ -2520,9 +2530,23 @@ def test_a_codex_turn_home_waits_for_its_child(
     assert bool(turn.at_return) == (child_outlives_the_turn or home_waits_for_close)
     assert bool(turn.after_close) == child_outlives_the_turn
     releases.wait_for_one()
+    assert releases.token_releases == 1
     assert _homes_in(image_turn.working_root) == []
     assert image_turn.process_pool.reservation_count() == 0
     image_turn.watch.assert_nothing_leaked()
+
+
+def _hold_the_reaps_once_armed(monkeypatch) -> tuple[Callable[[], None], Callable[[], None]]:
+    armed, opened = threading.Event(), threading.Event()
+    real = process._reap_process_group
+
+    def held(*arguments, **keywords):
+        if armed.is_set():
+            opened.wait(timeout=_HANG_BOUND_SECONDS)
+        return real(*arguments, **keywords)
+
+    monkeypatch.setattr(process, "_reap_process_group", held)
+    return armed.set, opened.set
 
 
 def test_a_tool_turn_home_outlives_its_last_round(monkeypatch, image_turn) -> None:
@@ -2531,39 +2555,51 @@ def test_a_tool_turn_home_outlives_its_last_round(monkeypatch, image_turn) -> No
     children = iter((shell_child("-c", ":"), shell_child("-c", "exec sleep 10")))
     monkeypatch.setattr(codex_transport, "codex_child_process", lambda *_a, **_k: next(children))
     _settle_within_a_few_hundredths(monkeypatch)
-    open_gate = _hold_until_opened(monkeypatch, process, "_reap_process_group")
+    hold_the_next_reap, release_the_reap = _hold_the_reaps_once_armed(monkeypatch)
 
-    async def two_rounds_then_close() -> tuple[list[str], list[str], list[str]]:
+    async def two_rounds_then_close() -> tuple[list[str], list[str]]:
         transport = _transport()
-        for _round in range(2):
+        for round_number in (1, 2):
+            responses = asyncio.wait_for(
+                _collect_tool_responses(transport), timeout=_HANG_BOUND_SECONDS,
+            )
             with pytest.raises(ProviderUnavailableError):
-                await asyncio.wait_for(
-                    _collect_tool_responses(transport), timeout=_HANG_BOUND_SECONDS,
-                )
-            if _round == 0:
-                after_first_round = _homes_in(image_turn.working_root)
+                await responses
+            if round_number == 1:
+                await asyncio.to_thread(releases.wait_for_one)
+                hold_the_next_reap()
         after_second_round = _homes_in(image_turn.working_root)
         await transport.aclose()
-        return after_first_round, after_second_round, _homes_in(image_turn.working_root)
+        return after_second_round, _homes_in(image_turn.working_root)
 
     try:
-        after_first_round, after_second_round, after_close = asyncio.run(two_rounds_then_close())
+        after_second_round, after_close = asyncio.run(two_rounds_then_close())
     finally:
-        open_gate()
+        release_the_reap()
 
-    assert len(after_first_round) == 1
-    assert after_second_round == after_first_round
-    assert after_close == after_first_round
-    releases.wait_for_one()
+    assert len(after_second_round) == 1
+    assert after_close == after_second_round
     releases.wait_for_one()
     assert _homes_in(image_turn.working_root) == []
+    assert releases.token_releases == 2
     assert image_turn.process_pool.reservation_count() == 0
     image_turn.watch.assert_nothing_leaked()
 
 
-@_BOTH_CODEX_TURNS
+@pytest.mark.parametrize(
+    ("run_the_turn", "home_waits_for_close", "expected_error", "expected_reason"),
+    (
+        (_run_the_image_turn, False, codex_image.CodexImageTimeoutError, None),
+        (
+            _run_the_tool_turn, True, ProviderUnavailableError,
+            normalize_route_failure(SafeRouteReasonCode.CLI_PROTOCOL_ERROR),
+        ),
+    ),
+    ids=("image-turn", "tool-turn"),
+)
 def test_a_failed_removal_on_the_late_path_never_changes_the_turn(
     monkeypatch, image_turn, caplog, run_the_turn, home_waits_for_close,
+    expected_error, expected_reason,
 ) -> None:
     releases = _HomeReleases(monkeypatch)
     open_gate = _a_reap_that_outlasts_the_settle_instant(monkeypatch)
@@ -2575,11 +2611,13 @@ def test_a_failed_removal_on_the_late_path_never_changes_the_turn(
         open_gate()
     releases.wait_for_one()
 
-    assert type(turn.error) in {codex_image.CodexImageTimeoutError, ProviderUnavailableError}
+    assert type(turn.error) is expected_error
+    assert getattr(turn.error, "reason", None) == expected_reason
     assert [
         record.getMessage() for record in caplog.records if record.name == process.__name__
     ] == ["private credential home removal failed (PermissionError)"]
     assert len(_homes_in(image_turn.working_root)) == 1
+    image_turn.watch.assert_nothing_leaked(turn.error)
     del turn
     gc.collect()
     assert _homes_in(image_turn.working_root) == []
@@ -2629,6 +2667,7 @@ def test_a_tool_turn_without_a_binary_reserves_nothing(
     assert image_turn.process_pool.reservation_count() == expected_holdings
     assert turn.after_close == []
     runner.assert_not_called()
+    image_turn.watch.assert_nothing_leaked(turn.error)
 
 
 def test_a_tool_round_whose_worker_cannot_start_releases_its_home(
@@ -2642,6 +2681,7 @@ def test_a_tool_round_whose_worker_cannot_start_releases_its_home(
 
     assert isinstance(turn.error, ProviderUnavailableError)
     releases.wait_for_one()
+    assert releases.token_releases == 1
     assert turn.after_close == []
     assert image_turn.process_pool.reservation_count() == 0
     assert image_turn.watch.reported_steps() == ["start SystemExit", "run SystemExit"]
@@ -2681,6 +2721,7 @@ def test_a_saturated_pool_returns_the_turns_home_token(
     runner.assert_not_called()
     assert pool.reservation_count() == 1
     assert turn.after_close == []
+    image_turn.watch.assert_nothing_leaked(turn.error)
 
 
 @_BOTH_CODEX_TURNS
@@ -2699,6 +2740,7 @@ def test_a_refused_home_reservation_reserves_no_slot(
     runner.assert_not_called()
     assert image_turn.process_pool.reservation_count() == 0
     assert turn.after_close == []
+    image_turn.watch.assert_nothing_leaked(turn.error)
 
 
 @pytest.mark.parametrize("home_release_raises", (True, False), ids=("raises", "releases"))
@@ -2738,8 +2780,9 @@ def test_a_tool_consumer_ends_at_the_settle_instant(monkeypatch, image_turn) -> 
     built_by = time.monotonic()
 
     async def stream_and_close() -> BaseException:
+        responses = asyncio.wait_for(_collect_tool_responses(transport), timeout=10)
         with pytest.raises(ProviderUnavailableError) as raised:
-            await asyncio.wait_for(_collect_tool_responses(transport), timeout=10)
+            await responses
         await transport.aclose()
         return raised.value
 

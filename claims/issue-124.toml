@@ -1,0 +1,8 @@
+claim_id = "29eb94e0518745f6b1ed33b404c441f2"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "4bb293b97cb082b463a0fe288b669882617057d6"
+branch = "claude/issue-124-codex-turn-homes"
+scope = ["README.md", "src/agent_providers/codex/image.py", "src/agent_providers/codex/protocol.py", "src/agent_providers/codex/transport.py", "src/agent_providers/process.py", "tests/provider_test_support.py", "tests/test_codex_cli_adapter.py", "tests/test_process.py"]
+opened_commit = "2b838d0636ee18661b4073879271d8740c9911f6"
+whole_reason = "Both Codex turns move onto the one credential-home owner in one cut: a turn left on TemporaryDirectory keeps a second owner; the home's copy mode, the new error class and the moved test helpers are what that owner needs, and README's row is its public face."

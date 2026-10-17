@@ -1,0 +1,8 @@
+claim_id = "aa5afd69f64d4a7291ad445160e8c75e"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "3c25e33d633d4444b1ab7f5fedf60361eea11be2"
+branch = "claude/issue-137-a1b-9a-mcp-drahtprofil-json-only-modelle"
+scope = ["README.md", "packages/agent-client/src/agent_client/capability.py", "packages/agent-service/src/agent_service/mcp_wire.py", "tests/test_service_mcp_wire.py"]
+opened_commit = "7533153d50bfaf0e8df45e22d05c0d5eac9468c3"
+whole_reason = "One wire profile: the new mcp_wire module, the endpoint constant it serves, its test module and its README rows form one change and do not split."

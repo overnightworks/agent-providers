@@ -11,7 +11,9 @@ from pathlib import Path
 
 import pytest
 from service_support import (
+    CALLED_PLAINLY_OR_FROM_AN_ACTIVE_HANDLER,
     LAST_TOOL_NAME_LENGTH_AT_THE_LIMIT,
+    called_from,
     everything_a_refusal_holds,
     generated_rsa_key,
     reaches_text,
@@ -705,14 +707,15 @@ def test_an_unsound_token_file_stops_startup_with_one_line_naming_field_and_path
     assert CANARY not in refusal
 
 
+@pytest.mark.parametrize("inside_active_handler", CALLED_PLAINLY_OR_FROM_AN_ACTIVE_HANDLER)
 @pytest.mark.parametrize(("arrange", "reason"), REFUSED_TOKEN_FILES)
 def test_an_unsound_token_file_leaks_no_content_into_the_refusal_or_what_it_holds(
-    tmp_path, monkeypatch, arrange, reason
+    tmp_path, monkeypatch, arrange, reason, inside_active_handler
 ):
     config_file = _written(tmp_path, _token_config(arrange(tmp_path, monkeypatch)))
 
     with pytest.raises(ConfigError) as refusal:
-        load_config(config_file)
+        called_from(lambda: load_config(config_file), inside_active_handler)
 
     held = everything_a_refusal_holds(refusal.value)
     assert not reaches_text(held, [CANARY])

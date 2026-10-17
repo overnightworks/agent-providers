@@ -300,6 +300,25 @@ def record_signed_tokens(monkeypatch) -> list[str]:
     return signed
 
 
+class UnrelatedFailure(Exception):
+    """Raised by a test only to leave a handler active around the call under test."""
+
+
+CALLED_PLAINLY_OR_FROM_AN_ACTIVE_HANDLER = [
+    pytest.param(False, id="plainly"),
+    pytest.param(True, id="from-an-active-handler"),
+]
+
+
+def called_from(call: Callable[[], object], inside_active_handler: bool) -> object:
+    if not inside_active_handler:
+        return call()
+    try:
+        raise UnrelatedFailure
+    except UnrelatedFailure:
+        return call()
+
+
 def everything_a_refusal_holds(refusal: BaseException) -> list[object]:
     """The refusal, its cause and context chain, their frames' locals and pydantic's contexts.
 

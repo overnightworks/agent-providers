@@ -18,6 +18,8 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import dsa, ec, ed25519, rsa
 from jwt.algorithms import RSAAlgorithm
 from service_support import (
+    CALLED_PLAINLY_OR_FROM_AN_ACTIVE_HANDLER,
+    called_from,
     everything_a_refusal_holds,
     generated_rsa_key,
     pem_of,
@@ -280,11 +282,15 @@ REFUSED_BUT_REAL_KEYS = [
     ),
     pytest.param(_encrypted_pem, id="encrypted"),
     pytest.param(_truncated_pem, id="truncated"),
+    pytest.param(lambda: pem_of(generated_rsa_key(3072, 3)), id="rsa-3072-exponent-3"),
 ]
 
 
+@pytest.mark.parametrize("inside_active_handler", CALLED_PLAINLY_OR_FROM_AN_ACTIVE_HANDLER)
 @pytest.mark.parametrize("key", REFUSED_BUT_REAL_KEYS)
-def test_a_refused_real_key_leaves_no_key_object_or_text_in_what_the_refusal_holds(tmp_path, key):
+def test_a_refused_real_key_leaves_no_key_object_or_text_in_what_the_refusal_holds(
+    tmp_path, key, inside_active_handler
+):
     key_file = tmp_path / "signing-key.pem"
     key_file.write_bytes(key())
     key_file.chmod(0o600)
@@ -292,14 +298,23 @@ def test_a_refused_real_key_leaves_no_key_object_or_text_in_what_the_refusal_hol
     config_file = _written(tmp_path, _config_text(str(key_file)))
 
     with pytest.raises(UnsoundSigningKey) as from_loading:
-        load_signing_key(key_file)
+        called_from(lambda: load_signing_key(key_file), inside_active_handler)
     with pytest.raises(ConfigError) as from_config:
-        load_config(config_file)
+        called_from(lambda: load_config(config_file), inside_active_handler)
 
     for refusal in (from_loading.value, from_config.value):
         held = everything_a_refusal_holds(refusal)
         assert key_body not in repr(held)
         assert not reaches_private_key(held)
+
+
+def test_a_subclass_building_from_a_private_key_gets_its_own_type():
+    class SpecializedSigningKey(SigningKey):
+        pass
+
+    assert isinstance(
+        SpecializedSigningKey.from_private_key(generated_rsa_key()), SpecializedSigningKey
+    )
 
 
 @pytest.mark.parametrize(("path", "shown"), CONTROL_PATHS_AS_SHOWN.items())

@@ -58,7 +58,7 @@ class SigningKey:
         reason = _unsound_reason(private_key)
         if reason is not None:
             raise UnsoundSigningKey(reason)
-        return _signing_key_of(private_key)
+        return _signing_key_of(cls, private_key)
 
     def sign(self, claims: Mapping[str, object], token_type: str) -> str:
         if not token_type:
@@ -103,7 +103,7 @@ def _signing_key_in_pem(contents: bytes) -> SigningKey | _KeyRefusal:
     reason = _unsound_reason(parsed)
     if reason is not None:
         return _KeyRefusal(reason)
-    return _signing_key_of(parsed)
+    return _signing_key_of(SigningKey, parsed)
 
 
 def _unsound_reason(private_key: object) -> str | None:
@@ -117,6 +117,6 @@ def _unsound_reason(private_key: object) -> str | None:
     return None
 
 
-def _signing_key_of(private_key: rsa.RSAPrivateKey) -> SigningKey:
+def _signing_key_of[KeyT: SigningKey](key_type: type[KeyT], private_key: rsa.RSAPrivateKey) -> KeyT:
     public_key = private_key.public_key()
-    return SigningKey(key_id(public_key), public_key, private_key)
+    return key_type(key_id(public_key), public_key, private_key)

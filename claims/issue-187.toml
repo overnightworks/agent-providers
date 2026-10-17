@@ -1,8 +1,0 @@
-claim_id = "b1c6d7814d4141dca00de8b4fb139811"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "961f4fda1fd01e38908222c501ae21dd09418a0b"
-branch = "claude/issue-187-a1b-10a2-0-gate-und-writer"
-scope = ["README.md", "packages/agent-service/src/agent_service/app_tools.py", "packages/agent-service/src/agent_service/capability.py", "packages/agent-service/src/agent_service/mcp_wire.py", "tests/test_service_capability.py", "tests/test_service_mcp_wire.py"]
-opened_commit = "f6ab9c156b6f862e7ca84c355bb1bf13f501d50a"
-whole_reason = "One pure layer: the capability's own predicate and the wire writers its first caller needs, each with its tests beside its owner, the one docstring the predicate makes untrue and the two README rows that name them."

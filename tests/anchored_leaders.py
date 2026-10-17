@@ -141,7 +141,7 @@ class Leaders:
 def spawn_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
     return [
         record.getMessage()
-        for record in caplog.records
+        for record in caplog.get_records("call")
         if record.name == SPAWN_LOGGER and record.levelno == logging.WARNING
     ]
 

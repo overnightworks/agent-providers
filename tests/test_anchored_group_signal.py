@@ -26,6 +26,7 @@ from anchored_leaders import (
     Leaders,
     Releaser,
     Started,
+    spawn_warnings,
     start_bound,
 )
 from anchored_support import (
@@ -94,6 +95,7 @@ def signal_within_bound(started: Started, sig: signal.Signals) -> None:
 @pytest.fixture(autouse=True)
 def no_spawn_warning(caplog: pytest.LogCaptureFixture) -> Iterator[None]:
     yield
+    assert spawn_warnings(caplog) == []
 
 
 @pytest.fixture

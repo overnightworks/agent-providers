@@ -435,9 +435,13 @@ def _parse_stream_event(
     return []
 
 
-def _parse_result_events(payload: dict, correlation_id: str | None) -> list[StreamEvent]:
+def _raise_for_error_result(payload: dict) -> None:
     if payload.get("is_error"):
         raise UnavailableError(CLAUDE_CLI_UNAVAILABLE_DETAIL)
+
+
+def _parse_result_events(payload: dict, correlation_id: str | None) -> list[StreamEvent]:
+    _raise_for_error_result(payload)
     text = payload.get("result")
     if isinstance(text, str):
         return [FinalEvent(text=text, correlation_id=correlation_id)]
@@ -445,10 +449,9 @@ def _parse_result_events(payload: dict, correlation_id: str | None) -> list[Stre
 
 
 def _raise_for_api_error_message(payload: dict) -> None:
-    fields = {**(payload.get("message") or {}), **payload}
-    if not fields.get("is_api_error_message"):
+    if not payload.get("is_api_error_message"):
         return
-    if fields.get("error") == _CLI_AUTHENTICATION_FAILED:
+    if payload.get("error") == _CLI_AUTHENTICATION_FAILED:
         raise CliLoginRefusedError(CLAUDE_CLI_LOGIN_REFUSED_DETAIL)
     raise UnavailableError(CLAUDE_CLI_UNAVAILABLE_DETAIL)
 
@@ -1836,9 +1839,10 @@ def _mcp_connected(payload: dict, server_name: str) -> bool:
 def _parse_cli_output(stdout: str) -> str:
     try:
         outer = json.loads(stdout)
-        return outer.get("result", stdout)
     except json.JSONDecodeError:
         return stdout
+    _raise_for_error_result(outer)
+    return outer.get("result", stdout)
 
 
 def _require_claude_binary() -> Path:

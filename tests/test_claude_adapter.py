@@ -137,7 +137,9 @@ def test_claude_cli_turn_reports_a_provider_failure_with_its_safe_code(
         ):
             pass
 
+    turn = _drive_turn()
+
     with pytest.raises(ProviderUnavailableError) as failure:
-        asyncio.run(_drive_turn())
+        asyncio.run(turn)
 
     assert failure.value.reason.code is safe_code

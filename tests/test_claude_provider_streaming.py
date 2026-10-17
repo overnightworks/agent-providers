@@ -11,12 +11,15 @@ import pytest
 
 from agent_providers.claude import provider
 from agent_providers.claude.provider import (
+    CLAUDE_CLI_LOGIN_REFUSED_DETAIL,
+    CLAUDE_CLI_UNAVAILABLE_DETAIL,
     CliLoginRefusedError,
     UnavailableError,
     _parse_stream_event,
     _safe_json_loads,
     acall_claude_with_mcp_stream,
 )
+from agent_providers.errors import ProviderUnavailableError, SafeRouteReasonCode
 from agent_providers.events import (
     AssistantTextEvent,
     FinalEvent,
@@ -26,6 +29,7 @@ from agent_providers.events import (
 )
 
 A_CORRELATION_ID = "job-42"
+_ASYNCIO_DEFAULT_LIMIT = 64 * 1024
 
 
 @pytest.fixture(autouse=True)
@@ -494,29 +498,6 @@ def test_iter_lines_returns_immediately_when_stdout_missing() -> None:
     assert asyncio.run(_run()) == []
 
 
-def test_stream_passes_buffer_limit_above_asyncio_default(monkeypatch) -> None:
-    monkeypatch.setattr(
-        provider, "_require_claude_binary", lambda: "/bin/claude",
-    )
-
-    captured: dict[str, Any] = {}
-
-    async def fake_exec(*cmd, **kwargs):
-        captured["cmd"] = cmd
-        captured["kwargs"] = kwargs
-        return _make_fake_proc([_result_line("ok")])
-
-    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
-
-    asyncio.run(_collect(
-        acall_claude_with_mcp_stream(prompt="hi", user_id="u"),
-    ))
-
-    assert "limit" in captured["kwargs"]
-    assert captured["kwargs"]["limit"] == provider._STREAM_BUFFER_LIMIT
-    assert captured["kwargs"]["limit"] > 64 * 1024
-
-
 def test_stream_consumes_oversized_tool_result_line(monkeypatch) -> None:
     monkeypatch.setattr(
         provider, "_require_claude_binary", lambda: "/bin/claude",
@@ -529,8 +510,13 @@ def test_stream_consumes_oversized_tool_result_line(monkeypatch) -> None:
         _result_line("done"),
     ]
 
-    async def fake_exec(*_cmd, **_kw):
-        return _make_fake_proc(lines)
+    async def fake_exec(*_cmd, **kwargs):
+        proc = _make_fake_proc([])
+        proc.stdout = asyncio.StreamReader(limit=kwargs.get("limit", _ASYNCIO_DEFAULT_LIMIT))
+        for line in lines:
+            proc.stdout.feed_data(line)
+        proc.stdout.feed_eof()
+        return proc
 
     monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
 
@@ -552,10 +538,8 @@ def _api_error_assistant_line(error: str, text: str = LOGIN_REFUSED_TEXT) -> byt
     return json.dumps({
         "type": "assistant",
         "error": error,
-        "message": {
-            "is_api_error_message": True,
-            "content": [{"type": "text", "text": text}],
-        },
+        "is_api_error_message": True,
+        "message": {"content": [{"type": "text", "text": text}]},
     }).encode() + b"\n"
 
 
@@ -589,58 +573,116 @@ def _stream_outcome(monkeypatch, lines: list[bytes], returncode: int = 0):
     return seen, None
 
 
+def _chain_text(failure: BaseException | None) -> str:
+    texts = []
+    while failure is not None:
+        texts.append(f"{failure!r} {failure}")
+        failure = failure.__cause__ or failure.__context__
+    return " ".join(texts)
+
+
+def _drive_over_the_turn_transport(monkeypatch, lines: list[bytes], returncode: int):
+    from agent_providers.claude.adapter import stream_claude_turn
+
+    monkeypatch.setattr(provider, "_require_claude_binary", lambda: "/bin/claude")
+
+    async def fake_exec(*_cmd, **_kw):
+        return _make_fake_proc(lines, returncode=returncode)
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    seen: list[StreamEvent] = []
+
+    async def drive() -> None:
+        async for event in stream_claude_turn(
+            user_id="u", system="s", model="claude-test", messages=[],
+        ):
+            seen.append(event)
+
+    try:
+        asyncio.run(drive())
+    except ProviderUnavailableError as failure:
+        return seen, failure
+    return seen, None
+
+
+@pytest.mark.parametrize("returncode", [0, 1])
 @pytest.mark.parametrize(
-    ("error", "expected_class"),
+    ("error", "expected_class", "expected_detail", "expected_code"),
     [
-        ("authentication_failed", CliLoginRefusedError),
-        ("rate_limit", UnavailableError),
+        (
+            "authentication_failed",
+            CliLoginRefusedError,
+            CLAUDE_CLI_LOGIN_REFUSED_DETAIL,
+            SafeRouteReasonCode.CLI_AUTH_REJECTED,
+        ),
+        (
+            "rate_limit",
+            UnavailableError,
+            CLAUDE_CLI_UNAVAILABLE_DETAIL,
+            SafeRouteReasonCode.CLI_PROTOCOL_ERROR,
+        ),
     ],
     ids=["login-refused", "other-api-error"],
 )
 def test_api_error_message_raises_before_any_text_is_yielded(
-    monkeypatch, caplog, error, expected_class,
+    monkeypatch, caplog, error, expected_class, expected_detail, expected_code, returncode,
 ) -> None:
     caplog.set_level("DEBUG")
     lines = [_api_error_assistant_line(error), _error_result_line()]
 
-    seen, failure = _stream_outcome(monkeypatch, lines, returncode=1)
+    seen, failure = _stream_outcome(monkeypatch, lines, returncode=returncode)
 
     assert type(failure) is expected_class
+    assert str(failure) == expected_detail
     assert seen == []
-    assert "Not logged in" not in f"{failure} {caplog.text}"
+    assert LOGIN_REFUSED_TEXT not in f"{_chain_text(failure)} {caplog.text}"
+
+    turn_seen, turn_failure = _drive_over_the_turn_transport(monkeypatch, lines, returncode)
+
+    assert turn_failure.reason.code is expected_code
+    assert turn_seen == []
+    assert LOGIN_REFUSED_TEXT not in _chain_text(turn_failure)
 
 
-def test_error_result_with_clean_exit_raises_without_final_event(monkeypatch) -> None:
-    lines = [_assistant_line("partial "), _error_result_line("boom")]
-
-    seen, failure = _stream_outcome(monkeypatch, lines, returncode=0)
-
-    assert isinstance(failure, UnavailableError)
-    assert not any(isinstance(e, FinalEvent) for e in seen)
-
-
-def test_error_result_with_failing_exit_raises(monkeypatch) -> None:
-    seen, failure = _stream_outcome(monkeypatch, [_error_result_line("boom")], returncode=1)
-
-    assert isinstance(failure, UnavailableError)
-    assert not any(isinstance(e, FinalEvent) for e in seen)
-
-
-def test_unauthenticated_run_as_recorded_raises_login_refused_without_its_text(
-    monkeypatch, caplog,
+@pytest.mark.parametrize("returncode", [0, 1])
+@pytest.mark.parametrize(
+    "lines",
+    [
+        [_error_result_line(LOGIN_REFUSED_TEXT)],
+        [_assistant_line("partial "), _error_result_line(LOGIN_REFUSED_TEXT)],
+    ],
+    ids=["error-result-only", "error-result-after-partial-text"],
+)
+def test_error_result_raises_a_plain_unavailable_error_without_its_text(
+    monkeypatch, caplog, lines, returncode,
 ) -> None:
     caplog.set_level("DEBUG")
-    recorded_assistant = json.dumps({
-        "type": "assistant",
-        "error": "authentication_failed",
-        "is_api_error_message": True,
-        "message": {"content": [{"type": "text", "text": LOGIN_REFUSED_TEXT}]},
-    }).encode() + b"\n"
 
-    seen, failure = _stream_outcome(
-        monkeypatch, [recorded_assistant, _error_result_line()], returncode=1,
-    )
+    seen, failure = _stream_outcome(monkeypatch, lines, returncode=returncode)
 
-    assert isinstance(failure, CliLoginRefusedError)
-    assert seen == []
-    assert "Not logged in" not in f"{failure} {caplog.text}"
+    assert type(failure) is UnavailableError
+    assert str(failure) == CLAUDE_CLI_UNAVAILABLE_DETAIL
+    assert not any(isinstance(e, FinalEvent) for e in seen)
+    assert LOGIN_REFUSED_TEXT not in f"{_chain_text(failure)} {caplog.text}"
+
+
+def test_stream_delivers_every_block_of_a_message_in_order(monkeypatch) -> None:
+    lines = [
+        json.dumps(_assistant_payload(
+            {"type": "text", "text": "looking"},
+            _a_tool_use_block("tu-1"),
+            _a_tool_use_block("tu-2"),
+        )).encode() + b"\n",
+        json.dumps(_user_payload(
+            _a_tool_result_block("tu-1", "a"), _a_tool_result_block("tu-2", "b"),
+        )).encode() + b"\n",
+        _result_line("done"),
+    ]
+
+    seen, failure = _stream_outcome(monkeypatch, lines)
+
+    assert failure is None
+    assert [e.type for e in seen] == [
+        "assistant_text", "tool_call", "tool_call", "tool_result", "tool_result", "final",
+    ]
+    assert [e.tool_use_id for e in seen[1:5]] == ["tu-1", "tu-2", "tu-1", "tu-2"]

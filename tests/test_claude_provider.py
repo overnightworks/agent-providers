@@ -35,6 +35,7 @@ from pydantic import SecretStr
 from agent_providers import process, spawn
 from agent_providers.claude import provider
 from agent_providers.claude.provider import (
+    CLAUDE_CLI_UNAVAILABLE_DETAIL,
     ClaudeResponse,
     CliToolSurfaceError,
     UnavailableError,
@@ -553,6 +554,23 @@ def test_call_cli_success(_no_tool_gate_open) -> None:
         result = _call_cli("hello")
 
     assert result.text == "cli response"
+
+
+def test_call_cli_error_result_raises_without_its_text(
+    _no_tool_gate_open, caplog
+) -> None:
+    caplog.set_level("DEBUG")
+    refused_text = "Not logged in · Please run /login"
+    json_output = json.dumps({"is_error": True, "result": refused_text})
+    mock_proc = MagicMock(returncode=0, stdout=json_output, stderr="")
+
+    with patch("subprocess.run", return_value=mock_proc):
+        with pytest.raises(UnavailableError) as failure:
+            _call_cli("hello")
+
+    assert type(failure.value) is UnavailableError
+    assert str(failure.value) == CLAUDE_CLI_UNAVAILABLE_DETAIL
+    assert refused_text not in f"{failure.value!r} {caplog.text}"
 
 
 def test_call_cli_uses_the_shared_process_pool_and_refuses_at_its_cap(

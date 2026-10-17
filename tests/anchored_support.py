@@ -469,6 +469,18 @@ class ChildCleanup:
             raise AssertionError(f"pid {owned.pid} is {observed}, not exited")
         return observed.code
 
+    def wait_stopped(self, owned: OwnedChild) -> None:
+        """Block until the child reports a stop, without consuming the report.
+
+        Preconditions: a fresh stop request, no competing stop consumer, and no continuation
+        before this observation. Under them the stop report is certain to arrive, so there is no
+        timer; a report that was already consumed is never reported again and would block forever.
+        """
+        self._require_listed(owned)
+        report = _waitid(P_PIDFD, owned.pidfd, os.WSTOPPED | os.WEXITED | os.WNOWAIT)
+        if report.si_code not in (os.CLD_STOPPED, os.CLD_TRAPPED):
+            raise AssertionError(f"pid {owned.pid} reported an exit, not a stop")
+
     def send_signal(self, owned: OwnedChild, signal_number: int) -> None:
         self._require_listed(owned)
         _pidfd_send_signal(owned.pidfd, signal_number)

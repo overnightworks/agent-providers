@@ -33,6 +33,18 @@ class WaitidCall:
     options: int
 
 
+def watcher_thread(pid: int) -> threading.Thread:
+    name = f"{WATCHER_THREAD_PREFIX}{pid}"
+    watcher = next((t for t in threading.enumerate() if t.name == name), None)
+    assert watcher is not None, f"no {name} thread exists"
+    return watcher
+
+
+def join_watcher(watcher: threading.Thread) -> None:
+    watcher.join(TEST_WAIT_SECONDS)
+    assert not watcher.is_alive(), "the watcher did not end within the bound"
+
+
 def traced_stop() -> SimpleNamespace:
     return SimpleNamespace(si_code=os.CLD_TRAPPED, si_status=int(signal.SIGTRAP))
 

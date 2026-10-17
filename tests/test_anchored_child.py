@@ -7,11 +7,8 @@ import logging
 import os
 import signal
 import subprocess
-import sys
 import threading
-import time
 import warnings
-from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -21,134 +18,15 @@ from anchored_kernel import (
     WATCHER_THREAD_PREFIX,
     KernelModel,
     PassThroughKernel,
+    join_watcher,
 )
-from anchored_support import TEST_WAIT_SECONDS, ChildCleanup, Exited, OwnedChild
-from test_zombie_anchor import EXIT_WITH_LINE
+from anchored_leaders import SPAWN_LOGGER, ExitProbe, Leaders, spawn_warnings
+from anchored_support import TEST_WAIT_SECONDS, ChildCleanup, Exited
 
 from agent_providers import spawn
-from agent_providers.spawn import AnchoredLeader, AnchorState, ChildProcess, closed_environment
+from agent_providers.spawn import AnchorState
 
-SPAWN_LOGGER = "agent_providers.spawn"
 SIGKILLED = -9
-
-
-class ExitProbe:
-    """The ``on_exit`` callback: counts its calls and reads the handle from inside them."""
-
-    def __init__(self, *, failure: Exception | None = None, held: bool = False) -> None:
-        self.seen = threading.Event()
-        self.release = threading.Event()
-        if not held:
-            self.release.set()
-        self.observed: list[tuple[AnchorState, int | None]] = []
-        self.leader: AnchoredLeader | None = None
-        self._bound = threading.Event()
-        self._failure = failure
-
-    def bind(self, leader: AnchoredLeader | None) -> None:
-        self.leader = leader
-        self._bound.set()
-
-    def __call__(self) -> None:
-        assert self._bound.wait(TEST_WAIT_SECONDS), "the handle was never bound"
-        assert self.leader is not None
-        self.observed.append((self.leader.state, self.leader.returncode))
-        self.seen.set()
-        assert self.release.wait(TEST_WAIT_SECONDS), "the callback was never released"
-        if self._failure is not None:
-            raise self._failure
-
-
-@dataclass
-class Started:
-    leader: AnchoredLeader
-    owned: OwnedChild
-    probe: ExitProbe
-    stdin: int
-
-    def write_exit_line(self, code: int) -> None:
-        os.write(self.stdin, f"{code}\n".encode())
-
-
-class Leaders:
-    def __init__(self, tmp_path: Path, cleanup: ChildCleanup) -> None:
-        self._tmp_path = tmp_path
-        self._cleanup = cleanup
-
-    def describe(self, binary: Path | None = None) -> ChildProcess:
-        return ChildProcess(
-            binary=binary or Path(sys.executable),
-            arguments=("-I", "-c", EXIT_WITH_LINE),
-            environment=closed_environment(self._tmp_path),
-            working_directory=self._tmp_path,
-        )
-
-    def start(self, probe: ExitProbe | None = None) -> Started:
-        probe = probe or ExitProbe()
-        reader, writer = os.pipe()
-        self._cleanup.close_at_cleanup(writer)
-        try:
-            captured = self._cleanup.capture(
-                lambda: spawn.start_anchored_leader(
-                    self.describe(),
-                    stdin=reader,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    on_exit=probe,
-                )
-            )
-        finally:
-            os.close(reader)
-        (owned,) = captured.children
-        probe.bind(captured.value)
-        return Started(captured.value, owned, probe, writer)
-
-    def start_bare(self) -> OwnedChild:
-        reader, writer = os.pipe()
-        self._cleanup.close_at_cleanup(writer)
-        try:
-            return self._cleanup.start_bare_child(
-                self.describe(),
-                stdin=reader,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        finally:
-            os.close(reader)
-
-    def watcher_of(self, started: Started) -> threading.Thread | None:
-        name = f"{WATCHER_THREAD_PREFIX}{started.owned.pid}"
-        return next((t for t in threading.enumerate() if t.name == name), None)
-
-    def await_exit_seen(self, started: Started) -> None:
-        assert started.probe.seen.wait(TEST_WAIT_SECONDS), "on_exit was not called within the bound"
-        self.join_watcher(started)
-
-    def join_watcher(self, started: Started) -> None:
-        watcher = self.watcher_of(started)
-        if watcher is not None:
-            watcher.join(TEST_WAIT_SECONDS)
-            assert not watcher.is_alive(), "the watcher did not end within the bound"
-
-
-@pytest.fixture
-def leaders(tmp_path: Path, child_cleanup: ChildCleanup) -> Leaders:
-    return Leaders(tmp_path, child_cleanup)
-
-
-@pytest.fixture
-def thread_failures(monkeypatch: pytest.MonkeyPatch) -> list[threading.ExceptHookArgs]:
-    forwarded: list[threading.ExceptHookArgs] = []
-    monkeypatch.setattr(threading, "excepthook", forwarded.append)
-    return forwarded
-
-
-def spawn_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
-    return [
-        record.getMessage()
-        for record in caplog.records
-        if record.name == SPAWN_LOGGER and record.levelno == logging.WARNING
-    ]
 
 
 def watcher_names() -> set[str]:
@@ -161,19 +39,11 @@ def process_status(pid: int) -> tuple[str, int, int]:
     return state, int(group), int(session)
 
 
-def await_stopped(pid: int) -> None:
-    deadline = time.monotonic() + TEST_WAIT_SECONDS
-    while process_status(pid)[0] != "T":
-        assert time.monotonic() < deadline, f"pid {pid} did not stop within the bound"
-
-
 def test_an_exited_leader_stays_an_unreaped_anchor_of_this_process(
     leaders: Leaders, child_cleanup: ChildCleanup
 ) -> None:
     started = leaders.start()
-    watcher = leaders.watcher_of(started)
-    assert watcher is not None
-    assert watcher.daemon
+    assert started.watcher.daemon
 
     started.write_exit_line(3)
     leaders.await_exit_seen(started)
@@ -264,7 +134,7 @@ def test_stopped_leaders_are_consumed_for_their_own_pid_only(
     first, second = leaders.start(), leaders.start()
     for started in (first, second):
         child_cleanup.send_signal(started.owned, signal.SIGSTOP)
-        await_stopped(started.owned.pid)
+        child_cleanup.wait_stopped(started.owned)
 
     report = (os.CLD_STOPPED, signal.SIGSTOP)
     assert spawn._consume_stop_report(first.owned.pid) == report
@@ -306,7 +176,7 @@ def test_a_loss_the_kernel_reports_leaves_the_real_zombie_intact_and_disarms_pop
         assert started.leader.state is AnchorState.LOST
         assert started.leader.done_with_pid is False
         started.probe.release.set()
-        leaders.join_watcher(started)
+        join_watcher(started.watcher)
 
     assert started.leader.state is AnchorState.LOST
     assert started.probe.observed == [(AnchorState.LOST, None)]

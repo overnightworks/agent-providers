@@ -13,11 +13,13 @@ from __future__ import annotations
 
 import ctypes
 import sys
+import threading
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from anchored_support import ZombieAnchor, child_cleanup_scope, zombie_anchor_session
+from anchored_leaders import Leaders
+from anchored_support import ChildCleanup, ZombieAnchor, child_cleanup_scope, zombie_anchor_session
 from provider_test_support import MCP_TOOL_NAMES, close_fake_cli_pipes
 
 from agent_providers.config import (
@@ -105,6 +107,18 @@ def zombie_anchor():
 def child_cleanup(zombie_anchor: ZombieAnchor):
     with child_cleanup_scope(zombie_anchor) as cleanup:
         yield cleanup
+
+
+@pytest.fixture
+def leaders(tmp_path: Path, child_cleanup: ChildCleanup) -> Leaders:
+    return Leaders(tmp_path, child_cleanup)
+
+
+@pytest.fixture
+def thread_failures(monkeypatch: pytest.MonkeyPatch) -> list[threading.ExceptHookArgs]:
+    forwarded: list[threading.ExceptHookArgs] = []
+    monkeypatch.setattr(threading, "excepthook", forwarded.append)
+    return forwarded
 
 
 @pytest.fixture(autouse=True)

@@ -1,8 +1,0 @@
-claim_id = "b8477d90429a40efa6fb91f01e80a7d4"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "3c9c055e56c157c508b7856a400a64380607d415"
-branch = "claude/issue-175-a1b-9c2a-transport-logger-zu"
-scope = ["README.md", "packages/agent-service/src/agent_service/cli.py", "tests/service_support.py", "tests/test_service_claude_version.py", "tests/test_service_config.py", "tests/test_service_process_hardening.py", "tests/test_service_transport_logging.py"]
-opened_commit = "3897df5cca3fcc3d233793364ea8015240fbaa09"
-whole_reason = "One process-entry function with two constants and its one call, the logger-level fixture, and the tests that prove it, including the control pair and the fresh-interpreter configuration cases; nothing here can land without leaving a record on the transport hierarchy or a leaked process-global level in the suite."

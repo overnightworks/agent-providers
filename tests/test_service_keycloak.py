@@ -47,7 +47,7 @@ from test_keycloak_token_shapes import (
 from webauth.jwt_verification import KEY_SET_REFRESH_COOLDOWN_SECONDS, KeySetFetchError
 from wire_builders import started
 
-from agent_client.wire import RejectionCode, RunStatus
+from agent_client.wire import RejectionCode, RunState, RunStatus
 from agent_providers.events import AssistantTextEvent, FinalEvent
 from agent_service.app import create_app
 from agent_service.identity import Principal
@@ -135,6 +135,18 @@ def test_a_real_user_and_workload_token_stream_the_scripted_run(
     ]
     runner = runners.cli if expected_route == Cli("claude-main") else runners.api
     assert runner.admitted[-1].route == expected_route
+
+
+def test_a_real_run_is_recorded_for_its_user_alone(service):
+    streamed = post_run(service, run_headers(_songmaker_workload(), _user_token("alice")))
+    run_id = str(decoded_events(streamed.content)[0].run_id)
+
+    alice = get_run(service, run_headers(_songmaker_workload(), _user_token("alice")), run_id)
+    bob = get_run(service, run_headers(_songmaker_workload(), _user_token("bob")), run_id)
+
+    status = RunStatus.model_validate_json(alice.content)
+    assert (status.state, status.events, status.client_lost) == (RunState.SUCCEEDED, 3, None)
+    assert_rejected(bob, RejectionCode.NOT_FOUND, 404)
 
 
 def test_a_user_in_no_group_is_not_enabled(service):

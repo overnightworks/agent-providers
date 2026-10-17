@@ -30,10 +30,11 @@ from collections.abc import (
 from contextlib import asynccontextmanager, contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, NoReturn
 
 import httpx
 import jwt
+import pytest
 import uvicorn
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -44,13 +45,15 @@ from pydantic import ValidationError
 import agent_service.signing as signing
 from agent_client.run_stream import StreamViolation, ViolationKind
 from agent_client.sse import RunStreamDecoder
-from agent_client.wire import RejectionCode, RunEvent, RunRejection, RunRequest
+from agent_client.wire import RejectionCode, RunEvent, RunRejection, RunRequest, RunStatus
 from agent_providers.events import AssistantTextEvent, StreamEvent
+from agent_service.app import create_app
 from agent_service.config import RunConfig, ServiceConfig
 from agent_service.identity import Principal
 from agent_service.routing import Cli
 from agent_service.run_events import run_frames
-from agent_service.runners import AdmittedRun
+from agent_service.run_records import RunRecords
+from agent_service.runners import AdmittedRun, Runners
 
 TEST_ISSUER: Final = "https://keycloak.test/realms/agent-test"
 TEST_JWKS_URL: Final = "https://keycloak.test/realms/agent-test/protocol/openid-connect/certs"
@@ -494,7 +497,7 @@ class GatedRunner:
     """
 
     def __init__(self) -> None:
-        self._inbox: asyncio.Queue[StreamEvent | Exception] = asyncio.Queue()
+        self._inbox: asyncio.Queue[StreamEvent | Exception | None] = asyncio.Queue()
         self._close_gate: asyncio.Event | None = None
         self.close_error: Exception | None = None
         self.steps = 0
@@ -504,6 +507,9 @@ class GatedRunner:
 
     def release(self, event: StreamEvent | Exception) -> None:
         self._inbox.put_nowait(event)
+
+    def exhaust(self) -> None:
+        self._inbox.put_nowait(None)
 
     def hold_close(self) -> None:
         self._close_gate = asyncio.Event()
@@ -521,6 +527,8 @@ class GatedRunner:
                 except asyncio.CancelledError:
                     self.cancellations += 1
                     raise
+                if event is None:
+                    return
                 if isinstance(event, Exception):
                     raise event
                 yield event
@@ -537,7 +545,55 @@ class GatedRunner:
         self.log.append("closed")
 
 
+STRAY_CANCELLATION_CANARY: Final = "CANARY_OF_A_STRAY_CANCELLATION"
+
+
+async def stray_cancellation(*, after_its_stop: bool) -> NoReturn:
+    """Raise a ``CancelledError`` while no cancellation request is on the task.
+
+    With ``after_its_stop`` it first waits until the task is cancelled and
+    then withdraws that request, as a step that swallows its stop would.
+    """
+    if after_its_stop:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            assert current is not None
+            current.uncancel()
+    raise asyncio.CancelledError(STRAY_CANCELLATION_CANARY)
+
+
+class StrayCancelledRunner(GatedRunner):
+    """A runner whose first step ends in a ``stray_cancellation``, then closes as a gated one."""
+
+    def __init__(self, *, after_its_stop: bool) -> None:
+        super().__init__()
+        self._after_its_stop = after_its_stop
+
+    async def run(self, admitted: AdmittedRun) -> AsyncGenerator[StreamEvent, None]:
+        try:
+            self.steps += 1
+            await stray_cancellation(after_its_stop=self._after_its_stop)
+            yield QUIET
+        finally:
+            await self._closed()
+
+
 SONGMAKER = service_config().apps["songmaker"]
+ALICE = Principal(TEST_ISSUER, "user-alice")
+
+
+def alice_admitted_run(run_id: uuid.UUID) -> AdmittedRun:
+    return AdmittedRun(
+        run_id=run_id,
+        app="songmaker",
+        principal=ALICE,
+        request=RunRequest.model_validate(run_body()),
+        route=Cli("claude-main"),
+    )
+
+
 QUIET = AssistantTextEvent(text="")
 
 
@@ -550,6 +606,146 @@ def in_loop(scenario: Callable[..., Coroutine[Any, Any, None]]) -> Callable[...,
     return run
 
 
+class BrokenClock(StepClock):
+    """A clock whose wait fails, which makes the run's supervision fail.
+
+    Each wait raises a new failure from ``breaks_with``.
+    """
+
+    def __init__(
+        self, breaks_with: Callable[[], BaseException] = lambda: RuntimeError("the clock broke")
+    ) -> None:
+        super().__init__()
+        self._breaks_with = breaks_with
+
+    async def wait_until(self, deadline: float) -> None:
+        raise self._breaks_with()
+
+
+class ClientSocket:
+    """The client end of one ASGI response: the request it posts, what it takes, when it leaves.
+
+    ``send`` blocks on the second body chunk until ``released`` is set, as
+    uvicorn's drain does, or raises ``second_chunk_raises`` there;
+    ``blocks_the_first_chunk`` blocks the first one forever. With
+    ``suspends_the_start`` the start message never completes. ``receive`` answers
+    the request first and ``http.disconnect`` once the client ``leave``s.
+    """
+
+    def __init__(
+        self,
+        *,
+        spec_version: str = "2.3",
+        blocks_the_first_chunk: bool = False,
+        blocks_the_second_chunk: bool = False,
+        second_chunk_raises: Exception | None = None,
+        suspends_the_start: bool = False,
+        leaves_at_once: bool = False,
+    ) -> None:
+        self.scope = _run_scope(spec_version)
+        self.messages: list[dict[str, Any]] = []
+        self.released = asyncio.Event()
+        self.answering = asyncio.Event()
+        self._blocks_the_first_chunk = blocks_the_first_chunk
+        self._blocks_the_second_chunk = blocks_the_second_chunk
+        self._second_chunk_raises = second_chunk_raises
+        self._suspends_the_start = suspends_the_start
+        self._left = asyncio.Event()
+        if leaves_at_once:
+            self.leave()
+        self._request: list[dict[str, Any]] = [
+            {"type": "http.request", "body": json.dumps(run_body()).encode(), "more_body": False}
+        ]
+
+    def leave(self) -> None:
+        self._left.set()
+
+    async def receive(self) -> dict[str, Any]:
+        if self._request:
+            return self._request.pop()
+        await self._left.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(self, message: dict[str, Any]) -> None:
+        self.answering.set()
+        if message["type"] == "http.response.start" and self._suspends_the_start:
+            self._suspends_the_start = False
+            await asyncio.Event().wait()
+        if message["type"] == "http.response.body" and self._bodies() == 0:
+            if self._blocks_the_first_chunk:
+                await asyncio.Event().wait()
+        if message["type"] == "http.response.body" and self._bodies() == 1:
+            if self._second_chunk_raises is not None:
+                raise self._second_chunk_raises
+            if self._blocks_the_second_chunk:
+                await self.released.wait()
+        self.messages.append(message)
+
+    def _bodies(self) -> int:
+        return sum(m["type"] == "http.response.body" for m in self.messages)
+
+    @property
+    def body(self) -> bytes:
+        return b"".join(m["body"] for m in self.messages if m["type"] == "http.response.body")
+
+    @property
+    def run_id(self) -> uuid.UUID:
+        return uuid.UUID(json.loads(self.body.split(b"data: ", 1)[1].split(b"\n", 1)[0])["run_id"])
+
+
+@functools.cache
+def _shared_mint() -> TokenMint:
+    return TokenMint()
+
+
+def _run_scope(spec_version: str) -> dict[str, Any]:
+    mint = _shared_mint()
+    headers = run_headers(mint.workload(), mint.user())
+    return {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": spec_version},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/runs",
+        "raw_path": b"/runs",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [(name.lower().encode(), value.encode()) for name, value in headers.items()]
+        + [(b"content-type", b"application/json")],
+        "client": ("127.0.0.1", 50000),
+        "server": ("127.0.0.1", 80),
+    }
+
+
+async def respond_through_the_app(
+    drive: Drive,
+    client: ClientSocket,
+    monkeypatch: pytest.MonkeyPatch,
+    runners: Runners | None = None,
+) -> asyncio.Task[None]:
+    """Post a run to the real app on the drive's runner, clock and store; its response task.
+
+    ``runners`` replace the drive's runner, as ``Runners()`` serves a run without one.
+
+    The token checks leave the loop for a worker thread, so this returns only
+    once the app has begun to answer: from then on the run waits on the clock alone.
+    """
+    monkeypatch.setattr("agent_service.app.LoopClock", lambda: drive.clock)
+    app = create_app(
+        service_config(runs=drive.runs.model_dump()),
+        runners=runners or Runners(cli=drive.runner),
+        records=drive.records,
+        fetch_key_set=_shared_mint().fetch_key_set,
+    )
+    response = asyncio.create_task(app(client.scope, client.receive, client.send))
+    answering = asyncio.create_task(client.answering.wait())
+    await asyncio.wait({response, answering}, return_when=asyncio.FIRST_COMPLETED)
+    answering.cancel()
+    await asyncio.gather(answering, return_exceptions=True)
+    return response
+
+
 class Drive:
     """One run read by a client task that a test can stall, on a clock the test moves."""
 
@@ -560,18 +756,16 @@ class Drive:
         clock: StepClock,
         *,
         read: bool = True,
+        records: RunRecords | None = None,
     ) -> None:
         self.runner = runner
+        self.runs = runs
         self.clock = clock
+        self.records = records or RunRecords(lambda: instant(clock.now))
         self.run_id = uuid.uuid4()
-        admitted = AdmittedRun(
-            run_id=self.run_id,
-            app="songmaker",
-            principal=Principal("https://keycloak.test/realms/agent-test", "user-alice"),
-            request=RunRequest.model_validate(run_body()),
-            route=Cli("claude-main"),
+        self.frames = run_frames(
+            alice_admitted_run(self.run_id), runner, SONGMAKER, runs, clock, self.records
         )
-        self.frames = run_frames(admitted, runner, SONGMAKER, runs, clock)
         self.events: list[tuple[float, RunEvent]] = []
         self.frame_sizes: list[int] = []
         self._decoder = RunStreamDecoder()
@@ -603,6 +797,10 @@ class Drive:
     def end_of_stream(self) -> list[ViolationKind]:
         """What the client's decoder reports about the stream's end: nothing for a clean one."""
         return [violation.kind for violation in self._decoder.close()]
+
+    def status(self, run_id: uuid.UUID | None = None) -> RunStatus | None:
+        """Alice's read of a run of the songmaker app: this drive's, unless another is named."""
+        return self.records.read(run_id or self.run_id, "songmaker", ALICE)
 
     def stall(self) -> None:
         self._may_read.clear()
@@ -658,8 +856,15 @@ async def driven(
     clock: StepClock | None = None,
     *,
     read: bool = True,
+    records: RunRecords | None = None,
 ) -> AsyncIterator[Drive]:
-    drive = Drive(runner or GatedRunner(), runs or RunConfig(), clock or StepClock(), read=read)
+    drive = Drive(
+        runner or GatedRunner(),
+        runs or RunConfig(),
+        clock or StepClock(),
+        read=read,
+        records=records,
+    )
     try:
         yield drive
     finally:

@@ -13,6 +13,7 @@ import logging
 import pytest
 from service_support import (
     QUIET,
+    BrokenClock,
     Drive,
     GatedRunner,
     ScriptedRunner,
@@ -478,17 +479,14 @@ async def test_a_runner_whose_close_fails_is_logged_and_the_terminal_is_unchange
     failures = [record for record in caplog.records if record.levelno >= logging.ERROR]
     assert len(failures) == 1
     assert str(drive.run_id) in failures[0].getMessage()
-    assert isinstance(failures[0].exc_info[1], OSError)
-
-
-class _BrokenClock(StepClock):
-    async def wait_until(self, deadline: float) -> None:
-        raise RuntimeError("the clock broke")
+    assert ": OSError at " in failures[0].getMessage()
+    assert failures[0].exc_info is None
+    assert "reap failed" not in caplog.text
 
 
 @in_loop
 async def test_a_failure_in_the_supervision_stops_the_runner_and_cuts_the_stream():
-    async with driven(clock=_BrokenClock(), read=False) as drive:
+    async with driven(clock=BrokenClock(), read=False) as drive:
         drive.took(await anext(drive.frames))
         with pytest.raises(RuntimeError, match="the clock broke"):
             await anext(drive.frames)

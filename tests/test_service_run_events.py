@@ -26,10 +26,15 @@ from provider_test_support import (
 from service_support import (
     ScriptedRunner,
     decoded_events,
+    get_run,
+    reaches_text,
     run_body,
+    run_headers,
+    served,
     service_config,
     with_placeholder_run_id,
 )
+from test_service_entrance import MINT
 
 from agent_client.tools import ToolEffect
 from agent_client.wire import (
@@ -39,6 +44,8 @@ from agent_client.wire import (
     FailureCode,
     RunEvent,
     RunRequest,
+    RunState,
+    RunStatus,
     Succeeded,
     ToolCall,
 )
@@ -52,17 +59,19 @@ from agent_providers.events import (
 )
 from agent_providers.grok import transport as grok_cli_adapter
 from agent_service import run_events
+from agent_service.app import create_app
 from agent_service.config import RunConfig
 from agent_service.identity import Principal
 from agent_service.routing import Cli
 from agent_service.run_events import run_frames
 from agent_service.run_liveness import LoopClock
+from agent_service.run_records import RunRecords
 from agent_service.runners import AdmittedRun, Runner
 
 SONGMAKER = service_config().apps["songmaker"]
 
 
-def _streamed(runner: Runner | None) -> bytes:
+def _streamed(runner: Runner | None, records: RunRecords | None = None) -> bytes:
     admitted = AdmittedRun(
         run_id=uuid.uuid4(),
         app="songmaker",
@@ -72,7 +81,8 @@ def _streamed(runner: Runner | None) -> bytes:
     )
 
     async def collected() -> bytes:
-        frames = run_frames(admitted, runner, SONGMAKER, RunConfig(), LoopClock())
+        store = records or RunRecords()
+        frames = run_frames(admitted, runner, SONGMAKER, RunConfig(), LoopClock(), store)
         return b"".join([frame async for frame in frames])
 
     return asyncio.run(collected())
@@ -267,3 +277,30 @@ def test_a_refused_tool_call_reaches_neither_the_frames_nor_the_service_log(monk
     service_records = [record for record in caplog.records if record.name == run_events.__name__]
     assert [record.levelno for record in service_records] == [logging.ERROR]
     assert A_CANARY not in formatted_log_text(service_records)
+
+
+def test_the_run_record_of_a_refused_tool_call_holds_the_failed_ending_but_not_the_refused_text(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        grok_cli_adapter,
+        "run_cli_bounded",
+        grok_cli_runner(
+            grok_tool_round_lines(a_call_to_an_undeclared_tool_carrying()),
+            grok_cli_outcome(),
+            [],
+        ),
+    )
+    refused = drive_turn("grok").error
+    assert isinstance(refused, TextToolCallRejectedError)
+    records = RunRecords()
+
+    run_id = decoded_events(_streamed(ScriptedRunner([refused]), records))[0].run_id
+
+    app = create_app(service_config(), records=records, fetch_key_set=MINT.fetch_key_set)
+    with served(app) as base_url:
+        response = get_run(base_url, run_headers(MINT.workload(), MINT.user()), str(run_id))
+    status = RunStatus.model_validate_json(response.content)
+    assert (status.state, status.failure_code) == (RunState.FAILED, FailureCode.PROVIDER_ERROR)
+    assert A_CANARY.encode() not in response.content
+    assert not reaches_text(records, [A_CANARY])

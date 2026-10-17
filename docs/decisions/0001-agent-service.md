@@ -466,20 +466,27 @@ run's ending is in its record (A1a2).
 - A heartbeat runs while idle, and an idle timeout applies.
 - Limits for bytes, time and tool calls are enforced.
 - Cancellation is explicit; nothing is retried automatically once dispatched.
-- A disconnect after a side-effecting tool call is reported as `failed` with code
-  `interrupted`, never as success.
 - Run status is queryable: `GET /runs/{id}`, authorised by the same two tokens,
   returns the run's `RunStatus`. Records live in memory, readable for up to one
   hour after the run ended, subject to earlier eviction once 10,000 ended
   records are held and to a process restart; there is no database.
-- A client disconnect cancels the run, which kills and reaps its process. It is
-  recorded as `cancelled`, or as `failed: interrupted` if a side-effecting tool
-  call had already been emitted (A0b wire ruling (a)).
+- When a run's response ends, however it ends (the stream finished, the client
+  disconnected, the response was cancelled, or sending failed), the service
+  closes the run's event generator itself before the response call returns
+  (`_RunResponse`, A1a2 item 11). It never relies on finalization by Starlette,
+  CPython or the garbage collector. The close stops the runner once; on the CLI
+  route that kills and reaps the process group (A1b). A disconnect, drop or
+  supervision failure preserves an already accepted terminal. Only a run
+  without an accepted terminal uses `cancellation_terminal()`: `cancelled`, or
+  `failed: interrupted` once a side-effecting tool call was emitted (A0b wire
+  ruling (a)). `client_lost` independently records the first loss cause.
 - Presentator's speech events (`sentence`, `audio`, `done`) stay in Presentator
   and are not added to this contract.
 
-**Consequence.** A client always learns how a run ended, either from its
-terminal event or from `GET /runs/{id}`.
+**Consequence.** A client learns how a run ended from its terminal event, or
+from `GET /runs/{id}` while the record is held (the status bullet above); once
+it is gone, the ending is unknown, and a run that emitted a side-effecting call
+may have changed state.
 
 ### A0b wire ruling (head, 15.10.2026)
 
@@ -663,18 +670,19 @@ Piece 3 of A1a3 (`agent_service.run_liveness`, the slow client):
 26. Closing the stream during or after a drop stops nothing twice and returns
     only after the runner's close has finished (rule 10).
 27. After the drop's cleanup the pump and the supervisor are gone; only the
-    client's consumer remains. Residuals: the dropped client's connection
-    stays open until it reads or leaves, because ASGI has no abort and
-    asyncio flushes before it closes (owner: A1d, edge); a frame the
-    supervisor had already encoded is accepted but never received (owner:
-    A1a2). `stall_timeout_s` is a provisional default.
+    client's consumer remains, until the response ends and closes the run's
+    generator (A1a2 item 11). Residuals: the dropped client's connection stays
+    open until it reads or leaves, because ASGI has no abort and asyncio
+    flushes before it closes (owner: A1d, edge); a frame the supervisor had
+    already encoded is accepted but never received, and the run's record
+    counts it in `events` (A1a2 item 1). `stall_timeout_s` is a provisional
+    default.
 
 ### A1a2 run-record ruling (head, 16.10.2026)
 
-Piece 1 of A1a2 (`agent_service.run_records`, `GET /runs/{id}`); recording,
-rules 7 to 13, arrives with A1a2-2. Until it lands nothing records a run, so
-every authenticated `GET` answers `not_found`; invalid credentials keep their
-normal rejections.
+Pieces 1 and 2 of A1a2: the store and `GET /runs/{id}`
+(`agent_service.run_records`, rules 1 to 6, A1a2-1), and recording (rules 7 to
+13, A1a2-2).
 
 Decisions:
 
@@ -740,6 +748,76 @@ Rules:
    is persisted, restored or announced. Documentation promises retention for up
    to one hour after completion, subject to earlier capacity eviction and
    process restart.
+7. A record begins when `run_started` is accepted, and it counts every accepted
+   event. `_WireRun` calls `begin` right after accepting `RunStarted` and hands
+   each later accepted event to the recorder, after `RunStream.accept` passes
+   and before the frame is returned. A refused event reaches neither. A
+   generator that is never advanced creates no record and never calls
+   `runner.run`.
+8. A run is over when its runner is closed, and the store hears it at once.
+   The cleanup task (`_reap`) calls the writer's `run_over()` as soon as the
+   runner's close has finished or failed, exactly once, whoever waits and
+   however often a waiter is cancelled, and before any wait for frame
+   delivery. `_supervise`'s finalizer guarantees that the slot closes; it is
+   not the completion notification. `_stop` raises what the decider decides
+   once the runner is stopped, so a recording defect cuts the stream the way a
+   supervision failure does. No step of a run's ending raises its failure past
+   the decider: the supervision (its clock, its drive and the drop report it
+   makes) and the cleanup (the disconnect report and the record's end) record
+   each failure in the run's one collection (`run_liveness.RunFailures`), in
+   the order the failures happened. One pure decider (`run_liveness._exit_of`)
+   reads that collection, any cancellation and the body's outcome: a
+   cancellation always wins, whether it was caught during teardown or arrived
+   in the body; then the first cleanup failure; then the first supervision
+   failure, unless the body raised. Every other failure is logged exactly
+   once. Every failure the service logs, a runner's and a failed close
+   included, is logged by its class and its stack positions
+   (`file:line:function`), never by its message, notes or chained exceptions.
+   A propagated failure is not logged by the service: Starlette and the ASGI
+   server log it in their own format, message and chain included. Every
+   failure that can propagate comes from the service's own recorder, clock or
+   loss report, so none carries provider or user text; a runner's failure is
+   logged through the one helper instead and never propagates. With no
+   runner, the run is recorded complete before its first frame is handed out.
+9. The ending is the accepted terminal; `cancellation_terminal()` is used only
+   when there is none. `run_over()` passes no fallback when a terminal was
+   accepted. The fallback's state and code are all that is read: it is never
+   sent, accepted or counted, and the record holds no provider text.
+10. Loss causes are latched when detected, and the first one wins. A drop calls
+    `client_lost(dropped)` before it awaits the stop; a supervision failure
+    does the same before its `finally` stops the runner; `run_frames` catches
+    `CancelledError` and `GeneratorExit` and latches `disconnected` before any
+    cleanup is awaited. `dropped` means the service cut the stream;
+    `disconnected` means the run's response ended before its stream finished:
+    the client left, or the server cancelled or failed the response. It does
+    not say whether the last frame arrived.
+11. The service closes its run's frames when the response ends, however it
+    ends. The owner is `_RunResponse` in `agent_service.app`, the one type a
+    run's response has: a `StreamingResponse` whose `__call__` awaits
+    Starlette's call inside `aclosing` on the run's generator. Starlette may
+    return or raise (the stream finished, the client disconnected, the
+    response task was cancelled, or `send` failed); in every case the
+    generator's `aclose()` is awaited before the call returns or re-raises, and
+    Starlette's own outcome propagates unchanged. A generator that is already
+    closed makes `aclose()` return at once. The close stops the runner once and
+    returns only after the runner's close has finished, so when the response
+    call ends, a started run's runner is closed, its record is ended and no
+    task of the run is alive. Nothing relies on finalization: no
+    `gc.collect()`, no reference count reaching zero, no event-loop
+    async-generator hook. Below ASGI spec 2.4, which is what uvicorn 0.54.0
+    speaks, a disconnect is reported at `receive` and seen at once. Under ASGI
+    spec 2.4 or later, Starlette does not listen for `http.disconnect`; it
+    detects connection loss when an in-flight or subsequent `send` raises.
+    There is no unconditional heartbeat-sized detection bound: runner cleanup
+    can delay the next frame, and sending depends on the server's transport
+    behavior. Once Starlette's call returns or raises, the service awaits
+    closure of its event generator before its response call exits. Both paths
+    reach the same close.
+12. One private method of `RunStream` decides which ending a cut-short run must
+    have; `cancellation_terminal` and the stream rules both ask it.
+13. Recording reaches the app through `create_app`, which passes its store to
+    the run. A record is gone after a restart, and no document promises that a
+    client always learns the ending.
 
 ## H7 CLI isolation and admission
 

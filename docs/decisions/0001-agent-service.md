@@ -132,9 +132,9 @@ body rules be fixed before the build.
 
   | Check | Answer |
   |---|---|
-  | The workload token is missing, or webauth refuses it while parsing it, before it looks up a key (among others: longer than 8192 characters, not a compact JWS whose header and claims set are strict JSON objects, a number that overflows to infinity, a header or claims set nested deeper than 8 levels, a forbidden header member (`crit`, `jku`, `jwk`, `x5u`, `x5c`, `b64`), an `alg` other than RS256, or a missing or invalid `kid`) | 401 `unauthorized`, one body, `WWW-Authenticate: Bearer` |
+  | The workload token is missing, or webauth refuses it while parsing it, before it looks up a key (among others: longer than 8192 characters, not a compact JWS whose header and claims set are strict JSON objects, a number that overflows to infinity, a header or claims set nested deeper than 8 levels, a forbidden header member (`crit`, `jku`, `jwk`, `x5u`, `x5c`, `b64`), an `alg` other than RS256, an invalid `kid`) | 401 `unauthorized`, one body, `WWW-Authenticate: Bearer` |
   | The service holds no current key set and cannot fetch one, or a token's `kid` is missing from a current key set and the refresh fails; this is decided when a token is verified (in practice the workload token, verified first) | 503 `unavailable`, `Retry-After: 30` |
-  | The workload token fails its signature, issuer, `aud` ∌ `agent-service` or time check, or has an empty `sub`; these are checked only once a current key set is held | 401 `unauthorized`, one body, `WWW-Authenticate: Bearer` |
+  | The workload token fails its signature, issuer, `aud` ∌ `agent-service` or time check, has an empty `sub`, or carries no `kid` while the current key set holds more than one RS256 key; these are checked only once a current key set is held | 401 `unauthorized`, one body, `WWW-Authenticate: Bearer` |
   | The user token is missing or not `Authorization: Bearer <token>`, or fails verification as the workload token above; or it has no `sub`, a `sub` that is not valid Unicode text (A1a4 O7), or a malformed group claim | 401 `unauthorized`, one body, `WWW-Authenticate: Bearer` |
   | The workload binding above fails (among others: an absent workload `sub`, an absent or empty `azp` or `client_id`); the user's `azp` differs from the workload's; the user's `sub` equals the workload's | 403 `forbidden` |
   | The body, at most 256 KiB enforced before buffering, parsed as strict JSON (no `NaN`, no member twice): its `v` is absent, not an integer, or not 1 | 400 `unsupported_version` |
@@ -147,10 +147,14 @@ body rules be fixed before the build.
   Every rejection is a `RunRejection` with `Cache-Control: no-store`, and no
   answer or log line carries token text.
   A token whose `kid` is missing from a still-current key set answers 503
-  `unavailable` when the key set cannot be refreshed (webauth v0.13.0 reports
+  `unavailable` when the key set cannot be refreshed (webauth v0.15.0 reports
   `KEY_SET_UNAVAILABLE`: the `kid` may be a rotated key it could not fetch),
   and 401 when a successful refresh lacks the `kid`. With no current key set
   the 503 row answers, whatever the `kid`.
+  A token without a `kid` is read against the key set's only RS256 key and
+  admitted when it verifies; against several RS256 keys it answers 401
+  (webauth v0.15.0, OIDC Core 10.1). The `kid` only selects a key: the
+  signature, issuer, audience, expiry and role checks still apply.
 - **The policy.** The service reads one TOML file into frozen models that
   forbid unknown fields; a refused file stops startup naming the field.
   `[identity]` names issuer, key-set URL (https), audience, subscription group,

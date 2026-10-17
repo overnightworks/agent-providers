@@ -44,7 +44,8 @@ from test_keycloak_token_shapes import (
     _realm_url,
     verify,  # noqa: F401 - a fixture, requested by name
 )
-from webauth.jwt_verification import KEY_SET_REFRESH_COOLDOWN_SECONDS, KeySetFetchError
+from webauth.https_client import KeySetFetchError
+from webauth.jwt_verification import KEY_SET_REFRESH_COOLDOWN_SECONDS
 from wire_builders import started
 
 from agent_client.wire import RejectionCode, RunState, RunStatus

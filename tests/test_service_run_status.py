@@ -28,7 +28,7 @@ from service_support import (
     service_config,
 )
 from test_service_entrance import MINT, TOKEN_REJECTIONS
-from webauth.jwt_verification import KeySetFetchError
+from webauth.https_client import KeySetFetchError
 from wire_builders import started, succeeded
 
 from agent_client.wire import RejectionCode, RunState, RunStatus

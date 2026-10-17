@@ -39,7 +39,7 @@ from service_support import (
 )
 from starlette.requests import ClientDisconnect
 from test_service_capability import QUOTATION_MARKS_256, TUNED_AT_THE_LIMIT
-from webauth.jwt_verification import KeySetFetchError
+from webauth.https_client import KeySetFetchError
 
 from agent_client.wire import RejectionCode, RunStarted
 from agent_providers.events import AssistantTextEvent, FinalEvent

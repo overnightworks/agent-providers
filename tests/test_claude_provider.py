@@ -26,12 +26,15 @@ from provider_test_support import (
     MCP_TOOL_NAMES,
     SAMPLE_TOOL_CATALOG,
     SECRET_ENV_KEYS,
+    EventGate,
     RunnerFailureWatch,
+    a_claude_cli_child,
     a_credential_destination_that_fails,
     assert_private_credential_child,
     drive_turn,
     fail_to_start_the_runner_thread,
     fake_cli_process,
+    install_claude_cli_children,
     override_provider_runtime,
     override_turn_runtime,
 )
@@ -605,10 +608,9 @@ def test_error_result_raises_without_its_text_from_every_entry_point(
         AsyncMock(return_value=Path("/usr/bin/claude")),
     )
 
-    async def open_async_pipes(_child, **_kwargs):
-        return _finished_async_process(json_output.encode())
-
-    monkeypatch.setattr(provider, "open_async_pipes", open_async_pipes)
+    install_claude_cli_children(
+        monkeypatch, a_claude_cli_child(communicate=(json_output.encode(), b"")),
+    )
     mock_proc = MagicMock(returncode=0, stdout=json_output, stderr="")
 
     with patch("subprocess.run", return_value=mock_proc):
@@ -736,16 +738,16 @@ def test_call_cli_with_system_prompt(_no_tool_gate_open) -> None:
     assert mock_run.call_args.kwargs["input"] == "be helpful\n\nhello"
 
 
-def test_acall_cli_keeps_prompt_and_system_out_of_argv(_no_tool_gate_open) -> None:
-    proc = MagicMock(returncode=0)
-    proc.communicate = AsyncMock(return_value=(b'{"result":"ok"}', b""))
-    create = AsyncMock(return_value=proc)
+def test_acall_cli_keeps_prompt_and_system_out_of_argv(
+    _no_tool_gate_open, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proc = a_claude_cli_child(communicate=(b'{"result":"ok"}', b""))
+    spawns = install_claude_cli_children(monkeypatch, proc)
 
-    with patch("asyncio.create_subprocess_exec", create):
-        result = asyncio.run(_acall_cli("secret prompt", system="secret system"))
+    result = asyncio.run(_acall_cli("secret prompt", system="secret system"))
 
     assert result.text == "ok"
-    command = create.call_args.args
+    command = spawns.children[0].command
     assert "secret prompt" not in command
     assert "secret system" not in command
     proc.communicate.assert_awaited_once_with(b"secret system\n\nsecret prompt")
@@ -758,14 +760,13 @@ def test_acall_cli_strips_secrets_from_child_env(
     for key, value in _leaked_secret_env_values().items():
         monkeypatch.setenv(key, value)
     monkeypatch.setenv("PATH", "/usr/bin")
-    proc = MagicMock(returncode=0)
-    proc.communicate = AsyncMock(return_value=(b'{"result":"ok"}', b""))
-    create = AsyncMock(return_value=proc)
+    spawns = install_claude_cli_children(
+        monkeypatch, a_claude_cli_child(communicate=(b'{"result":"ok"}', b"")),
+    )
 
-    with patch("asyncio.create_subprocess_exec", create):
-        asyncio.run(_acall_cli("hello"))
+    asyncio.run(_acall_cli("hello"))
 
-    child_env = create.call_args.kwargs["env"]
+    child_env = spawns.children[0].environment
     for key in SECRET_ENV_KEYS:
         assert key not in child_env
     assert child_env["PATH"] == "/usr/bin"
@@ -783,9 +784,9 @@ def test_acall_cli_surfaces_a_missing_or_failed_binary(
     if failure == "missing":
         spawn = AsyncMock(side_effect=FileNotFoundError())
     else:
-        process = MagicMock(pid=1, returncode=1)
-        process.communicate = AsyncMock(return_value=(b"", b"failed"))
-        spawn = AsyncMock(return_value=process)
+        spawn = AsyncMock(
+            return_value=a_claude_cli_child(pid=1, returncode=1, communicate=(b"", b"failed")),
+        )
     monkeypatch.setattr(provider, "_spawn_reserved_async_cli_process", spawn)
 
     call = _acall_cli("hello")
@@ -810,9 +811,9 @@ def test_tool_turn_cli_surfaces_a_missing_or_failed_binary(
     if failure == "missing":
         spawn = AsyncMock(side_effect=FileNotFoundError())
     else:
-        process = MagicMock(pid=1, returncode=1)
-        process.communicate = AsyncMock(return_value=(b"", b"failed"))
-        spawn = AsyncMock(return_value=process)
+        spawn = AsyncMock(
+            return_value=a_claude_cli_child(pid=1, returncode=1, communicate=(b"", b"failed")),
+        )
     monkeypatch.setattr(provider, "_spawn_reserved_async_cli_process", spawn)
 
     call = provider.acall_claude_with_mcp("hello", user_id="user-1")
@@ -835,20 +836,17 @@ def test_call_cli_passes_model(_no_tool_gate_open) -> None:
 @pytest.fixture
 def spawned_claude_children(_no_tool_gate_open, monkeypatch: pytest.MonkeyPatch) -> list:
     """Every CLI child the Claude provider starts, answered by a fake that exits cleanly."""
-    children: list = []
-
     def run_capturing(child, **_kwargs):
         children.append(child)
         return MagicMock(returncode=0, stdout='{"result":"ok"}', stderr="")
 
-    async def open_async_pipes(child, **_kwargs):
-        children.append(child)
+    def child_that_exits_cleanly(child, _stream_buffer_limit):
         if "stream-json" in child.arguments:
-            return _streaming_cli_process([b'{"type":"result","result":"ok"}\n'])
-        return _finished_async_process(b'{"result":"ok"}')
+            return a_claude_cli_child(stream_lines=[b'{"type":"result","result":"ok"}\n'])
+        return a_claude_cli_child(communicate=(b'{"result":"ok"}', b""))
 
+    children = install_claude_cli_children(monkeypatch, factory=child_that_exits_cleanly).children
     monkeypatch.setattr(provider, "run_capturing", run_capturing)
-    monkeypatch.setattr(provider, "open_async_pipes", open_async_pipes)
     monkeypatch.setattr(
         provider, "verify_cli_tool_surface", AsyncMock(return_value=Path("/usr/bin/claude")),
     )
@@ -1041,44 +1039,35 @@ def test_acall_cli_refuses_a_cli_the_gate_rejects(_no_tool_gate_open, monkeypatc
         "averify_no_builtin_cli_tools",
         AsyncMock(side_effect=CliToolSurfaceError("Bash")),
     )
-    create = AsyncMock()
-    with patch("asyncio.create_subprocess_exec", create):
-        call = _acall_cli("hello")
-        with pytest.raises(CliToolSurfaceError):
-            asyncio.run(call)
-    create.assert_not_called()
+    spawns = install_claude_cli_children(monkeypatch)
+    call = _acall_cli("hello")
+    with pytest.raises(CliToolSurfaceError):
+        asyncio.run(call)
+    assert spawns.children == []
 
 
 def test_healthy_mcp_turn_holds_its_process_pool_reservation_until_it_exits(
     monkeypatch,
 ) -> None:
-    started = asyncio.Event()
-    release = asyncio.Event()
-    proc = MagicMock(pid=1234, returncode=0)
-
-    async def communicate(_stdin: bytes) -> tuple[bytes, bytes]:
-        started.set()
-        await release.wait()
-        return b'{"result":"ok"}', b""
-
-    proc.communicate = AsyncMock(side_effect=communicate)
+    turn_gate = EventGate()
+    install_claude_cli_children(
+        monkeypatch,
+        a_claude_cli_child(
+            pid=1234, communicate=(b'{"result":"ok"}', b""), communicate_gate=turn_gate,
+        ),
+    )
     monkeypatch.setattr(
         provider, "verify_cli_tool_surface", AsyncMock(return_value=Path("/usr/bin/claude")),
     )
     monkeypatch.setattr(provider, "_write_mcp_config", lambda _spec, _user_id: "unused")
     monkeypatch.setattr(provider, "_unlink_quiet", lambda _path: None)
-    monkeypatch.setattr(
-        provider.asyncio,
-        "create_subprocess_exec",
-        AsyncMock(return_value=proc),
-    )
 
     async def run_turn() -> None:
         turn = asyncio.create_task(provider.acall_claude_with_mcp("hi", user_id="u-1"))
-        await started.wait()
+        await turn_gate.started.wait()
         with provider._zombie_registry_lock:
             assert len(provider._zombie_reap_reservations) == 1
-        release.set()
+        turn_gate.release.set()
         assert (await turn).text == "ok"
         with provider._zombie_registry_lock:
             assert not provider._zombie_reap_reservations
@@ -1098,28 +1087,15 @@ def test_mcp_turn_refuses_a_healthy_turn_when_the_shared_process_pool_is_full(
     monkeypatch.setattr(provider, "_unlink_quiet", lambda _path: None)
     release = asyncio.Event()
     started = [asyncio.Event() for _ in range(process_cap + 1)]
-    processes: list[MagicMock] = []
-    spawned: list[tuple[object, ...]] = []
-
-    for pid, turn_started in enumerate(started, start=1):
-        proc = MagicMock(pid=pid, returncode=0)
-
-        async def communicate(
-            _stdin: bytes,
-            turn_started: asyncio.Event = turn_started,
-        ) -> tuple[bytes, bytes]:
-            turn_started.set()
-            await release.wait()
-            return b'{"result":"ok"}', b""
-
-        proc.communicate = AsyncMock(side_effect=communicate)
-        processes.append(proc)
-
-    async def fake_exec(*cmd: object, **_kwargs: object) -> MagicMock:
-        spawned.append(cmd)
-        return processes.pop(0)
-
-    monkeypatch.setattr(provider.asyncio, "create_subprocess_exec", fake_exec)
+    processes = [
+        a_claude_cli_child(
+            pid=pid,
+            communicate=(b'{"result":"ok"}', b""),
+            communicate_gate=EventGate(started=turn_started, release=release),
+        )
+        for pid, turn_started in enumerate(started, start=1)
+    ]
+    spawned = install_claude_cli_children(monkeypatch, *processes).children
 
     async def run_turns() -> None:
         running = []
@@ -1265,32 +1241,19 @@ def _sync_claude_call(fails: bool, monkeypatch: pytest.MonkeyPatch) -> object:
     return call_claude("hello").text
 
 
-def _finished_async_process(stdout: bytes, *, returncode: int = 0) -> MagicMock:
-    proc = MagicMock(pid=2468, returncode=returncode)
-    proc.communicate = AsyncMock(return_value=(stdout, b""))
-    proc.wait = AsyncMock(return_value=returncode)
-    return proc
-
-
 def _cancelled_async_claude_call(fails: bool, monkeypatch: pytest.MonkeyPatch) -> object:
     async def run() -> str:
-        communicating = asyncio.Event()
-        proc = _finished_async_process(b'{"result":"ok"}')
-        if fails:
-            async def communicate_until_cancelled(_stdin: bytes) -> tuple[bytes, bytes]:
-                communicating.set()
-                await asyncio.Event().wait()
-                raise AssertionError("the turn must be cancelled")
-
-            proc.communicate = communicate_until_cancelled
-
-        async def open_async_pipes(_child, **_kwargs):
-            return proc
-
-        monkeypatch.setattr(provider, "open_async_pipes", open_async_pipes)
+        communicating = EventGate()
+        install_claude_cli_children(
+            monkeypatch,
+            a_claude_cli_child(
+                communicate=(b'{"result":"ok"}', b""),
+                communicate_gate=communicating if fails else None,
+            ),
+        )
         turn = asyncio.create_task(acall_claude("hello"))
         if fails:
-            await communicating.wait()
+            await communicating.started.wait()
             turn.cancel()
         return (await turn).text
 
@@ -1298,20 +1261,20 @@ def _cancelled_async_claude_call(fails: bool, monkeypatch: pytest.MonkeyPatch) -
 
 
 def _mcp_claude_call(fails: bool, monkeypatch: pytest.MonkeyPatch) -> object:
-    async def open_async_pipes(_child, **_kwargs):
-        return _finished_async_process(b'{"result":"ok"}', returncode=1 if fails else 0)
-
-    monkeypatch.setattr(provider, "open_async_pipes", open_async_pipes)
+    install_claude_cli_children(
+        monkeypatch,
+        a_claude_cli_child(communicate=(b'{"result":"ok"}', b""), returncode=1 if fails else 0),
+    )
     return asyncio.run(provider.acall_claude_with_mcp("hello", user_id="user-1")).text
 
 
 def _mcp_claude_stream(fails: bool, monkeypatch: pytest.MonkeyPatch) -> object:
-    async def open_async_pipes(_child, **_kwargs):
-        return _streaming_cli_process(
-            [b'{"type":"result","result":"ok"}\n'], returncode=1 if fails else 0,
-        )
-
-    monkeypatch.setattr(provider, "open_async_pipes", open_async_pipes)
+    install_claude_cli_children(
+        monkeypatch,
+        a_claude_cli_child(
+            stream_lines=[b'{"type":"result","result":"ok"}\n'], returncode=1 if fails else 0,
+        ),
+    )
     stream = acall_claude_with_mcp_stream("hello", user_id="user-1")
     return asyncio.run(_collect_stream_events(stream))[-1].text
 
@@ -1472,7 +1435,7 @@ def test_async_claude_entrypoints_own_private_credential_homes_until_reap(
     source = current_config().claude_cli_auth_file
     homes: list[Path] = []
 
-    async def open_async_pipes(child, **_kwargs):
+    def child_started_in_a_private_home(child, _stream_buffer_limit):
         homes.append(assert_private_credential_child(
             child,
             root=tmp_path,
@@ -1480,12 +1443,10 @@ def test_async_claude_entrypoints_own_private_credential_homes_until_reap(
             destination=Path(".claude/.credentials.json"),
         ))
         if entrypoint == "stream":
-            return _streaming_cli_process([b'{"type":"result","result":"ok"}\n'])
-        proc = MagicMock(pid=2468, returncode=0)
-        proc.communicate = AsyncMock(return_value=(b'{"result":"ok"}', b""))
-        return proc
+            return a_claude_cli_child(stream_lines=[b'{"type":"result","result":"ok"}\n'])
+        return a_claude_cli_child(communicate=(b'{"result":"ok"}', b""))
 
-    monkeypatch.setattr(provider, "open_async_pipes", open_async_pipes)
+    install_claude_cli_children(monkeypatch, factory=child_started_in_a_private_home)
     monkeypatch.setattr(
         provider,
         "averify_no_builtin_cli_tools",
@@ -1781,8 +1742,7 @@ def test_a_deployment_without_an_mcp_server_runs_the_tool_free_command_line(
         "_write_mcp_config",
         lambda *_args: pytest.fail("no MCP config may be written without a server"),
     )
-    process = MagicMock(pid=1, returncode=0)
-    process.communicate = AsyncMock(return_value=(b'{"result":"ok"}', b""))
+    process = a_claude_cli_child(pid=1, communicate=(b'{"result":"ok"}', b""))
     spawn = AsyncMock(return_value=process)
     monkeypatch.setattr(provider, "_spawn_reserved_async_cli_process", spawn)
 
@@ -1806,8 +1766,7 @@ def test_a_deployment_without_an_mcp_server_streams_the_tool_free_command_line(
         "_write_mcp_config",
         lambda *_args: pytest.fail("no MCP config may be written without a server"),
     )
-    process = MagicMock(pid=1, returncode=0)
-    process.stdin = None
+    process = a_claude_cli_child(pid=1, has_stdin=False)
     spawn = AsyncMock(return_value=process)
     monkeypatch.setattr(provider, "_spawn_reserved_async_cli_process", spawn)
     monkeypatch.setattr(provider, "_reap_stream_process_after_cancellation", AsyncMock())
@@ -2001,16 +1960,6 @@ def _assert_the_turn_runs_what_the_probe_verified(
     assert ("--allowedTools" in executed) is mcp_attached
 
 
-def _spawned_async_cli(commands: list[tuple[str, ...]], stdout: bytes):
-    async def fake_exec(*cmd, **_kw):
-        commands.append(cmd)
-        spawned = MagicMock(pid=4242, returncode=0)
-        spawned.communicate = AsyncMock(return_value=(stdout, b""))
-        return spawned
-
-    return fake_exec
-
-
 def test_the_mcp_turn_runs_the_same_command_its_probe_verified(
     tmp_path,
     monkeypatch,
@@ -2018,16 +1967,14 @@ def test_the_mcp_turn_runs_the_same_command_its_probe_verified(
     build = _mounted_build(tmp_path, monkeypatch)
     monkeypatch.setattr(provider, "verify_cli_tool_surface", verify_cli_tool_surface)
     probe_commands = _answer_with(monkeypatch, _init_line(_ALL_SAMPLE_TOOLS))
-    turn_commands: list[tuple[str, ...]] = []
-    monkeypatch.setattr(
-        "asyncio.create_subprocess_exec",
-        _spawned_async_cli(turn_commands, b'{"result": "ok"}'),
+    turn_spawns = install_claude_cli_children(
+        monkeypatch, a_claude_cli_child(pid=4242, communicate=(b'{"result": "ok"}', b"")),
     )
 
     asyncio.run(provider.acall_claude_with_mcp(prompt="hi", user_id="u-1"))
 
     _assert_the_turn_runs_what_the_probe_verified(
-        list(probe_commands[0]), list(turn_commands[0]), build, mcp_attached=True,
+        list(probe_commands[0]), list(turn_spawns.children[0].command), build, mcp_attached=True,
     )
 
 
@@ -2044,15 +1991,9 @@ def test_the_streamed_mcp_turn_runs_the_same_command_its_probe_verified(
     build = _mounted_build(tmp_path, monkeypatch)
     monkeypatch.setattr(provider, "verify_cli_tool_surface", verify_cli_tool_surface)
     probe_commands = _answer_with(monkeypatch, _init_line(_ALL_SAMPLE_TOOLS))
-    turn_commands: list[tuple[str, ...]] = []
-
-    async def fake_exec(*cmd, **_kw):
-        turn_commands.append(cmd)
-        spawned = MagicMock(pid=4242, returncode=0)
-        spawned.stdin = None
-        return spawned
-
-    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    turn_spawns = install_claude_cli_children(
+        monkeypatch, a_claude_cli_child(pid=4242, has_stdin=False),
+    )
     monkeypatch.setattr(provider, "_reap_stream_process_after_cancellation", AsyncMock())
 
     async def one_final_event(_proc, _timeout, _correlation_id):
@@ -2068,7 +2009,7 @@ def test_the_streamed_mcp_turn_runs_the_same_command_its_probe_verified(
 
     assert [event.text for event in asyncio.run(collect())] == ["done"]
     _assert_the_turn_runs_what_the_probe_verified(
-        list(probe_commands[0]), list(turn_commands[0]), build, mcp_attached=True,
+        list(probe_commands[0]), list(turn_spawns.children[0].command), build, mcp_attached=True,
     )
 
 
@@ -2105,16 +2046,14 @@ def test_the_async_tool_free_turn_runs_the_same_command_its_probe_verified(
         provider, "averify_no_builtin_cli_tools", averify_no_builtin_cli_tools,
     )
     probe_commands = _answer_with(monkeypatch, _init_line([]))
-    turn_commands: list[tuple[str, ...]] = []
-    monkeypatch.setattr(
-        "asyncio.create_subprocess_exec",
-        _spawned_async_cli(turn_commands, b'{"result":"ok"}'),
+    turn_spawns = install_claude_cli_children(
+        monkeypatch, a_claude_cli_child(pid=4242, communicate=(b'{"result":"ok"}', b"")),
     )
 
     asyncio.run(_acall_cli("hello"))
 
     _assert_the_turn_runs_what_the_probe_verified(
-        list(probe_commands[0]), list(turn_commands[0]), build, mcp_attached=False,
+        list(probe_commands[0]), list(turn_spawns.children[0].command), build, mcp_attached=False,
     )
 
 
@@ -2192,11 +2131,7 @@ def test_sigterm_exit_wait_reports_a_timeout() -> None:
     timeout itself rather than genuinely hanging, so this proves the
     branch (a TimeoutError becomes ``False``), not asyncio's own timer."""
 
-    async def _timed_out() -> None:
-        raise TimeoutError
-
-    proc = MagicMock()
-    proc.wait = AsyncMock(side_effect=_timed_out)
+    proc = a_claude_cli_child(wait_outcome=TimeoutError())
 
     completed = asyncio.run(provider._wait_for_sigterm_exit(proc))
 
@@ -2204,8 +2139,7 @@ def test_sigterm_exit_wait_reports_a_timeout() -> None:
 
 
 def test_sigterm_exit_wait_reports_a_completed_process() -> None:
-    proc = MagicMock()
-    proc.wait = AsyncMock(return_value=0)
+    proc = a_claude_cli_child(wait_outcome=0)
 
     completed = asyncio.run(provider._wait_for_sigterm_exit(proc))
 
@@ -2231,9 +2165,7 @@ def test_reap_process_group_tracks_a_zombie_when_the_wait_never_confirms_exit(
         lambda proc: tracked.append(proc.pid) or True,
     )
 
-    proc = MagicMock()
-    proc.pid = 9999
-    proc.returncode = None
+    proc = a_claude_cli_child(pid=9999, returncode=None)
 
     became_zombie = asyncio.run(provider._reap_process_group(proc))
 
@@ -2252,9 +2184,7 @@ def test_reap_process_group_confirms_a_normal_exit_without_signaling_a_zombie(
     tracked: list[int] = []
     monkeypatch.setattr(provider, "_track_zombie_reap_async", lambda proc: tracked.append(proc.pid))
 
-    proc = MagicMock()
-    proc.pid = 4321
-    proc.returncode = None
+    proc = a_claude_cli_child(pid=4321, returncode=None)
     _reserve_zombie_process(proc.pid)
 
     became_zombie = asyncio.run(provider._reap_process_group(proc))
@@ -2278,8 +2208,7 @@ def test_track_zombie_reap_logs_and_starts_a_background_reaper(monkeypatch, capl
     monkeypatch.setattr(provider, "_reap_in_background", AsyncMock())
 
     async def _run() -> bool:
-        proc = MagicMock()
-        proc.pid = 5150
+        proc = a_claude_cli_child(pid=5150, returncode=None)
         _reserve_zombie_process(proc.pid)
         return provider._track_zombie_reap_async(proc)
 
@@ -2290,22 +2219,14 @@ def test_track_zombie_reap_logs_and_starts_a_background_reaper(monkeypatch, capl
 
 
 def test_track_zombie_reap_starts_the_reaper_held_by_its_reservation() -> None:
-    started = asyncio.Event()
-    release = asyncio.Event()
-
-    async def wait() -> int:
-        started.set()
-        await release.wait()
-        return 0
+    reaping = EventGate()
 
     async def _run() -> bool:
-        proc = MagicMock()
-        proc.pid = 5150
-        proc.wait = AsyncMock(side_effect=wait)
+        proc = a_claude_cli_child(pid=5150, returncode=None, wait_gate=reaping)
         _reserve_zombie_process(proc.pid)
         became_zombie = provider._track_zombie_reap_async(proc)
-        await started.wait()
-        release.set()
+        await reaping.started.wait()
+        reaping.release.set()
         with provider._zombie_registry_lock:
             tasks = list(provider._zombie_reap_tasks)
         await asyncio.gather(*tasks)
@@ -2338,9 +2259,7 @@ def test_reap_in_background_eventually_reaps_logs_and_releases_its_reservation(c
     reap's process ultimately gets cleaned up."""
     caplog.set_level("INFO")
     _reserve_zombie_process(8888)
-    proc = MagicMock()
-    proc.pid = 8888
-    proc.wait = AsyncMock(return_value=0)
+    proc = a_claude_cli_child(pid=8888, returncode=None)
 
     asyncio.run(provider._reap_in_background(proc))
 
@@ -3583,26 +3502,18 @@ def test_tool_surface_probe_refuses_to_start_when_the_zombie_pool_is_saturated(
     async def _run() -> None:
         reapers_started = [asyncio.Event(), asyncio.Event()]
         release_reapers = asyncio.Event()
-        processes: list[MagicMock] = []
-
-        for pid, started in enumerate(reapers_started, start=1):
-            proc = fake_cli_process(None, still_running=True)
-            proc.pid = pid
-            proc.returncode = None
-            proc.communicate = AsyncMock(side_effect=asyncio.TimeoutError)
-
-            async def wait(started: asyncio.Event = started) -> int:
-                started.set()
-                await release_reapers.wait()
-                return 0
-
-            proc.wait = AsyncMock(side_effect=wait)
-            processes.append(proc)
-
-        async def fake_exec(*_args: object, **_kwargs: object) -> MagicMock:
-            return processes.pop(0)
-
-        monkeypatch.setattr(provider.asyncio, "create_subprocess_exec", fake_exec)
+        install_claude_cli_children(
+            monkeypatch,
+            *(
+                a_claude_cli_child(
+                    pid=pid,
+                    returncode=None,
+                    communicate=asyncio.TimeoutError(),
+                    wait_gate=EventGate(started=started, release=release_reapers),
+                )
+                for pid, started in enumerate(reapers_started, start=1)
+            ),
+        )
 
         for _ in reapers_started:
             with pytest.raises(UnavailableError, match="timed out"):
@@ -3849,13 +3760,7 @@ def test_mcp_turn_non_stream_turn_refuses_a_cli_with_an_unverified_tool_surface(
         "verify_cli_tool_surface",
         AsyncMock(side_effect=CliToolSurfaceError("FutureTool")),
     )
-    spawned: list[tuple[str, ...]] = []
-
-    async def fake_exec(*cmd, **_kw):
-        spawned.append(cmd)
-        raise AssertionError("the tool turn must not spawn an unverified CLI")
-
-    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    spawned = install_claude_cli_children(monkeypatch).children
 
     turn = provider.acall_claude_with_mcp(prompt="hi", user_id="u-1")
     with pytest.raises(CliToolSurfaceError):
@@ -3871,13 +3776,7 @@ def test_mcp_turn_refuses_a_cli_with_an_unverified_tool_surface(
         "verify_cli_tool_surface",
         AsyncMock(side_effect=CliToolSurfaceError("FutureTool")),
     )
-    spawned: list[tuple[str, ...]] = []
-
-    async def fake_exec(*cmd, **_kw):
-        spawned.append(cmd)
-        raise AssertionError("the tool turn must not spawn an unverified CLI")
-
-    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    spawned = install_claude_cli_children(monkeypatch).children
 
     async def _turn() -> None:
         async for _ in acall_claude_with_mcp_stream(prompt="hi", user_id="u-1"):
@@ -3889,54 +3788,17 @@ def test_mcp_turn_refuses_a_cli_with_an_unverified_tool_surface(
     assert spawned == []
 
 
-class _StreamReader:
-    def __init__(self, lines: list[bytes]) -> None:
-        self._lines = list(lines)
-
-    async def readline(self) -> bytes:
-        return self._lines.pop(0) if self._lines else b""
-
-    async def read(self, size: int = -1) -> bytes:
-        if not self._lines:
-            return b""
-        payload = b"".join(self._lines)
-        if size >= 0:
-            self._lines = [payload[size:]] if len(payload) > size else []
-            return payload[:size]
-        self._lines = []
-        return payload
-
-
-def _streaming_cli_process(lines: list[bytes], *, returncode: int = 0) -> MagicMock:
-    process = MagicMock()
-    process.pid = 2468
-    process.returncode = returncode
-    process.stdout = _StreamReader(lines)
-    process.stderr = _StreamReader([])
-    process.stdin = MagicMock()
-
-    async def drain() -> None:
-        return None
-
-    async def wait() -> None:
-        return None
-
-    process.stdin.drain = drain
-    process.wait = wait
-    return process
-
-
 async def _collect_stream_events(stream) -> list[object]:
     return [event async for event in stream]
 
 
 def test_public_claude_stream_skips_malformed_cli_output(monkeypatch, caplog) -> None:
-    process = _streaming_cli_process(
-        [
+    process = a_claude_cli_child(
+        stream_lines=[
             b"not-json\n",
             b'{"type":"assistant","message":{"content":[{"type":"text","text":"draft"}]}}\n',
             b'{"type":"result","result":"final"}\n',
-        ]
+        ],
     )
 
     async def spawn(*_command, **_kwargs):
@@ -3964,7 +3826,7 @@ def test_public_claude_stream_skips_malformed_cli_output(monkeypatch, caplog) ->
 
 
 def test_public_claude_stream_names_a_nonzero_cli_exit(monkeypatch) -> None:
-    process = _streaming_cli_process([], returncode=2)
+    process = a_claude_cli_child(returncode=2)
 
     async def spawn(*_command, **_kwargs):
         return process
@@ -4012,8 +3874,7 @@ def test_stream_reap_completes_before_a_cancelled_closer_returns(monkeypatch) ->
     monkeypatch.setattr(provider, "_unlink_quiet", lambda _path: None)
 
     async def _run() -> None:
-        proc = MagicMock()
-        proc.stdin = None
+        proc = a_claude_cli_child(has_stdin=False)
         reaper_started = asyncio.Event()
         finish_reaper = asyncio.Event()
         reaper_finished = asyncio.Event()
@@ -4063,7 +3924,7 @@ def test_closing_a_claude_stream_keeps_its_private_home_until_confirmed_reap(
         reap_started = asyncio.Event()
         finish_reap = asyncio.Event()
 
-        async def open_async_pipes(child, **_kwargs):
+        def child_started_in_a_private_home(child, _stream_buffer_limit):
             nonlocal home_seen
             home_seen = assert_private_credential_child(
                 child,
@@ -4071,12 +3932,13 @@ def test_closing_a_claude_stream_keeps_its_private_home_until_confirmed_reap(
                 source=source,
                 destination=Path(".claude/.credentials.json"),
             )
-            proc = _streaming_cli_process([
-                b'{"type":"assistant","message":{"content":'
-                b'[{"type":"text","text":"partial"}]}}\n',
-            ])
-            proc.returncode = None
-            return proc
+            return a_claude_cli_child(
+                returncode=None,
+                stream_lines=[
+                    b'{"type":"assistant","message":{"content":'
+                    b'[{"type":"text","text":"partial"}]}}\n',
+                ],
+            )
 
         async def reap_process_group(proc) -> bool:
             reap_started.set()
@@ -4084,7 +3946,7 @@ def test_closing_a_claude_stream_keeps_its_private_home_until_confirmed_reap(
             provider._release_zombie_reservation(proc.pid)
             return False
 
-        monkeypatch.setattr(provider, "open_async_pipes", open_async_pipes)
+        install_claude_cli_children(monkeypatch, factory=child_started_in_a_private_home)
         monkeypatch.setattr(provider, "_reap_process_group", reap_process_group)
         monkeypatch.setattr(
             provider,
@@ -4142,7 +4004,7 @@ def test_stream_reap_does_not_spin_under_anyio_level_cancellation(monkeypatch) -
         monkeypatch.setattr(provider, "_reap_process_group", fake_reap)
 
         async def close_after_cancellation() -> None:
-            process = MagicMock()
+            process = a_claude_cli_child(returncode=None)
             with pytest.raises(asyncio.CancelledError):
                 await provider._reap_stream_process_after_cancellation(process)
             close_finished.set()
@@ -4186,28 +4048,19 @@ def test_stream_failure_starts_one_background_reaper(
     async def _run() -> None:
         reaper_started = asyncio.Event()
         release_reaper = asyncio.Event()
-        proc = MagicMock()
-        proc.pid = 5150
-        proc.returncode = None
-        proc.stdin = None
-        proc.stderr = None
-
-        async def wait() -> int:
-            reaper_started.set()
-            await release_reaper.wait()
-            return 0
+        proc = a_claude_cli_child(
+            pid=5150,
+            returncode=None,
+            has_stdin=False,
+            wait_gate=EventGate(started=reaper_started, release=release_reaper),
+        )
 
         async def failing_lines(*_args: object):
             if failure is not None:
                 raise failure
             yield b""
 
-        proc.wait = AsyncMock(side_effect=wait)
-        monkeypatch.setattr(
-            provider.asyncio,
-            "create_subprocess_exec",
-            AsyncMock(return_value=proc),
-        )
+        install_claude_cli_children(monkeypatch, proc)
         monkeypatch.setattr(provider, "_iter_lines", failing_lines)
 
         async def stream() -> None:

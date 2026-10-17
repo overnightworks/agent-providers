@@ -17,6 +17,7 @@ sys.path.insert(
     0, str(Path(__file__).resolve().parents[1])
 )  # the fake app is test code, not a wheel
 
+from capability_support import capability_carrying  # noqa: E402
 from mcp_app_fake import CERTIFICATE_HOST, ScriptedApp, TestAuthority, serving  # noqa: E402
 
 from agent_service.app_tools import open_app_tools  # noqa: E402
@@ -40,7 +41,7 @@ def declared_httpx_ranges() -> list[set[str]]:
 async def discover(origin: str, authority: TestAuthority) -> list[str]:
     async with asyncio.timeout(DISCOVERY_DEADLINE_SECONDS):
         async with open_app_tools(
-            origin, "smoke-capability", authority.client_context()
+            origin, capability_carrying("smoke-capability"), authority.client_context()
         ) as session:
             return [tool.name for tool in await session.list_tools()]
 

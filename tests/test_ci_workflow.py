@@ -28,27 +28,44 @@ def _timeout_minutes(job: str) -> int:
 
 @pytest.mark.parametrize(
     ("job", "minutes"),
-    [("checks", 20), ("keycloak-token-shapes", 30), ("dependency-floors", 20)],
+    [("test", 20), ("checks", 5), ("keycloak-token-shapes", 30), ("dependency-floors", 20)],
 )
 def test_a_ci_job_is_bounded_in_time(job, minutes):
     assert _timeout_minutes(job) == minutes
 
 
-def test_checks_runs_on_every_declared_python_minor_under_its_own_name():
-    checks = _job_body("checks")
-    matrix = re.search(r'^        python-version: \[(.*)\]$', checks, re.M)
+def test_test_runs_on_every_declared_python_minor():
+    test_job = _job_body("test")
+    matrix = re.search(r'^        python-version: \[(.*)\]$', test_job, re.M)
     assert matrix
     assert re.findall(r'"([\d.]+)"', matrix.group(1)) == _DECLARED_PYTHON_MINORS
+    assert "fail-fast: false" in test_job
+    assert "python-version: ${{ matrix.python-version }}" in test_job
+    assert "matrix." not in re.sub(r"^\s+(python-version|if):.*$", "", test_job, flags=re.M)
+
+
+def test_checks_is_the_one_aggregate_of_the_test_matrix():
+    checks = _job_body("checks")
     assert "    name: checks\n" in checks
-    assert "fail-fast: false" in checks
-    assert "python-version: ${{ matrix.python-version }}" in checks
-    assert "matrix." not in re.sub(r"^\s+(python-version|if):.*$", "", checks, flags=re.M)
+    assert "    needs: [test]\n" in checks
+    assert "    if: always()\n" in checks
+    assert "strategy:" not in checks
+    assert "TEST_RESULT: ${{ needs.test.result }}" in checks
+    assert 'run: test "$TEST_RESULT" = success' in checks
 
 
 def test_only_the_oldest_leg_uploads_coverage():
-    upload = re.search(r"Upload the coverage report.*?\n\n", _job_body("checks"), re.S)
+    upload = re.search(r"Upload the coverage report.*?\n\n", _job_body("test"), re.S)
     assert upload
     assert "if: matrix.python-version == '3.12'" in upload.group(0)
+
+
+def test_the_quality_verdict_waits_for_the_checks_aggregate_without_a_matrix():
+    quality = _job_body("quality")
+    needs = re.search(r"^    needs: \[(.*)\]$", quality, re.M)
+    assert needs
+    assert "checks" in [name.strip() for name in needs.group(1).split(",")]
+    assert "strategy:" not in quality
 
 
 def test_dependency_floors_resolves_the_lowest_direct_dependencies():

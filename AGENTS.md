@@ -77,9 +77,9 @@ collection because one test imports Pillow at module load.
 CI also runs the `quality` gate (`overnightworks/quality`, pinned by commit in
 `ci.yml`); its required check is `quality / verdict`. Its secret allowance and
 mandatory jobs live in `quality/config.toml`, its SonarCloud scope in
-`sonar-project.properties`, and the `checks` job feeds it `coverage.xml`.
-`checks` runs on every declared Python minor (3.12 to 3.15) and only the 3.12
-leg feeds `coverage.xml`; `dependency-floors` runs the suite on the lowest
+`sonar-project.properties`, and the `test` job feeds it `coverage.xml`.
+`test` runs on every declared Python minor (3.12 to 3.15) and only the 3.12
+leg feeds `coverage.xml`; `checks` is the one aggregate the verdict requires; `dependency-floors` runs the suite on the lowest
 declared direct dependencies at 3.12, and `quality/config.toml` makes it
 mandatory.
 

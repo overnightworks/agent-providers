@@ -13,8 +13,8 @@ permissions:
   contents: read
 
 jobs:
-  checks:
-    name: checks
+  test:
+    name: test
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -145,6 +145,18 @@ jobs:
           cat refused.txt
           test "$status" -eq 2
           grep -q 'identity.jwks_url' refused.txt
+
+  checks:
+    name: checks
+    needs: [test]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fail unless every Python minor passed
+        env:
+          TEST_RESULT: ${{ needs.test.result }}
+        run: test "$TEST_RESULT" = success
 
   keycloak-token-shapes:
     name: keycloak-token-shapes

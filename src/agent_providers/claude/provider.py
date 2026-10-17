@@ -28,6 +28,7 @@ from agent_providers import process
 from agent_providers.config import McpServerSpec, current_config, current_turn_config
 from agent_providers.constants import (
     CLAUDE_CLI_COMPLETION_TIMEOUT_SECONDS,
+    CLAUDE_CLI_CURRENT_MODEL_MARKER,
     CLAUDE_CLI_MAX_CONCURRENT_PROCESSES,
     CLAUDE_CLI_MODEL_LIST_MARKER,
     CLAUDE_CLI_NO_TOOL_SURFACE_TIMEOUT_SECONDS,
@@ -531,16 +532,29 @@ def cli_login_status() -> CliLogin:
     return claude_cli_login(_find_claude_binary())
 
 
-def list_cli_model_aliases() -> list[str]:
-    """Model names the CLI's `--model` flag accepts, read from `/model`.
+@dataclass(frozen=True)
+class ClaudeCliModelCatalog:
+    """What the CLI's `/model` text states.
 
-    The CLI's own text is the only source for this list — there is no
+    ``aliases`` are the names the `--model` flag accepts. ``current_model_label``
+    is the CLI's own name for the model a turn with no model runs: something to
+    show, never a model to pass and never one of the aliases.
+    """
+
+    aliases: tuple[str, ...]
+    current_model_label: str | None
+
+
+def cli_model_catalog() -> ClaudeCliModelCatalog:
+    """Read the CLI's model aliases and its stated default from one `/model` start.
+
+    The CLI's own text is the only source for this — there is no
     machine-readable catalog endpoint for a CLI-only login. Raises
-    UnavailableError, never returns an empty list, if that text doesn't
+    UnavailableError, never returns an empty alias tuple, if that text doesn't
     contain the expected `Available: a, b, c.` fragment.
 
     The CLI's closing "or a full model ID" is not a name, and the flag also
-    takes full ids that this list does not hold.
+    takes full ids that the aliases do not hold.
     """
     binary = _require_claude_binary()
     with _faults_in_the_claude_family():
@@ -560,24 +574,40 @@ def list_cli_model_aliases() -> list[str]:
         raise UnavailableError(
             CLAUDE_CLI_MODEL_CATALOG_ERROR,
         )
-    return _parse_cli_model_aliases(run.stdout)
+    return ClaudeCliModelCatalog(
+        _model_aliases_in(run.stdout), _current_model_label_in(run.stdout),
+    )
 
 
-def _parse_cli_model_aliases(stdout: str) -> list[str]:
+def _model_aliases_in(stdout: str) -> tuple[str, ...]:
     for line in stdout.splitlines():
         if CLAUDE_CLI_MODEL_LIST_MARKER not in line:
             continue
         after_marker = line.split(CLAUDE_CLI_MODEL_LIST_MARKER, 1)[1]
-        aliases = [
+        aliases = tuple(
             token.strip()
             for token in after_marker.rstrip(".").split(", ")
             if token.strip() and " " not in token.strip()
-        ]
+        )
         if aliases:
             return aliases
     raise UnavailableError(
         "Claude CLI /model output did not contain a parseable model list",
     )
+
+
+def _current_model_label_in(stdout: str) -> str | None:
+    marked_lines = [
+        line for line in stdout.splitlines()
+        if line.startswith(CLAUDE_CLI_CURRENT_MODEL_MARKER)
+    ]
+    if len(marked_lines) != 1:
+        return None
+    _, opening, after_opening = marked_lines[0].partition("`")
+    label, closing, _ = after_opening.partition("`")
+    if not (opening and closing and label and label.isprintable()):
+        return None
+    return label
 
 
 # ── Shared helpers ─────────────────────────────────────────────────

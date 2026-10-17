@@ -28,7 +28,7 @@ from agent_providers.claude.provider import (
     CliLoginNotConfiguredError,
     CliUnavailableError,
     cli_login_status,
-    list_cli_model_aliases,
+    cli_model_catalog,
 )
 from agent_providers.claude.provider import (
     UnavailableError as ClaudeCliUnavailableError,
@@ -172,6 +172,9 @@ class ProviderRouteSnapshot:
     ``readiness`` is ``READY``, and empty otherwise. It is neither fixed nor
     complete: a name missing from it is no proof that the route refuses it.
     ``catalogue_failure`` names why a probed catalogue failed.
+    ``default_model_label`` is the Claude CLI's own name for what a turn with no
+    model runs. It is for display only, never a model to pass, and ``None`` for
+    every other route and for a route that is not ready.
     """
 
     models: tuple[str, ...]
@@ -183,6 +186,13 @@ class ProviderRouteSnapshot:
     reason: SafeRouteReason | None
     probed_at: datetime
     setup_label: str
+    default_model_label: str | None
+
+
+@dataclass(frozen=True)
+class _RouteOffer:
+    models: list[str]
+    default_model_label: str | None
 
 
 @dataclass(frozen=True)
@@ -201,7 +211,7 @@ def probe_provider_route(provider: str, route: ProviderRoute) -> ProviderRouteSn
     if preflight is not None:
         return preflight
     try:
-        models = tuple(list_provider_models(provider, route))
+        offer = _route_offer(provider, route)
     except ProviderModelCatalogUnavailableError as exc:
         reason = exc.reason or normalize_route_failure(
             SafeRouteReasonCode.CATALOGUE_PROTOCOL_ERROR,
@@ -210,6 +220,7 @@ def probe_provider_route(provider: str, route: ProviderRoute) -> ProviderRouteSn
             (), reason, None, None, _readiness_of_fault(reason.code),
             capability, reason, now,
             _CLI_LOGIN_SETUP_LABEL if route is ProviderRoute.CLI else _API_KEY_SETUP_LABEL,
+            None,
         )
     except ProviderUnavailableError as exc:
         reason = exc.reason or normalize_route_failure(
@@ -219,15 +230,17 @@ def probe_provider_route(provider: str, route: ProviderRoute) -> ProviderRouteSn
             (), reason, None, None, _readiness_of_fault(reason.code),
             capability, reason, now,
             _CLI_LOGIN_SETUP_LABEL if route is ProviderRoute.CLI else _API_KEY_SETUP_LABEL,
+            None,
         )
     if route is ProviderRoute.API:
         source = "provider API"
     else:
         source = "provider CLI"
     return ProviderRouteSnapshot(
-        models, None, source, None, ProviderRouteReadinessState.READY,
+        tuple(offer.models), None, source, None, ProviderRouteReadinessState.READY,
         capability, None, now,
         _CLI_LOGIN_SETUP_LABEL if route is ProviderRoute.CLI else _API_KEY_SETUP_LABEL,
+        offer.default_model_label,
     )
 
 
@@ -306,7 +319,7 @@ def _route_preflight_snapshot(
 ) -> ProviderRouteSnapshot:
     return ProviderRouteSnapshot(
         (), None, None, None, readiness, capability,
-        normalize_route_failure(reason_code), now, setup_label,
+        normalize_route_failure(reason_code), now, setup_label, None,
     )
 
 
@@ -351,17 +364,25 @@ def list_provider_models(provider: str, route: ProviderRoute) -> list[str]:
     list, and ProviderUnavailableError for an unknown provider or a missing API
     key.
     """
+    return _route_offer(provider, route).models
+
+
+def _route_offer(provider: str, route: ProviderRoute) -> _RouteOffer:
     config = current_config()
     if provider not in ProviderName:
         raise ProviderUnavailableError(provider, _unknown_provider_message(provider))
     if route is ProviderRoute.CLI:
-        return _models_for_setup_method(provider, _cli_setup_method_for(provider), config)
+        if provider == ProviderName.CLAUDE:
+            return _claude_cli_offer()
+        method = _cli_setup_method_for(provider)
+        return _RouteOffer(_models_for_setup_method(provider, method, config), None)
     key = _secret(_provider_api_credential(provider, config).secret)
     if not key:
         raise ProviderUnavailableError(
             provider, route.value, normalize_route_failure(SafeRouteReasonCode.API_KEY_NOT_SET),
         )
-    return _models_for_setup_method(provider, ProviderSetupMethod.API_KEY, config)
+    models = _models_for_setup_method(provider, ProviderSetupMethod.API_KEY, config)
+    return _RouteOffer(models, None)
 
 
 def _cli_setup_method_for(provider: str) -> ProviderSetupMethod:
@@ -386,8 +407,6 @@ def _models_for_setup_method(
     method: ProviderSetupMethod,
     config: ProviderRuntimeConfig,
 ) -> list[str]:
-    if method is ProviderSetupMethod.CLAUDE_CLI:
-        return _list_claude_cli_models()
     if method is ProviderSetupMethod.GROK_CLI:
         return _list_grok_cli_models()
     if method is ProviderSetupMethod.CODEX_CLI:
@@ -625,22 +644,16 @@ def _list_openai_models(key: str) -> list[str]:
     return sorted(chat)
 
 
-def _list_claude_cli_models() -> list[str]:
+def _claude_cli_offer() -> _RouteOffer:
     try:
-        aliases = list_cli_model_aliases()
+        catalog = cli_model_catalog()
     except ClaudeCliUnavailableError as exc:
         raise ProviderModelCatalogUnavailableError(
             ProviderName.CLAUDE,
             CLAUDE_CLI_MODEL_CATALOG_ERROR,
             normalize_route_failure(_cli_fault_reason_code(exc)),
         ) from exc
-    if not aliases:
-        raise ProviderModelCatalogUnavailableError(
-            ProviderName.CLAUDE,
-            "no chat models returned by claude CLI",
-            normalize_route_failure(SafeRouteReasonCode.CATALOGUE_PROTOCOL_ERROR),
-        )
-    return sorted(aliases)
+    return _RouteOffer(sorted(catalog.aliases), catalog.current_model_label)
 
 
 def _list_claude_models(key: str) -> list[str]:

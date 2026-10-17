@@ -39,6 +39,7 @@ from agent_providers.catalog import (
     ProviderReady,
     ProviderRoute,
     ProviderRouteReadinessState,
+    ProviderRouteSnapshot,
     ProviderSetupMethod,
     list_provider_models,
     probe_provider_route,
@@ -164,17 +165,144 @@ def test_a_cli_that_offers_no_usable_name_is_a_catalogue_failure(
     assert failure.value.reason.code is SafeRouteReasonCode.CATALOGUE_PROTOCOL_ERROR
 
 
-def test_a_ready_claude_cli_route_carries_its_aliases(tmp_path: Path) -> None:
+CLAUDE_DEFAULT_LABEL = "Opus 5 (1M context)"
+CLAUDE_AVAILABLE_LINE = "Usage: /model <name>. Available: sonnet, opus.\n"
+
+
+def test_a_ready_claude_cli_route_names_its_default_from_one_model_start(
+    tmp_path: Path,
+) -> None:
+    calls = tmp_path / "calls"
     _configure_cli(tmp_path, "claude", {
         CLAUDE_STATUS_COMMAND: CLAUDE_LOGGED_IN,
         CLAUDE_MODEL_COMMAND: CLAUDE_MODEL_CATALOG_STDOUT,
-    })
+    }, calls_log=calls)
 
     snapshot = probe_provider_route("claude", ProviderRoute.CLI)
 
     assert snapshot.readiness is ProviderRouteReadinessState.READY
     assert list(snapshot.models) == CLAUDE_MODEL_CATALOG_ALIASES
     assert snapshot.catalogue_failure is None
+    assert snapshot.default_model_label == CLAUDE_DEFAULT_LABEL
+    assert calls.read_text().splitlines() == ["auth status", "-p /model"]
+
+
+@pytest.mark.parametrize("unreadable_label_text", [
+    "",
+    "Current model: `Opus 5`\nCurrent model: `Sonnet 5`\n",
+], ids=("no-current-model-line", "two-current-model-lines"))
+def test_a_ready_claude_cli_route_with_an_unreadable_label_names_none(
+    unreadable_label_text: str, tmp_path: Path,
+) -> None:
+    _configure_cli(tmp_path, "claude", {
+        CLAUDE_STATUS_COMMAND: CLAUDE_LOGGED_IN,
+        CLAUDE_MODEL_COMMAND: unreadable_label_text + CLAUDE_AVAILABLE_LINE,
+    })
+
+    snapshot = probe_provider_route("claude", ProviderRoute.CLI)
+
+    assert snapshot.readiness is ProviderRouteReadinessState.READY
+    assert snapshot.models == ("opus", "sonnet")
+    assert snapshot.catalogue_failure is None
+    assert snapshot.default_model_label is None
+
+
+def test_the_claude_default_follows_the_cli_at_the_next_probe(tmp_path: Path) -> None:
+    def probe_after_the_cli_states(label: str) -> ProviderRouteSnapshot:
+        _configure_cli(tmp_path, "claude", {
+            CLAUDE_STATUS_COMMAND: CLAUDE_LOGGED_IN,
+            CLAUDE_MODEL_COMMAND: f"Current model: `{label}`\n" + CLAUDE_AVAILABLE_LINE,
+        })
+        return probe_provider_route("claude", ProviderRoute.CLI)
+
+    first = probe_after_the_cli_states("Opus 5.5 (default)")
+    second = probe_after_the_cli_states("Sonnet 5.5 (default)")
+
+    assert (first.default_model_label, second.default_model_label) == (
+        "Opus 5.5 (default)", "Sonnet 5.5 (default)",
+    )
+
+
+def _stub_a_ready_api_listing(
+    monkeypatch: pytest.MonkeyPatch, key_setting: str, listed_id: str,
+) -> None:
+    override_provider_runtime(**{key_setting: SecretStr("a-key")})
+    monkeypatch.setattr(httpx, "get", lambda url, **_: httpx.Response(
+        200, json={"data": [{"id": listed_id}]}, request=httpx.Request("GET", url),
+    ))
+
+
+def _a_ready_cli_route(provider: str):
+    def arrange(tmp_path: Path, _monkeypatch: pytest.MonkeyPatch) -> ProviderRoute:
+        _configure_cli(tmp_path, provider, SIGNED_IN_CLI_ANSWERS[provider])
+        return ProviderRoute.CLI
+    return arrange
+
+
+def _a_ready_api_route(provider: str, key_setting: str, listed_id: str):
+    def arrange(_tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ProviderRoute:
+        _stub_a_ready_api_listing(monkeypatch, key_setting, listed_id)
+        return ProviderRoute.API
+    return arrange
+
+
+def _a_logged_out_claude_cli_route(
+    tmp_path: Path, _monkeypatch: pytest.MonkeyPatch,
+) -> ProviderRoute:
+    _configure_cli(tmp_path, "claude", {
+        CLAUDE_STATUS_COMMAND: CLAUDE_LOGGED_OUT,
+        CLAUDE_MODEL_COMMAND: CLAUDE_MODEL_CATALOG_STDOUT,
+    })
+    return ProviderRoute.CLI
+
+
+def _a_claude_cli_route_with_a_broken_catalogue(
+    tmp_path: Path, _monkeypatch: pytest.MonkeyPatch,
+) -> ProviderRoute:
+    _configure_cli(tmp_path, "claude", {
+        CLAUDE_STATUS_COMMAND: CLAUDE_LOGGED_IN,
+        CLAUDE_MODEL_COMMAND: CLAUDE_MODEL_CATALOG_NAMING_NO_MODEL,
+    })
+    return ProviderRoute.CLI
+
+
+def _a_claude_cli_route_without_a_binary(
+    tmp_path: Path, _monkeypatch: pytest.MonkeyPatch,
+) -> ProviderRoute:
+    override_provider_runtime(claude_cli_binary="missing-cli", cli_binary_search_path=(tmp_path,))
+    return ProviderRoute.CLI
+
+
+ROUTES_WITHOUT_A_STATED_DEFAULT = [
+    pytest.param(_a_ready_cli_route("codex"), "codex", id="codex-cli"),
+    pytest.param(_a_ready_cli_route("grok"), "grok", id="grok-cli"),
+    pytest.param(_a_logged_out_claude_cli_route, "claude", id="claude-logged-out"),
+    pytest.param(_a_claude_cli_route_without_a_binary, "claude", id="claude-binary-gone"),
+    pytest.param(
+        _a_claude_cli_route_with_a_broken_catalogue, "claude", id="claude-broken-catalogue",
+    ),
+    pytest.param(
+        _a_ready_api_route("claude", "anthropic_api_key", "claude-opus-5"), "claude",
+        id="claude-api",
+    ),
+    pytest.param(
+        _a_ready_api_route("grok", "xai_api_key", "grok-4.6"), "grok", id="grok-api",
+    ),
+    pytest.param(
+        _a_ready_api_route("codex", "openai_api_key", "gpt-5.6"), "codex", id="codex-api",
+    ),
+]
+
+
+@pytest.mark.parametrize(("arrange", "provider"), ROUTES_WITHOUT_A_STATED_DEFAULT)
+def test_a_route_without_a_stated_default_names_none(
+    arrange, provider: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route = arrange(tmp_path, monkeypatch)
+
+    snapshot = probe_provider_route(provider, route)
+
+    assert snapshot.default_model_label is None
 
 
 def test_a_claude_cli_route_with_a_broken_catalogue_is_disturbed_and_lists_nothing(

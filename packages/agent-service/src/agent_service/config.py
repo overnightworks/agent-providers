@@ -1,7 +1,8 @@
 """The service's one configuration: identity, listener, profiles, purposes and apps.
 
 The service accepts at most one subscription profile, for Claude, which needs its
-token file. An app that lists tools names its one https MCP origin; an origin is
+token file and the ``[cli]`` section naming the absolute Claude program and the exact version
+it must report. An app that lists tools names its one https MCP origin; an origin is
 never shared between apps and needs the signing key. At load, every such app's
 capability is measured against the 8,192-character limit with a reserved subject
 size and timestamp width, so an app whose tools do not fit stops startup instead
@@ -45,6 +46,7 @@ from agent_service.capability import (
     preflight_claims,
     signed_capability,
 )
+from agent_service.claude_version import PinnedClaudeVersion
 from agent_service.secret_file import read_token_file, shown_text
 from agent_service.signing import SigningKey, load_signing_key
 
@@ -118,6 +120,17 @@ class SigningConfig(_Section):
     key: Annotated[SigningKey, BeforeValidator(_signing_key_in_file)] = Field(
         validation_alias="key_file"
     )
+
+
+def _claude_program(path: object) -> Path:
+    return _absolute_path_to("claude program", path)
+
+
+class CliConfig(_Section):
+    """The Claude program this installation runs and the one version it must report."""
+
+    claude_binary: Annotated[Path, BeforeValidator(_claude_program)]
+    claude_version: PinnedClaudeVersion
 
 
 class ServerConfig(_Section):
@@ -253,6 +266,13 @@ def _refuse_a_claude_profile_without_its_token_file(document: object) -> None:
             )
 
 
+def _refuse_a_claude_profile_without_the_cli_section(document: object) -> None:
+    if _value(document, "cli") is not None:
+        return
+    if any(provider is Provider.CLAUDE for _name, _table, provider in _raw_profiles(document)):
+        raise ValueError("cli: required for a claude profile")
+
+
 def _refuse_an_origin_without_signing(document: object) -> None:
     if not isinstance(document, Mapping) or document.get("signing") is not None:
         return
@@ -277,6 +297,7 @@ RULES_ON_THE_RAW_DOCUMENT: Final = (
     _refuse_a_second_profile_for_one_provider,
     _refuse_a_profile_for_a_provider_without_a_route,
     _refuse_a_claude_profile_without_its_token_file,
+    _refuse_a_claude_profile_without_the_cli_section,
     _refuse_an_origin_without_signing,
     _refuse_tools_without_an_origin,
 )
@@ -286,6 +307,7 @@ class ServiceConfig(_Section):
     identity: IdentityConfig
     server: ServerConfig = ServerConfig()
     runs: RunConfig = RunConfig()
+    cli: CliConfig | None = None
     signing: SigningConfig | None = None
     profiles: dict[NonEmptyText, ProfileConfig] = Field(default_factory=dict)
     purposes: dict[NonEmptyText, PurposeConfig]

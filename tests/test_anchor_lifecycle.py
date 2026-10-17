@@ -139,8 +139,8 @@ def designed_transitions(stored: int, reported: int):
 
 @pytest.mark.parametrize(
     ("stored", "reported"),
-    [(0, 3), (3, -9), (-9, 3)],
-    ids=["zero", "positive", "negative"],
+    list(itertools.permutations((0, 3, -9), 2)),
+    ids=lambda code: str(code),
 )
 @pytest.mark.parametrize("state", list(AnchorState), ids=lambda state: state.name)
 @pytest.mark.parametrize(

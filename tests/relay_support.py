@@ -212,17 +212,28 @@ def port_of(relay: Relay) -> int:
 
 
 class RelayWrites:
-    """Records every stream write synchronously, so a gate check never waits on delivery order."""
+    """Records what each socket send hands to the kernel, synchronously, so no delivery order hides it."""
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._writes: list[tuple[Any, bytes]] = []
-        original = asyncio.StreamWriter.write
+        monkeypatch.setattr(socket.socket, "send", self._recorded("send", lambda data: data))
+        monkeypatch.setattr(socket.socket, "sendall", self._recorded("sendall", lambda data: data))
+        monkeypatch.setattr(
+            socket.socket, "sendmsg", self._recorded("sendmsg", lambda buffers: b"".join(buffers))
+        )
 
-        def recording(writer: asyncio.StreamWriter, data: bytes | bytearray | memoryview) -> None:
-            self._writes.append((writer.get_extra_info("peername"), bytes(data)))
-            original(writer, data)
+    def _recorded(self, method: str, joined: Callable[[Any], bytes]) -> Callable[..., Any]:
+        original = getattr(socket.socket, method)
 
-        monkeypatch.setattr(asyncio.StreamWriter, "write", recording)
+        def recording(sock: socket.socket, data: Any, *rest: Any) -> Any:
+            peer = sock.getpeername()
+            data = list(data) if method == "sendmsg" else data
+            sent = original(sock, data, *rest)
+            offered = bytes(joined(data))
+            self._writes.append((peer, offered if method == "sendall" else offered[:sent]))
+            return sent
+
+        return recording
 
     def to(self, client: "RawClient") -> bytes:
         return b"".join(data for peer, data in self._writes if peer == client.address)

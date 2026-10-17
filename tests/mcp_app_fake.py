@@ -322,3 +322,4 @@ def serving(
         fake.shutdown()
         fake.server_close()
         thread.join(WAIT_SECONDS)
+        assert not thread.is_alive()

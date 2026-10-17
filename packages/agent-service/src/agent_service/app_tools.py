@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import ssl
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass
 from enum import StrEnum
 from http import HTTPStatus
@@ -196,23 +196,34 @@ class _Conversation:
         require_answer_headers: Callable[[httpx.Response], None],
     ) -> _Received:
         headers = self._headers(negotiated, session_id)
+        refusal: UpstreamError | None = None
         try:
             async with self.http.stream(
                 "POST", self.endpoint, content=body, headers=headers
             ) as sent:
-                if 300 <= sent.status_code < 400:
-                    raise_without_chain(UpstreamRedirected(sent.status_code))
-                if not 200 <= sent.status_code < 300:
-                    raise_without_chain(UpstreamRefused(sent.status_code))
-                require_answer_headers(sent)
-                return _Received(
-                    sent.status_code,
-                    sent.headers.get("Content-Type"),
-                    await _raw_body_within_bound(sent),
-                    sent.headers.get(SESSION_ID_HEADER),
-                )
+                try:
+                    return await self._received(sent, require_answer_headers)
+                except UpstreamError as established:
+                    refusal = established
         except httpx.HTTPError as failure:
-            _transport_failure(failure)
+            if refusal is None:
+                _transport_failure(failure)
+        assert refusal is not None
+        raise_without_chain(refusal)
+
+    @staticmethod
+    async def _received(
+        sent: httpx.Response, require_answer_headers: Callable[[httpx.Response], None]
+    ) -> _Received:
+        if not 200 <= sent.status_code < 300:
+            raise_without_chain(UpstreamRefused(sent.status_code))
+        require_answer_headers(sent)
+        return _Received(
+            sent.status_code,
+            sent.headers.get("Content-Type"),
+            await _raw_body_within_bound(sent),
+            sent.headers.get(SESSION_ID_HEADER),
+        )
 
     async def request(
         self,
@@ -298,10 +309,20 @@ async def _handshake(conversation: _Conversation) -> AppToolsSession:
     return AppToolsSession(conversation, negotiated, session_id)
 
 
+async def _refuse_redirect(response: httpx.Response) -> None:
+    """Decide a 3xx before httpx parses its ``Location``; a failing close never replaces it."""
+    if not 300 <= response.status_code < 400:
+        return
+    with suppress(httpx.HTTPError):
+        await response.aclose()
+    raise_without_chain(UpstreamRedirected(response.status_code))
+
+
 def _http_client(tls_context: ssl.SSLContext) -> httpx.AsyncClient:
     return httpx.AsyncClient(
         transport=httpx.AsyncHTTPTransport(retries=0, verify=tls_context),
         follow_redirects=False,
+        event_hooks={"response": [_refuse_redirect]},
         trust_env=False,
         timeout=httpx.Timeout(
             connect=UPSTREAM_IO_SECONDS,

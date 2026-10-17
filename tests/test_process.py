@@ -77,7 +77,6 @@ from agent_providers.process import (
     AgentCliUnavailableError,
     CachedProbe,
     ClaimedStartThread,
-    CliCredentialNotConfiguredError,
     CliEnvironmentCause,
     CliEnvironmentUnavailableError,
     CliLineChannel,
@@ -87,7 +86,6 @@ from agent_providers.process import (
     CliRunOutcome,
     CliRunReason,
     PrivateCredentialHome,
-    PrivateHomeNotCreatedError,
     _run_credentialed_catalog_cli,
     claude_cli_login,
     clear_agent_cli_caches,
@@ -1597,7 +1595,7 @@ def test_an_unusable_login_is_an_error_where_a_missing_credential_is(tmp_path: P
     unusable = tmp_path / "unusable.json"
     unusable.write_text("not json")
 
-    with pytest.raises(CliCredentialNotConfiguredError):
+    with pytest.raises(CliLoginUnusableError):
         PrivateCredentialHome(
             unusable,
             Path("auth.json"),
@@ -1671,7 +1669,7 @@ def test_an_unusable_copy_follows_missing_credential_is_error(
         )
 
     if refused:
-        with pytest.raises(CliCredentialNotConfiguredError) as raised:
+        with pytest.raises(CliLoginUnusableError) as raised:
             install()
         assert str(raised.value) == "configured CLI credential is unusable"
         assert raised.value.__cause__ is None
@@ -1830,13 +1828,13 @@ def _remove_the_source(monkeypatch: pytest.MonkeyPatch, source: Path) -> None:
     (
         (
             fail_the_home_chmod,
-            PrivateHomeNotCreatedError,
+            CliEnvironmentUnavailableError,
             "could not prepare the private CLI credential copy",
         ),
-        (fail_mkdtemp, PrivateHomeNotCreatedError, "could not create a private CLI home"),
+        (fail_mkdtemp, CliEnvironmentUnavailableError, "could not create a private CLI home"),
         (
             _remove_the_source,
-            CliCredentialNotConfiguredError,
+            CliLoginUnusableError,
             "configured CLI credential is missing",
         ),
     ),
@@ -2607,7 +2605,7 @@ def test_the_home_registry_forgets_every_closed_or_collected_home(
     assert len(process._live_home_finalizers) == registered_before + 10
     del closed, unclosed, home
     gc.collect()
-    with pytest.raises(CliCredentialNotConfiguredError):
+    with pytest.raises(CliLoginUnusableError):
         PrivateCredentialHome(
             tmp_path / "missing.json",
             Path(".claude/.credentials.json"),
@@ -3646,8 +3644,8 @@ _LOGIN_SCENARIOS = {
         _a_stored_login_read_whole,
         {
             _enter_through_the_login_decider: CliLoginUnusableError,
-            _enter_through_a_private_credential_home: CliCredentialNotConfiguredError,
-            _enter_through_a_codex_turn_home: CliCredentialNotConfiguredError,
+            _enter_through_a_private_credential_home: CliLoginUnusableError,
+            _enter_through_a_codex_turn_home: CliLoginUnusableError,
         },
     ),
     "incomplete": (
@@ -3655,8 +3653,8 @@ _LOGIN_SCENARIOS = {
         _a_stored_login_read_whole,
         {
             _enter_through_the_login_decider: False,
-            _enter_through_a_private_credential_home: CliCredentialNotConfiguredError,
-            _enter_through_a_codex_turn_home: CliCredentialNotConfiguredError,
+            _enter_through_a_private_credential_home: CliLoginUnusableError,
+            _enter_through_a_codex_turn_home: CliLoginUnusableError,
         },
     ),
     "read-fails-mid-way": (
@@ -3815,7 +3813,7 @@ def test_a_memory_error_inside_the_malformed_handler_holds_no_credential_bytes(
     ("fault", "refusal"),
     (
         (KeyboardInterrupt(), KeyboardInterrupt),
-        (OSError(errno.ENOSPC, "synthetic"), PrivateHomeNotCreatedError),
+        (OSError(errno.ENOSPC, "synthetic"), CliEnvironmentUnavailableError),
     ),
     ids=("interruption", "oserror"),
 )
@@ -3829,7 +3827,7 @@ def test_a_failed_codex_turn_home_layout_removes_the_home_and_leaves_no_chain(
         create_codex_turn_home(CODEX_TOOL_TURN_DIRECTORY_PREFIX)
 
     assert not _private_homes_under(tmp_path)
-    if refusal is PrivateHomeNotCreatedError:
+    if refusal is CliEnvironmentUnavailableError:
         assert raised.value.cause is CliEnvironmentCause.HOME_NOT_CREATED
         assert str(raised.value) == "could not create a private CLI home"
         assert raised.value.__cause__ is None

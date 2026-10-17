@@ -21,7 +21,7 @@ class SafeRouteReasonCode(StrEnum):
     API_KEY_NOT_SET = "api_key_not_set"
     CLI_LOGIN_NOT_CONFIGURED = "cli_login_not_configured"
     CLI_AUTH_REJECTED = "cli_auth_rejected"
-    CLI_BINARY_UNAVAILABLE = "cli_binary_unavailable"
+    CLI_UNAVAILABLE = "cli_unavailable"
     CLI_CAPACITY_EXHAUSTED = "cli_capacity_exhausted"
     CLI_PROTOCOL_ERROR = "cli_protocol_error"
     API_HTTP_ERROR = "api_http_error"
@@ -47,7 +47,7 @@ _SAFE_MESSAGES: dict[SafeRouteReasonCode, str] = {
     SafeRouteReasonCode.API_KEY_NOT_SET: "API key is not set.",
     SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED: "CLI is not signed in.",
     SafeRouteReasonCode.CLI_AUTH_REJECTED: "CLI login was rejected or has expired.",
-    SafeRouteReasonCode.CLI_BINARY_UNAVAILABLE: "CLI is unavailable.",
+    SafeRouteReasonCode.CLI_UNAVAILABLE: "CLI is unavailable.",
     SafeRouteReasonCode.CLI_CAPACITY_EXHAUSTED: "Codex is busy. Try again shortly.",
     SafeRouteReasonCode.CLI_PROTOCOL_ERROR: "CLI returned an invalid response.",
     SafeRouteReasonCode.API_HTTP_ERROR: "API request failed.",

@@ -44,7 +44,7 @@ from agent_providers.text_tool_protocol import (
         (SafeRouteReasonCode.API_KEY_NOT_SET, "API key is not set."),
         (SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED, "CLI is not signed in."),
         (SafeRouteReasonCode.CLI_AUTH_REJECTED, "CLI login was rejected or has expired."),
-        (SafeRouteReasonCode.CLI_BINARY_UNAVAILABLE, "CLI is unavailable."),
+        (SafeRouteReasonCode.CLI_UNAVAILABLE, "CLI is unavailable."),
         (SafeRouteReasonCode.CLI_CAPACITY_EXHAUSTED, "Codex is busy. Try again shortly."),
         (SafeRouteReasonCode.CLI_PROTOCOL_ERROR, "CLI returned an invalid response."),
         (SafeRouteReasonCode.API_HTTP_ERROR, "API request failed."),
@@ -59,6 +59,26 @@ from agent_providers.text_tool_protocol import (
 )
 def test_route_failure_code_has_its_exact_safe_message(code, message):
     assert normalize_route_failure(code).model_dump() == {"code": code, "message": message}
+
+
+def test_the_reason_codes_are_exactly_the_fifteen_public_values():
+    assert {code.value for code in SafeRouteReasonCode} == {
+        "api_key_not_set",
+        "cli_login_not_configured",
+        "cli_auth_rejected",
+        "cli_unavailable",
+        "cli_capacity_exhausted",
+        "cli_protocol_error",
+        "api_http_error",
+        "api_protocol_error",
+        "catalogue_http_error",
+        "catalogue_protocol_error",
+        "tool_execution_failed",
+        "tool_protocol_error",
+        "tool_limit_exceeded",
+        "no_image_tool",
+        "route_failed",
+    }
 
 
 def test_tool_protocol_rejection_codes_are_closed() -> None:

@@ -104,20 +104,6 @@ def _restore_environment_error(
     return CliEnvironmentUnavailableError(detail, cause=cause)
 
 
-class CliCredentialNotConfiguredError(CliLoginUnusableError):
-    """Raised when a turn cannot copy its configured credential source."""
-
-
-class PrivateHomeNotCreatedError(CliEnvironmentUnavailableError):
-    """Raised when a private CLI home could not be created or made private."""
-
-    def __init__(self, detail: str) -> None:
-        super().__init__(detail, cause=CliEnvironmentCause.HOME_NOT_CREATED)
-
-    def __reduce__(self) -> tuple[type[PrivateHomeNotCreatedError], tuple[str], dict[str, Any]]:
-        return (type(self), (str(self),), self.__dict__)
-
-
 class CliProbeBudgetExceeded(AgentCliUnavailableError):
     """Raised when one caller outwaits a still-running cached probe."""
 
@@ -1355,7 +1341,10 @@ class PrivateCredentialHome:
                 )
             except OSError:
                 raise_without_chain(
-                    PrivateHomeNotCreatedError("could not create a private CLI home")
+                    CliEnvironmentUnavailableError(
+                        "could not create a private CLI home",
+                        cause=CliEnvironmentCause.HOME_NOT_CREATED,
+                    )
                 )
             self._finalizer = _live_home_finalizers[registry_key] = weakref.finalize(
                 self, _remove_abandoned_tree, Path(created), os.getpid(), registry_key,
@@ -1369,7 +1358,11 @@ class PrivateCredentialHome:
             try:
                 os.chmod(self._home, 0o700)
             except OSError:
-                raise_without_chain(PrivateHomeNotCreatedError(_CREDENTIAL_COPY_FAILED_DETAIL))
+                raise_without_chain(
+                    CliEnvironmentUnavailableError(
+                        _CREDENTIAL_COPY_FAILED_DETAIL, cause=CliEnvironmentCause.HOME_NOT_CREATED,
+                    )
+                )
             install_credential_file(
                 auth_file,
                 self._home / relative_destination,
@@ -1547,7 +1540,7 @@ def _install_credential(
     if payload is None:
         if missing_credential_is_error:
             raise_without_chain(
-                CliCredentialNotConfiguredError("configured CLI credential is missing")
+                CliLoginUnusableError("configured CLI credential is missing")
             )
         # A probe with no credential answers "logged out", which is
         # indistinguishable from a typo in the configured path. Name the path
@@ -1563,7 +1556,7 @@ def _install_credential(
         if payload is None:
             if missing_credential_is_error:
                 raise_without_chain(
-                    CliCredentialNotConfiguredError("configured CLI credential is unusable")
+                    CliLoginUnusableError("configured CLI credential is unusable")
                 )
             log.warning(
                 "the credential at the configured path %s is not a usable login; "

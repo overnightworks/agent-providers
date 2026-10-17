@@ -8,6 +8,7 @@ import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -22,6 +23,9 @@ from provider_test_support import (
     RunnerFailureWatch,
     a_call_nested_too_deeply_to_decode,
     a_call_to_an_undeclared_tool_carrying,
+    a_credential_destination_that_fails,
+    a_symlink_to_a_login,
+    a_usable_login_over_the_bound,
     assert_a_multi_result_batch_is_rejected,
     assert_private_credential_child,
     assert_the_canary_reaches_only_the_host,
@@ -71,6 +75,60 @@ def test_grok_turn_without_a_configured_credential_is_logged_out(tmp_path: Path)
         _transport()
 
     assert raised.value.reason.code is SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED
+
+
+@pytest.mark.parametrize(
+    "make_source",
+    (a_symlink_to_a_login, a_usable_login_over_the_bound),
+    ids=("linked", "oversize"),
+)
+def test_grok_turn_with_an_unusable_credential_is_logged_out(
+    tmp_path: Path, make_source,
+) -> None:
+    override_provider_runtime(grok_cli_auth_file=make_source(tmp_path))
+
+    with pytest.raises(ProviderUnavailableError) as raised:
+        _transport()
+
+    assert raised.value.reason.code is SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED
+
+
+def _a_working_root_that_was_removed(tmp_path: Path):
+    removed_root = tmp_path / "removed-root"
+    removed_root.mkdir(mode=0o700)
+    override_provider_runtime(cli_working_directory_root=removed_root)
+    removed_root.rmdir()
+    return nullcontext()
+
+
+def _a_credential_copy_that_cannot_be_written(tmp_path: Path):
+    return a_credential_destination_that_fails("write")
+
+
+@pytest.mark.parametrize(
+    "break_the_environment",
+    (_a_working_root_that_was_removed, _a_credential_copy_that_cannot_be_written),
+    ids=("root-removed", "copy-not-written"),
+)
+def test_grok_turn_that_cannot_make_its_home_finds_the_cli_unavailable(
+    tmp_path: Path, break_the_environment,
+) -> None:
+    with break_the_environment(tmp_path):
+        with pytest.raises(ProviderUnavailableError) as raised:
+            _transport()
+
+    assert raised.value.reason.code is SafeRouteReasonCode.CLI_UNAVAILABLE
+    assert list(tmp_path.rglob(f"{grok_cli_adapter.GROK_CLI_TURN_DIRECTORY_PREFIX}*")) == []
+
+
+def test_grok_round_without_its_binary_finds_the_cli_unavailable() -> None:
+    transport = _transport()
+    override_provider_runtime(grok_cli_binary="no-such-grok-binary-3b7e")
+
+    with pytest.raises(ProviderUnavailableError) as raised:
+        asyncio.run(_collect_transport_responses(transport))
+
+    assert raised.value.reason.code is SafeRouteReasonCode.CLI_UNAVAILABLE
 
 
 class _OneWorkerExecutor(ThreadPoolExecutor):

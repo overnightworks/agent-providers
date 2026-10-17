@@ -287,7 +287,7 @@ def _cli_fault_reason_code(fault: Exception) -> SafeRouteReasonCode:
     if isinstance(fault, CliLoginUnusableError | CliLoginNotConfiguredError):
         return SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED
     if isinstance(fault, CliEnvironmentUnavailableError | CliUnavailableError):
-        return SafeRouteReasonCode.CLI_BINARY_UNAVAILABLE
+        return SafeRouteReasonCode.CLI_UNAVAILABLE
     return SafeRouteReasonCode.CATALOGUE_PROTOCOL_ERROR
 
 

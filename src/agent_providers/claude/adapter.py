@@ -243,7 +243,7 @@ def _protocol_error(code: SafeRouteReasonCode) -> ProviderUnavailableError:
 def _claude_cli_failure_reason(error: UnavailableError) -> SafeRouteReasonCode:
     """Map typed Claude CLI failures without exposing their diagnostics."""
     if isinstance(error, CliUnavailableError):
-        return SafeRouteReasonCode.CLI_BINARY_UNAVAILABLE
+        return SafeRouteReasonCode.CLI_UNAVAILABLE
     if isinstance(error, CliLoginNotConfiguredError):
         return SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED
     if isinstance(error, CliLoginRefusedError):

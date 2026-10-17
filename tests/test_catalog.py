@@ -314,7 +314,7 @@ def test_a_signed_in_cli_route_is_disturbed_once_its_binary_is_gone(
 
     assert with_binary.readiness is ProviderRouteReadinessState.READY
     assert without_binary.readiness is ProviderRouteReadinessState.DISTURBED
-    assert without_binary.reason.code is SafeRouteReasonCode.CLI_BINARY_UNAVAILABLE
+    assert without_binary.reason.code is SafeRouteReasonCode.CLI_UNAVAILABLE
 
 
 @pytest.mark.parametrize("provider", ["claude", "grok", "codex"])
@@ -330,7 +330,7 @@ def test_a_cli_route_whose_private_home_cannot_be_made_is_disturbed(
     snapshot = probe_provider_route(provider, ProviderRoute.CLI)
 
     assert snapshot.readiness is ProviderRouteReadinessState.DISTURBED
-    assert snapshot.reason.code is SafeRouteReasonCode.CLI_BINARY_UNAVAILABLE
+    assert snapshot.reason.code is SafeRouteReasonCode.CLI_UNAVAILABLE
 
 
 LOGIN_FAULT_ROUTES = [
@@ -375,7 +375,7 @@ FAULTS_BY_MEANING = [
         CliEnvironmentUnavailableError(
             "no binary", cause=CliEnvironmentCause.BINARY_MISSING,
         ),
-        SafeRouteReasonCode.CLI_BINARY_UNAVAILABLE,
+        SafeRouteReasonCode.CLI_UNAVAILABLE,
         id="environment",
     ),
     pytest.param(
@@ -483,7 +483,7 @@ def _claude_binary_removed(tmp_path: Path) -> None:
 
 CLAUDE_LISTING_FAULTS = [
     pytest.param(
-        _cli_root_removed, SafeRouteReasonCode.CLI_BINARY_UNAVAILABLE, id="home-not-made",
+        _cli_root_removed, SafeRouteReasonCode.CLI_UNAVAILABLE, id="home-not-made",
     ),
     pytest.param(
         _claude_credential_replaced_by_a_link, SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED,
@@ -511,7 +511,7 @@ def test_the_claude_cli_listing_without_a_binary_is_unavailable(tmp_path: Path) 
     with pytest.raises(ProviderModelCatalogUnavailableError) as failure:
         list_provider_models("claude", ProviderRoute.CLI)
 
-    assert failure.value.reason.code is SafeRouteReasonCode.CLI_BINARY_UNAVAILABLE
+    assert failure.value.reason.code is SafeRouteReasonCode.CLI_UNAVAILABLE
 
 
 @pytest.mark.parametrize(("make_fault", "expected_code"), CLAUDE_LISTING_FAULTS)
@@ -598,7 +598,7 @@ CLAUDE_ENVIRONMENT_FAULTS = [
     ),
     pytest.param(
         _claude_cli_root_removed, CliEnvironmentCause.HOME_NOT_CREATED,
-        "PrivateHomeNotCreatedError", id="root-removed",
+        "CliEnvironmentUnavailableError", id="root-removed",
     ),
     pytest.param(
         _claude_credential_copy_not_written, CliEnvironmentCause.CREDENTIAL_COPY_NOT_WRITTEN,

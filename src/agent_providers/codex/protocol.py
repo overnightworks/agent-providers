@@ -26,7 +26,6 @@ from agent_providers.process import (
     CliLineChannel,
     PrivateCredentialHome,
     PrivateCredentialHomeReservation,
-    PrivateHomeNotCreatedError,
     resolve_cli_binary,
     run_cli_bounded,
     run_publishing_failures,
@@ -184,7 +183,11 @@ def create_codex_turn_home(prefix: str) -> CodexTurnHome:
         )
     except OSError:
         home.close()
-        raise_without_chain(PrivateHomeNotCreatedError("could not create a private CLI home"))
+        raise_without_chain(
+            CliEnvironmentUnavailableError(
+                "could not create a private CLI home", cause=CliEnvironmentCause.HOME_NOT_CREATED,
+            )
+        )
     except BaseException:  # NOSONAR(S5754) closes the home, re-raises
         home.close()
         raise

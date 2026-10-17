@@ -854,6 +854,20 @@ def _the_segment_in_json(token: str, _other: str) -> bytes:
     return json.dumps({"text": f"echo {_segment_of(token)} end"}).encode()
 
 
+def _base64url(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def _constructed_token(signature_bytes: bytes) -> str:
+    header = _base64url(json.dumps({"alg": "RS256", "typ": "JWT"}).encode())
+    payload = _base64url(json.dumps({"sub": "constructed"}).encode())
+    return ".".join([header, payload, _base64url(signature_bytes)])
+
+
+_SIGNATURE_WITH_DASHES_AND_UNDERSCORES = bytes(range(256)) + bytes(range(128))
+_ANOTHER_SIGNATURE = bytes(reversed(_SIGNATURE_WITH_DASHES_AND_UNDERSCORES))
+
+
 @pytest.mark.parametrize(
     ("body_of", "appears"),
     [
@@ -872,11 +886,19 @@ def _the_segment_in_json(token: str, _other: str) -> bytes:
     ],
 )
 def test_the_capability_appears_in_a_body_only_through_its_signature_segment(
-    tmp_path: Path, body_of: Callable[[str, str], bytes], appears: bool
+    body_of: Callable[[str, str], bytes], appears: bool
 ) -> None:
-    scope = _scope(tmp_path)
-    token = signed_capability(scope, _claims_of(scope)).token
-    other = signed_capability(scope, _claims_of(scope, now=NOW_IN_2026 + 100.0)).token
+    token = _constructed_token(_SIGNATURE_WITH_DASHES_AND_UNDERSCORES)
+    other = _constructed_token(_ANOTHER_SIGNATURE)
     assert {"-", "_"} <= set(_segment_of(token))
 
     assert capability_carrying(token).appears_in(body_of(token, other)) is appears
+
+
+def test_a_really_signed_capability_is_found_by_its_signature_segment_in_json_output(
+    tmp_path: Path,
+) -> None:
+    scope = _scope(tmp_path)
+    token = signed_capability(scope, _claims_of(scope)).token
+
+    assert capability_carrying(token).appears_in(_the_segment_in_json(token, token))

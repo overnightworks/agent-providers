@@ -8,6 +8,7 @@ from typing import Any
 
 from agent_providers.claude.provider import (
     CliBinaryUnavailableError,
+    CliLoginRefusedError,
     CliToolSurfaceError,
     UnavailableError,
     acall_claude_with_mcp_stream,
@@ -242,6 +243,8 @@ def _claude_cli_failure_reason(error: UnavailableError) -> SafeRouteReasonCode:
     """Map typed Claude CLI failures without exposing their diagnostics."""
     if isinstance(error, CliBinaryUnavailableError):
         return SafeRouteReasonCode.CLI_BINARY_UNAVAILABLE
+    if isinstance(error, CliLoginRefusedError):
+        return SafeRouteReasonCode.CLI_AUTH_REJECTED
     if isinstance(error, CliToolSurfaceError):
         return SafeRouteReasonCode.TOOL_EXECUTION_FAILED
     return SafeRouteReasonCode.CLI_PROTOCOL_ERROR

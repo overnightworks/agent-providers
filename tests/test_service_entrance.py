@@ -266,6 +266,18 @@ TOKEN_REJECTIONS = [
         id="user-subject-with-a-lone-surrogate",
     ),
     pytest.param(
+        MINT.workload,
+        lambda: MINT.user(azp=PRESENTATOR_CLIENT, sub="user-\ud800"),
+        UNAUTHORIZED,
+        id="lone-surrogate-answers-before-the-azp-mismatch",
+    ),
+    pytest.param(
+        lambda: MINT.workload(client="unknown-app"),
+        lambda: MINT.user(azp="unknown-app", sub="user-\ud800"),
+        UNAUTHORIZED,
+        id="lone-surrogate-answers-before-an-unregistered-client",
+    ),
+    pytest.param(
         lambda: MINT.workload(realm_access={"roles": ["default-roles-agent-test"]}),
         MINT.user,
         FORBIDDEN,

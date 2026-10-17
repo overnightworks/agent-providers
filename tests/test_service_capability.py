@@ -403,6 +403,8 @@ def serving(tmp_path, monkeypatch, caplog) -> ServingFactory:
 
     uvicorn does not propagate its records, and it resets its logger's handlers
     when the server is configured, so the handler joins after the server is up.
+    Configuring a second server strips the handler of the first, so a test that reads
+    logs serves one app at a time and never nests ``serving``.
     """
     caplog.set_level(logging.DEBUG)
 
@@ -704,7 +706,9 @@ def test_neither_repr_nor_str_of_an_admitted_run_shows_the_token(serving):
         assert not any(token in text for text in (repr(admitted), str(admitted)))
 
 
-def test_no_frame_header_or_status_body_of_an_admitted_run_carries_the_token(serving):
+def test_no_frame_header_or_status_body_or_log_of_an_admitted_run_carries_the_token(
+    serving, caplog
+):
     with serving() as service:
         user = MINT.user()
         response = service.run(user)
@@ -716,17 +720,21 @@ def test_no_frame_header_or_status_body_of_an_admitted_run_carries_the_token(ser
         for answer in (response, status):
             held = [answer.text, *answer.headers.values(), *answer.headers.keys()]
             assert not any(token in text or _segment_of(token) in text for text in held)
+        _assert_no_token_in_any_log(caplog, service.signed)
 
 
-def _token_bearing_error(admitted: AdmittedRun) -> RuntimeError:
+def _raise_token_bearing_error(admitted: AdmittedRun) -> None:
+    """Raise a ``RuntimeError`` whose message, note and ``__context__`` hold the token.
+
+    Its ``__cause__`` holds the signature segment; both links are genuinely raised and caught.
+    """
     token = admitted.capability.token
     try:
-        raise ValueError(_segment_of(token))
-    except ValueError as cause:
+        raise KeyError(token)
+    except KeyError:
         error = RuntimeError(token)
         error.add_note(token)
-        error.__cause__ = cause
-        return error
+        raise error from ValueError(_segment_of(token))
 
 
 class _RunnerThatRaisesTheTokenIt:
@@ -736,16 +744,22 @@ class _RunnerThatRaisesTheTokenIt:
         self._inside_a_group = inside_a_group
         self._in_its_close = in_its_close
 
+    def _fail(self, admitted: AdmittedRun) -> None:
+        try:
+            _raise_token_bearing_error(admitted)
+        except RuntimeError as error:
+            if not self._inside_a_group:
+                raise
+            raise ExceptionGroup("the runner failed", [error]) from None
+
     async def run(self, admitted: AdmittedRun):
-        error = _token_bearing_error(admitted)
-        raised = ExceptionGroup("the runner failed", [error]) if self._inside_a_group else error
         if self._in_its_close:
             try:
                 yield FinalEvent(text="done")
                 yield AssistantTextEvent(text="never taken")
             finally:
-                raise raised
-        raise raised
+                self._fail(admitted)
+        self._fail(admitted)
         yield
 
 
@@ -800,6 +814,10 @@ def test_nothing_logged_over_an_admitted_run_the_refusals_and_the_guard_carries_
         service.run(purpose=PRESENTER)
         service.run(MINT.user(groups=[]))
         service.run(v=2)
+        service.run(turn={"system": "x", "messages": []})
+        signed = list(service.signed)
+    with serving(fetch_key_set=_unreachable_issuer) as unreachable:
+        assert unreachable.run().status_code == 503
 
-        assert len(service.signed) == 2
-        _assert_no_token_in_any_log(caplog, service.signed)
+    assert len(signed) == 2
+    _assert_no_token_in_any_log(caplog, signed)

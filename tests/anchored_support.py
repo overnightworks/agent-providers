@@ -538,6 +538,8 @@ def child_cleanup_scope(anchor: ZombieAnchor) -> Iterator[ChildCleanup]:
     cleanup = ChildCleanup(anchor)
     try:
         yield cleanup
-        cleanup.cleanup()
     finally:
-        cleanup.hand_over()
+        try:
+            cleanup.cleanup()
+        finally:
+            cleanup.hand_over()

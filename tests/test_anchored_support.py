@@ -379,3 +379,33 @@ def test_leaving_the_cleanup_scope_ends_children_closes_descriptors_and_defers_t
         assert deferred.popen.returncode == SIGKILLED
     finally:
         anchor.hand_over(zombie_anchor)
+
+
+def test_leaving_the_cleanup_scope_by_an_exception_still_ends_children_and_closes_descriptors(
+    tmp_path: Path, zombie_anchor: ZombieAnchor
+) -> None:
+    class TestBodyFailed(Exception):
+        pass
+
+    anchor = ZombieAnchor()
+    try:
+        before = open_descriptors()
+        with pytest.raises(TestBodyFailed):
+            with child_cleanup_scope(anchor) as cleanup:
+                scripts = ScriptChildren(tmp_path, cleanup)
+                running = scripts.start()
+                captured = cleanup.capture(scripts.start_then(lambda: FakeHandle(done_with_pid=False)))
+                (deferred,) = captured.children
+                raise TestBodyFailed
+
+        assert running.owned.resolved
+        assert running.owned.popen.returncode == SIGKILLED
+        assert cleanup.listed() == ()
+        assert state(deferred) == Exited(SIGKILLED)
+        assert open_descriptors() == before | {str(deferred.pidfd)}
+        del captured
+        gc.collect()
+        anchor.finalize()
+        assert deferred.popen.returncode == SIGKILLED
+    finally:
+        anchor.hand_over(zombie_anchor)

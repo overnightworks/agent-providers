@@ -60,6 +60,7 @@ def test_a_valid_file_loads_with_the_documented_defaults(tmp_path):
     assert config.runs.max_duration_s == 600.0
     assert config.runs.stall_timeout_s == 30.0
     assert (config.runs.max_tool_calls, config.runs.max_bytes) == (30, 4194304)
+    assert config.runs.max_parallel_cli_runs == 5
     assert config.app_of_workload_client("songmaker-test") == "songmaker"
 
 
@@ -117,6 +118,10 @@ REFUSED_RUN_SETTINGS = (
     "max_bytes = 0",
     "max_bytes = -1",
     "max_bytes = 4194304.0",
+    "max_parallel_cli_runs = 0",
+    "max_parallel_cli_runs = -1",
+    "max_parallel_cli_runs = true",
+    "max_parallel_cli_runs = 5.0",
     "max_tool_call = 30",
 )
 
@@ -199,7 +204,13 @@ def _with_key_set_url(url: str) -> str:
             id="signing-with-only-a-key-member",
         ),
         *[
-            pytest.param(_with_runs(setting), "runs", id=f"runs-{setting.replace(' ', '')}")
+            pytest.param(
+                _with_runs(setting),
+                "runs.max_parallel_cli_runs"
+                if setting.startswith("max_parallel_cli_runs")
+                else "runs",
+                id=f"runs-{setting.replace(' ', '')}",
+            )
             for setting in REFUSED_RUN_SETTINGS
         ],
     ],
@@ -234,6 +245,12 @@ def test_run_budgets_given_in_the_file_load(tmp_path):
     runs = load_config(_written(tmp_path, text)).runs
 
     assert (runs.max_tool_calls, runs.max_bytes) == (5, 2097152)
+
+
+def test_an_explicit_parallel_run_limit_loads_and_gives_that_many_places(tmp_path):
+    runs = load_config(_written(tmp_path, _with_runs("max_parallel_cli_runs = 2"))).runs
+
+    assert runs.max_parallel_cli_runs == 2
 
 
 def _refused_on_one_line(config_file: Path, capsys) -> str:

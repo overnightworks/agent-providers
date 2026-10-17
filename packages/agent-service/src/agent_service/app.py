@@ -8,7 +8,10 @@ checked in a fixed order, and the first failure answers:
 2. the body's protocol version, then its shape (``agent_service.run_request``);
 3. whether the app may ask for the purpose;
 4. the route (``agent_service.routing``);
-5. for an app with an MCP origin, whether the run's capability fits the 8,192
+5. for the CLI route, the service's admission limit (``agent_service.admission``): a
+   subscription run beyond it answers ``busy`` with ``Retry-After`` before anything is
+   signed;
+6. for an app with an MCP origin, whether the run's capability fits the 8,192
    characters every verifier accepts (``capability_too_large``).
 
 An admitted run answers ``200 text/event-stream`` with its frames
@@ -40,6 +43,7 @@ from webauth.jwt_verification import KeySetFetch, MonotonicClock, fetch_key_set_
 
 from agent_client.capability import MAX_CAPABILITY_CHARACTERS
 from agent_client.wire import PROTOCOL_VERSION, RejectionCode, RunRejection, RunRequest
+from agent_service.admission import AdmissionSlot, Lease
 from agent_service.capability import (
     Capability,
     CapabilityTooLarge,
@@ -48,7 +52,7 @@ from agent_service.capability import (
 )
 from agent_service.config import ServiceConfig
 from agent_service.identity import Caller, CallerCheck, build_verifier
-from agent_service.routing import NotEnabled, route
+from agent_service.routing import Cli, NotEnabled, ServedRoute, route
 from agent_service.run_events import run_frames
 from agent_service.run_liveness import LoopClock
 from agent_service.run_records import RunRecords, utc_now
@@ -57,6 +61,7 @@ from agent_service.runners import AdmittedRun, Runners
 
 WORKLOAD_TOKEN_HEADER: Final = "Agent-Workload-Token"
 RETRY_UNAVAILABLE_AFTER_SECONDS: Final = 30
+RETRY_BUSY_AFTER_SECONDS: Final = 10
 _BEARER_SCHEME: Final = "bearer"
 
 _log = logging.getLogger(__name__)
@@ -107,6 +112,7 @@ def create_app(
     callers = CallerCheck(build_verifier(config.identity, fetch_key_set, monotonic_clock), config)
     installed_runners = runners or Runners()
     installed_records = records or RunRecords(wall_clock)
+    subscription_slot = AdmissionSlot(config.runs.max_parallel_cli_runs)
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
     @app.post("/runs")
@@ -119,7 +125,13 @@ def create_app(
         if isinstance(run_request, RejectionCode):
             return rejection(run_request)
         return _admitted(
-            config, installed_runners, installed_records, wall_clock, caller, run_request
+            config,
+            installed_runners,
+            installed_records,
+            subscription_slot,
+            wall_clock,
+            caller,
+            run_request,
         )
 
     @app.get("/runs/{run_id}")
@@ -149,22 +161,31 @@ class _RunResponse(StreamingResponse):
 
     Starlette never closes the generator it streams, and a generator left
     paused behind a blocked send is only finalized by the garbage collector.
+
+    It also releases the run's lease on exit, after the frames are closed. That
+    frees the place only for a run that never began, because the lease is
+    released once the run is over, however long the connection hangs on.
     """
 
-    def __init__(self, frames: AsyncGenerator[bytes, None]) -> None:
+    def __init__(self, frames: AsyncGenerator[bytes, None], lease: Lease | None) -> None:
         super().__init__(
             frames, media_type="text/event-stream", headers={"Cache-Control": "no-store"}
         )
+        self._lease = lease
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        async with aclosing(self.body_iterator):
-            await super().__call__(scope, receive, send)
+        try:
+            async with aclosing(self.body_iterator):
+                await super().__call__(scope, receive, send)
+        finally:
+            _release(self._lease)
 
 
 def _admitted(
     config: ServiceConfig,
     runners: Runners,
     records: RunRecords,
+    subscription_slot: AdmissionSlot,
     wall_clock: Callable[[], datetime],
     caller: Caller,
     run_request: RunRequest,
@@ -181,6 +202,39 @@ def _admitted(
     )
     if isinstance(served, NotEnabled):
         return rejection(RejectionCode.NOT_ENABLED)
+    lease = None
+    if isinstance(served, Cli):
+        lease = subscription_slot.try_take()
+        if lease is None:
+            return rejection(RejectionCode.BUSY)
+    try:
+        response = _admitted_response(
+            config, runners, records, lease, wall_clock, caller, run_request, served
+        )
+    except BaseException:
+        _release(lease)
+        raise
+    if isinstance(response, RejectionCode):
+        _release(lease)
+        return rejection(response)
+    return response
+
+
+def _release(lease: Lease | None) -> None:
+    if lease is not None:
+        lease.release()
+
+
+def _admitted_response(
+    config: ServiceConfig,
+    runners: Runners,
+    records: RunRecords,
+    lease: Lease | None,
+    wall_clock: Callable[[], datetime],
+    caller: Caller,
+    run_request: RunRequest,
+    served: ServedRoute,
+) -> _RunResponse | RejectionCode:
     run_id = uuid.uuid4()
     try:
         capability = _capability_of(config, caller, run_request, run_id, wall_clock)
@@ -191,7 +245,7 @@ def _admitted(
             too_large.length,
             MAX_CAPABILITY_CHARACTERS,
         )
-        return rejection(RejectionCode.CAPABILITY_TOO_LARGE)
+        return RejectionCode.CAPABILITY_TOO_LARGE
     admitted = AdmittedRun(
         run_id=run_id,
         app=caller.app,
@@ -200,10 +254,18 @@ def _admitted(
         route=served,
         capability=capability,
     )
+    app_config = config.apps[caller.app]
     return _RunResponse(
         run_frames(
-            admitted, runners.for_route(served), app_config, config.runs, LoopClock(), records
-        )
+            admitted,
+            runners.for_route(served),
+            app_config,
+            config.runs,
+            LoopClock(),
+            records,
+            lease,
+        ),
+        lease,
     )
 
 
@@ -236,6 +298,8 @@ def rejection(code: RejectionCode) -> Response:
         headers["WWW-Authenticate"] = "Bearer"
     if code is RejectionCode.UNAVAILABLE:
         headers["Retry-After"] = str(RETRY_UNAVAILABLE_AFTER_SECONDS)
+    if code is RejectionCode.BUSY:
+        headers["Retry-After"] = str(RETRY_BUSY_AFTER_SECONDS)
     body = RunRejection(v=PROTOCOL_VERSION, code=code, message=_MESSAGE[code])
     return Response(
         content=body.model_dump_json(),

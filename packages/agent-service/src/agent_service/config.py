@@ -125,6 +125,7 @@ class RunConfig(_Section):
     max_duration_s: StrictFloat = Field(default=600.0, gt=0, allow_inf_nan=False)
     max_tool_calls: StrictInt = Field(default=30, ge=1)
     max_bytes: StrictInt = Field(default=4 * MAX_EVENT_BYTES, ge=1)
+    max_parallel_cli_runs: StrictInt = Field(default=5, ge=1)
 
     @model_validator(mode="after")
     def _heartbeat_before_stall_before_idle_before_maximum(self) -> Self:

@@ -925,6 +925,39 @@ after the start and closes stdin 5 s later. "Init" is the `system/init` event.
 Every run held `/tmp/probe-stack.lock`. The fake servers and proxies of the
 cells below are scratch scripts on `127.0.0.1` inside the same unshared network.
 
+**Driver.** `python3 -I drive.py DELAY -- /opt/claude ARGS` (`DELAY` is 0.5 unless
+a cell says otherwise; `WAIT` is the seconds to wait after the write, default 5;
+`END=term` sends `SIGTERM` instead of closing stdin). Each output line is printed
+with its time since the start:
+
+```python
+import sys, json, subprocess, time, threading, os
+delay = float(sys.argv[1]); cmd = sys.argv[sys.argv.index('--') + 1:]
+t0 = time.monotonic()
+p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+def pump(stream, tag):
+    for line in stream: print(f"{time.monotonic()-t0:8.3f} {tag} {line.rstrip()[:4000]}", flush=True)
+th = [threading.Thread(target=pump, args=(p.stdout, 'out')), threading.Thread(target=pump, args=(p.stderr, 'err'))]
+[t.start() for t in th]
+time.sleep(delay)
+p.stdin.write(json.dumps({"type": "user", "message": {"role": "user", "content": "hello"}}) + "\n"); p.stdin.flush()
+print(f"{time.monotonic()-t0:8.3f} --- user message written", flush=True)
+try: p.wait(timeout=float(os.environ.get('WAIT', '5')))
+except subprocess.TimeoutExpired:
+    if os.environ.get("END") == "term": p.terminate()
+    else: p.stdin.close()
+    try: p.wait(timeout=20)
+    except subprocess.TimeoutExpired: p.kill()
+[t.join() for t in th]
+print(f"{time.monotonic()-t0:8.3f} --- exit {p.returncode}")
+```
+
+Inside the sandbox the file lists of the home, the working directory and
+`/tmp` (`find ... -printf '%y %s %P\n'`) were taken before and after the run and
+diffed. The traces are the driver run under `strace -f -qq -s 200` with
+`-e trace=connect,sendto,sendmsg,sendmmsg` (A1b-0a c6) or `-e trace=execve`
+(A1b-0c c7), and `-o` a file in scratch.
+
 #### A1b-0a flags and stream, no login
 
 **c1 Flags.** Each flag below was added to `ARGS`. Every one reached init and the
@@ -967,7 +1000,7 @@ not under `TMPDIR` or the home.
 **c3 Init timing.** With stdin open and no message for 6 s, nothing was printed
 on stdout or stderr. The driver wrote the message at 6.001 s; init arrived at
 6.030 s (29 ms), then the `assistant` event at 6.054 s and the `result` at
-6.056 s. With a 0.5 s delay init arrived 25 to 55 ms after the write in every run (0.523 to 0.556 s). The CLI prints init only after it holds the first
+6.056 s. With a 0.5 s delay init arrived 22 to 55 ms after the write in every run (0.523 to 0.556 s). The CLI prints init only after it holds the first
 message (body fact 11 holds on 2.1.302). Section A1b-0c shows that it contacts a
 configured MCP server before that message.
 
@@ -1000,9 +1033,24 @@ $TMPDIR/claude-<uid>/                  empty directory
 /tmp/cc-socks-<uid>/                   empty directory (outside the home and TMPDIR)
 ```
 
-With `--tools "" --strict-mcp-config --setting-sources ""` added, the
-`.claude/projects/<cwd>/memory` directory was not created; the other entries
-were. No session transcript (`.jsonl`) was written in either run. A control
+The `memory/` directory depends on `--system-prompt-file`, not on the other
+flags. Re-run with exactly these flag sets (each with the default `ARGS`, no
+login), by whether `.claude/projects/<cwd>/memory/` existed afterwards:
+
+| Flags added to `ARGS` | `memory/` | Session `.jsonl` |
+|---|---|---|
+| `--no-session-persistence` | created | not written |
+| `--max-turns 1`, or `--strict-mcp-config`, or `--tools ""`, or `--setting-sources ""` (each alone, A1b-0a c1) | created | written |
+| `--tools "" --strict-mcp-config --setting-sources ""` | created | written (22,214 B) |
+| `--tools "" --strict-mcp-config --setting-sources "" --no-session-persistence` | created | not written |
+| `--system-prompt-file F` | not created | written (67,246 B) |
+| `--system-prompt-file F --no-session-persistence` | not created | not written |
+| `--tools "" --strict-mcp-config --setting-sources "" --no-session-persistence --max-turns 1 --system-prompt-file F` (A1b-0a c1) | not created | not written |
+
+So the only flag measured to suppress `memory/` is `--system-prompt-file`; the
+three flags `--tools "" --strict-mcp-config --setting-sources ""` do not, with or
+without `--no-session-persistence`. The other entries of the list above were
+created in every row. Why `--system-prompt-file` suppresses it is not measured. A control
 without the flag (the A1b-0c runs) did write
 `.claude/projects/<cwd>/<session-uuid>.jsonl` although the run was unauthenticated.
 
@@ -1046,13 +1094,29 @@ file (A1d conditions). Not measured: other managed locations (macOS, Windows,
 
 #### A1b-0c the CLI as an MCP client, no login
 
-The fake Streamable HTTP server is a scratch script on `127.0.0.1:18765` inside
-the unshared network. It logs every request. It answers `initialize`,
-`tools/list` and `ping` with `application/json`, answers notifications with
-202 and an empty body, answers `GET` with 405 and a `DELETE` with 405 (200 in
-the session variant), and answers any other method with a JSON-RPC
-`-32601` error. `ARGS` also carries `--mcp-config F` where `F` is
-`{"mcpServers":{"fake":{"type":"http","url":"http://127.0.0.1:18765/mcp","headers":{"Authorization":"Bearer dummy-0c-token"}}}}`.
+The fake Streamable HTTP server is a Python `http.server` script
+(`ThreadingHTTPServer`, HTTP/1.1) on `127.0.0.1:18765` inside the unshared
+network, started inside the sandbox before the CLI. It logs the time, method,
+path, headers and JSON body of every request. Its response definitions, by
+mode (the default mode is the plain run):
+
+| Request | Response |
+|---|---|
+| `POST` with a JSON-RPC `id`, method `initialize` | 200 `application/json` `{"jsonrpc":"2.0","id":<id>,"result":{"protocolVersion":<the requested one, or the mode's>,"capabilities":{"tools":{}},"serverInfo":{"name":"fake-mcp","version":"0"}}}`; in the session mode also header `Mcp-Session-Id: sess-0c-1` |
+| `POST` `tools/list` | 200 `{"result":{"tools":[{"name":"echo","description":"echo","inputSchema":{"type":"object","properties":{}}}]}}` |
+| `POST` `ping` | 200 `{"result":{}}` |
+| `POST` any other method with an `id` (so `server/discover`) | 200 `{"jsonrpc":"2.0","id":<id>,"error":{"code":-32601,"message":"method not found"}}` |
+| `POST` without an `id` (notifications) | 202, empty body |
+| `GET` | 405, `Allow: POST`, empty body |
+| `DELETE` | 405, empty body (200 in the session mode) |
+
+Mode variants: `401` answers every `POST` with 401, body `{"error":"unauthorized"}` and
+`WWW-Authenticate: Bearer realm="fake"`; `d400` and `d404` answer `server/discover`
+with 400 or 404 and body `{"error":"unsupported"}`; `pv:<version>` answers
+`initialize` with that `protocolVersion`; `session` is the session variant above.
+`ARGS` also carries `--mcp-config F` where `F` is
+`{"mcpServers":{"fake":{"type":"http","url":"http://127.0.0.1:18765/mcp","headers":{"Authorization":"Bearer dummy-0c-token"}}}}`;
+the stdio control uses `{"mcpServers":{"fake":{"type":"stdio","command":"/usr/bin/sleep","args":["31"]}}}`.
 Times are relative to the stdin write of the first message.
 
 Request order at the server, identical in every run that connected (three
@@ -1072,15 +1136,16 @@ before the message was written, which is also before init. Without a login the
 CLI still contacts a configured MCP server and calls `tools/list`.
 
 - **c1 Authorization.** Every request, including `GET`, carries the `Authorization`
-  value from the config's `headers` unchanged (checked by length and equality;
-  the value is not recorded here).
+  value from the config's `headers` unchanged (the server logged only its length and
+  whether it equals the dummy `Bearer dummy-0c-token` of the config; the value
+  is that dummy).
 - **c2 `initialize`.** `protocolVersion` `2025-11-25`; `capabilities`
   `{"roots":{"listChanged":true},"elicitation":{"form":{},"url":{}}}`; `clientInfo`
   `{"name":"claude-code","title":"Claude Code","version":"2.1.302","description":"Anthropic's agentic coding tool","websiteUrl":"https://claude.com/claude-code"}`.
   Before it, request 1 (`server/discover`, protocol `2026-07-28`, the same client
   info and capabilities in `params._meta`) is a probe. The CLI fell back to
   `initialize` and connected when the probe got a JSON-RPC error with status 200,
-  400 or 404.
+  or a plain `{"error":"unsupported"}` body with 400 or 404.
 - **Version negotiation.** If the server answers `initialize` with
   `2025-06-18` or `2025-03-26`, the CLI connects and sends that version in
   `MCP-Protocol-Version` afterwards. With `1999-01-01` it stops after request 2
@@ -1106,14 +1171,15 @@ CLI still contacts a configured MCP server and calls `tools/list`.
   "uname -s ..."` and `uname`. A control run with
   `{"type":"stdio","command":"/usr/bin/sleep","args":["31"]}` shows an extra
   `execve("/usr/bin/sleep", ["/usr/bin/sleep", "31"])`. So the HTTP server config
-  starts no process for the server. The CLI does start `git` and `rg`, so a
-  sandbox must allow them. In the stdio control the CLI had not exited 20 s after
+  starts no process for the server. The CLI starts `git` and `rg` at startup; whether it runs
+  without them is not measured. In the stdio control the CLI had not exited 20 s after
   stdin closed (killed by the driver; exit code not recorded).
 - **c8 End of the session.** No `DELETE` and no `notifications/cancelled` reached
   the server when stdin closed (exit 1), nor on `SIGTERM` with stdin open (exit
   143), with or without an `Mcp-Session-Id` issued. In the session variant the
   CLI echoed `Mcp-Session-Id` on requests 3 to 5, so a server that issues one
-  gets it back but is never told the session ended.
+  gets it back; in the measured cases (EOF on stdin after the unauthenticated
+  result, and `SIGTERM`) it was not told the session ended.
 - **c9 `MCP-Protocol-Version` and 202.** The header is absent on `initialize` and
   present with the negotiated version on every later request (`POST` and `GET`).
   A 202 with an empty body for `notifications/initialized` is accepted: the CLI
@@ -1124,6 +1190,11 @@ CLI still contacts a configured MCP server and calls `tools/list`.
 **c1 and c2 Hosts of an unauthenticated `-p` run.** `HTTPS_PROXY` and
 `HTTP_PROXY` point at a scratch proxy on `127.0.0.1:18766` inside the unshared
 network that records the request line and answers every `CONNECT` with 403.
+The proxy is a socket server that reads up to the end of the request headers,
+appends `{"wall":<time>,"request_line":"<first line>"}` to its log and replies
+`HTTP/1.1 403 Forbidden`, `Content-Length: 0`, `Connection: close`. The sandbox
+sets `HTTPS_PROXY`, `HTTP_PROXY` and their lower-case forms to
+`http://127.0.0.1:18766`.
 `ARGS` is the default plus `--no-session-persistence`. The run ends with the same
 unauthenticated result as A1b-0a in all four cases.
 
@@ -1189,9 +1260,9 @@ only host contacted was `api.anthropic.com:443`. The unset run shows no update
 attempt either, so this measurement does not show the updater acting; it shows
 that with the switch set nothing changed. The updater's own behaviour with a
 network and a newer release is not measured. The host's `versions/` directory
-itself holds five versions (2.1.296, 2.1.299 to 2.1.302), so a self-updating
-install keeps old binaries, which is why the image pins the file and sets the
-switch.
+itself holds five versions (2.1.296, 2.1.299 to 2.1.302); whether a self-updating
+install keeps old binaries in general is not measured. The image pins the file
+and sets the switch.
 
 ## H8 atelier-2
 

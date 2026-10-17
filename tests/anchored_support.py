@@ -25,9 +25,12 @@ import signal
 import subprocess
 import time
 import weakref
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Protocol, runtime_checkable
+from unittest import mock
+
+from agent_providers.spawn import ChildProcess
 
 P_PIDFD = 3
 TEST_WAIT_SECONDS = 10
@@ -97,6 +100,7 @@ def _wait_for_exits(pidfds: Iterable[int], timeout: float) -> set[int]:
     return readable
 
 
+@runtime_checkable
 class PidUser(Protocol):
     """A handle that may act on a child's pid; ``done_with_pid`` never blocks.
 
@@ -160,6 +164,13 @@ class SessionCleanupFailed(Exception):
         )
 
 
+@dataclass(frozen=True)
+class DroppedPopen:
+    """What stays of a disarmed ``Popen`` once its owner let it go: nothing left to write."""
+
+    returncode: object = DISARMED
+
+
 @dataclass
 class OwnedChild:
     """A held child: its pid, the pidfd that names it, its ``Popen`` and who else has its number.
@@ -173,7 +184,7 @@ class OwnedChild:
 
     pid: int
     pidfd: int
-    popen: subprocess.Popen
+    popen: subprocess.Popen | DroppedPopen
     recipient: Recipient | weakref.ReferenceType[PidUser]
     resolved: bool = field(default=False)
 
@@ -349,3 +360,173 @@ class FakeHandle:
 
     def __init__(self, *, done_with_pid: bool = False) -> None:
         self.done_with_pid = done_with_pid
+
+
+class CleanupFailed(SessionCleanupFailed):
+    """A child's kill was refused or its death was not confirmed; the next cleanup retries it."""
+
+
+class IdentityUnavailable(Exception):
+    """A pidfd call was refused; ``popen`` is the child that exists without a pidfd, if any."""
+
+    def __init__(self, message: str, *, popen: subprocess.Popen | None = None) -> None:
+        super().__init__(message)
+        self.popen = popen
+
+
+@dataclass(frozen=True)
+class Captured:
+    value: object
+    children: tuple[OwnedChild, ...]
+
+
+def popen_bare(
+    child: ChildProcess, *, stdin: int | None, stdout: int | None, stderr: int | None
+) -> subprocess.Popen:
+    return subprocess.Popen(
+        child.command,
+        stdin=stdin,
+        stdout=stdout,
+        stderr=stderr,
+        env=dict(child.environment),
+        cwd=child.working_directory,
+        start_new_session=True,
+    )
+
+
+class ChildCleanup:
+    """Owns every child a test starts: named by a pidfd at creation, killed first, never reaped
+    behind a handle.
+
+    The kill comes first so that a running child ends by the kill and never by an exit line or
+    EOF; a pidfd kill reaches only its own process, so it is always safe. Registered raw
+    descriptors are closed with ``os.close`` (never a file object, so no flush can wait), then
+    the children are waited for within one bound. A dead child is reaped through its pidfd only
+    when nobody else may still act on its number; otherwise it stays an unreaped zombie
+    (deferred, not an error), because an unreaped zombie keeps its number from reuse and a
+    delayed watcher could still wait on a freed one. There is deliberately no operation that
+    reaps behind a handle. ``hand_over`` moves whatever is still listed into the session's
+    anchor after ``cleanup`` decided deferral while every handle was as reachable as the test
+    left it; only the anchor reaps it, once its handle let go. A ``Popen`` whose ``returncode``
+    is ``None`` is never dropped, because its destructor would wait on a number; ``drop_popen``
+    admits only a disarmed one. A refused pidfd is never answered with the number: the child
+    ends with its own lifetime and its ``Popen`` reaps it.
+    """
+
+    def __init__(self, anchor: ZombieAnchor) -> None:
+        self._anchor = anchor
+        self._listed: list[OwnedChild] = []
+        self._descriptors: list[int] = []
+        _prove_the_pidfd_calls_on_this_process()
+
+    def listed(self) -> tuple[OwnedChild, ...]:
+        return tuple(self._listed)
+
+    def capture(self, start: Callable[[], object]) -> Captured:
+        created: list[OwnedChild] = []
+        real_popen = subprocess.Popen
+
+        def create(*args, **kwargs):
+            popen = real_popen(*args, **kwargs)
+            try:
+                owned = OwnedChild.name(popen, UNREPORTED)
+            except OSError as refusal:
+                raise IdentityUnavailable(
+                    f"pid {popen.pid}: pidfd_open refused: {refusal}", popen=popen
+                ) from refusal
+            self._listed.append(owned)
+            created.append(owned)
+            return popen
+
+        with mock.patch("subprocess.Popen", create):
+            value = start()
+        if isinstance(value, PidUser):
+            for owned in created:
+                owned.declare_recipient(value)
+        return Captured(value, tuple(created))
+
+    def start_bare_child(
+        self, child: ChildProcess, *, stdin: int | None, stdout: int | None, stderr: int | None
+    ) -> OwnedChild:
+        captured = self.capture(
+            lambda: popen_bare(child, stdin=stdin, stdout=stdout, stderr=stderr)
+        )
+        (owned,) = captured.children
+        owned.declare_recipient(NOBODY)
+        return owned
+
+    def state(self, owned: OwnedChild) -> ProcessState | Exited:
+        self._require_listed(owned)
+        return state(owned)
+
+    def wait_exited(self, owned: OwnedChild) -> int:
+        self._require_listed(owned)
+        if owned.pidfd not in _wait_for_exits([owned.pidfd], TEST_WAIT_SECONDS):
+            raise AssertionError(f"pid {owned.pid} did not exit within {TEST_WAIT_SECONDS}s")
+        observed = state(owned)
+        if not isinstance(observed, Exited):
+            raise AssertionError(f"pid {owned.pid} is {observed}, not exited")
+        return observed.code
+
+    def send_signal(self, owned: OwnedChild, signal_number: int) -> None:
+        self._require_listed(owned)
+        _pidfd_send_signal(owned.pidfd, signal_number)
+
+    def drop_popen(self, owned: OwnedChild) -> weakref.ReferenceType[subprocess.Popen]:
+        self._require_listed(owned)
+        if owned.popen.returncode is None:
+            raise AssertionError(f"pid {owned.pid}: an armed Popen is never dropped")
+        dropped = weakref.ref(owned.popen)
+        owned.popen = DroppedPopen()
+        return dropped
+
+    def close_at_cleanup(self, descriptor: int) -> None:
+        self._descriptors.append(descriptor)
+
+    def cleanup(self, bound: float = TEST_WAIT_SECONDS) -> None:
+        deadline = time.monotonic() + bound
+        errors = kill_children(self._listed)
+        self._close_descriptors()
+        errors.extend(resolve_children(self._listed, deadline=deadline, session_ended=False))
+        self._listed = [owned for owned in self._listed if not owned.resolved]
+        if errors:
+            raise CleanupFailed(errors)
+
+    def hand_over(self) -> None:
+        for owned in self._listed:
+            self._anchor.hold(owned)
+        self._listed = []
+
+    def _close_descriptors(self) -> None:
+        descriptors, self._descriptors = self._descriptors, []
+        for descriptor in descriptors:
+            os.close(descriptor)
+
+    def _require_listed(self, owned: OwnedChild) -> None:
+        if not any(listed is owned for listed in self._listed):
+            raise AssertionError(f"pid {owned.pid} is not listed: it was resolved or handed over")
+
+
+def _prove_the_pidfd_calls_on_this_process() -> None:
+    try:
+        pidfd = _pidfd_open(os.getpid())
+    except OSError as refusal:
+        raise IdentityUnavailable(f"pidfd_open refused: {refusal}") from refusal
+    try:
+        _prove_signal_and_wait(pidfd)
+    finally:
+        os.close(pidfd)
+
+
+def _prove_signal_and_wait(pidfd: int) -> None:
+    try:
+        _pidfd_send_signal(pidfd, 0)
+    except OSError as refusal:
+        raise IdentityUnavailable(f"pidfd_send_signal refused: {refusal}") from refusal
+    try:
+        _waitid(P_PIDFD, pidfd, os.WEXITED | os.WNOHANG)
+    except ChildProcessError:
+        return
+    except OSError as refusal:
+        raise IdentityUnavailable(f"waitid refused: {refusal}") from refusal
+    raise IdentityUnavailable("waitid reported a child for the test process itself")

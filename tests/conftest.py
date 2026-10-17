@@ -17,7 +17,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from anchored_support import zombie_anchor_session
+from anchored_support import ChildCleanup, ZombieAnchor, zombie_anchor_session
 from provider_test_support import MCP_TOOL_NAMES, close_fake_cli_pipes
 
 from agent_providers.config import (
@@ -99,6 +99,16 @@ def _worker_dumpable_flag() -> int:
 @pytest.fixture(scope="session")
 def zombie_anchor():
     yield from zombie_anchor_session()
+
+
+@pytest.fixture
+def child_cleanup(zombie_anchor: ZombieAnchor):
+    cleanup = ChildCleanup(zombie_anchor)
+    try:
+        yield cleanup
+        cleanup.cleanup()
+    finally:
+        cleanup.hand_over()
 
 
 @pytest.fixture(autouse=True)

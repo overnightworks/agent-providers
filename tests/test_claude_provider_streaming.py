@@ -644,6 +644,35 @@ def test_api_error_message_raises_before_any_text_is_yielded(
     assert LOGIN_REFUSED_TEXT not in _chain_text(turn_failure)
 
 
+def test_the_api_error_flag_decides_not_the_error_field(monkeypatch) -> None:
+    flagged_without_error_field = json.dumps({
+        "type": "assistant",
+        "is_api_error_message": True,
+        "message": {"content": [{"type": "text", "text": LOGIN_REFUSED_TEXT}]},
+    }).encode() + b"\n"
+
+    seen, failure = _stream_outcome(monkeypatch, [flagged_without_error_field])
+
+    assert type(failure) is UnavailableError
+    assert seen == []
+
+
+def test_an_error_field_without_the_api_error_flag_still_yields_its_text(
+    monkeypatch,
+) -> None:
+    unflagged_with_error_field = json.dumps({
+        "type": "assistant",
+        "error": "authentication_failed",
+        "is_api_error_message": False,
+        "message": {"content": [{"type": "text", "text": "fine"}]},
+    }).encode() + b"\n"
+
+    seen, failure = _stream_outcome(monkeypatch, [unflagged_with_error_field, _result_line("fine")])
+
+    assert failure is None
+    assert [e.type for e in seen] == ["assistant_text", "final"]
+
+
 @pytest.mark.parametrize("returncode", [0, 1])
 @pytest.mark.parametrize(
     "lines",

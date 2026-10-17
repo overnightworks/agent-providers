@@ -556,17 +556,36 @@ def test_call_cli_success(_no_tool_gate_open) -> None:
     assert result.text == "cli response"
 
 
-def test_call_cli_error_result_raises_without_its_text(
-    _no_tool_gate_open, caplog
+@pytest.mark.parametrize(
+    "entry_point",
+    [
+        lambda: call_claude("hello"),
+        lambda: asyncio.run(acall_claude("hello")),
+        lambda: asyncio.run(provider.acall_claude_with_mcp("hello", user_id="user-1")),
+    ],
+    ids=["call_claude", "acall_claude", "acall_claude_with_mcp"],
+)
+def test_error_result_raises_without_its_text_from_every_entry_point(
+    _no_tool_gate_open, monkeypatch, caplog, entry_point
 ) -> None:
     caplog.set_level("DEBUG")
     refused_text = "Not logged in · Please run /login"
     json_output = json.dumps({"is_error": True, "result": refused_text})
+    monkeypatch.setattr(
+        provider,
+        "verify_cli_tool_surface",
+        AsyncMock(return_value=Path("/usr/bin/claude")),
+    )
+
+    async def open_async_pipes(_child, **_kwargs):
+        return _finished_async_process(json_output.encode())
+
+    monkeypatch.setattr(provider, "open_async_pipes", open_async_pipes)
     mock_proc = MagicMock(returncode=0, stdout=json_output, stderr="")
 
     with patch("subprocess.run", return_value=mock_proc):
         with pytest.raises(UnavailableError) as failure:
-            _call_cli("hello")
+            entry_point()
 
     assert type(failure.value) is UnavailableError
     assert str(failure.value) == CLAUDE_CLI_UNAVAILABLE_DETAIL

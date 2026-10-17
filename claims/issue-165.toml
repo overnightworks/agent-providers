@@ -3,6 +3,6 @@ agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
 role = "builder"
 base = "706a4cf4ebf927a197e1365a5c1cf79ef4231f5e"
 branch = "claude/issue-165-a1b-7n-nicht-root-nicht-dumpbar"
-scope = ["README.md", "packages/agent-service/src/agent_service/cli.py", "packages/agent-service/src/agent_service/process_hardening.py", "tests/conftest.py", "tests/test_service_process_hardening.py"]
+scope = ["README.md", "packages/agent-service/src/agent_service/cli.py", "packages/agent-service/src/agent_service/process_hardening.py", "tests/conftest.py", "tests/test_service_config.py", "tests/test_service_process_hardening.py"]
 opened_commit = "aaa1287ca60673b08b7359c640e60f2898766143"
 whole_reason = "One startup step: the root refusal and PR_SET_DUMPABLE 0 run first, so the cases, the isolation fixture and the README cannot land apart."

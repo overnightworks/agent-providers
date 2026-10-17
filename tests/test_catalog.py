@@ -362,7 +362,7 @@ def test_a_wrong_typed_codex_login_is_named_in_the_setup_warning(
 
     _codex_setup(tmp_path, a_codex_login(tokens={"account_id": 7}))
 
-    assert "codex CLI probe unavailable: AgentCliUnavailableError" in caplog.text
+    assert "codex CLI probe unavailable: CliLoginUnusableError" in caplog.text
 
 
 def test_codex_setup_does_not_follow_a_link_to_a_complete_login(tmp_path: Path) -> None:

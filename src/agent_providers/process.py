@@ -22,7 +22,7 @@ from collections import deque
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import Enum, StrEnum
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Final, Literal, NotRequired, Required, TypedDict, Unpack, cast
@@ -61,15 +61,61 @@ CODEX_CLI_MODEL_CATALOG_OUTPUT_READ_LIMIT_BYTES: Final = 4 * 1024 * 1024
 
 
 class AgentCliUnavailableError(Exception):
-    """Raised when a CLI's login response does not match its contract."""
+    """A CLI cannot serve this call.
+
+    Raised directly only for a catalogue answer that breaks its contract.
+    """
 
 
-class CliCredentialNotConfiguredError(AgentCliUnavailableError):
+class CliLoginUnusableError(AgentCliUnavailableError):
+    """The CLI login is missing, unreadable, invalid or too large, or has no status."""
+
+
+class CliEnvironmentCause(StrEnum):
+    BINARY_MISSING = "binary_missing"
+    HOME_NOT_CREATED = "home_not_created"
+    CREDENTIAL_COPY_NOT_WRITTEN = "credential_copy_not_written"
+
+
+type _EnvironmentReduction = tuple[
+    Callable[[str, CliEnvironmentCause], CliEnvironmentUnavailableError],
+    tuple[str, CliEnvironmentCause],
+    dict[str, Any],
+]
+
+
+class CliEnvironmentUnavailableError(AgentCliUnavailableError):
+    """The CLI cannot run here.
+
+    Its binary is missing, or its private home or credential copy cannot be made.
+    """
+
+    def __init__(self, detail: str, *, cause: CliEnvironmentCause) -> None:
+        super().__init__(detail)
+        self.cause = cause
+
+    def __reduce__(self) -> _EnvironmentReduction:
+        return (_restore_environment_error, (str(self), self.cause), self.__dict__)
+
+
+def _restore_environment_error(
+    detail: str, cause: CliEnvironmentCause,
+) -> CliEnvironmentUnavailableError:
+    return CliEnvironmentUnavailableError(detail, cause=cause)
+
+
+class CliCredentialNotConfiguredError(CliLoginUnusableError):
     """Raised when a turn cannot copy its configured credential source."""
 
 
-class PrivateHomeNotCreatedError(AgentCliUnavailableError):
+class PrivateHomeNotCreatedError(CliEnvironmentUnavailableError):
     """Raised when a private CLI home could not be created or made private."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail, cause=CliEnvironmentCause.HOME_NOT_CREATED)
+
+    def __reduce__(self) -> tuple[type[PrivateHomeNotCreatedError], tuple[str], dict[str, Any]]:
+        return (type(self), (str(self),), self.__dict__)
 
 
 class CliProbeBudgetExceeded(AgentCliUnavailableError):
@@ -1521,7 +1567,12 @@ def _install_credential(
         destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         _write_new_credential_file(destination, payload, mode)
     except OSError:
-        raise_without_chain(AgentCliUnavailableError(_CREDENTIAL_COPY_FAILED_DETAIL))
+        raise_without_chain(
+            CliEnvironmentUnavailableError(
+                _CREDENTIAL_COPY_FAILED_DETAIL,
+                cause=CliEnvironmentCause.CREDENTIAL_COPY_NOT_WRITTEN,
+            )
+        )
 
 
 def _write_new_credential_file(destination: Path, payload: bytes, mode: int) -> None:
@@ -1640,7 +1691,7 @@ def _read_credential_file(path: Path) -> bytes | None:
             if exc.errno == errno.ELOOP
             else _CREDENTIAL_UNREADABLE_DETAIL
         )
-        raise_without_chain(AgentCliUnavailableError(refusal))
+        raise_without_chain(CliLoginUnusableError(refusal))
     try:
         content, refusal = _read_regular_file(descriptor)
     finally:
@@ -1648,7 +1699,7 @@ def _read_credential_file(path: Path) -> bytes | None:
     if not closed:
         content, refusal = None, _CREDENTIAL_UNREADABLE_DETAIL
     if refusal is not None:
-        raise_without_chain(AgentCliUnavailableError(refusal))
+        raise_without_chain(CliLoginUnusableError(refusal))
     return content
 
 
@@ -1825,21 +1876,21 @@ def grok_cli_token_is_present() -> bool:
     except FileNotFoundError:
         return False
     except OSError as exc:
-        raise AgentCliUnavailableError("could not read Grok CLI credentials") from exc
+        raise CliLoginUnusableError("could not read Grok CLI credentials") from exc
     try:
         document = json.loads(raw_auth)
     except json.JSONDecodeError as exc:
-        raise AgentCliUnavailableError(GROK_CLI_CREDENTIALS_INVALID_DETAIL) from exc
+        raise CliLoginUnusableError(GROK_CLI_CREDENTIALS_INVALID_DETAIL) from exc
     if not isinstance(document, dict):
-        raise AgentCliUnavailableError(GROK_CLI_CREDENTIALS_INVALID_DETAIL)
+        raise CliLoginUnusableError(GROK_CLI_CREDENTIALS_INVALID_DETAIL)
     for realm in document.values():
         if not isinstance(realm, dict):
-            raise AgentCliUnavailableError(GROK_CLI_CREDENTIALS_INVALID_DETAIL)
+            raise CliLoginUnusableError(GROK_CLI_CREDENTIALS_INVALID_DETAIL)
         key = realm.get("key")
         if key is None:
             continue
         if not isinstance(key, str):
-            raise AgentCliUnavailableError(GROK_CLI_CREDENTIALS_INVALID_DETAIL)
+            raise CliLoginUnusableError(GROK_CLI_CREDENTIALS_INVALID_DETAIL)
         if key:
             return True
     return False
@@ -1856,7 +1907,7 @@ def _codex_login_in_the_mirror_is_usable() -> bool:
         return False
     verdict = assess_codex_login(document).verdict
     if verdict is CodexLoginVerdict.MALFORMED:
-        raise_without_chain(AgentCliUnavailableError(CODEX_CLI_CREDENTIALS_INVALID_DETAIL))
+        raise_without_chain(CliLoginUnusableError(CODEX_CLI_CREDENTIALS_INVALID_DETAIL))
     return verdict is CodexLoginVerdict.USABLE
 
 
@@ -1870,7 +1921,7 @@ def _parse_grok_login(output: str) -> CliLogin:
             return CliLogin(logged_in=True, auth_method=account or None)
         if stripped == GROK_CLI_LOGGED_OUT_MARKER:
             return LOGGED_OUT
-    raise AgentCliUnavailableError("grok models did not report its login status")
+    raise CliLoginUnusableError("grok models did not report its login status")
 
 
 def _parse_grok_model_names(output: str) -> tuple[str, ...]:
@@ -1938,7 +1989,7 @@ def _parse_codex_login(output: str) -> CliLogin:
             return CliLogin(logged_in=True, auth_method=account or None)
         if stripped == CODEX_CLI_LOGGED_OUT_MARKER:
             return LOGGED_OUT
-    raise AgentCliUnavailableError("codex login status did not report its login status")
+    raise CliLoginUnusableError("codex login status did not report its login status")
 
 
 _grok_status_probe = CachedProbe(_probe_grok_status)

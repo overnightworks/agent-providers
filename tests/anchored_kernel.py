@@ -97,10 +97,12 @@ class RecordingKernel:
     def await_reached(self) -> None:
         assert self.reached.wait(TEST_WAIT_SECONDS), "the hold after the real call was not reached"
 
-    def await_calls(self, count: int) -> None:
+    def await_calls(self, count: int, name: Literal["waitid", "waitpid"]) -> None:
         with self._changed:
-            if not self._changed.wait_for(lambda: len(self.calls) >= count, TEST_WAIT_SECONDS):
-                raise AssertionError(f"fewer than {count} waitid calls within the bound")
+            if not self._changed.wait_for(
+                lambda: sum(call.name == name for call in self.calls) >= count, TEST_WAIT_SECONDS
+            ):
+                raise AssertionError(f"fewer than {count} {name} calls within the bound")
 
     def waitpid(self, pid: int, options: int) -> tuple[int, int]:
         position = self._record(pid, options, "waitpid")
@@ -177,12 +179,21 @@ class KernelModel(RecordingKernel):
     """
 
     def __init__(
-        self, *, stops: int = 0, loses_at: str | None = None, **holds: int | None
+        self,
+        *,
+        stops: int = 0,
+        loses_at: str | None = None,
+        hold_before_call: int | None = None,
+        hold_after_call: int | None = None,
+        hold_before_waitpid: int | None = None,
     ) -> None:
-        super().__init__(**holds)
+        super().__init__(
+            hold_before_call=hold_before_call,
+            hold_after_call=hold_after_call,
+            hold_before_waitpid=hold_before_waitpid,
+        )
         self._stops = deque(traced_stop() for _ in range(stops))
         self._loses_at = loses_at
-        self._lost = False
         self._stops_without_consumption = 0
 
     def __call__(self, idtype: int, pid: int, options: int):
@@ -202,8 +213,6 @@ class KernelModel(RecordingKernel):
     def _refusal(self, idtype: int, pid: int, options: int) -> str | None:
         if idtype != os.P_PID or pid != self._watched_pid():
             return f"a call named pid {pid}, not the watched leader"
-        if self._lost:
-            return "a call followed a reported loss"
         with self._changed:
             reaped = self._reaped_refusal(pid)
         if reaped:
@@ -226,7 +235,7 @@ class KernelModel(RecordingKernel):
     def _observe_exit(self, pid: int, options: int):
         with self._changed:
             if self._loses_at == "wait":
-                self._lost = True
+                self._reaped.add(pid)
                 raise ChildProcessError("scripted loss at the exit observation")
             if self._stops and self._stops_without_consumption < SPIN_LIMIT:
                 self._stops_without_consumption += 1
@@ -239,7 +248,7 @@ class KernelModel(RecordingKernel):
     def _consume_stop_report(self, pid: int, options: int):
         with self._changed:
             if self._loses_at == "consume":
-                self._lost = True
+                self._reaped.add(pid)
                 raise ChildProcessError("scripted loss at the stop consumption")
             if not self._stops:
                 return None

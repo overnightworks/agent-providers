@@ -16,6 +16,7 @@ import pytest
 from anchored_kernel import (
     CONSUME_STOP_REPORT,
     OBSERVE_EXIT,
+    WATCHER_THREAD_PREFIX,
     KernelModel,
     PassThroughKernel,
     RecordingKernel,
@@ -127,7 +128,10 @@ def assert_a_destroyed_handle_reaps_nothing(
 
 
 def test_a_release_reaps_the_published_exit_once_and_a_dropped_handle_reaps_nothing(
-    leaders: Leaders, child_cleanup: ChildCleanup, monkeypatch: pytest.MonkeyPatch
+    leaders: Leaders,
+    child_cleanup: ChildCleanup,
+    thread_failures: list[threading.ExceptHookArgs],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     kernel = PassThroughKernel()
     with monkeypatch.context() as patch:
@@ -146,6 +150,8 @@ def test_a_release_reaps_the_published_exit_once_and_a_dropped_handle_reaps_noth
 
         release_within_bound(started)
 
+        join_watcher(started.watcher)
+        assert thread_failures == []
         assert names_of(kernel.calls).count("waitpid") == 1
         assert kernel.violations == []
     assert started.leader.done_with_pid is True
@@ -171,6 +177,7 @@ def test_a_refused_release_leaves_the_leader_for_a_later_release(
     waitpids_before_the_refusal: int,
     leaders: Leaders,
     child_cleanup: ChildCleanup,
+    thread_failures: list[threading.ExceptHookArgs],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     kernel = PassThroughKernel(waitpid_answer=answer)
@@ -205,6 +212,8 @@ def test_a_refused_release_leaves_the_leader_for_a_later_release(
 
         assert started.leader.state is AnchorState.RELEASED
         assert child_cleanup.state(started.owned) == GONE
+        join_watcher(started.watcher)
+        assert thread_failures == []
         assert kernel.violations == []
 
 
@@ -221,7 +230,7 @@ def assert_the_watcher_never_followed_the_reap(
     [
         pytest.param(
             lambda: PassThroughKernel(hold_before_call=1),
-            lambda kernel: kernel.await_calls(1),
+            lambda kernel: kernel.await_calls(1, "waitid"),
             [OBSERVE_EXIT],
             id="a-hold-before-the-first-wait",
         ),
@@ -233,7 +242,7 @@ def assert_the_watcher_never_followed_the_reap(
         ),
         pytest.param(
             lambda: KernelModel(stops=1, hold_before_call=2),
-            lambda kernel: kernel.await_calls(2),
+            lambda kernel: kernel.await_calls(2, "waitid"),
             [OBSERVE_EXIT, CONSUME_STOP_REPORT, OBSERVE_EXIT],
             id="a-hold-before-the-stop-consumption",
         ),
@@ -245,6 +254,7 @@ def test_a_release_while_the_watcher_waits_makes_no_kernel_call(
     watcher_options: list[int],
     leaders: Leaders,
     child_cleanup: ChildCleanup,
+    thread_failures: list[threading.ExceptHookArgs],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     model = kernel()
@@ -271,11 +281,16 @@ def test_a_release_while_the_watcher_waits_makes_no_kernel_call(
         release_within_bound(started)
 
         assert child_cleanup.state(started.owned) == GONE
+        join_watcher(started.watcher)
+        assert thread_failures == []
         assert_the_watcher_never_followed_the_reap(model, watcher_options)
 
 
 def test_a_release_during_the_exit_callback_leaves_the_live_watcher_no_call_to_make(
-    leaders: Leaders, child_cleanup: ChildCleanup, monkeypatch: pytest.MonkeyPatch
+    leaders: Leaders,
+    child_cleanup: ChildCleanup,
+    thread_failures: list[threading.ExceptHookArgs],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     kernel = PassThroughKernel()
     with monkeypatch.context() as patch:
@@ -294,6 +309,7 @@ def test_a_release_during_the_exit_callback_leaves_the_live_watcher_no_call_to_m
             started.probe.release.set()
         join_watcher(started.watcher)
 
+        assert thread_failures == []
         assert started.probe.observed == [(AnchorState.EXITED, EXIT_CODE)]
         assert_the_watcher_never_followed_the_reap(kernel, [OBSERVE_EXIT])
 
@@ -375,7 +391,10 @@ def exited_leader_with_a_held_release(
 
 
 def test_two_releasers_of_one_exited_leader_reap_once(
-    leaders: Leaders, child_cleanup: ChildCleanup, monkeypatch: pytest.MonkeyPatch
+    leaders: Leaders,
+    child_cleanup: ChildCleanup,
+    thread_failures: list[threading.ExceptHookArgs],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     lock = InstrumentedLock()
     with monkeypatch.context() as patch:
@@ -383,13 +402,15 @@ def test_two_releasers_of_one_exited_leader_reap_once(
         kernel, started = exited_leader_with_a_held_release(patch, leaders)
         releasers = [Releaser(started.leader), Releaser(started.leader)]
         try:
-            kernel.await_calls(2)
+            kernel.await_calls(1, "waitpid")
             lock.await_waiting(1)
         finally:
             kernel.open_hold()
         for releaser in releasers:
             releaser.join()
 
+        join_watcher(started.watcher)
+        assert thread_failures == []
         assert [releaser.error for releaser in releasers] == [None, None]
         assert names_of(kernel.calls).count("waitpid") == 1
         assert kernel.violations == []
@@ -399,17 +420,23 @@ def test_two_releasers_of_one_exited_leader_reap_once(
 
 
 def test_a_cleanup_during_a_held_release_keeps_the_zombie_for_the_late_reap(
-    leaders: Leaders, child_cleanup: ChildCleanup, monkeypatch: pytest.MonkeyPatch
+    leaders: Leaders,
+    child_cleanup: ChildCleanup,
+    thread_failures: list[threading.ExceptHookArgs],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     with monkeypatch.context() as patch:
         kernel, started = exited_leader_with_a_held_release(patch, leaders)
         releaser = Releaser(started.leader)
         try:
-            kernel.await_calls(2)
+            kernel.await_calls(1, "waitpid")
 
-            assert call_within_deadline(
-                lambda: started.leader.done_with_pid, seconds=TEST_WAIT_SECONDS
-            ) is False
+            assert (
+                call_within_deadline(
+                    lambda: started.leader.done_with_pid, seconds=TEST_WAIT_SECONDS
+                )
+                is False
+            )
             child_cleanup.cleanup()
 
             assert child_cleanup.state(started.owned) == Exited(EXIT_CODE)
@@ -417,6 +444,8 @@ def test_a_cleanup_during_a_held_release_keeps_the_zombie_for_the_late_reap(
             kernel.open_hold()
         releaser.join()
 
+        join_watcher(started.watcher)
+        assert thread_failures == []
         assert releaser.error is None
         assert child_cleanup.state(started.owned) == GONE
         assert started.leader.state is AnchorState.RELEASED
@@ -426,3 +455,22 @@ def test_a_cleanup_during_a_held_release_keeps_the_zombie_for_the_late_reap(
         assert names_of(kernel.calls).count("waitpid") == 1
         assert kernel.violations == []
         child_cleanup.cleanup()
+
+
+@pytest.mark.parametrize("loses_at", ["wait", "consume"])
+def test_a_waitpid_after_a_scripted_loss_is_refused_and_never_forwarded(loses_at: str) -> None:
+    unrelated_pid = 2**22 + 1
+    kernel = KernelModel(stops=1, loses_at=loses_at)
+    kernel.bind(unrelated_pid)
+    options = OBSERVE_EXIT if loses_at == "wait" else CONSUME_STOP_REPORT
+    losing_call = threading.Thread(
+        target=lambda: pytest.raises(ChildProcessError, kernel, os.P_PID, unrelated_pid, options),
+        name=f"{WATCHER_THREAD_PREFIX}{unrelated_pid}",
+    )
+    losing_call.start()
+    losing_call.join(TEST_WAIT_SECONDS)
+
+    with pytest.raises(ChildProcessError):
+        kernel.waitpid(unrelated_pid, os.WNOHANG)
+
+    assert kernel.violations == [f"a call named pid {unrelated_pid} after it was reaped"]

@@ -42,6 +42,20 @@ class TlsCredentials:
     key_file: Path
 
 
+def _certificate_signing_usage() -> x509.KeyUsage:
+    return x509.KeyUsage(
+        digital_signature=True,
+        content_commitment=False,
+        key_encipherment=False,
+        data_encipherment=False,
+        key_agreement=False,
+        key_cert_sign=True,
+        crl_sign=True,
+        encipher_only=False,
+        decipher_only=False,
+    )
+
+
 class TestAuthority:
     """A throwaway CA that issues server certificates for the fake."""
 
@@ -75,7 +89,14 @@ class TestAuthority:
             .not_valid_before(now - _BACKDATED)
             .not_valid_after(now + _VALID_FOR)
             .add_extension(x509.BasicConstraints(ca=is_authority, path_length=None), critical=True)
+            .add_extension(x509.SubjectKeyIdentifier.from_public_key(public_key), critical=False)
+            .add_extension(
+                x509.AuthorityKeyIdentifier.from_issuer_public_key(self._key.public_key()),
+                critical=False,
+            )
         )
+        if is_authority:
+            builder = builder.add_extension(_certificate_signing_usage(), critical=True)
         if hostnames:
             names = [x509.DNSName(host) for host in hostnames]
             builder = builder.add_extension(x509.SubjectAlternativeName(names), critical=False)

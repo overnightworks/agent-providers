@@ -388,6 +388,11 @@ def record_task_names() -> list[str]:
     names: list[str] = []
 
     class RecordingTask(asyncio.Task):
+        def __init__(self, coro: object, **kwargs: object) -> None:
+            super().__init__(coro, **kwargs)
+            if (name := kwargs.get("name")) is not None:
+                names.append(str(name))
+
         def set_name(self, value: object) -> None:
             names.append(str(value))
             super().set_name(value)

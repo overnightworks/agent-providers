@@ -1,8 +1,0 @@
-claim_id = "6d1f16a7e38d419b8735cb8de4c2267f"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "5d5cecd6c44555658aca039a91dc2b0f13238e98"
-branch = "claude/issue-152-a1b-7a-gepinnte-claude-version-beim-star"
-scope = ["README.md", "docs/decisions/0001-agent-service.md", "packages/agent-service/src/agent_service/claude_version.py", "packages/agent-service/src/agent_service/cli.py", "packages/agent-service/src/agent_service/config.py", "tests/service_support.py", "tests/test_service_claude_version.py", "tests/test_service_config.py"]
-opened_commit = "08089d17ffb2fc92b869d13ee31d214504085f6e"
-whole_reason = "One startup contract: the config section, its probe, the pinned test documents and the two documents that name them cannot land apart."

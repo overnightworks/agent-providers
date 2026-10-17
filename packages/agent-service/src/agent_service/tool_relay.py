@@ -56,9 +56,8 @@ class Relay:
         relay._server = await asyncio.start_server(relay._accept, LOOPBACK_HOST, 0)
         port = relay._server.sockets[0].getsockname()[1]
         relay._expected_host = f"{LOOPBACK_HOST}:{port}".encode()
-        relay.access = RelayAccess(
-            url=f"http://{LOOPBACK_HOST}:{port}{MCP_ENDPOINT_PATH}", secret=relay._secret
-        )
+        url = f"http://{LOOPBACK_HOST}:{port}{MCP_ENDPOINT_PATH}"  # NOSONAR(S5332) loopback only
+        relay.access = RelayAccess(url=url, secret=relay._secret)
         return relay
 
     async def close(self) -> None:

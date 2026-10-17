@@ -77,26 +77,34 @@ collection because one test imports Pillow at module load.
 CI also runs the `quality` gate (`overnightworks/quality`, pinned by commit in
 `ci.yml`); its required check is `quality / verdict`. Its secret allowance and
 mandatory jobs live in `quality/config.toml`, its SonarCloud scope in
-`sonar-project.properties`, and the `checks` job feeds it `coverage.xml`.
+`sonar-project.properties`, and the `test` job feeds it `coverage.xml`.
+`test` runs on every declared Python minor (3.12 to 3.15) and only the 3.12
+leg feeds `coverage.xml`. `quality/config.toml` makes each `test (<minor>)`
+leg, the `checks` aggregate, `keycloak-token-shapes` and `dependency-floors`
+(the suite on the lowest declared direct dependencies at 3.12) mandatory.
 
 CI also proves the built wheels outside the workspace: in a fresh venv, the
 client wheel alone imports every `agent_client` module, client and core
 together import `agent_providers.dispatch` with the identical
 `ToolDeclaration`, and all three install together, the installed
 `agent_service.app_tools` discovers a tool from a local TLS fake, and the
-installed `agent-service` refuses a bad config. The `keycloak-token-shapes` job serves
-the test realm from Keycloak and runs `tests/test_service_keycloak.py`, the
-service's end-to-end proof with real tokens; elsewhere that suite skips.
+installed `agent-service` refuses a bad config. The `keycloak-token-shapes`
+job serves the test realm from Keycloak and runs
+`tests/test_service_keycloak.py`, the service's end-to-end proof with real
+tokens; elsewhere that suite skips.
 
 ## Releasing
 
 A release is a tag, and the three distributions move in lockstep. On a `v*`
 tag `.github/workflows/release.yml` builds the three wheels, checks that their
 names carry the tag's version, and attaches exactly those three wheels to the
-GitHub release; host applications pin the asset URLs. A tag is never moved — a
-broken release gets the next patch tag — so the pull request that precedes the
-tag raises all seven version literals together: the three `pyproject.toml`
-files, `agent_providers.__version__`, core's exact `overnightworks-agent-client`
-pin, and the service's exact pins on core and client.
+GitHub release; host applications pin the asset URLs. A release whose README
+holds `## Migrating to <version>` gets a release page that opens with a link to
+that section, so a breaking release writes that section before the tag. A tag
+is never moved — a broken release gets the next patch tag — so the pull
+request that precedes the tag raises all seven version literals together:
+the three `pyproject.toml` files, `agent_providers.__version__`, core's exact
+`overnightworks-agent-client` pin, and the service's exact pins on core and
+client.
 `tests/test_distribution_contract.py` fails while they disagree, because uv
 ignores those pins inside the workspace.

@@ -521,9 +521,6 @@ CALL_NOT_JSON_ROWS = {
         )
         for constant in ("NaN", "Infinity", "-Infinity")
     },
-    "decoder-recursion": _Refusal(
-        _call(DEEPLY_NESTED_JSON), TextToolRejectionRule.CALL_NOT_JSON, THE_VALUE_START,
-    ),
 }
 CLOSE_TAG_ROWS = {
     "prose-after-the-value": _Refusal(
@@ -663,6 +660,32 @@ def test_a_refused_call_names_the_rule_it_broke_and_where(parse, row):
     assert (rejection.rule, rejection.offset) == (row.rule, row.offset)
     assert rejection.length == len(row.text.strip())
     assert 0 <= rejection.offset <= rejection.length
+
+
+@pytest.mark.parametrize("parse", PARSERS.values(), ids=PARSERS)
+def test_a_call_the_json_decoder_cannot_recurse_into_is_refused_at_the_value_start(
+    parse, monkeypatch,
+):
+    def exhausted(self, text, position):
+        raise RecursionError
+
+    monkeypatch.setattr(json.JSONDecoder, "raw_decode", exhausted)
+
+    rejection = _refusal_of_text(parse, _call(DEEPLY_NESTED_JSON)).rejection
+
+    assert (rejection.rule, rejection.offset) == (
+        TextToolRejectionRule.CALL_NOT_JSON, THE_VALUE_START,
+    )
+
+
+@pytest.mark.parametrize("parse", PARSERS.values(), ids=PARSERS)
+def test_an_unclosed_deeply_nested_call_is_refused_as_not_json_within_the_block(parse):
+    text = _call(DEEPLY_NESTED_JSON)
+
+    rejection = _refusal_of_text(parse, text).rejection
+
+    assert rejection.rule is TextToolRejectionRule.CALL_NOT_JSON
+    assert THE_VALUE_START <= rejection.offset <= len(text.strip())
 
 
 @pytest.mark.parametrize(("parse", "row"), _cases(PRECEDENCE_ROWS))

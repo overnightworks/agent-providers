@@ -13,6 +13,7 @@ import pytest
 from pydantic import ValidationError
 from wire_builders import call, heartbeat, result, started, succeeded, text
 
+from agent_client import sse as sse_module
 from agent_client.run_stream import StreamViolation, ViolationKind
 from agent_client.sse import (
     Decoded,
@@ -216,23 +217,45 @@ def test_tool_input_deeper_than_the_limit_is_not_built() -> None:
         call(1, "call-1", tool_input=too_deep)
 
 
-@pytest.mark.parametrize(
-    ("depth", "kind"),
-    [
-        pytest.param(MAX_TOOL_INPUT_DEPTH + 1, ViolationKind.SCHEMA_MISMATCH, id="past the limit"),
-        pytest.param(100_000, ViolationKind.INVALID_JSON, id="past the JSON parser's own limit"),
-    ],
-)
-def test_a_frame_whose_tool_input_nests_too_deep_is_named(depth: int, kind: ViolationKind) -> None:
+def _frame_nested(depth: int) -> bytes:
     shallow_call = encode_event(call(1, "call-1", tool_input={"a": 1}))
     deep_frame = shallow_call.replace(b'{"a":1}', b'{"a":' * depth + b"1" + b"}" * depth)
     assert len(deep_frame) < MAX_EVENT_BYTES
+    return deep_frame
 
-    opening, violation = RunStreamDecoder().feed(OPENING + deep_frame)
+
+def _violation_of(frame: bytes) -> StreamViolation:
+    opening, violation = RunStreamDecoder().feed(OPENING + frame)
 
     assert opening == A_RUN[0]
     assert isinstance(violation, StreamViolation)
-    assert violation.kind is kind
+    return violation
+
+
+def test_a_frame_whose_tool_input_nests_past_the_limit_is_a_schema_mismatch() -> None:
+    violation = _violation_of(_frame_nested(MAX_TOOL_INPUT_DEPTH + 1))
+
+    assert violation.kind is ViolationKind.SCHEMA_MISMATCH
+
+
+def test_a_frame_nested_far_past_the_parser_stack_ends_in_a_violation() -> None:
+    violation = _violation_of(_frame_nested(100_000))
+
+    assert violation.kind in {ViolationKind.INVALID_JSON, ViolationKind.SCHEMA_MISMATCH}
+
+
+def test_a_frame_the_json_parser_cannot_recurse_into_is_invalid_json(monkeypatch) -> None:
+    def exhausted(*args: Any, **kwargs: Any) -> Any:
+        raise RecursionError
+
+    decoder = RunStreamDecoder()
+    assert decoder.feed(OPENING) == [A_RUN[0]]
+    monkeypatch.setattr(sse_module.json, "loads", exhausted)
+
+    [violation] = decoder.feed(_frame_nested(MAX_TOOL_INPUT_DEPTH + 1))
+
+    assert isinstance(violation, StreamViolation)
+    assert violation.kind is ViolationKind.INVALID_JSON
 
 
 @pytest.mark.parametrize(

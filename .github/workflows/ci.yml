@@ -13,10 +13,14 @@ permissions:
   contents: read
 
 jobs:
-  checks:
-    name: checks
+  test:
+    name: test
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13", "3.14", "3.15"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -44,6 +48,7 @@ jobs:
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884
         with:
           enable-cache: true
+          python-version: ${{ matrix.python-version }}
 
       # The workspace's own packages are put on the path rather than built, so
       # every checking step runs only locked wheels and no setup script.
@@ -69,6 +74,7 @@ jobs:
           --cov-report=xml:coverage.xml
 
       - name: Upload the coverage report for the quality gate
+        if: matrix.python-version == '3.12'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage
@@ -140,6 +146,17 @@ jobs:
           test "$status" -eq 2
           grep -q 'identity.jwks_url' refused.txt
 
+  checks:
+    name: checks
+    needs: [test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fail unless every Python minor passed
+        env:
+          TEST_RESULT: ${{ needs.test.result }}
+        run: test "$TEST_RESULT" = success
+
   keycloak-token-shapes:
     name: keycloak-token-shapes
     runs-on: ubuntu-latest
@@ -205,8 +222,35 @@ jobs:
         if: always()
         run: docker rm --force keycloak
 
+  dependency-floors:
+    name: dependency-floors
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      UV_RESOLUTION: lowest-direct
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884
+        with:
+          enable-cache: false
+          python-version: "3.12"
+
+      - name: Install the lowest declared direct dependencies
+        run: uv sync --all-packages --extra dev --extra image --no-build --no-install-workspace
+
+      - name: Versions the suite runs against
+        run: uv pip list
+
+      - name: Tests
+        env:
+          PYTHONPATH: src:packages/agent-client/src:packages/agent-service/src
+        run: uv run --no-sync --no-build pytest tests -q
+
   quality:
-    needs: [checks, keycloak-token-shapes]
+    needs: [checks, keycloak-token-shapes, dependency-floors]
     if: always()
     permissions:
       contents: read

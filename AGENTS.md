@@ -82,8 +82,9 @@ mandatory jobs live in `quality/config.toml`, its SonarCloud scope in
 CI also proves the built wheels outside the workspace: in a fresh venv, the
 client wheel alone imports every `agent_client` module, client and core
 together import `agent_providers.dispatch` with the identical
-`ToolDeclaration`, and all three install together and the installed
-`agent-service` refuses a bad config. The `keycloak-token-shapes` job serves
+`ToolDeclaration`, and all three install together, the installed
+`agent_service.app_tools` discovers a tool from a local TLS fake, and the
+installed `agent-service` refuses a bad config. The `keycloak-token-shapes` job serves
 the test realm from Keycloak and runs `tests/test_service_keycloak.py`, the
 service's end-to-end proof with real tokens; elsewhere that suite skips.
 

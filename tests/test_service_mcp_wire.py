@@ -38,6 +38,7 @@ from agent_service.mcp_wire import (
     read_tool_outcome,
     request_headers,
     require_acknowledgement,
+    require_session_id,
     require_supported_version,
 )
 
@@ -164,6 +165,25 @@ def test_a_client_refuses_a_server_version_outside_the_set() -> None:
         refusal_of(require_supported_version, "2025-06-18").refusal
         is WireRefusal.UNSUPPORTED_VERSION
     )
+
+
+@pytest.mark.parametrize("session_id", ["a", "~", "!", "session-1.AbC_9", "\x21\x7e"])
+def test_a_visible_ascii_session_id_is_kept(session_id: str) -> None:
+    assert require_session_id(session_id) == session_id
+
+
+@pytest.mark.parametrize(
+    "session_id",
+    ["", " ", "a b", "tab\t", "line\n", "\x7f", "caf\xe9", "snow\u2603", "\x00"],
+    ids=["empty", "space", "inner-space", "tab", "newline", "del", "latin-1", "unicode", "nul"],
+)
+def test_a_session_id_outside_visible_ascii_is_refused_and_echoes_nothing(session_id: str) -> None:
+    refusal = refusal_of(require_session_id, session_id)
+
+    assert refusal.refusal is WireRefusal.INVALID_SESSION_ID
+    assert str(refusal) == "invalid_session_id"
+    assert refusal.__cause__ is None
+    assert refusal.__context__ is None
 
 
 def test_the_initialize_result_is_built_from_constants_and_echoes_no_client_member() -> None:

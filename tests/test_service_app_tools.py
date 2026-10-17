@@ -985,8 +985,9 @@ def test_no_client_frame_of_a_closed_error_holds_the_token_as_text(
             async with open_app_tools(origin, CAPABILITY, context) as session:
                 await session.list_tools()
 
+    scenario = discover()
     with pytest.raises(expected) as raised:
-        asyncio.run(discover())
+        asyncio.run(scenario)
 
     assert CANARY_TOKEN not in text_locals_of_client_frames(raised.value)
 
@@ -1043,8 +1044,9 @@ def test_an_exception_already_leaving_wins_over_a_close_failure(
             if raised_in_body is not None:
                 raise raised_in_body
 
+    scenario = connect()
     with pytest.raises(leaving) as raised:
-        asyncio.run(connect())
+        asyncio.run(scenario)
 
     assert not exception_in_context_chain(raised.value, httpx.CloseError)
 

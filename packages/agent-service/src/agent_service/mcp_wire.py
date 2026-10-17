@@ -19,7 +19,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from http import HTTPStatus
-from typing import Annotated, Any, Final, Literal, NoReturn, Self
+from typing import Annotated, Any, Final, Literal, NoReturn, Self, TypeVar
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, ValidationError
 from pydantic.alias_generators import to_camel
@@ -98,7 +98,7 @@ class _Tolerant(_Model):
     model_config = ConfigDict(extra="ignore")
 
 
-type RequestId = int | UnicodeText
+RequestId = int | UnicodeText
 
 
 class JsonRpcRequest(_Model):
@@ -128,7 +128,8 @@ class JsonRpcError(_Model):
 
 
 type JsonRpcMessage = JsonRpcRequest | JsonRpcNotification | JsonRpcResponse | JsonRpcError
-type _JsonArray[Item] = Annotated[tuple[Item, ...], Field(strict=False)]
+_Item = TypeVar("_Item")
+_JsonArray = Annotated[tuple[_Item, ...], Field(strict=False)]
 type Reply = JsonRpcResponse | JsonRpcError
 
 

@@ -1,0 +1,8 @@
+claim_id = "e088902c6a75478cb6bed31b87c411d5"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "c4d3e7ccec3c51daecee358c108ece54e66145ca"
+branch = "claude/issue-105-test-vocabulary"
+scope = [".github/host-vocabulary-allowed.txt", ".github/workflows/ci.yml", "AGENTS.md", "pyproject.toml", "src/agent_providers/text_tool_protocol.py", "tests/conftest.py", "tests/fixtures/codex-cover-no-image-events.jsonl", "tests/fixtures/codex-cover-quota-exceeded.jsonl", "tests/fixtures/codex-image-no-image-events.jsonl", "tests/fixtures/codex-image-quota-exceeded.jsonl", "tests/provider_test_support.py", "tests/test_claude_provider.py", "tests/test_codex_cli_adapter.py", "tests/test_grok_cli_adapter.py", "tests/test_sse_codec.py", "tests/test_text_tool_protocol.py", "tests/test_tool_loop.py", "tests/test_wire_protocol.py"]
+opened_commit = "24f35a7e91e817106530f6209f989be880c776fd"
+whole_reason = "One naming pass over the test modules slice 8 already changed, plus the guard that keeps the names clean; the fixture moves, their readers and the allow-list the guard reads must land together."

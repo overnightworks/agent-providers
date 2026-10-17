@@ -521,10 +521,12 @@ class _ProbeUnderWatch:
 
     def __init__(self) -> None:
         self.calls = 0
+        self.entered = threading.Event()
         self.release = threading.Event()
 
     def __call__(self) -> str:
         self.calls += 1
+        self.entered.set()
         self.release.wait(timeout=_PROBE_THREAD_BOUND_SECONDS)
         return "answer"
 
@@ -535,26 +537,37 @@ def _probe_threads() -> list[threading.Thread]:
     ]
 
 
-def _announce_the_follower(monkeypatch) -> threading.Event:
-    """Set the returned event once the thread named ``follower`` waits on a flight."""
-    follower_waits = threading.Event()
+class _WaitAnnouncements:
+    """Which named threads wait on a flight, and on which future."""
+
+    def __init__(self) -> None:
+        self._waiting: dict[str, threading.Event] = {}
+        self.futures: dict[str, concurrent.futures.Future] = {}
+
+    def waiting(self, name: str) -> threading.Event:
+        return self._waiting.setdefault(name, threading.Event())
+
+
+def _announce_the_waiters(monkeypatch) -> _WaitAnnouncements:
+    announcements = _WaitAnnouncements()
 
     class AnnouncingFuture(concurrent.futures.Future):
         def result(self, timeout=None):
-            if threading.current_thread().name == "follower":
-                follower_waits.set()
+            name = threading.current_thread().name
+            announcements.futures[name] = self
+            announcements.waiting(name).set()
             return super().result(timeout)
 
     monkeypatch.setattr(concurrent.futures, "Future", AnnouncingFuture)
-    return follower_waits
+    return announcements
 
 
-def _answer_on_the_follower_thread(cached: CachedProbe, answers: list[str]) -> threading.Thread:
-    follower = threading.Thread(
-        target=lambda: answers.append(cached.get()), name="follower", daemon=True,
-    )
-    follower.start()
-    return follower
+def _answer_on_a_named_thread(
+    cached: CachedProbe, answers: list[str], name: str,
+) -> threading.Thread:
+    worker = threading.Thread(target=lambda: answers.append(cached.get()), name=name, daemon=True)
+    worker.start()
+    return worker
 
 
 def test_a_probe_thread_that_cannot_start_leaves_no_flight_behind(monkeypatch) -> None:
@@ -570,7 +583,9 @@ def test_a_probe_thread_that_cannot_start_leaves_no_flight_behind(monkeypatch) -
 
     assert raised.value is cannot_start
     assert probe.calls == 0
-    monkeypatch.setattr("agent_providers.process.CLI_PROBE_CALLER_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(
+        "agent_providers.process.CLI_PROBE_CALLER_TIMEOUT_SECONDS", _PROBE_THREAD_BOUND_SECONDS,
+    )
     assert cached.get() == "answer"
     assert probe.calls == 1
 
@@ -580,7 +595,9 @@ def test_a_login_probe_that_cannot_start_a_thread_is_retried_by_the_next_call(
 ) -> None:
     probed = CachedProbe(lambda: CliLogin(logged_in=True, auth_method="chatgpt"))
     monkeypatch.setattr(process, "_codex_login_probe", probed)
-    monkeypatch.setattr("agent_providers.process.CLI_PROBE_CALLER_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(
+        "agent_providers.process.CLI_PROBE_CALLER_TIMEOUT_SECONDS", _PROBE_THREAD_BOUND_SECONDS,
+    )
     cannot_start = RuntimeError("can't start new thread")
 
     with monkeypatch.context() as failing:
@@ -598,7 +615,7 @@ def test_a_probe_start_that_raises_leaves_one_owner_of_the_flight(
 ) -> None:
     probe = _ProbeUnderWatch()
     cached = CachedProbe(probe)
-    follower_waits = _announce_the_follower(monkeypatch)
+    announcements = _announce_the_waiters(monkeypatch)
     interruption = KeyboardInterrupt()
     follower_answers: list[str] = []
     follower: threading.Thread | None = None
@@ -611,20 +628,28 @@ def test_a_probe_start_that_raises_leaves_one_owner_of_the_flight(
                 target=cached._run_and_resolve,
                 thread_claims_first=thread_claims_first,
             )
-            with pytest.raises(KeyboardInterrupt) as raised:
-                cached.get()
-            assert raised.value is interruption
-            if thread_claims_first:
-                follower = _answer_on_the_follower_thread(cached, follower_answers)
-                assert follower_waits.wait(timeout=_PROBE_THREAD_BOUND_SECONDS)
-                assert probe.calls == 1
-            else:
-                owned_threads = _probe_threads()
+            threads_before = set(_probe_threads())
+            try:
+                with pytest.raises(KeyboardInterrupt) as raised:
+                    cached.get()
+                assert raised.value is interruption
+                if thread_claims_first:
+                    follower = _answer_on_a_named_thread(cached, follower_answers, "follower")
+                    assert announcements.waiting("follower").wait(
+                        timeout=_PROBE_THREAD_BOUND_SECONDS,
+                    )
+                    assert probe.entered.wait(timeout=_PROBE_THREAD_BOUND_SECONDS)
+                    assert probe.calls == 1
+                else:
+                    owned_threads = set(_probe_threads()) - threads_before
+                    assert len(owned_threads) == 1
+                    gate.set()
+                    for thread in owned_threads:
+                        thread.join(timeout=_PROBE_THREAD_BOUND_SECONDS)
+                        assert not thread.is_alive()
+                    assert probe.calls == 0
+            finally:
                 gate.set()
-                for thread in owned_threads:
-                    thread.join(timeout=_PROBE_THREAD_BOUND_SECONDS)
-                    assert not thread.is_alive()
-                assert probe.calls == 0
     finally:
         probe.release.set()
         if follower is not None:
@@ -638,24 +663,24 @@ def test_a_probe_start_that_raises_leaves_one_owner_of_the_flight(
 def test_a_started_probe_thread_owns_its_flight_before_it_claims(monkeypatch) -> None:
     probe = _ProbeUnderWatch()
     cached = CachedProbe(probe)
-    follower_waits = _announce_the_follower(monkeypatch)
+    announcements = _announce_the_waiters(monkeypatch)
     gate, _ = order_the_thread_start_claims(monkeypatch, thread_claims_first=False)
     answers: list[str] = []
-    starter = threading.Thread(target=lambda: answers.append(cached.get()), daemon=True)
-    follower: threading.Thread | None = None
+    workers: list[threading.Thread] = []
 
     try:
-        starter.start()
-        follower = _answer_on_the_follower_thread(cached, answers)
-        assert follower_waits.wait(timeout=_PROBE_THREAD_BOUND_SECONDS)
+        workers.append(_answer_on_a_named_thread(cached, answers, "starter"))
+        assert announcements.waiting("starter").wait(timeout=_PROBE_THREAD_BOUND_SECONDS)
+        workers.append(_answer_on_a_named_thread(cached, answers, "follower"))
+        assert announcements.waiting("follower").wait(timeout=_PROBE_THREAD_BOUND_SECONDS)
+        assert announcements.futures["follower"] is announcements.futures["starter"]
         assert probe.calls == 0
         gate.set()
     finally:
         gate.set()
         probe.release.set()
-        starter.join(timeout=_PROBE_THREAD_BOUND_SECONDS)
-        if follower is not None:
-            follower.join(timeout=_PROBE_THREAD_BOUND_SECONDS)
+        for worker in workers:
+            worker.join(timeout=_PROBE_THREAD_BOUND_SECONDS)
 
     assert answers == ["answer", "answer"]
     assert probe.calls == 1

@@ -1085,7 +1085,7 @@ def start_then_raise(
 def order_the_thread_start_claims(
     monkeypatch, *, thread_claims_first: bool,
 ) -> tuple[threading.Event, threading.Event]:
-    """Hold every started thread at its claim until the returned gate opens.
+    """Hold every started ``ClaimedStartThread`` at its claim until the returned gate opens.
 
     The gate is open from the start with ``thread_claims_first``. The second
     event is set once a thread has taken its claim.

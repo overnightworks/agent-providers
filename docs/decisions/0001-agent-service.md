@@ -1143,7 +1143,7 @@ the parallel-run limit stands once, in H7's Decision.
 Measured on 17.10.2026 on `$HOME/.local/share/claude/versions/2.1.302`
 (`claude --version` prints `2.1.302 (Claude Code)`), a 285,793,528-byte Bun
 executable. No cell used a login, a token or an Anthropic account, except
-A1b-0b1, which used the dedicated measurement token. Nothing here
+A1b-0b1 and A1b-0b2, which used the dedicated measurement token. Nothing here
 reads `~/.claude`.
 
 **Harness (every cell).** Each run is the CLI under `bwrap` with the network
@@ -1687,6 +1687,152 @@ read.
 Not measured: the token's lifetime and what the CLI does when it expires or is
 revoked; request paths (no proxy); a run with the token and an `~/.claude`
 credential together.
+
+#### A1b-0b2 the turn limit, live
+
+Measured on 17.10.2026 on 2.1.302 (`claude --version` prints `2.1.302 (Claude Code)`,
+checked without the token in the same sandbox) with the operator's dedicated
+measurement token, authorized for this cell. It reached the CLI only as
+`CLAUDE_CODE_OAUTH_TOKEN` in the child's environment (the A1b-0b1 route);
+`<token>` stands for it, and the scans below found it, the `sk-ant` prefix and every other
+definite signature in none of the stored evidence. Live runs: 3 (cap 3), no retry.
+
+**Harness.** A1b-0b1's harness (network not unshared, private home, empty working
+directory, both deleted after each run, `--die-with-parent`) with these changes. The
+environment is `PATH=/usr/bin:/bin`, `HOME`, `TMPDIR` (the home's `tmp`),
+`DISABLE_AUTOUPDATER=1`, `MCP_TOOL_TIMEOUT=600000` (above every run's deadline, so a
+held call cannot time out into an error result) and `CLAUDE_CODE_OAUTH_TOKEN=<token>`.
+Inside the sandbox a script starts a loopback MCP server (A1b-0c's plain-mode server
+with the barrier below) and then runs the CLI; `ARGS` is `-p --input-format
+stream-json --output-format stream-json --verbose --max-turns N --tools ""
+--strict-mcp-config --setting-sources "" --no-session-persistence --mcp-config
+<home>/mcp.json --allowedTools mcp__fake__step --model haiku`, and `<home>/mcp.json`
+names `http://127.0.0.1:<port>/mcp` with a dummy bearer. The one user message is
+written to stdin, which is then closed. The CLI runs through the bounded runner
+(`run_cli_bounded`) in its own process group with a deadline of 120 s (S1, S3) or
+240 s (S5); the machine's probe lock is held for every run. Init reports `tools`
+exactly `mcp__fake__step`, `mcp_servers` exactly `fake` `connected`, `model`
+`"claude-haiku-5-5"` and `claude_code_version` `2.1.302` in all three runs; the
+`modelUsage` key is `claude-haiku-5-5` in all three.
+
+**H, the additive hypothesis.** The CLI counts one turn per model response, whatever
+`tool_use`, text or thinking blocks the response carries. `N` is the run's
+`--max-turns`, `M` is `max_tool_calls`, `R` the model responses, `T` the calls the
+model made and `S` the calls the fake server answered. The one free parameter is the
+offset `d = S - N`, measured with one call per response (H admits `d` in {-1, 0, +1}).
+H implies `max_turns = M + k` with `k = max(1 - d, 1)`, so that the service's limit
+(rule 15) fires before the CLI serves call `M + 1`. Predictions: c1 (S1, `N` 3) fixes
+`d` and has `R = 3 + max(d, 0)`, `S = 3 + d`; c2 (S3, `N` 3) has c1's counts; c3 (S5,
+`N = 30 + k`) has `S = N + d`, at least 31. In every row each call is served except,
+for `d = -1`, the call of response `N`.
+
+**The response barrier.** The server starts with `P = N + 1` permits. Each `tools/call`
+takes one permit and is answered at once while a permit remains; when none remains the
+server sends no byte for it and logs `held`. `initialize`, notifications, `tools/list`,
+`ping`, `GET` and `DELETE` take none. Under the assumption A (the CLI makes no model
+request while a call is unanswered and none after a response without a call, and every
+result it hands the model is the server's), a run has at most `P + 1` responses, so at
+most 5, 5 and 34, and 44 in all. A's known breaches (a call the CLI answers locally, a
+request it sends on its own) are detected in the stream, abort the run and stop the
+series; none was detected. The bound counts the responses visible in the stream. The
+quota exposure is larger by what the stream does not show (requests outside it, which
+are not measured, retried requests, which abort the run, and responses after a breach)
+and is bounded only by each run's deadline. The token is a subscription setup token:
+the runs used plan quota and were not billed per call; `total_cost_usd` below is the
+CLI's notional estimate, never a cap.
+
+**The fixed measurement constants.** The tool is `step(n)` with `n` an integer. S1 and
+S5 send:
+
+> This is a measurement. Call the tool step with n=1. Each result names your next call; make exactly that call, one call per answer, and write no text. Stop only when a result says done.
+
+and `step(n)` replies `Not done. Next: call step with n=<n+1>.`. S3 sends:
+
+> This is a measurement. In each answer, first write one short sentence, then call the tool step. Start with n=1. Each result names your next call. Stop only when a result says done.
+
+and `step(n)` replies `Not done. Next: write one short sentence, then call step with n=<n+1>.`.
+No reply says "done", so a valid run ends by the CLI's limit.
+
+**Why parallel calls and the mixed sequence are not measured.** The formula needs the
+largest ratio of CLI turns to counted tool calls. One call per response is the worst
+case for a CLI that counts responses: the ratio is exactly 1. A response carrying `p`
+calls costs one turn if the CLI counts responses (ratio `1/p`) and `p` turns if it
+counts calls (ratio 1), so parallel calls cannot raise the ratio above the single-call
+loop's. One case escapes this and is named in c4, not measured.
+
+**The runs.** Every run: layer 1 (evidence integrity) `intact`, layer 2 (sequence
+compliance) `compliant`, layer 3 `complete` with terminal cause `ending` (the turn
+limit, positively identified by `terminal_reason: "max_turns"`), teardown confirmed
+(runner reason `complete`, process group gone, home and working directory deleted),
+stop path none, `stop_series` false, exit code 1 after a natural end, no
+`unprompted-response` and no `local-result`.
+
+| | S1 (c1) | S3 (c2) | S5 (c3) |
+|---|---|---|---|
+| `--max-turns` N / permits P | 3 / 4 | 3 / 4 | 31 / 32 |
+| R, `assistant` events | 3, 3 | 3, 6 | 31, 31 |
+| T, `T_dup` | 3, 0 | 3, 0 | 31, 0 |
+| text blocks, thinking blocks | 0, 0 | 3, 0 | 0, 0 |
+| S, `S_dup`, `held`, `tail-unseen` | 3, 0, 0, 0 | 3, 0, 0, 0 | 31, 0, 0, 0 |
+| U, `U_err` | 3, 0 | 3, 0 | 31, 0 |
+| last call served | yes | yes | yes |
+| `subtype` | `error_max_turns` | `error_max_turns` | `error_max_turns` |
+| `is_error` | true | true | true |
+| `terminal_reason`, `stop_reason` | `max_turns`, `tool_use` | `max_turns`, `tool_use` | `max_turns`, `tool_use` |
+| `num_turns` | 4 | 4 | 32 |
+| `total_cost_usd` (notional) | 0.00098875 | 0.00082068 | 0.00358051 |
+| `d = S - N` | 0 | 0 | 0 |
+| layer 4 | matches H | matches H, c1's `d` | matches H, c1's `d` |
+
+The `result` of the CLI's limit differs from a completion's (A1b-0b1 c1: `subtype`
+`success`, `is_error` false, `terminal_reason` `completed`, `stop_reason` `end_turn`):
+it has `subtype: "error_max_turns"`, `is_error: true`, `terminal_reason: "max_turns"`,
+`stop_reason: "tool_use"`, a numeric `total_cost_usd`, and the process exits 1.
+`num_turns` is `N + 1` in all three runs although the CLI served `N` calls and made
+`N` responses; this card does not explain the extra count and `num_turns` is no
+substitute for `S`. The run's last `tool_result` arrived before the `result` (the CLI
+served call `N`; it did not serve a call `N + 1`). Responses in S3 arrive as
+two `assistant` events each (the text block, then the `tool_use` block) under one
+`message.id`, so A1b-2's parser must group `assistant` events by `message.id` to count
+responses: 6 events for 3 responses. A text block beside the call did not cost a turn.
+
+**c1 S1, single-tool loop, `--max-turns 3`: matches, `d = 0`.** Three responses, three
+calls, all served. The limit is checked after response 3's call ran, and no fourth
+response was made. `k = max(1 - 0, 1) = 1`.
+
+**c2 S3, text beside each call, `--max-turns 3`: matches c1's `d`.** The same counts as
+c1 with a text block in each response (R 3, S 3). A text block does not cost a turn
+of its own.
+
+**c3 S5, the single-tool loop at `--max-turns 31` (`30 + k`): matches.** 31 responses,
+31 calls, all served (`S = N + d = 31`, at least 31), ending in the CLI's limit. In a
+one-call-per-response loop with `max_tool_calls = 30`, the service would therefore see
+call 31 first and end the run `failed: limit_exceeded` (rule 15) before the CLI's limit.
+
+**c4 The formula: established, within the measured sequences.** `d = 0`, `k = 1`, so
+`max_turns = max_tool_calls + 1` (31 for the default 30). "Established" means H is
+supported by one call per response, a text block beside each call, `N` 3 and 31, and
+haiku, not proven for every response shape. **Handoff to A1b-4a, the whole-response
+rejection gap.** A CLI that counted calls and refused a whole response whose calls
+would cross `N` could stop up to `p - 1` calls before call `M + 1` (with `M = 30` and
+`N = 31`, serve 29 calls and refuse a following three-call response, so the service
+never sees call 31), and all three runs here could still match, because S1, S3 and S5
+cannot tell response counting from call counting. The formula alone does not discharge
+line 13's "the service's limit always fires first"; A1b-4a owns resolving that
+remaining application condition before it makes the promise. Parallel calls (S2) stay
+not measured.
+
+**Responses used.** 3 + 3 + 31 = 37 visible model responses against the bound of 44
+under A; no breach of A was detected. The notional cost of the three runs is 0.00538994.
+Quota exposure beyond the visible responses is not measured (see above).
+
+Not measured: other models, and a run that resumes after a max-turns ending; values
+of `N` other than 3 and 31; parallel calls in one response, including the
+call-counting CLI that refuses a whole response crossing `N`; a final answer inside a
+tool loop (A1b-0b1 measured it at `N` 1 only); how an `isError` tool result counts (a
+run that received the unexpected reply would not be driven); the cost of a thinking
+block (haiku emitted none); any model request the CLI makes outside the stream, and
+`MCP_TOOL_TIMEOUT`'s default; why `num_turns` is `N + 1`.
 
 ## H8 atelier-2
 

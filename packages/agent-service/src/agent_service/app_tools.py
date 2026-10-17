@@ -8,15 +8,17 @@ bounded at ``MAX_EVENT_BYTES``. Every wire rule is ``mcp_wire``'s; this module
 owns only the conversation: status precedence, answer correlation, the
 session id and the pagination bound.
 
-Wire, protocol and HTTP-status refusals leave as the closed ``UpstreamError``
-members below, which name only a reason, never a URL, header, body or the
-capability. Transport exceptions of ``httpx`` are not mapped here.
+Wire, protocol, HTTP-status and transport failures leave as the closed
+``UpstreamError`` members below, which name only a reason or a status, never a
+URL, header, body or the capability, and chain to no ``httpx`` exception. A
+request is POSTed once: after its bytes may have been sent it is never
+retransmitted, so a lost connection ends that call as ``UpstreamCallLost``.
 """
 
 from __future__ import annotations
 
 import ssl
-from collections.abc import AsyncIterator, Iterator, Mapping
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from enum import StrEnum
@@ -49,6 +51,7 @@ from agent_service.mcp_wire import (
     read_tool_outcome,
     request_headers,
     require_acknowledgement,
+    require_json_answer,
     require_session_id,
     require_supported_version,
 )
@@ -84,6 +87,29 @@ class UpstreamRefused(UpstreamError):
     def __init__(self, status: int):
         super().__init__(status)
         self.status = status
+
+
+class UpstreamRedirected(UpstreamError):
+    def __init__(self, status: int):
+        super().__init__(status)
+        self.status = status
+
+
+class UpstreamUnreachable(UpstreamError):
+    """No request byte can have reached the app: connect, TLS or pool failed."""
+
+
+class UpstreamCallLost(UpstreamError):
+    """The request may have been processed; a caller must not retry it automatically."""
+
+
+_NEVER_SENT: Final = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
+
+
+def _transport_failure(failure: httpx.HTTPError) -> NoReturn:
+    if isinstance(failure, _NEVER_SENT):
+        raise_without_chain(UpstreamUnreachable())
+    raise_without_chain(UpstreamCallLost())
 
 
 def _protocol_error(
@@ -129,6 +155,20 @@ def _require_identity_encoding(response: httpx.Response) -> None:
         _protocol_error(ProtocolFailure.CONTENT_ENCODING)
 
 
+def _require_request_answer_headers(response: httpx.Response) -> None:
+    if response.status_code != HTTPStatus.OK:
+        _protocol_error(ProtocolFailure.UNEXPECTED_STATUS)
+    _require_identity_encoding(response)
+    with _wire_refusals_as_protocol_errors():
+        require_json_answer(response.headers.get("Content-Type"))
+
+
+def _require_acknowledgement_headers(response: httpx.Response) -> None:
+    with _wire_refusals_as_protocol_errors():
+        require_acknowledgement(response.status_code, b"")
+    _require_identity_encoding(response)
+
+
 @dataclass(frozen=True)
 class _Conversation:
     http: httpx.AsyncClient
@@ -153,21 +193,26 @@ class _Conversation:
         body: bytes,
         negotiated: ProtocolVersion | None,
         session_id: str | None,
-        required_status: HTTPStatus | None,
+        require_answer_headers: Callable[[httpx.Response], None],
     ) -> _Received:
         headers = self._headers(negotiated, session_id)
-        async with self.http.stream("POST", self.endpoint, content=body, headers=headers) as sent:
-            if not 200 <= sent.status_code < 300:
-                raise_without_chain(UpstreamRefused(sent.status_code))
-            if required_status is not None and sent.status_code != required_status:
-                _protocol_error(ProtocolFailure.UNEXPECTED_STATUS)
-            _require_identity_encoding(sent)
-            return _Received(
-                sent.status_code,
-                sent.headers.get("Content-Type"),
-                await _raw_body_within_bound(sent),
-                sent.headers.get(SESSION_ID_HEADER),
-            )
+        try:
+            async with self.http.stream(
+                "POST", self.endpoint, content=body, headers=headers
+            ) as sent:
+                if 300 <= sent.status_code < 400:
+                    raise_without_chain(UpstreamRedirected(sent.status_code))
+                if not 200 <= sent.status_code < 300:
+                    raise_without_chain(UpstreamRefused(sent.status_code))
+                require_answer_headers(sent)
+                return _Received(
+                    sent.status_code,
+                    sent.headers.get("Content-Type"),
+                    await _raw_body_within_bound(sent),
+                    sent.headers.get(SESSION_ID_HEADER),
+                )
+        except httpx.HTTPError as failure:
+            _transport_failure(failure)
 
     async def request(
         self,
@@ -178,7 +223,9 @@ class _Conversation:
     ) -> _Answered:
         request_id = next(self.request_ids)
         message = JsonRpcRequest(id=request_id, method=method.value, params=params)
-        received = await self._post(encode_message(message), negotiated, session_id, HTTPStatus.OK)
+        received = await self._post(
+            encode_message(message), negotiated, session_id, _require_request_answer_headers
+        )
         with _wire_refusals_as_protocol_errors():
             reply = read_answer(received.content_type, received.body)
         if reply.id != request_id:
@@ -191,7 +238,7 @@ class _Conversation:
         self, method: McpMethod, negotiated: ProtocolVersion, session_id: str | None
     ) -> None:
         body = encode_message(JsonRpcNotification(method=method.value))
-        received = await self._post(body, negotiated, session_id, None)
+        received = await self._post(body, negotiated, session_id, _require_acknowledgement_headers)
         with _wire_refusals_as_protocol_errors():
             require_acknowledgement(received.status, received.body)
 

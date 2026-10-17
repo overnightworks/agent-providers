@@ -4,7 +4,9 @@ The server is stdlib ``ThreadingHTTPServer`` on 127.0.0.1 behind a test CA and
 a server certificate generated at run time with ``cryptography``; nothing is
 committed. Every request is recorded and answered by a responder the test
 supplies. Every wait carries a timeout and ``close`` releases every held
-response, so no handler outlives its test.
+response, so no handler outlives its test. Connections are HTTP/1.0 unless
+the server is started with ``keep_alive``; every accepted connection is
+counted before its TLS handshake.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Final
@@ -104,6 +107,7 @@ class RecordedRequest:
     path: str
     headers: Mapping[str, str]
     body: bytes
+    connection: int = 0
 
     @property
     def message(self) -> dict[str, Any]:
@@ -114,15 +118,30 @@ class RecordedRequest:
         return self.message.get("method")
 
 
+class Fate(StrEnum):
+    ANSWER = "answer"
+    DROP_UNANSWERED = "drop_unanswered"
+    CUT_MID_BODY = "cut_mid_body"
+
+
 @dataclass(frozen=True)
 class FakeResponse:
-    """One scripted answer; ``held_back`` is sent only after the test releases it."""
+    """One scripted answer.
+
+    ``held_back`` is sent only after the test releases it. The ``fate`` makes
+    the app close the connection without any answer, or after ``body`` while
+    the headers promised ``held_back`` as well.
+    """
 
     status: int = 200
     content_type: str | None = "application/json"
     body: bytes = b""
     headers: Mapping[str, str] = field(default_factory=dict)
     held_back: bytes = b""
+    fate: Fate = Fate.ANSWER
+
+
+DROPPED: Final = FakeResponse(fate=Fate.DROP_UNANSWERED)
 
 
 def rpc_result(request: RecordedRequest, result: Mapping[str, Any], **kwargs: Any) -> FakeResponse:
@@ -193,18 +212,32 @@ class _Handler(BaseHTTPRequestHandler):
     server: McpAppFake
     timeout = WAIT_SECONDS
 
-    def do_POST(self) -> None:
-        length = int(self.headers.get("Content-Length", 0))
+    def setup(self) -> None:
+        super().setup()
+        self.protocol_version = "HTTP/1.1" if self.server.keep_alive else "HTTP/1.0"
+
+    def _record(self, method: str, body: bytes) -> RecordedRequest:
         request = RecordedRequest(
-            "POST", self.path, _lower_cased(self.headers.items()), self.rfile.read(length)
+            method,
+            self.path,
+            _lower_cased(self.headers.items()),
+            body,
+            connection=self.client_address[1],
         )
         self.server.record(request)
-        self._send(self.server.responder(request))
+        return request
+
+    def do_POST(self) -> None:
+        length = int(self.headers.get("Content-Length", 0))
+        request = self._record("POST", self.rfile.read(length))
+        response = self.server.responder(request)
+        if response.fate is Fate.DROP_UNANSWERED:
+            self.close_connection = True
+            return
+        self._send(response)
 
     def do_GET(self) -> None:
-        self.server.record(
-            RecordedRequest("GET", self.path, _lower_cased(self.headers.items()), b"")
-        )
+        self._record("GET", b"")
         self._send(FakeResponse(status=405, content_type=None))
 
     def _send(self, response: FakeResponse) -> None:
@@ -217,6 +250,9 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(response.body)
         self.wfile.flush()
+        if response.fate is Fate.CUT_MID_BODY:
+            self.close_connection = True
+            return
         if response.held_back and self.server.tail_released.wait(WAIT_SECONDS):
             self.wfile.write(response.held_back)
 
@@ -227,7 +263,9 @@ class _Handler(BaseHTTPRequestHandler):
 class McpAppFake(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, responder: Responder, credentials: TlsCredentials) -> None:
+    def __init__(
+        self, responder: Responder, credentials: TlsCredentials, *, keep_alive: bool = False
+    ) -> None:
         super().__init__((LOOPBACK, 0), _Handler)
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.minimum_version = ssl.TLSVersion.TLSv1_2
@@ -236,7 +274,9 @@ class McpAppFake(ThreadingHTTPServer):
             self.socket, server_side=True, do_handshake_on_connect=False
         )
         self.responder = responder
+        self.keep_alive = keep_alive
         self.tail_released = threading.Event()
+        self._accepted_connections = 0
         self._recorded: list[RecordedRequest] = []
         self._lock = threading.Lock()
 
@@ -249,6 +289,17 @@ class McpAppFake(ThreadingHTTPServer):
         with self._lock:
             return list(self._recorded)
 
+    @property
+    def accepted_connections(self) -> int:
+        with self._lock:
+            return self._accepted_connections
+
+    def get_request(self) -> Any:
+        accepted = super().get_request()
+        with self._lock:
+            self._accepted_connections += 1
+        return accepted
+
     def record(self, request: RecordedRequest) -> None:
         with self._lock:
             self._recorded.append(request)
@@ -258,8 +309,10 @@ class McpAppFake(ThreadingHTTPServer):
 
 
 @contextmanager
-def serving(responder: Responder, credentials: TlsCredentials) -> Iterator[McpAppFake]:
-    fake = McpAppFake(responder, credentials)
+def serving(
+    responder: Responder, credentials: TlsCredentials, *, keep_alive: bool = False
+) -> Iterator[McpAppFake]:
+    fake = McpAppFake(responder, credentials, keep_alive=keep_alive)
     thread = threading.Thread(target=fake.serve_forever, args=(POLL_SECONDS,), daemon=True)
     thread.start()
     try:

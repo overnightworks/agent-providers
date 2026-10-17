@@ -1,0 +1,8 @@
+claim_id = "c9030a36f34245098cbb41c8faf8722c"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "13c0a4417f7d1c8dcfa7200a02382170fe5b66e7"
+branch = "claude/issue-129-claude-without-model"
+scope = ["README.md", "src/agent_providers/claude/adapter.py", "src/agent_providers/claude/provider.py", "src/agent_providers/config.py", "src/agent_providers/dispatch.py", "tests/conftest.py", "tests/provider_test_support.py", "tests/test_claude_adapter.py", "tests/test_claude_provider.py", "tests/test_config.py", "tests/test_dispatch.py"]
+opened_commit = "edf4f51f7f47449201a43d449585e8ec3dc3049a"
+whole_reason = "One decision, what a missing and an empty model mean on the Claude path, spans the Claude provider and adapter, dispatch, the configuration field, README and their tests; split, a released state would let None mean two things."

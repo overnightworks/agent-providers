@@ -1,0 +1,8 @@
+claim_id = "209115c13e6547498ab5b47a1ce7f02b"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "3c25e33d633d4444b1ab7f5fedf60361eea11be2"
+branch = "claude/issue-139-codex-login-3c-ein-einmaliger-start-clai"
+scope = ["src/agent_providers/codex/image.py", "src/agent_providers/process.py", "tests/provider_test_support.py", "tests/test_codex_cli_adapter.py", "tests/test_process.py"]
+opened_commit = "0c3e38212812c3d54366dd84a1d3af891799d7f6"
+whole_reason = "The start claim and its two users are one handshake: a runner claim without the image claim still lets the image turn release the home under its runner's child, and the test helper that orders the two claims serves both."

@@ -26,7 +26,7 @@ from agent_providers.process import (
     CliLineChannel,
     PrivateCredentialHome,
     PrivateCredentialHomeReservation,
-    resolve_cli_binary,
+    require_cli_binary,
     run_cli_bounded,
     run_publishing_failures,
 )
@@ -92,11 +92,7 @@ def codex_child_process(arguments: tuple[str, ...], turn_home: CodexTurnHome) ->
     the CLI discovers only the redacted login this turn installed under
     ``CODEX_HOME``.
     """
-    binary = resolve_cli_binary(current_config().codex_cli_binary)
-    if binary is None:
-        raise CliEnvironmentUnavailableError(
-            CODEX_CLI_BINARY_MISSING_DETAIL, cause=CliEnvironmentCause.BINARY_MISSING,
-        )
+    binary = require_cli_binary(current_config().codex_cli_binary, CODEX_CLI_BINARY_MISSING_DETAIL)
     return ChildProcess(
         binary=binary,
         arguments=arguments,

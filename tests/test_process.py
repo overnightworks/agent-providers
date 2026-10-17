@@ -3326,6 +3326,35 @@ def test_credential_probe_names_malformed_mounted_credentials(
         function()
 
 
+def test_a_grok_credential_that_is_not_valid_utf8_is_unusable_without_a_chain(tmp_path) -> None:
+    credential_file = tmp_path / "grok.json"
+    credential_file.write_bytes(b'{"realm": {"key": "\xff\xfe"}}')
+    override_provider_runtime(grok_cli_auth_file=credential_file)
+
+    with pytest.raises(CliLoginUnusableError, match=GROK_CLI_CREDENTIALS_INVALID_DETAIL) as refusal:
+        process.grok_cli_token_is_present()
+
+    assert refusal.value.__cause__ is None
+    assert refusal.value.__context__ is None
+
+
+def test_a_grok_credential_is_read_as_utf8_whatever_the_locale_default_is(
+    tmp_path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    credential_file = tmp_path / "grok.json"
+    credential_file.write_bytes(b'{"realm": {"key": "caf\xe9"}}')
+    override_provider_runtime(grok_cli_auth_file=credential_file)
+    read_text = Path.read_text
+
+    def read_with_a_latin1_default(self: Path, encoding: str | None = None, **options):
+        return read_text(self, encoding or "latin-1", **options)
+
+    monkeypatch.setattr(Path, "read_text", read_with_a_latin1_default)
+
+    with pytest.raises(CliLoginUnusableError, match=GROK_CLI_CREDENTIALS_INVALID_DETAIL):
+        process.grok_cli_token_is_present()
+
+
 def _a_credential_document_holding(canary: str) -> str:
     return '{"realm": {"key": "' + canary + '"'
 

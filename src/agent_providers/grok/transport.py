@@ -72,7 +72,7 @@ _PROMPT_FILE_ARGUMENT_INDEX: Final = 1
 # Grok owns this larger bound because a 600-second streamed turn can include
 # substantial thought and usage NDJSON before its final answer.
 GROK_CLI_TURN_OUTPUT_READ_LIMIT_BYTES: Final = 4 * 1024 * 1024
-GROK_CLI_TURN_DIRECTORY_PREFIX: Final = "songmaker-grok-cli-"
+GROK_CLI_TURN_DIRECTORY_PREFIX: Final = "agent-cli-grok-turn-"
 
 log = logging.getLogger(__name__)
 

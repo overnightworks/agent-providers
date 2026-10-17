@@ -160,6 +160,10 @@ class _RunResponse(StreamingResponse):
 
     Starlette never closes the generator it streams, and a generator left
     paused behind a blocked send is only finalized by the garbage collector.
+
+    It also releases the run's lease on exit, after the frames are closed. That
+    frees the slot only for a run that never began, because the lease is
+    released once the run is over, however long the connection hangs on.
     """
 
     def __init__(self, frames: AsyncGenerator[bytes, None], lease: Lease | None) -> None:
@@ -173,8 +177,7 @@ class _RunResponse(StreamingResponse):
             async with aclosing(self.body_iterator):
                 await super().__call__(scope, receive, send)
         finally:
-            if self._lease is not None:
-                self._lease.release()
+            _release(self._lease)
 
 
 def _admitted(
@@ -204,13 +207,21 @@ def _admitted(
         if lease is None:
             return rejection(RejectionCode.BUSY)
     try:
-        return _admitted_response(
+        response = _admitted_response(
             config, runners, records, lease, wall_clock, caller, run_request, served
         )
     except BaseException:
-        if lease is not None:
-            lease.release()
+        _release(lease)
         raise
+    if isinstance(response, RejectionCode):
+        _release(lease)
+        return rejection(response)
+    return response
+
+
+def _release(lease: Lease | None) -> None:
+    if lease is not None:
+        lease.release()
 
 
 def _admitted_response(
@@ -222,7 +233,7 @@ def _admitted_response(
     caller: Caller,
     run_request: RunRequest,
     served: ServedRoute,
-) -> Response:
+) -> _RunResponse | RejectionCode:
     run_id = uuid.uuid4()
     try:
         capability = _capability_of(config, caller, run_request, run_id, wall_clock)
@@ -233,9 +244,7 @@ def _admitted_response(
             too_large.length,
             MAX_CAPABILITY_CHARACTERS,
         )
-        if lease is not None:
-            lease.release()
-        return rejection(RejectionCode.CAPABILITY_TOO_LARGE)
+        return RejectionCode.CAPABILITY_TOO_LARGE
     admitted = AdmittedRun(
         run_id=run_id,
         app=caller.app,

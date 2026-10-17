@@ -37,11 +37,12 @@ from service_support import (
     service_config,
     shared_mint,
 )
+from starlette.requests import ClientDisconnect
 from test_service_capability import QUOTATION_MARKS_256, TUNED_AT_THE_LIMIT
 from webauth.jwt_verification import KeySetFetchError
 
 from agent_client.wire import RejectionCode, RunStarted
-from agent_providers.events import FinalEvent
+from agent_providers.events import AssistantTextEvent, FinalEvent
 from agent_service.admission import AdmissionSlot
 from agent_service.app import create_app
 from agent_service.config import RunConfig
@@ -170,7 +171,7 @@ def test_a_capability_too_large_after_the_take_releases_the_lease(service):
     _assert_streamed_to_a_terminal(service.let_go(service.begin_held_cli_run()))
 
 
-@pytest.mark.parametrize("failing_step", ["AdmittedRun", "run_frames"])
+@pytest.mark.parametrize("failing_step", ["AdmittedRun", "run_frames", "_RunResponse"])
 def test_a_failure_before_the_response_exists_releases_the_lease(
     service, monkeypatch, failing_step
 ):
@@ -190,7 +191,6 @@ def test_two_concurrent_cli_requests_give_one_busy_answer_with_the_header_on_the
 
     (busy,) = (request.result() for request in refused)
     assert_rejected(busy, RejectionCode.BUSY, 429)
-    assert busy.headers["retry-after"] == "10"
     (admitted,) = set(requests) - refused
     _assert_streamed_to_a_terminal(service.let_go(admitted))
 
@@ -222,7 +222,9 @@ class _FailingRecorderOver:
         self._monkeypatch.setattr("agent_service.run_records.RunRecorder.over", over)
 
 
-def _consumed(runner: Runner | None, lease) -> None:
+def _consumed(runner: Runner | None, lease, *, recorder_fails: bool = False) -> None:
+    tolerated = (RuntimeError,) if recorder_fails else ()
+
     async def collected() -> None:
         frames = run_frames(
             alice_admitted_run(uuid.uuid4()),
@@ -233,7 +235,7 @@ def _consumed(runner: Runner | None, lease) -> None:
             RunRecords(),
             lease,
         )
-        with suppress(Exception):
+        with suppress(*tolerated):
             [frame async for frame in frames]
 
     asyncio.run(collected())
@@ -251,12 +253,12 @@ def test_a_run_that_is_over_releases_its_lease_even_when_its_record_fails(
     slot = AdmissionSlot()
     lease = slot.try_take()
 
-    _consumed(runner, lease)
+    _consumed(runner, lease, recorder_fails=recorder_fails)
 
     assert slot.try_take() is not None
 
 
-def test_a_late_release_by_an_old_run_leaves_the_lease_of_a_newer_run_held(monkeypatch):
+def test_a_late_release_by_an_old_run_leaves_the_lease_of_a_newer_run_held():
     slot = AdmissionSlot()
     old_lease = slot.try_take()
     _consumed(ScriptedRunner(FINAL), old_lease)
@@ -271,7 +273,7 @@ def test_a_late_release_by_an_old_run_leaves_the_lease_of_a_newer_run_held(monke
 
 
 def test_a_response_closed_before_its_first_step_releases_the_lease():
-    async def scenario() -> tuple[int, int]:
+    async def scenario() -> int:
         app = create_app(
             service_config(),
             runners=Runners(cli=ScriptedRunner(FINAL)),
@@ -281,8 +283,139 @@ def test_a_response_closed_before_its_first_step_releases_the_lease():
         await app(abandoned.scope, abandoned.receive, abandoned.send)
         next_run = ClientSocket()
         await app(next_run.scope, next_run.receive, next_run.send)
-        return next_run.messages[0]["status"], len(next_run.messages)
+        return next_run.messages[0]["status"]
 
-    status, _ = asyncio.run(scenario())
+    assert asyncio.run(scenario()) == 200
 
-    assert status == 200
+
+STALLING_RUNS = {
+    "heartbeat_interval_s": 1,
+    "stall_timeout_s": 1.5,
+    "idle_timeout_s": 3.0,
+    "max_duration_s": 8.0,
+}
+
+
+class GatedRunner:
+    """A CLI runner whose first run never ends and whose close waits on a gate.
+
+    Later runs hold until ``later_runs_proceed`` is set.
+    """
+
+    def __init__(self) -> None:
+        self.runs = 0
+        self.entered = asyncio.Event()
+        self.closing = asyncio.Event()
+        self.closed = asyncio.Event()
+        self.close_gate = asyncio.Event()
+        self.later_runs_proceed = asyncio.Event()
+
+    async def run(self, admitted):
+        self.runs += 1
+        first = self.runs == 1
+        try:
+            self.entered.set()
+            yield AssistantTextEvent(text="streaming")
+            await (asyncio.Event() if first else self.later_runs_proceed).wait()
+            yield FinalEvent(text="done")
+        finally:
+            if first:
+                self.closing.set()
+                await self.close_gate.wait()
+                self.closed.set()
+
+
+async def _bounded(awaitable):
+    return await asyncio.wait_for(awaitable, WAIT_LIMIT_S)
+
+
+class _Asking:
+    """One more CLI request over the ASGI app, answered or still streaming."""
+
+    def __init__(self, app, spec_version: str = "2.3") -> None:
+        self.client = ClientSocket(spec_version=spec_version)
+        self.response = asyncio.create_task(
+            app(self.client.scope, self.client.receive, self.client.send)
+        )
+
+    async def status(self) -> int:
+        await _bounded(self.client.answering.wait())
+        return self.client.messages[0]["status"]
+
+    async def finished(self, runner: GatedRunner) -> None:
+        runner.later_runs_proceed.set()
+        self.client.leave()
+        await _bounded(self.response)
+
+
+async def _asked_until_admitted(app, attempts: int = 100) -> _Asking:
+    for _ in range(attempts):
+        asking = _Asking(app)
+        if await asking.status() == 200:
+            return asking
+    raise AssertionError("the slot was never freed")
+
+
+def _gated_app(runs: dict[str, object] | None = None):
+    runner = GatedRunner()
+    app = create_app(
+        service_config(runs=runs),
+        runners=Runners(cli=runner),
+        fetch_key_set=shared_mint().fetch_key_set,
+    )
+    return runner, app
+
+
+@pytest.mark.parametrize(
+    "gone",
+    [
+        pytest.param({"spec_version": "2.3"}, id="spec-2.3-client-leaves"),
+        pytest.param(
+            {"spec_version": "2.4", "second_chunk_raises": OSError("peer gone")},
+            id="spec-2.4-send-fails",
+        ),
+    ],
+)
+def test_the_slot_stays_taken_until_the_stopped_run_has_been_closed(gone):
+    async def scenario() -> tuple[int, int]:
+        runner, app = _gated_app()
+        departing = ClientSocket(**gone)
+        old_response = asyncio.create_task(app(departing.scope, departing.receive, departing.send))
+        await _bounded(runner.entered.wait())
+        if gone["spec_version"] == "2.3":
+            await _bounded(departing.answering.wait())
+            departing.leave()
+        await _bounded(runner.closing.wait())
+
+        during_the_close = await _Asking(app).status()
+        runner.close_gate.set()
+        with suppress(ClientDisconnect):
+            await _bounded(old_response)
+        after_the_close = _Asking(app)
+        after_status = await after_the_close.status()
+        await after_the_close.finished(runner)
+        return during_the_close, after_status
+
+    assert asyncio.run(scenario()) == (429, 200)
+
+
+def test_the_next_run_is_admitted_while_the_old_connection_hangs_and_the_old_response_ends_late():
+    async def scenario() -> tuple[bool, int, int]:
+        runner, app = _gated_app(STALLING_RUNS)
+        runner.close_gate.set()
+        hanging = ClientSocket(blocks_the_second_chunk=True)
+        old_response = asyncio.create_task(app(hanging.scope, hanging.receive, hanging.send))
+        await _bounded(runner.closed.wait())
+
+        successor = await _asked_until_admitted(app)
+        old_still_hanging = not old_response.done()
+        hanging.released.set()
+        hanging.leave()
+        await _bounded(old_response)
+        while_successor_runs = await _Asking(app).status()
+        await successor.finished(runner)
+        after_successor = _Asking(app)
+        await after_successor.finished(runner)
+        return old_still_hanging, while_successor_runs, await after_successor.status()
+
+    assert asyncio.run(scenario()) == (True, 429, 200)

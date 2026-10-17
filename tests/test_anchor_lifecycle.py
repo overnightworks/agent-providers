@@ -116,34 +116,44 @@ def transition(state: AnchorState, returncode: int | None, announces: bool = Fal
 UNCHANGED = None
 
 
-def designed_transitions(code: int):
-    exited, stopped, reaped, not_reaped, gone = events_with(code)
+def designed_transitions(stored: int, reported: int):
+    exited, stopped, reaped, not_reaped, gone = events_with(reported)
     return {
-        (RUNNING, exited): transition(EXITED, code, True),
+        (RUNNING, exited): transition(EXITED, reported, True),
         (RUNNING, stopped): UNCHANGED,
-        (RUNNING, reaped): transition(RELEASED, code, True),
+        (RUNNING, reaped): transition(RELEASED, reported, True),
         (RUNNING, not_reaped): UNCHANGED,
         (RUNNING, gone): transition(LOST, None, True),
         (EXITED, exited): UNCHANGED,
         (EXITED, stopped): UNCHANGED,
-        (EXITED, reaped): transition(RELEASED, code),
+        (EXITED, reaped): transition(RELEASED, reported),
         (EXITED, not_reaped): UNCHANGED,
-        (EXITED, gone): transition(LOST, code),
-        **{(state, event): UNCHANGED for state in (RELEASED, LOST) for event in events_with(code)},
+        (EXITED, gone): transition(LOST, stored),
+        **{
+            (state, event): UNCHANGED
+            for state in (RELEASED, LOST)
+            for event in events_with(reported)
+        },
     }
 
 
-@pytest.mark.parametrize("code", [0, 3, -9], ids=["zero", "positive", "negative"])
+@pytest.mark.parametrize(
+    ("stored", "reported"),
+    [(0, 3), (3, -9), (-9, 3)],
+    ids=["zero", "positive", "negative"],
+)
 @pytest.mark.parametrize("state", list(AnchorState), ids=lambda state: state.name)
 @pytest.mark.parametrize(
     "event_index",
     range(len(ALL_EVENTS_WITH_THREE)),
     ids=lambda i: type(ALL_EVENTS_WITH_THREE[i]).__name__,
 )
-def test_every_state_meets_every_event_with_the_designed_transition(state, event_index, code):
-    event = events_with(code)[event_index]
-    before = status_in(state, code)
-    expected = designed_transitions(code)[(state, event)]
+def test_every_state_meets_every_event_with_the_designed_transition(
+    state, event_index, stored, reported
+):
+    event = events_with(reported)[event_index]
+    before = status_in(state, stored)
+    expected = designed_transitions(stored, reported)[(state, event)]
     expected_status, expected_announces = (before, False) if expected is UNCHANGED else expected
 
     result = advance(before, event)

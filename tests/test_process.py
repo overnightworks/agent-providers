@@ -27,6 +27,8 @@ from provider_test_support import (
     ANOTHER_RUNNER_FAILURE_CANARY,
     GROK_LOGGED_IN,
     SECRET_ENV_KEYS,
+    FailingLogHandler,
+    RaisingLogHandler,
     RunnerFailureWatch,
     a_codex_login,
     a_fifo,
@@ -3362,20 +3364,7 @@ def test_a_report_made_while_the_log_handler_fails_never_prints_the_failure_text
     monkeypatch, failure_watch, pooled_run,
 ) -> None:
     process_pool, callbacks = pooled_run
-    handler_errors: list[logging.LogRecord] = []
-
-    class FailingHandler(logging.Handler):
-        def emit(self, record: logging.LogRecord) -> None:
-            try:
-                raise RuntimeError("log handler failed")
-            except RuntimeError:
-                self.handleError(record)
-
-        def handleError(self, record: logging.LogRecord) -> None:
-            handler_errors.append(record)
-            super().handleError(record)
-
-    handler = FailingHandler()
+    handler = FailingLogHandler()
     process_logger = logging.getLogger("agent_providers.process")
     process_logger.addHandler(handler)
     monkeypatch.setattr(process, "_exchange_bounded", _raising(ValueError(A_RUNNER_FAILURE_CANARY)))
@@ -3386,7 +3375,7 @@ def test_a_report_made_while_the_log_handler_fails_never_prints_the_failure_text
 
     assert outcome.reason is CliRunReason.IO_ERROR
     assert failure_watch.reported_steps() == ["exchange ValueError"]
-    assert len(handler_errors) == 1
+    assert len(handler.handled_records) == 1
     assert process_pool.reservation_count() == 0
     failure_watch.assert_nothing_leaked()
 
@@ -3404,11 +3393,7 @@ def test_a_log_handler_that_raises_does_not_strand_the_hand_off_or_the_backgroun
 
     callbacks["on_reaped"] = release_and_signal
 
-    class RaisingHandler(logging.Handler):
-        def emit(self, record: logging.LogRecord) -> None:
-            raise OSError("log handler cannot write")
-
-    handler = RaisingHandler()
+    handler = RaisingLogHandler(then=OSError)
     process_logger = logging.getLogger("agent_providers.process")
     process_logger.addHandler(handler)
     monkeypatch.setattr(process, "_reap_process_group", _raising(
@@ -3776,13 +3761,7 @@ def test_a_later_failing_report_never_displaces_earlier_control_flow(
 ) -> None:
     process_pool, callbacks = pooled_run
     fail_to_start_the_runner_thread(monkeypatch, RuntimeError(A_RUNNER_FAILURE_CANARY))
-    raising_records = iter(raised_by_records)
-
-    class FailingHandler(logging.Handler):
-        def emit(self, record: logging.LogRecord) -> None:
-            raise next(raising_records, RuntimeError)
-
-    handler = FailingHandler()
+    handler = RaisingLogHandler(raised_by_records)
     process_logger = logging.getLogger("agent_providers.process")
     process_logger.addHandler(handler)
     callbacks["on_spawn_failed"] = _raising(RuntimeError(ANOTHER_RUNNER_FAILURE_CANARY))
@@ -3803,11 +3782,7 @@ def test_control_flow_raised_by_the_log_handler_while_reporting_propagates_after
     fail_to_start_the_runner_thread(monkeypatch, RuntimeError(A_RUNNER_FAILURE_CANARY))
     channel = CliLineChannel(maximum_lines=1)
 
-    class ExitingHandler(logging.Handler):
-        def emit(self, record: logging.LogRecord) -> None:
-            raise SystemExit
-
-    handler = ExitingHandler()
+    handler = RaisingLogHandler(then=SystemExit)
     process_logger = logging.getLogger("agent_providers.process")
     process_logger.addHandler(handler)
     try:

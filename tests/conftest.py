@@ -86,12 +86,17 @@ def _configure_agent_provider_runtime(tmp_path: Path):
 
 
 @pytest.fixture(autouse=True)
-def _service_hardening_never_touches_the_kernel(monkeypatch):
-    """Run the real hardening policy as an unprivileged user over a no-op kernel call."""
-    import agent_service.process_hardening as hardening
+def _service_hardening_never_touches_the_kernel():
+    """Run the real hardening policy as an unprivileged user over a no-op kernel call.
 
-    monkeypatch.setattr(hardening, "set_not_dumpable", lambda: None)
-    monkeypatch.setattr(hardening, "effective_user_id", lambda: 1000)
+    Uses ``patch`` rather than ``monkeypatch``: a shared ``monkeypatch`` set up this early would
+    be undone after the other autouse patches and restore their mocks into later tests.
+    """
+    with (
+        patch("agent_service.process_hardening.set_not_dumpable", lambda: None),
+        patch("agent_service.process_hardening.effective_user_id", lambda: 1000),
+    ):
+        yield
 
 
 @pytest.fixture(autouse=True)

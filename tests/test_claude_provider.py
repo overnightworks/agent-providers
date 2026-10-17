@@ -3607,11 +3607,13 @@ def test_tool_surface_probe_refuses_to_start_when_the_zombie_pool_is_saturated(
                 await provider.acall_claude_with_mcp(prompt="hi", user_id="u-1")
 
         await asyncio.gather(*(started.wait() for started in reapers_started))
-        with pytest.raises(UnavailableError) as exc:
+        async def refused_probe() -> Path:
             if probe_kind == "async":
-                await averify_no_builtin_cli_tools()
-            else:
-                verify_no_builtin_cli_tools()
+                return await averify_no_builtin_cli_tools()
+            return verify_no_builtin_cli_tools()
+
+        with pytest.raises(UnavailableError) as exc:
+            await refused_probe()
         assert str(exc.value) == (
             "Claude CLI process pool is at its concurrency limit (2); refusing to start another"
         )

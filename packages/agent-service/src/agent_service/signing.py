@@ -83,21 +83,31 @@ class SigningKey:
 def load_signing_key(path: Path) -> SigningKey:
     """Reads the file through one descriptor and raises ``UnsoundSigningKey`` for any refusal."""
     try:
-        return SigningKey.from_private_key(_parsed_private_key(read_secret_file(path, "key file")))
+        parsed = _parsed_private_key(read_secret_file(path, "key file"))
+        if not isinstance(parsed, _KeyRefusal):
+            return SigningKey.from_private_key(parsed)
     except UnsoundSecretFile as refusal:
         raise UnsoundSigningKey(str(refusal)) from None
     except UnsoundSigningKey as refusal:
         raise UnsoundSigningKey(f"{shown_text(str(path))} {refusal}") from None
+    raise UnsoundSigningKey(f"{shown_text(str(path))} {parsed.reason}")
 
 
-def _parsed_private_key(contents: bytes) -> object:
+@dataclass(frozen=True)
+class _KeyRefusal:
+    """Returned, never raised: the parsing frame holds the PEM and must not sit in a chain."""
+
+    reason: str
+
+
+def _parsed_private_key(contents: bytes) -> object | _KeyRefusal:
     if contents.count(_PEM_BLOCK_START) > 1:
-        raise UnsoundSigningKey("holds more than one PEM block; it must hold exactly one")
+        return _KeyRefusal("holds more than one PEM block; it must hold exactly one")
     try:
         return serialization.load_pem_private_key(contents, password=None)
     except TypeError:
-        raise UnsoundSigningKey("is encrypted; it must be an unencrypted PEM") from None
+        return _KeyRefusal("is encrypted; it must be an unencrypted PEM")
     except UnsupportedAlgorithm:
-        raise UnsoundSigningKey("uses a key algorithm the service does not support") from None
+        return _KeyRefusal("uses a key algorithm the service does not support")
     except ValueError:
-        raise UnsoundSigningKey("is not an unencrypted PEM private key") from None
+        return _KeyRefusal("is not an unencrypted PEM private key")

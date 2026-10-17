@@ -258,9 +258,27 @@ def test_an_unsound_key_file_stops_startup_with_one_line_naming_its_path_and_no_
     )
 
 
+def _encrypted_pem() -> bytes:
+    return generated_rsa_key(3072).private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.BestAvailableEncryption(b"passphrase"),
+    )
+
+
+def _truncated_pem() -> bytes:
+    pem = pem_of(generated_rsa_key(3072))
+    return pem[: len(pem) // 2]
+
+
 REFUSED_BUT_REAL_KEYS = [
-    pytest.param(lambda: ec.generate_private_key(ec.SECP256R1()), id="ec-p256"),
-    pytest.param(lambda: generated_rsa_key(2048), id="rsa-2048"),
+    pytest.param(lambda: pem_of(ec.generate_private_key(ec.SECP256R1())), id="ec-p256"),
+    pytest.param(lambda: pem_of(generated_rsa_key(2048)), id="rsa-2048"),
+    pytest.param(
+        lambda: pem_of(generated_rsa_key(3072)) + pem_of(generated_rsa_key(3072)), id="two-blocks"
+    ),
+    pytest.param(_encrypted_pem, id="encrypted"),
+    pytest.param(_truncated_pem, id="truncated"),
 ]
 
 
@@ -268,7 +286,9 @@ REFUSED_BUT_REAL_KEYS = [
 def test_a_refused_real_key_leaks_no_key_material_into_what_the_refusal_or_its_handler_holds(
     tmp_path, key
 ):
-    key_file = written_key_file(tmp_path, key())
+    key_file = tmp_path / "signing-key.pem"
+    key_file.write_bytes(key())
+    key_file.chmod(0o600)
     key_body = key_file.read_text().splitlines()[1]
 
     with pytest.raises(UnsoundSigningKey) as refusal:

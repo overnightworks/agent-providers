@@ -13,7 +13,10 @@ from pathlib import Path
 import pytest
 import uvicorn
 from provider_test_support import fake_cli_executable
-from service_support import PINNED_CLAUDE_VERSION
+from service_support import (
+    PINNED_CLAUDE_VERSION,
+    logging_state_snapshot,  # noqa: F401 - a fixture, requested by name
+)
 from test_service_config import (
     CLAUDE_VERSION_LINE,
     CLI_SECTION,
@@ -39,7 +42,7 @@ PROVIDER_TOKEN_VARIABLES = (
 
 
 @pytest.fixture
-def served(monkeypatch):
+def served(monkeypatch, logging_state_restored):
     runs = []
     monkeypatch.setattr(uvicorn, "run", lambda app, **where: runs.append(where))
     return runs

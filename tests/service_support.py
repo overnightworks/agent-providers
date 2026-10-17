@@ -33,6 +33,7 @@ from collections.abc import (
     Sequence,
 )
 from contextlib import asynccontextmanager, contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final, NoReturn
@@ -81,6 +82,56 @@ RUN_ID_PLACEHOLDER: Final = "00000000-0000-4000-8000-000000000000"
 @pytest.fixture(name="authority", scope="session")
 def fake_app_authority(tmp_path_factory: pytest.TempPathFactory) -> TestAuthority:
     return TestAuthority(tmp_path_factory.mktemp("fake-app-ca"))
+
+
+@dataclass(frozen=True)
+class LoggerState:
+    level: int
+    handlers: tuple[logging.Handler, ...]
+    filters: tuple[Any, ...]
+    propagate: bool
+    disabled: bool
+
+    @classmethod
+    def of(cls, logger: logging.Logger) -> LoggerState:
+        return cls(
+            logger.level,
+            tuple(logger.handlers),
+            tuple(logger.filters),
+            logger.propagate,
+            logger.disabled,
+        )
+
+    def restored_onto(self, logger: logging.Logger) -> None:
+        logger.setLevel(self.level)
+        logger.handlers[:] = self.handlers
+        logger.filters[:] = self.filters
+        logger.propagate = self.propagate
+        logger.disabled = self.disabled
+
+
+UNTOUCHED_LOGGER: Final = LoggerState(logging.NOTSET, (), (), True, False)
+
+
+@pytest.fixture(name="logging_state_restored")
+def logging_state_snapshot() -> Iterator[None]:
+    manager = logging.Logger.manager
+    root = logging.getLogger()
+    root_state = LoggerState.of(root)
+    named_states = {
+        name: LoggerState.of(logger)
+        for name, logger in list(manager.loggerDict.items())
+        if isinstance(logger, logging.Logger)
+    }
+    disabled_below, last_resort = manager.disable, logging.lastResort
+    record_factory = logging.getLogRecordFactory()
+    yield
+    for name, logger in list(manager.loggerDict.items()):
+        if isinstance(logger, logging.Logger):
+            named_states.get(name, UNTOUCHED_LOGGER).restored_onto(logger)
+    root_state.restored_onto(root)
+    manager.disable, logging.lastResort = disabled_below, last_resort
+    logging.setLogRecordFactory(record_factory)
 
 
 @functools.cache

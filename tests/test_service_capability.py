@@ -12,6 +12,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import Enum
 from pathlib import Path
 
 import httpx
@@ -723,30 +724,46 @@ def test_no_frame_header_or_status_body_or_log_of_an_admitted_run_carries_the_to
         _assert_no_token_in_any_log(caplog, service.signed)
 
 
-def _raise_token_bearing_error(admitted: AdmittedRun) -> None:
-    """Raise a ``RuntimeError`` whose message, note and ``__context__`` hold the token.
+class _ChainKind(Enum):
+    IMPLICIT = "an implicit chain"
+    EXPLICIT = "an explicit chain"
 
-    Its ``__cause__`` holds the signature segment; both links are genuinely raised and caught.
+
+def _raise_token_bearing_error(admitted: AdmittedRun, chain: _ChainKind) -> None:
+    """Raise a ``RuntimeError`` whose message and note hold the token, chained as ``chain`` says.
+
+    Implicit: raised inside the ``except`` of a genuinely raised ``KeyError(token)``, without
+    ``from``, so ``__context__`` holds the token and ``__suppress_context__`` is False.
+    Explicit: ``from`` a genuinely raised and caught ``ValueError(segment)``, so ``__cause__``
+    holds the signature segment, carries a traceback and ``__suppress_context__`` is True.
     """
     token = admitted.capability.token
+    error = RuntimeError(token)
+    error.add_note(token)
+    if chain is _ChainKind.IMPLICIT:
+        try:
+            raise KeyError(token)
+        except KeyError:
+            raise error
     try:
-        raise KeyError(token)
-    except KeyError:
-        error = RuntimeError(token)
-        error.add_note(token)
-        raise error from ValueError(_segment_of(token))
+        raise ValueError(_segment_of(token))
+    except ValueError as cause:
+        raise error from cause
 
 
 class _RunnerThatRaisesTheTokenIt:
     """A runner whose step raises, or whose close raises, an error that carries its capability."""
 
-    def __init__(self, *, inside_a_group: bool = False, in_its_close: bool = False) -> None:
+    def __init__(
+        self, chain: _ChainKind, *, inside_a_group: bool = False, in_its_close: bool = False
+    ) -> None:
+        self._chain = chain
         self._inside_a_group = inside_a_group
         self._in_its_close = in_its_close
 
     def _fail(self, admitted: AdmittedRun) -> None:
         try:
-            _raise_token_bearing_error(admitted)
+            _raise_token_bearing_error(admitted, self._chain)
         except RuntimeError as error:
             if not self._inside_a_group:
                 raise
@@ -763,30 +780,37 @@ class _RunnerThatRaisesTheTokenIt:
         yield
 
 
+_FAILING_RUNNER_CASES = [
+    ("step-raises-the-token", {}, "The runner of run {} failed", "RuntimeError", "failed"),
+    (
+        "step-raises-the-token-in-a-group",
+        {"inside_a_group": True},
+        "The runner of run {} failed",
+        "ExceptionGroup",
+        "failed",
+    ),
+    (
+        "close-raises-the-token",
+        {"in_its_close": True},
+        "Closing the runner of run {} failed",
+        "RuntimeError",
+        "succeeded",
+    ),
+]
+
+
 @pytest.mark.parametrize(
     ("runner", "event", "kind", "terminal"),
     [
         pytest.param(
-            _RunnerThatRaisesTheTokenIt(),
-            "The runner of run {} failed",
-            "RuntimeError",
-            "failed",
-            id="step-raises-the-token",
-        ),
-        pytest.param(
-            _RunnerThatRaisesTheTokenIt(inside_a_group=True),
-            "The runner of run {} failed",
-            "ExceptionGroup",
-            "failed",
-            id="step-raises-the-token-in-a-group",
-        ),
-        pytest.param(
-            _RunnerThatRaisesTheTokenIt(in_its_close=True),
-            "Closing the runner of run {} failed",
-            "RuntimeError",
-            "succeeded",
-            id="close-raises-the-token",
-        ),
+            _RunnerThatRaisesTheTokenIt(chain, **options),
+            event,
+            kind,
+            terminal,
+            id=f"{name}-through-{chain.value.replace(' ', '-')}",
+        )
+        for name, options, event, kind, terminal in _FAILING_RUNNER_CASES
+        for chain in _ChainKind
     ],
 )
 def test_a_failing_runner_is_logged_by_its_class_and_the_token_reaches_no_log(

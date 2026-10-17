@@ -345,6 +345,12 @@ def _gated_answer(
     return respond
 
 
+CLAUDE_CLI_CHILD_SURFACE: Final = (
+    "pid", "returncode", "communicate", "wait", "stdin", "stdout", "stderr",
+)
+CLAUDE_CLI_STDIN_SURFACE: Final = ("write", "drain", "close")
+
+
 def a_claude_cli_child(
     *,
     pid: int = 2468,
@@ -360,7 +366,7 @@ def a_claude_cli_child(
     has_stdin: bool = True,
 ) -> MagicMock:
     """Build the async twin of ``fake_cli_process``: an ``asyncio.subprocess.Process`` stand-in."""
-    child = MagicMock(pid=pid, returncode=returncode)
+    child = MagicMock(spec_set=CLAUDE_CLI_CHILD_SURFACE, pid=pid, returncode=returncode)
     child.communicate = AsyncMock(side_effect=_gated_answer(communicate, communicate_gate))
     child.wait = AsyncMock(side_effect=_gated_answer(wait_outcome, wait_gate))
     child.stdout = ClaudeCliStreamReader(
@@ -368,7 +374,7 @@ def a_claude_cli_child(
     )
     child.stderr = ClaudeCliStreamReader([stderr] if stderr else [])
     if has_stdin:
-        child.stdin = MagicMock()
+        child.stdin = MagicMock(spec_set=CLAUDE_CLI_STDIN_SURFACE)
         child.stdin.drain = AsyncMock()
     else:
         child.stdin = None

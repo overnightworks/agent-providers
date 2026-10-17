@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -31,18 +32,34 @@ from agent_providers.spawn import ChildProcess, closed_environment
 
 GUARDED_MODULES = ("test_claude_provider.py", "test_claude_adapter.py")
 PATCHING_CALLS = frozenset({"setattr", "patch", "object"})
+GATE_DEADLINE_SECONDS = 5
 GUARDED_DOOR_NAMES = frozenset({"create_subprocess_exec", "open_async_pipes"})
 
 
 def patched_door_lines(source: str) -> list[int]:
     """Line numbers of every call that patches an async spawn door by name."""
+    tree = ast.parse(source)
+    patching_calls = PATCHING_CALLS | _patch_aliases(tree)
     return [
         call.lineno
-        for call in ast.walk(ast.parse(source))
+        for call in ast.walk(tree)
         if isinstance(call, ast.Call)
-        and _callee_name(call) in PATCHING_CALLS
-        and any(_names_a_door(argument) for argument in call.args)
+        and _callee_name(call) in patching_calls
+        and any(
+            _names_a_door(argument)
+            for argument in [*call.args, *(keyword.value for keyword in call.keywords)]
+        )
     ]
+
+
+def _patch_aliases(tree: ast.AST) -> frozenset[str]:
+    return frozenset(
+        alias.asname
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module == "unittest.mock"
+        for alias in node.names
+        if alias.name == "patch" and alias.asname
+    )
 
 
 def _callee_name(call: ast.Call) -> str | None:
@@ -71,10 +88,15 @@ def _names_a_door(argument: ast.expr) -> bool:
         'monkeypatch.setattr(\n    provider.asyncio,\n    "create_subprocess_exec",\n    f,\n)',
         'monkeypatch.setattr(provider, "open_async_pipes", f)',
         'patch("agent_providers.claude.provider.open_async_pipes", f)',
+        'from unittest.mock import patch as replace\nreplace("asyncio.create_subprocess_exec", f)',
+        'patch(target="asyncio.create_subprocess_exec", new=f)',
+        'monkeypatch.setattr(target=provider, name="open_async_pipes", value=f)',
     ],
 )
 def test_the_guard_flags_every_spelling_of_a_door_patch(patch_spelling: str) -> None:
-    assert patched_door_lines(f"def test():\n    {patch_spelling}\n") != []
+    assert patched_door_lines(
+        "def test():\n" + textwrap.indent(patch_spelling, "    ") + "\n",
+    ) != []
 
 
 @pytest.mark.parametrize(
@@ -116,6 +138,15 @@ def test_the_builder_answers_communicate_and_exposes_the_child_surface() -> None
     child.communicate.assert_awaited_once_with(b"prompt")
 
 
+def test_the_builder_child_and_its_stdin_refuse_attributes_a_process_lacks() -> None:
+    child = a_claude_cli_child()
+
+    with pytest.raises(AttributeError):
+        child.not_a_process_attribute  # noqa: B018
+    with pytest.raises(AttributeError):
+        child.stdin.not_a_pipe_attribute  # noqa: B018
+
+
 def test_the_builder_raises_the_communicate_error_it_was_given() -> None:
     child = a_claude_cli_child(communicate=asyncio.TimeoutError())
 
@@ -147,10 +178,14 @@ def test_a_gated_child_call_completes_only_after_its_release(gated_call: str) ->
 
     async def drive() -> None:
         pending = asyncio.ensure_future(call(b"") if gated_call == "communicate" else call())
-        await gate.started.wait()
-        assert not pending.done()
-        gate.release.set()
-        await pending
+        try:
+            async with asyncio.timeout(GATE_DEADLINE_SECONDS):
+                await gate.started.wait()
+                assert not pending.done()
+                gate.release.set()
+                await pending
+        finally:
+            pending.cancel()
 
     asyncio.run(drive())
 

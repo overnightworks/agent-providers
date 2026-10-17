@@ -22,6 +22,7 @@ from service_support import (
     PROCESS_TOKEN,
     called_from,
     everything_a_refusal_holds,
+    logging_state_snapshot,  # noqa: F401 - a fixture, requested by name
     process_claude_cli,
     process_signing_key_file,
     process_token_file,
@@ -832,7 +833,7 @@ SECOND_APP_LISTING_TOOLS_WITHOUT_ORIGIN = (
 
 
 @pytest.fixture
-def served_apps(monkeypatch):
+def served_apps(monkeypatch, logging_state_restored):
     served = []
     monkeypatch.setattr(uvicorn, "run", lambda app, **where: served.append((app, where)))
     return served

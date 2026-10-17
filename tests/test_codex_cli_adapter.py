@@ -37,6 +37,7 @@ from provider_test_support import (
     RaisingLogHandler,
     RunnerFailureWatch,
     a_call_nested_too_deeply_to_decode,
+    a_call_to_a_declared_tool,
     a_call_to_an_undeclared_tool_carrying,
     a_codex_login,
     a_credential_destination_that_fails,
@@ -47,8 +48,10 @@ from provider_test_support import (
     a_symlink_to_a_login,
     a_usable_login_over_the_bound,
     assert_a_multi_result_batch_is_rejected,
+    assert_a_tool_round_then_its_resume,
     assert_the_canary_reaches_only_the_host,
     call_within_deadline,
+    cli_rounds_runner,
     drive_turn,
     exception_chain,
     fail_mkdtemp,
@@ -305,8 +308,8 @@ async def _collect_tool_events(stream) -> list[object]:
     return [event async for event in stream]
 
 
-def test_codex_tool_command_pins_read_only_isolation_for_start_and_resume() -> None:
-    model = "codex-test"
+@pytest.mark.parametrize("model", ["codex-test", None])
+def test_codex_tool_command_pins_read_only_isolation_for_start_and_resume(model) -> None:
     thread_id = "52700000-0000-4000-8000-000000000000"
     common = (
         "--json",
@@ -328,7 +331,7 @@ def test_codex_tool_command_pins_read_only_isolation_for_start_and_resume() -> N
         "-c", "features.code_mode=false",
         "-c", "features.code_mode_only=false",
         "-c", 'sandbox_mode="read-only"',
-        "--model", model,
+        *(("--model", model) if model is not None else ()),
     )
 
     assert codex_transport._codex_tool_arguments(model) == (
@@ -338,6 +341,100 @@ def test_codex_tool_command_pins_read_only_isolation_for_start_and_resume() -> N
         model,
         thread_id=thread_id,
     ) == ("exec", "resume", *common, thread_id, "-")
+
+
+@pytest.mark.parametrize("model", [None, "gpt-x"])
+def test_stream_turn_runs_the_codex_cli_across_rounds(monkeypatch, model) -> None:
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        codex_protocol,
+        "run_cli_bounded",
+        cli_rounds_runner(
+            [_tool_round_lines(a_call_to_a_declared_tool()), _tool_round_lines("done")],
+            _outcome(),
+            calls,
+        ),
+    )
+
+    turn = drive_turn("codex", model=model)
+
+    assert_a_tool_round_then_its_resume(
+        turn, calls, model=model,
+        resume_follows=lambda command: (
+            command[1:3] == ("exec", "resume")
+            and command[-2:] == ("52700000-0000-4000-8000-000000000000", "-")
+        ),
+    )
+
+
+def test_codex_transport_refuses_an_empty_model_before_any_home(monkeypatch) -> None:
+    def fail_if_a_home_is_made(*_args, **_kwargs):
+        raise AssertionError("a turn home was made")
+
+    monkeypatch.setattr(codex_transport, "create_codex_turn_home", fail_if_a_home_is_made)
+    monkeypatch.setattr(codex_protocol, "run_cli_bounded", fail_if_a_home_is_made)
+
+    with pytest.raises(ProviderUnavailableError) as refusal:
+        codex_transport.CodexCliToolTransport(model="", catalog=SAMPLE_TOOL_CATALOG)
+
+    assert refusal.value.reason.code is SafeRouteReasonCode.ROUTE_FAILED
+    assert (refusal.value.provider, refusal.value.route) == ("codex", ProviderRoute.CLI)
+
+
+@pytest.mark.parametrize("model", [None, "gpt-image-x"])
+def test_image_arguments_leave_out_model_without_one(model) -> None:
+    arguments = codex_image._codex_image_arguments(model)
+
+    assert ("--model" in arguments) is (model is not None)
+    if model is not None:
+        assert arguments[arguments.index("--model") + 1] == model
+
+
+def _spawned_image_arguments(monkeypatch, **options) -> tuple[list[tuple[str, ...]], bytes]:
+    calls: list[tuple[str, ...]] = []
+    spawn = _generated_png_runner()
+
+    def recording_runner(child, **kwargs):
+        calls.append(child.command)
+        return spawn(child, **kwargs)
+
+    monkeypatch.setattr(codex_protocol, "run_cli_bounded", recording_runner)
+    image = codex_image.generate_codex_image(
+        "prompt", policy=AN_IMAGE_POLICY, deadline=10_000_000, **options,
+    )
+    return calls, image
+
+
+@pytest.mark.parametrize("options", [{}, {"model": None}], ids=["omitted", "explicit-none"])
+def test_image_turn_runs_the_codex_default(monkeypatch, options) -> None:
+    calls, image = _spawned_image_arguments(monkeypatch, **options)
+
+    assert image.startswith(b"\x89PNG")
+    assert len(calls) == 1
+    assert "--model" not in calls[0]
+
+
+def test_image_turn_passes_a_chosen_model(monkeypatch) -> None:
+    calls, image = _spawned_image_arguments(monkeypatch, model="gpt-image-x")
+
+    assert image.startswith(b"\x89PNG")
+    assert calls[0][calls[0].index("--model") + 1] == "gpt-image-x"
+
+
+def test_image_turn_refuses_an_empty_model_before_any_home(monkeypatch) -> None:
+    def fail_if_anything_starts(*_args, **_kwargs):
+        raise AssertionError("the turn started")
+
+    monkeypatch.setattr(codex_image, "create_codex_turn_home", fail_if_anything_starts)
+    monkeypatch.setattr(codex_image, "image_encoder_is_installed", fail_if_anything_starts)
+    monkeypatch.setattr(codex_protocol, "run_cli_bounded", fail_if_anything_starts)
+
+    with pytest.raises(codex_image.CodexImageCliError) as refusal:
+        codex_image.generate_codex_image(
+            "prompt", policy=AN_IMAGE_POLICY, deadline=10_000_000, model="",
+        )
+
+    assert exception_chain(refusal.value) == [refusal.value]
 
 
 def test_codex_tool_transport_uses_an_empty_private_work_directory_on_resume(monkeypatch) -> None:
@@ -1823,8 +1920,7 @@ def test_a_codex_tool_result_nested_too_deeply_is_passed_on_in_the_next_prompt(
     monkeypatch,
 ) -> None:
     calls: list = []
-    lines = _tool_round_lines('<notes_tool_call>\n{"name":"list_notes","arguments":{}}\n'
-                              "</notes_tool_call>")
+    lines = _tool_round_lines(a_call_to_a_declared_tool())
     monkeypatch.setattr(codex_protocol, "run_cli_bounded", _runner(lines, _outcome(), calls))
     transport = _transport()
 

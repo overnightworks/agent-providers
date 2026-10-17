@@ -31,6 +31,7 @@ from agent_providers.codex.protocol import (
     CodexCliStreamFailure,
     codex_child_process,
     codex_cli_failure_reason,
+    codex_model_arguments,
     create_codex_turn_home,
     error_item_message,
     event_item,
@@ -48,6 +49,7 @@ from agent_providers.errors import (
     TextToolCallRejectedError,
     normalize_route_failure,
     raise_without_chain,
+    refuse_empty_model,
 )
 from agent_providers.process import (
     CliEnvironmentUnavailableError,
@@ -120,7 +122,8 @@ class CodexCliToolTransport:
     requests their removal; it happens once the last round's child is reaped.
     """
 
-    def __init__(self, *, model: str, catalog: ToolCatalog) -> None:
+    def __init__(self, *, model: str | None, catalog: ToolCatalog) -> None:
+        refuse_empty_model("codex", "cli", model)
         self._model = model
         self._catalog = catalog
         try:
@@ -277,7 +280,7 @@ class CodexCliToolTransport:
 
 
 def _codex_tool_arguments(
-    model: str,
+    model: str | None,
     *,
     thread_id: str | None = None,
 ) -> tuple[str, ...]:
@@ -295,8 +298,7 @@ def _codex_tool_arguments(
         *(part for config in _CODEX_TOOL_ISOLATION_CONFIGS for part in ("-c", config)),
         "-c",
         'sandbox_mode="read-only"',
-        "--model",
-        model,
+        *codex_model_arguments(model),
     )
     if thread_id is None:
         return (

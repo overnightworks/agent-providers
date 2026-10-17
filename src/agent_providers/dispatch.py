@@ -37,6 +37,7 @@ from agent_providers.errors import (
     SafeRouteReasonCode,
     ToolProtocolRejectionCode,
     normalize_route_failure,
+    refuse_empty_model,
 )
 from agent_providers.events import StreamEvent
 from agent_providers.grok.transport import GrokCliToolTransport
@@ -97,9 +98,8 @@ async def stream_turn(
 ) -> AsyncIterator[StreamEvent]:
     if provider not in ProviderName:
         raise _unavailable(provider, route, SafeRouteReasonCode.ROUTE_FAILED)
-    if _model_is_unusable(
-        model, provider_default_runs=provider == "claude" and route is ProviderRoute.CLI,
-    ):
+    refuse_empty_model(provider, route.value, model)
+    if model is None and route is not ProviderRoute.CLI:
         raise _unavailable(provider, route, SafeRouteReasonCode.ROUTE_FAILED)
     try:
         stream = _stream_for_route(
@@ -198,7 +198,7 @@ def _stream_for_route(
 
 async def _stream_grok_cli_tool_turn(
     *,
-    model: str,
+    model: str | None,
     system: str,
     messages: list[dict[str, str]],
     executor: ToolExecutor,
@@ -219,7 +219,7 @@ async def _stream_grok_cli_tool_turn(
 
 async def _stream_codex_cli_tool_turn(
     *,
-    model: str,
+    model: str | None,
     system: str,
     messages: list[dict[str, str]],
     executor: ToolExecutor,
@@ -277,10 +277,6 @@ async def _stream_cli_tool_turn(
         ) from exc
 
 
-def _model_is_unusable(model: str | None, *, provider_default_runs: bool) -> bool:
-    return model == "" or (model is None and not provider_default_runs)
-
-
 def call_provider_once(
     *, provider: str, model: str | None, prompt: str, timeout: int, system: str | None = None,
 ) -> str:
@@ -289,9 +285,10 @@ def call_provider_once(
     Grok and Codex use their HTTP API. Claude uses its API with an Anthropic
     key and its CLI without one; only the CLI runs without a model.
     """
-    if provider not in ProviderName or _model_is_unusable(
-        model, provider_default_runs=provider == "claude",
-    ):
+    if provider not in ProviderName:
+        raise _unavailable(provider, ProviderRoute.API, SafeRouteReasonCode.ROUTE_FAILED)
+    refuse_empty_model(provider, ProviderRoute.API.value, model)
+    if model is None and provider != "claude":
         raise _unavailable(provider, ProviderRoute.API, SafeRouteReasonCode.ROUTE_FAILED)
     try:
         if provider == "claude":

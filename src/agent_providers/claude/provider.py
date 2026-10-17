@@ -42,6 +42,7 @@ from agent_providers.errors import (
     ProviderUnavailableError,
     SafeRouteReasonCode,
     normalize_route_failure,
+    refuse_empty_model,
 )
 from agent_providers.events import (
     AssistantTextEvent,
@@ -187,7 +188,8 @@ class ClaudeResponse:
 
 def _refuse_unusable_model(model: str | None, *, route: Literal["api", "cli"]) -> None:
     """An empty name is never a default; the API has no default to fall back to."""
-    if model == "" or (model is None and route == "api"):
+    refuse_empty_model("claude", route, model)
+    if model is None and route == "api":
         raise ProviderUnavailableError(
             "claude",
             route,

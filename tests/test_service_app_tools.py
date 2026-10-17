@@ -13,12 +13,13 @@ import socket
 import ssl
 import threading
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
-from contextlib import ExitStack, closing
+from contextlib import ExitStack, closing, nullcontext
 from dataclasses import replace
 from typing import Any
 
 import httpx
 import pytest
+from capability_support import capability_carrying
 from mcp_app_fake import (
     ACKNOWLEDGED,
     CERTIFICATE_HOST,
@@ -52,7 +53,8 @@ from agent_service.app_tools import (
 )
 from agent_service.mcp_wire import NON_TEXT_BLOCK_MESSAGE, WireRefusal
 
-CAPABILITY = "capability-for-this-run"
+CAPABILITY = capability_carrying("capability-for-this-run")
+CANARY_TOKEN = CAPABILITY.token
 VERSION = "2025-11-25"
 CLIENT_DEADLINE_SECONDS = 30
 CANARY_HEADER = "canary-response-header"
@@ -159,7 +161,7 @@ def assert_closed(error: BaseException) -> None:
     assert error.__cause__ is None
     assert error.__context__ is None
     visible = f"{error!s} {error!r} {error.args!r} {vars(error)!r}"
-    for canary in (CAPABILITY, CANARY_HEADER, CANARY_BODY):
+    for canary in (CANARY_TOKEN, CANARY_HEADER, CANARY_BODY):
         assert canary not in visible
     carried = [*error.args, *vars(error).values()]
     assert not any(type(value).__module__.startswith("httpx") for value in carried)
@@ -200,7 +202,7 @@ def test_discovery_over_tls_speaks_the_profile_in_order(serve, context):
         ("POST", "/mcp", "tools/list"),
     ]
     for request in fake.requests:
-        assert request.headers["authorization"] == f"Bearer {CAPABILITY}"
+        assert request.headers["authorization"] == f"Bearer {CANARY_TOKEN}"
         assert request.headers["content-type"] == "application/json"
         assert request.headers["accept"] == "application/json, text/event-stream"
         assert request.headers["accept-encoding"] == "identity"
@@ -351,7 +353,7 @@ def test_a_call_returns_the_joined_text_and_is_posted_once(serve, context):
     assert (outcome.content, outcome.is_error) == ("a\nb", False)
     (call,) = requests_for(fake, "tools/call")
     assert call.message["params"] == {"name": "echo", "arguments": {"word": "hi"}}
-    assert call.headers["authorization"] == f"Bearer {CAPABILITY}"
+    assert call.headers["authorization"] == f"Bearer {CANARY_TOKEN}"
 
 
 def test_concurrent_calls_answered_in_reverse_order_each_get_their_own_answer(serve, context):
@@ -833,7 +835,7 @@ POSSIBLY_PROCESSED = [
 
 def failure_carrying_the_request(failure_type: type[httpx.HTTPError]) -> httpx.HTTPError:
     request = httpx.Request(
-        "POST", "https://localhost/mcp", headers={"Authorization": f"Bearer {CAPABILITY}"}
+        "POST", "https://localhost/mcp", headers={"Authorization": f"Bearer {CANARY_TOKEN}"}
     )
     if failure_type is httpx.HTTPStatusError:
         response = httpx.Response(500, text=CANARY_BODY, request=request)
@@ -916,3 +918,180 @@ def test_an_established_refusal_wins_over_a_failure_to_close_the_refused_respons
     failure_of(refusal, lambda: asyncio.run(connect()))
 
     assert transport.close_attempts >= 1
+
+
+def test_nothing_the_client_holds_shows_the_token_in_its_repr(serve, context, opened_clients):
+    fake = serve()
+
+    async def reprs(session: AppToolsSession) -> list[str]:
+        (client,) = opened_clients.clients
+        held = [session, session._conversation, client.auth, CAPABILITY]
+        return [repr(thing) for thing in held]
+
+    assert all(CANARY_TOKEN not in text for text in in_session(fake, context, reprs))
+
+
+def text_locals_of_client_frames(error: BaseException) -> list[str]:
+    texts: list[str] = []
+    trace = error.__traceback__
+    while trace is not None:
+        if trace.tb_frame.f_globals["__name__"] == app_tools.__name__:
+            for local in trace.tb_frame.f_locals.values():
+                members = (
+                    local.values()
+                    if isinstance(local, dict)
+                    else local
+                    if isinstance(local, tuple)
+                    else [local]
+                )
+                texts.extend(member for member in members if isinstance(member, str))
+        trace = trace.tb_next
+    return texts
+
+
+def refused_at(rpc_method: str, status: int, headers: dict[str, str] | None = None):
+    response = FakeResponse(status=status, content_type=None, headers=headers or {})
+    return lambda serve: serve(answering(rpc_method, response)).origin
+
+
+def unused_origin(_serve) -> str:
+    with closing(socket.socket()) as unused:
+        unused.bind(("127.0.0.1", 0))
+        return f"https://{CERTIFICATE_HOST}:{unused.getsockname()[1]}"
+
+
+def lost_call(serve) -> str:
+    return serve(answering("tools/list", DROPPED)).origin
+
+
+@pytest.mark.parametrize(
+    ("expected", "origin_of"),
+    [
+        (UpstreamRefused, refused_at("initialize", 500)),
+        (UpstreamRedirected, refused_at("initialize", 307, {"Location": "https://other.example/"})),
+        (UpstreamProtocolError, refused_at("initialize", 200)),
+        (UpstreamUnreachable, unused_origin),
+        (UpstreamCallLost, lost_call),
+    ],
+    ids=["refused", "redirected", "protocol-error", "unreachable", "call-lost"],
+)
+def test_no_client_frame_of_a_closed_error_holds_the_token_as_text(
+    serve, context, expected, origin_of
+):
+    origin = origin_of(serve)
+
+    async def discover() -> None:
+        async with asyncio.timeout(STALL_DEADLINE_SECONDS):
+            async with open_app_tools(origin, CAPABILITY, context) as session:
+                await session.list_tools()
+
+    scenario = discover()
+    with pytest.raises(expected) as raised:
+        asyncio.run(scenario)
+
+    assert not any(CANARY_TOKEN in text for text in text_locals_of_client_frames(raised.value))
+
+
+def close_failing_with_the_request(monkeypatch: pytest.MonkeyPatch) -> list[object]:
+    attempts: list[object] = []
+
+    async def failing_close(transport: httpx.AsyncHTTPTransport) -> None:
+        attempts.append(transport)
+        raise failure_carrying_the_request(httpx.CloseError)
+
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "aclose", failing_close)
+    return attempts
+
+
+def test_a_transport_close_failure_after_a_completed_run_leaves_as_a_closed_error(
+    serve, context, monkeypatch
+):
+    fake = serve()
+    attempts = close_failing_with_the_request(monkeypatch)
+
+    failure_of(UpstreamCallLost, lambda: list_tool_names(fake, context))
+
+    assert len(attempts) == 1
+
+
+class HostFailure(Exception):
+    pass
+
+
+def exception_in_context_chain(error: BaseException | None, kind: type[BaseException]) -> bool:
+    while error is not None:
+        if isinstance(error, kind):
+            return True
+        error = error.__context__
+    return False
+
+
+def retained_exceptions_and_secrets(error: BaseException) -> list[object]:
+    attributes = list(vars(error).values())
+    retained = [error.__cause__, *attributes]
+    leaking_text = [value for value in attributes if CANARY_TOKEN in repr(value)]
+    return [
+        *(value for value in retained if isinstance(value, BaseException)),
+        *leaking_text,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("app", "leaving", "raised_in_body"),
+    [
+        (
+            answering("initialize", FakeResponse(status=401, content_type=None)),
+            UpstreamRefused,
+            None,
+        ),
+        (ScriptedApp(), HostFailure, HostFailure("host")),
+        (ScriptedApp(), asyncio.CancelledError, asyncio.CancelledError()),
+    ],
+    ids=["refusal", "host-exception", "cancellation"],
+)
+def test_an_exception_already_leaving_wins_over_a_close_failure(
+    serve, context, monkeypatch, app, leaving, raised_in_body
+):
+    fake = serve(app)
+    attempts = close_failing_with_the_request(monkeypatch)
+
+    async def connect() -> None:
+        async with open_app_tools(fake.origin, CAPABILITY, context):
+            if raised_in_body is not None:
+                raise raised_in_body
+
+    scenario = connect()
+    with pytest.raises(leaving) as raised:
+        asyncio.run(scenario)
+
+    assert len(attempts) == 1
+    assert raised_in_body is None or raised.value is raised_in_body
+    assert leaving is not UpstreamRefused or raised.value.status == 401
+    assert not exception_in_context_chain(raised.value, httpx.CloseError)
+    assert retained_exceptions_and_secrets(raised.value) == []
+
+
+@pytest.mark.parametrize(
+    ("app", "outcome", "close_fails"),
+    [
+        (ScriptedApp(), None, False),
+        (
+            answering("tools/list", FakeResponse(status=500, content_type=None)),
+            UpstreamRefused,
+            False,
+        ),
+        (ScriptedApp(), UpstreamCallLost, True),
+    ],
+    ids=["completed-run", "closed-error-run", "failing-exit"],
+)
+def test_a_run_sends_post_only_and_never_ends_the_session_itself(
+    serve, context, monkeypatch, app, outcome, close_fails
+):
+    fake = serve(app)
+    attempts = close_failing_with_the_request(monkeypatch) if close_fails else []
+
+    with pytest.raises(outcome) if outcome else nullcontext():
+        list_tool_names(fake, context)
+
+    assert len(attempts) == close_fails
+    assert {request.method for request in fake.requests} == {"POST"}

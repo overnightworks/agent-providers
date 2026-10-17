@@ -1,8 +1,0 @@
-claim_id = "096af0def95e4c4e90bad14053ec3494"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "42b16a6391e62d50176cb930161bbe120a0ea928"
-branch = "docs/config-rule"
-scope = ["AGENTS.md", "CLAUDE.md", "README.md", "src/agent_providers/config.py"]
-opened_commit = "5d28cf99aee5d0ed56db0e3014aaa5078bff7ffa"
-whole_reason = "One rule stated in its four places (CLAUDE.md, AGENTS.md, README and the config module docstring); anchoring it in only some of them leaves the files contradicting each other."

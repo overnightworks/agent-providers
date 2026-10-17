@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import gc
 import json
@@ -1023,13 +1024,13 @@ def a_background_reap_over_a_group_that_never_dies(monkeypatch):
     return held
 
 
-def _reap_in_background_on_a_bounded_thread(child, on_reaped) -> BaseException | None:
-    raised: list[BaseException] = []
+def _reap_in_background_on_a_bounded_thread(child, on_reaped) -> Exception | None:
+    raised: list[Exception] = []
 
     def reap() -> None:
         try:
             process._reap_in_background(child, on_reaped)
-        except BaseException as error:  # noqa: BLE001 - handed to the asserting test
+        except Exception as error:
             raised.append(error)
 
     reaper = threading.Thread(target=reap)
@@ -2053,6 +2054,10 @@ def _closing_a_home(source: Path) -> _HomeRun:
     return _HomeRun(home.close, home.close)
 
 
+def _closing_a_home_left_to_collection(source: Path) -> _HomeRun:
+    return _HomeRun(_build_home(source).close, None)
+
+
 def _reserving_from_a_home(source: Path) -> _HomeRun:
     home = _build_home(source)
     return _HomeRun(home.reserve, home.close)
@@ -2060,7 +2065,12 @@ def _reserving_from_a_home(source: Path) -> _HomeRun:
 
 def _reserving_from_a_closing_home(source: Path) -> _HomeRun:
     home = _a_closing_home_whose_removal_failed(source)
-    return _HomeRun(home.reserve, home.close)
+
+    def reserve_and_accept_the_refusal() -> None:
+        with contextlib.suppress(RuntimeError):
+            home.reserve()
+
+    return _HomeRun(reserve_and_accept_the_refusal, home.close)
 
 
 def _releasing_the_last_reservation(source: Path) -> _HomeRun:
@@ -2073,7 +2083,7 @@ _HOME_RUNS = {
     "reserve": _reserving_from_a_home,
     "refused reserve": _reserving_from_a_closing_home,
     "release": _releasing_the_last_reservation,
-    "close": _closing_a_home,
+    "close": _closing_a_home_left_to_collection,
     "removal attempt": _closing_a_home,
 }
 
@@ -2119,8 +2129,6 @@ def _interrupted_by_a_keyboard_interrupt_at(position: int, codes: frozenset, ope
         completed_with = operation()
     except KeyboardInterrupt:
         return True
-    except RuntimeError:
-        return False
     finally:
         sys.settrace(tracer_found_at_entry)
         gc.enable()
@@ -2362,7 +2370,9 @@ def test_reserve_and_close_interleaved_at_every_line_remove_a_home_once(
     reserving_is_paused = paused_operation == "reserve"
 
     def operations_of(home, ledger):
-        reserve = lambda: ledger.reserve_from(home)  # noqa: E731
+        def reserve():
+            return ledger.reserve_from(home)
+
         return (reserve, home.close) if reserving_is_paused else (home.close, reserve)
 
     def outcome_holds(home, ledger, paused, other) -> None:
@@ -2378,17 +2388,24 @@ def test_reserve_and_close_interleaved_at_every_line_remove_a_home_once(
     )
 
 
-@pytest.mark.parametrize("paused_operation", ("close", "release"))
+@pytest.mark.parametrize(
+    ("paused_operation", "closed_before_the_run"),
+    (("close", False), ("release", True), ("release", False)),
+    ids=("close", "release-of-a-closed-home", "release-while-the-first-close-runs"),
+)
 def test_close_and_the_last_release_interleaved_at_every_line_remove_a_home_once(
-    tmp_path: Path, paused_operation: str,
+    tmp_path: Path, paused_operation: str, closed_before_the_run: bool,
 ) -> None:
     closing_is_paused = paused_operation == "close"
 
     def operations_of(home, ledger):
         held = ledger.reserve_from(home)
-        if not closing_is_paused:
+        if closed_before_the_run:
             home.close()
-        release = lambda: ledger.release(held)  # noqa: E731
+
+        def release() -> None:
+            ledger.release(held)
+
         return (home.close, release) if closing_is_paused else (release, home.close)
 
     def outcome_holds(home, ledger, _paused, _other) -> None:

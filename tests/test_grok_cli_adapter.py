@@ -20,6 +20,7 @@ from provider_test_support import (
     DEEPLY_NESTED_JSON,
     GROK_SESSION_ID,
     SAMPLE_TOOL_CATALOG,
+    CliCall,
     RunnerFailureWatch,
     a_call_nested_too_deeply_to_decode,
     a_call_to_a_declared_tool,
@@ -36,7 +37,6 @@ from provider_test_support import (
     fail_to_start_the_runner_thread,
     formatted_log_text,
     grok_cli_outcome,
-    grok_cli_runner,
     grok_tool_round_lines,
     override_provider_runtime,
 )
@@ -244,7 +244,7 @@ def test_grok_tool_command_pins_native_tool_and_web_isolation(model) -> None:
 
 @pytest.mark.parametrize("model", [None, "grok-4.5"])
 def test_stream_turn_runs_the_grok_cli_across_rounds(monkeypatch, model) -> None:
-    calls: list[tuple[str, ...]] = []
+    calls: list[CliCall] = []
     monkeypatch.setattr(
         grok_cli_adapter,
         "run_cli_bounded",
@@ -281,31 +281,32 @@ def test_grok_tool_transport_starts_then_resumes_in_one_private_credential_home(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    calls = []
+    calls: list[CliCall] = []
     homes: list[Path] = []
     source = current_config().grok_cli_auth_file
-    rounds = iter([
-        grok_tool_round_lines(a_call_to_a_declared_tool()),
-        grok_tool_round_lines("done"),
-        grok_tool_round_lines("another turn"),
-    ])
 
-    def run_cli_bounded(child, **kwargs):
-        calls.append((child, kwargs))
+    def assert_private_home(child) -> None:
         homes.append(assert_private_credential_child(
             child,
             root=tmp_path,
             source=source,
             destination=Path(".grok/auth.json"),
         ))
-        for line in next(rounds):
-            assert kwargs["stdout_line_channel"]._send(line)
-        outcome = grok_cli_outcome()
-        kwargs["stdout_line_channel"]._close(outcome)
-        kwargs["on_reaped"](1, False)
-        return outcome
 
-    monkeypatch.setattr(grok_cli_adapter, "run_cli_bounded", run_cli_bounded)
+    monkeypatch.setattr(
+        grok_cli_adapter,
+        "run_cli_bounded",
+        cli_rounds_runner(
+            [
+                grok_tool_round_lines(a_call_to_a_declared_tool()),
+                grok_tool_round_lines("done"),
+                grok_tool_round_lines("another turn"),
+            ],
+            grok_cli_outcome(),
+            calls,
+            on_child=assert_private_home,
+        ),
+    )
     transport = _transport()
 
     async def collect_and_close() -> list[object]:
@@ -330,17 +331,18 @@ def test_grok_tool_transport_starts_then_resumes_in_one_private_credential_home(
 
     assert isinstance(events[0], ToolCallEvent)
     assert events[-1] == FinalEvent(text="done")
-    (first_child, first_kwargs), (second_child, second_kwargs), (third_child, _) = calls
-    first_command, second_command = first_child.command, second_child.command
+    first, second, third = calls
+    first_kwargs, second_kwargs = first.kwargs, second.kwargs
+    first_command, second_command = first.command, second.command
     assert "--session-id" not in first_command
     assert "--resume" not in first_command
     assert second_command[-2:] == ("--resume", GROK_SESSION_ID)
-    for child, kwargs in calls:
-        assert child.command.count("--deny") == 1
-        assert child.command[child.command.index("--deny") + 1] == "*"
-        assert kwargs["stdin_payload"] is None
-        assert kwargs["prompt_file_arg_index"] == 1
-        assert kwargs["output_read_limit_bytes"] == (
+    for call in calls:
+        assert call.command.count("--deny") == 1
+        assert call.command[call.command.index("--deny") + 1] == "*"
+        assert call.kwargs["stdin_payload"] is None
+        assert call.kwargs["prompt_file_arg_index"] == 1
+        assert call.kwargs["output_read_limit_bytes"] == (
             grok_cli_adapter.GROK_CLI_TURN_OUTPUT_READ_LIMIT_BYTES
         )
     assert first_kwargs["prompt_file_bytes"] == b"system\n\nUser: hello"
@@ -348,14 +350,14 @@ def test_grok_tool_transport_starts_then_resumes_in_one_private_credential_home(
         b'<notes_tool_result>\n{"notes":[]}\n</notes_tool_result>'
     )
     assert first_kwargs["deadline"] == second_kwargs["deadline"]
-    assert "GROK_HOME" not in first_child.environment
+    assert "GROK_HOME" not in first.child.environment
     first_home = homes[0]
-    second_home = second_child.working_directory
-    third_home = third_child.working_directory
+    second_home = second.child.working_directory
+    third_home = third.child.working_directory
     assert second_home == first_home
     assert third_home != first_home
     assert homes == [first_home, first_home, third_home]
-    assert not first_child.working_directory.exists()
+    assert not first.child.working_directory.exists()
     assert not third_home.exists()
     assert source.read_text() == "{}"
 
@@ -519,23 +521,21 @@ def test_recorded_grok_tool_stream_executes_then_resumes_without_streaming_proto
     monkeypatch,
 ) -> None:
     """The recording is a real Grok capture parsed with the catalog it was recorded against."""
-    calls = []
-    rounds = iter([
-        _recorded_grok_tool_round_lines(),
-        grok_tool_round_lines(
-            "The fictional note has 68 words.", "01a06e35-a690-72b1-889d-804843d68226",
+    calls: list[CliCall] = []
+    monkeypatch.setattr(
+        grok_cli_adapter,
+        "run_cli_bounded",
+        cli_rounds_runner(
+            [
+                _recorded_grok_tool_round_lines(),
+                grok_tool_round_lines(
+                    "The fictional note has 68 words.", "01a06e35-a690-72b1-889d-804843d68226",
+                ),
+            ],
+            grok_cli_outcome(),
+            calls,
         ),
-    ])
-
-    def run_cli_bounded(child, **kwargs):
-        calls.append((child.command, kwargs))
-        for line in next(rounds):
-            assert kwargs["stdout_line_channel"]._send(line)
-        outcome = grok_cli_outcome()
-        kwargs["stdout_line_channel"]._close(outcome)
-        return outcome
-
-    monkeypatch.setattr(grok_cli_adapter, "run_cli_bounded", run_cli_bounded)
+    )
     transport = grok_cli_adapter.GrokCliToolTransport(
         model="grok-test", catalog=RECORDED_GROK_CATALOG,
     )
@@ -553,7 +553,7 @@ def test_recorded_grok_tool_stream_executes_then_resumes_without_streaming_proto
     assert executed == [("get_song", {"song_id": "fixture-song-527"})]
     assert "<songmaker_tool_call>" not in streamed_text
     assert events[-1] == FinalEvent(text="The fictional note has 68 words.")
-    assert calls[1][0][-2:] == ("--resume", "01a06e35-a690-72b1-889d-804843d68226")
+    assert calls[1].command[-2:] == ("--resume", "01a06e35-a690-72b1-889d-804843d68226")
 
 
 def test_grok_tool_stream_executes_a_write_after_prose_and_exposes_its_result_next_round(
@@ -607,8 +607,8 @@ def test_grok_tool_transport_rejects_a_multi_result_batch(monkeypatch, caplog) -
     monkeypatch.setattr(
         grok_cli_adapter,
         "run_cli_bounded",
-        grok_cli_runner(
-            grok_tool_round_lines(a_call_to_a_declared_tool()), grok_cli_outcome(), calls,
+        cli_rounds_runner(
+            [grok_tool_round_lines(a_call_to_a_declared_tool())], grok_cli_outcome(), calls,
         ),
     )
     transport = _transport()
@@ -637,7 +637,7 @@ def test_grok_tool_transport_rejects_missing_or_invalid_session_id(
     monkeypatch.setattr(
         grok_cli_adapter,
         "run_cli_bounded",
-        grok_cli_runner(lines, grok_cli_outcome(), calls),
+        cli_rounds_runner([lines], grok_cli_outcome(), calls),
     )
     transport = _transport()
 
@@ -664,7 +664,7 @@ def test_grok_tool_transport_normalizes_malformed_json_without_its_document(
     monkeypatch.setattr(
         grok_cli_adapter,
         "run_cli_bounded",
-        grok_cli_runner([document.encode() + b"\n"], grok_cli_outcome(), calls),
+        cli_rounds_runner([[document.encode() + b"\n"]], grok_cli_outcome(), calls),
     )
     transport = _transport()
 
@@ -698,7 +698,7 @@ def test_grok_text_tool_parser_rejection_carries_its_rule_and_writes_no_line(
     monkeypatch.setattr(
         grok_cli_adapter,
         "run_cli_bounded",
-        grok_cli_runner(grok_tool_round_lines(malformed_tool_call), grok_cli_outcome(), calls),
+        cli_rounds_runner([grok_tool_round_lines(malformed_tool_call)], grok_cli_outcome(), calls),
     )
     caplog.set_level("WARNING", logger="agent_providers.grok.transport")
     transport = _transport()
@@ -722,8 +722,8 @@ def test_a_refused_grok_call_hands_its_text_only_to_the_host(
     monkeypatch.setattr(
         grok_cli_adapter,
         "run_cli_bounded",
-        grok_cli_runner(
-            grok_tool_round_lines(a_call_to_an_undeclared_tool_carrying()),
+        cli_rounds_runner(
+            [grok_tool_round_lines(a_call_to_an_undeclared_tool_carrying())],
             grok_cli_outcome(),
             [],
         ),
@@ -752,8 +752,8 @@ def test_a_grok_call_nested_too_deeply_is_refused_not_a_failed_route(
     monkeypatch.setattr(
         grok_cli_adapter,
         "run_cli_bounded",
-        grok_cli_runner(
-            grok_tool_round_lines(a_call_nested_too_deeply_to_decode()), grok_cli_outcome(), [],
+        cli_rounds_runner(
+            [grok_tool_round_lines(a_call_nested_too_deeply_to_decode())], grok_cli_outcome(), [],
         ),
     )
     caplog.set_level(logging.DEBUG)
@@ -776,7 +776,7 @@ def test_a_grok_event_line_nested_too_deeply_is_refused_as_a_cli_protocol_error(
     nested_line = DEEPLY_NESTED_JSON.encode() + b"\n"
     monkeypatch.setattr(
         grok_cli_adapter, "run_cli_bounded",
-        grok_cli_runner([nested_line], grok_cli_outcome(), calls),
+        cli_rounds_runner([[nested_line]], grok_cli_outcome(), calls),
     )
     caplog.set_level("WARNING", logger="agent_providers.grok.transport")
     transport = _transport()
@@ -798,8 +798,8 @@ def test_a_grok_tool_result_nested_too_deeply_is_passed_on_in_the_next_prompt(
     calls = []
     monkeypatch.setattr(
         grok_cli_adapter, "run_cli_bounded",
-        grok_cli_runner(
-            grok_tool_round_lines(a_call_to_a_declared_tool()), grok_cli_outcome(), calls,
+        cli_rounds_runner(
+            [grok_tool_round_lines(a_call_to_a_declared_tool())] * 2, grok_cli_outcome(), calls,
         ),
     )
     transport = _transport()
@@ -812,7 +812,7 @@ def test_a_grok_tool_result_nested_too_deeply_is_passed_on_in_the_next_prompt(
 
     asyncio.run(collect())
 
-    assert DEEPLY_NESTED_JSON.encode() in calls[1][1]["prompt_file_bytes"]
+    assert DEEPLY_NESTED_JSON.encode() in calls[1].kwargs["prompt_file_bytes"]
 
 
 def test_grok_tool_transport_rejects_unknown_events_without_logging_the_protocol(
@@ -823,8 +823,8 @@ def test_grok_tool_transport_rejects_unknown_events_without_logging_the_protocol
     monkeypatch.setattr(
         grok_cli_adapter,
         "run_cli_bounded",
-        grok_cli_runner(
-            [json.dumps({"type": event_type}).encode() + b"\n"], grok_cli_outcome(), calls,
+        cli_rounds_runner(
+            [[json.dumps({"type": event_type}).encode() + b"\n"]], grok_cli_outcome(), calls,
         ),
     )
     caplog.set_level("WARNING")
@@ -854,7 +854,7 @@ def test_grok_tool_transport_accepts_ignored_observations_without_data(
     monkeypatch.setattr(
         grok_cli_adapter,
         "run_cli_bounded",
-        grok_cli_runner(lines, grok_cli_outcome(), calls),
+        cli_rounds_runner([lines], grok_cli_outcome(), calls),
     )
     transport = _transport()
 
@@ -874,7 +874,7 @@ def test_grok_tool_transport_rejects_a_second_end_event(monkeypatch) -> None:
     monkeypatch.setattr(
         grok_cli_adapter,
         "run_cli_bounded",
-        grok_cli_runner(lines, grok_cli_outcome(), calls),
+        cli_rounds_runner([lines], grok_cli_outcome(), calls),
     )
     transport = _transport()
 
@@ -926,7 +926,7 @@ def test_grok_tool_transport_names_failed_or_incomplete_runs_without_leaking_std
     monkeypatch.setattr(
         grok_cli_adapter,
         "run_cli_bounded",
-        grok_cli_runner(lines, outcome, calls),
+        cli_rounds_runner([lines], outcome, calls),
     )
     caplog.set_level("WARNING")
     transport = _transport()
@@ -942,22 +942,20 @@ def test_grok_tool_transport_names_failed_or_incomplete_runs_without_leaking_std
 
 
 def test_grok_tool_transport_rejects_a_changed_resume_session_id(monkeypatch) -> None:
-    calls = []
+    calls: list[CliCall] = []
     changed_session_id = "4ee93ca6-9a08-4d8a-8539-e113a8d677ed"
-    rounds = iter([
-        grok_tool_round_lines("first"),
-        grok_tool_round_lines("second", changed_session_id),
-    ])
-
-    def run_cli_bounded(child, **kwargs):
-        calls.append((child.command, kwargs))
-        for line in next(rounds):
-            assert kwargs["stdout_line_channel"]._send(line)
-        outcome = grok_cli_outcome()
-        kwargs["stdout_line_channel"]._close(outcome)
-        return outcome
-
-    monkeypatch.setattr(grok_cli_adapter, "run_cli_bounded", run_cli_bounded)
+    monkeypatch.setattr(
+        grok_cli_adapter,
+        "run_cli_bounded",
+        cli_rounds_runner(
+            [
+                grok_tool_round_lines("first"),
+                grok_tool_round_lines("second", changed_session_id),
+            ],
+            grok_cli_outcome(),
+            calls,
+        ),
+    )
     transport = _transport()
 
     async def collect() -> None:
@@ -973,7 +971,7 @@ def test_grok_tool_transport_rejects_a_changed_resume_session_id(monkeypatch) ->
         await transport.aclose()
 
     asyncio.run(collect())
-    assert calls[1][0][-2:] == ("--resume", GROK_SESSION_ID)
+    assert calls[1].command[-2:] == ("--resume", GROK_SESSION_ID)
 
 
 @pytest.mark.parametrize("event_type", ("tool_call", "tool_call_update"))
@@ -1076,7 +1074,7 @@ def test_grok_tool_transport_removes_its_private_session_tree_and_redacts_logs(
     external_session = session_root / "external" / GROK_SESSION_ID
     external_session.mkdir(parents=True)
     (external_session / "history.jsonl").write_text("leave me")
-    calls = []
+    calls: list[CliCall] = []
     text = "private text"
     note_id = "note-private"
     call_json = f'{{"text":"{text}","note_id":"{note_id}"}}'
@@ -1087,19 +1085,21 @@ def test_grok_tool_transport_removes_its_private_session_tree_and_redacts_logs(
         "</notes_tool_call>"
     )
 
-    def run_cli_bounded(child, **kwargs):
-        calls.append((child, kwargs))
+    def create_session_tree(child) -> None:
         session_tree = child.working_directory / ".grok" / "sessions" / GROK_SESSION_ID
         session_tree.mkdir(parents=True)
         (session_tree / "prompt_history.jsonl").write_text(f"{text} {note_id}")
-        for line in grok_tool_round_lines(tool_call):
-            assert kwargs["stdout_line_channel"]._send(line)
-        outcome = grok_cli_outcome(stderr=stderr_document)
-        kwargs["stdout_line_channel"]._close(outcome)
-        kwargs["on_reaped"](1, False)
-        return outcome
 
-    monkeypatch.setattr(grok_cli_adapter, "run_cli_bounded", run_cli_bounded)
+    monkeypatch.setattr(
+        grok_cli_adapter,
+        "run_cli_bounded",
+        cli_rounds_runner(
+            [grok_tool_round_lines(tool_call)],
+            grok_cli_outcome(stderr=stderr_document),
+            calls,
+            on_child=create_session_tree,
+        ),
+    )
     caplog.set_level("INFO", logger="agent_providers.grok.transport")
     transport = _transport()
 
@@ -1111,7 +1111,7 @@ def test_grok_tool_transport_removes_its_private_session_tree_and_redacts_logs(
         await transport.aclose()
 
     asyncio.run(collect_and_close())
-    working_directory = str(calls[0][0].working_directory)
+    working_directory = str(calls[0].child.working_directory)
     assert not Path(working_directory).exists()
     assert (external_session / "history.jsonl").read_text() == "leave me"
     assert "Grok CLI tool round provider=grok route=cli round=1 session=" in caplog.text

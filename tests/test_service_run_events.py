@@ -17,10 +17,10 @@ import pytest
 from provider_test_support import (
     A_CANARY,
     a_call_to_an_undeclared_tool_carrying,
+    cli_rounds_runner,
     drive_turn,
     formatted_log_text,
     grok_cli_outcome,
-    grok_cli_runner,
     grok_tool_round_lines,
 )
 from service_support import (
@@ -256,8 +256,8 @@ def test_a_refused_tool_call_reaches_neither_the_frames_nor_the_service_log(monk
     monkeypatch.setattr(
         grok_cli_adapter,
         "run_cli_bounded",
-        grok_cli_runner(
-            grok_tool_round_lines(a_call_to_an_undeclared_tool_carrying()),
+        cli_rounds_runner(
+            [grok_tool_round_lines(a_call_to_an_undeclared_tool_carrying())],
             grok_cli_outcome(),
             [],
         ),
@@ -286,8 +286,8 @@ def test_the_run_record_of_a_refused_tool_call_holds_the_failed_ending_but_not_t
     monkeypatch.setattr(
         grok_cli_adapter,
         "run_cli_bounded",
-        grok_cli_runner(
-            grok_tool_round_lines(a_call_to_an_undeclared_tool_carrying()),
+        cli_rounds_runner(
+            [grok_tool_round_lines(a_call_to_an_undeclared_tool_carrying())],
             grok_cli_outcome(),
             [],
         ),

@@ -37,6 +37,7 @@ from mcp_app_fake import (
     serving,
     tool_listing,
 )
+from service_support import fake_app_authority  # noqa: F401 - a fixture, requested by name
 
 from agent_client.wire import MAX_EVENT_BYTES
 from agent_service import app_tools
@@ -61,11 +62,6 @@ CANARY_HEADER = "canary-response-header"
 CANARY_BODY = "canary-response-body"
 SHORT_IO_SECONDS = 0.3
 STALL_DEADLINE_SECONDS = 5
-
-
-@pytest.fixture(scope="session")
-def authority(tmp_path_factory: pytest.TempPathFactory) -> TestAuthority:
-    return TestAuthority(tmp_path_factory.mktemp("fake-app-ca"))
 
 
 @pytest.fixture

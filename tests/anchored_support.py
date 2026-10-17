@@ -148,6 +148,10 @@ class ChildError:
     detail: str = ""
 
 
+class ResolvedChildTouched(RuntimeError):
+    """A resolved record was used; its closed pidfd number may now name another child's pidfd."""
+
+
 class SessionCleanupFailed(Exception):
     def __init__(self, errors: Iterable[ChildError]) -> None:
         self.errors = tuple(errors)
@@ -190,8 +194,16 @@ def _held_recipient(
     return weakref.ref(recipient)
 
 
+def _require_unresolved(children: Iterable[OwnedChild]) -> None:
+    for owned in children:
+        if owned.resolved:
+            raise ResolvedChildTouched(
+                f"pid {owned.pid} is resolved; its pidfd number may be reused"
+            )
+
+
 def state(owned: OwnedChild) -> ProcessState | Exited:
-    assert not owned.resolved, f"pid {owned.pid} is resolved; its pidfd number may be reused"
+    _require_unresolved([owned])
     try:
         observed = _waitid(P_PIDFD, owned.pidfd, os.WEXITED | os.WNOHANG | os.WNOWAIT)
     except ChildProcessError:
@@ -215,6 +227,8 @@ def free_to_reap(owned: OwnedChild, *, session_ended: bool) -> bool:
 
 def kill_children(children: Iterable[OwnedChild]) -> list[ChildError]:
     """Step one: ``SIGKILL`` through each pidfd; refusals are errors, ``ESRCH`` means reaped."""
+    children = list(children)
+    _require_unresolved(children)
     errors = []
     for owned in children:
         try:
@@ -241,6 +255,7 @@ def resolve_children(
     not confirmed dead is kept with its pidfd and its ``Popen``.
     """
     children = list(children)
+    _require_unresolved(children)
     readable = _wait_for_exits(
         [owned.pidfd for owned in children], max(0.0, deadline - time.monotonic())
     )

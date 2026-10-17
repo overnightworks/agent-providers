@@ -7,13 +7,15 @@ import errno
 import os
 import subprocess
 import sys
-from collections.abc import Iterator
+import time
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import anchored_support
 import pytest
 from anchored_support import (
     NOBODY,
+    P_PIDFD,
     RUNNING,
     TEST_WAIT_SECONDS,
     UNREPORTED,
@@ -22,8 +24,11 @@ from anchored_support import (
     FakeHandle,
     OwnedChild,
     Recipient,
+    ResolvedChildTouched,
     SessionCleanupFailed,
     ZombieAnchor,
+    kill_children,
+    resolve_children,
     state,
     zombie_anchor_session,
 )
@@ -47,6 +52,8 @@ class Cell:
         self._session_anchor = session_anchor
         self._anchors: list[ZombieAnchor] = []
         self._stdin_writers: dict[int, int] = {}
+        self._witnesses: dict[int, int] = {}
+        self.unnamed: list[subprocess.Popen] = []
 
     def anchor(self) -> ZombieAnchor:
         return self.track(ZombieAnchor())
@@ -55,29 +62,68 @@ class Cell:
         self._anchors.append(anchor)
         return anchor
 
-    def start_child(self, recipient: Recipient | FakeHandle = NOBODY) -> OwnedChild:
+    def start_child(
+        self, anchor: ZombieAnchor, recipient: Recipient | FakeHandle = NOBODY
+    ) -> OwnedChild:
         stdin_reader, stdin_writer = os.pipe()
-        popen = subprocess.Popen(
-            [sys.executable, "-I", "-c", EXIT_WITH_LINE],
-            stdin=stdin_reader,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            env=closed_environment(self._tmp_path),
-            cwd=self._tmp_path,
-            start_new_session=True,
-        )
-        os.close(stdin_reader)
+        try:
+            popen = subprocess.Popen(
+                [sys.executable, "-I", "-c", EXIT_WITH_LINE],
+                stdin=stdin_reader,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env=closed_environment(self._tmp_path),
+                cwd=self._tmp_path,
+                start_new_session=True,
+            )
+        except OSError:
+            os.close(stdin_writer)
+            raise
+        finally:
+            os.close(stdin_reader)
+        try:
+            owned = OwnedChild.name(popen, recipient)
+        except OSError:
+            self._reap_unnamed(popen, stdin_writer)
+            raise
         self._stdin_writers[popen.pid] = stdin_writer
-        return OwnedChild.name(popen, recipient)
+        self._witnesses[popen.pid] = os.dup(owned.pidfd)
+        anchor.hold(owned)
+        return owned
+
+    def _reap_unnamed(self, popen: subprocess.Popen, stdin_writer: int) -> None:
+        # No pidfd exists for this child, so EOF on its stdin ends it and the Popen, the only
+        # object that knows its number, is the one thing that can reap it.
+        self.unnamed.append(popen)
+        os.close(stdin_writer)
+        popen.wait(timeout=TEST_WAIT_SECONDS)
 
     def tell_to_exit_with(self, owned: OwnedChild, code: int) -> None:
         os.write(self._stdin_writers[owned.pid], f"{code}\n".encode())
 
+    def witness_descriptors(self) -> set[int]:
+        return set(self._witnesses.values())
+
+    def assert_reaped(self, owned: OwnedChild) -> None:
+        with pytest.raises(ChildProcessError):
+            os.waitid(P_PIDFD, self._witnesses[owned.pid], os.WEXITED | os.WNOHANG | os.WNOWAIT)
+
     def close(self) -> None:
-        for stdin_writer in self._stdin_writers.values():
-            os.close(stdin_writer)
+        for descriptor in [*self._stdin_writers.values(), *self._witnesses.values()]:
+            os.close(descriptor)
         for anchor in self._anchors:
             anchor.hand_over(self._session_anchor)
+
+
+def open_pidfds() -> set[int]:
+    descriptors = set()
+    for entry in os.listdir("/proc/self/fd"):
+        try:
+            if os.readlink(f"/proc/self/fd/{entry}") == "anon_inode:[pidfd]":
+                descriptors.add(int(entry))
+        except FileNotFoundError:
+            continue
+    return descriptors
 
 
 @pytest.fixture
@@ -146,27 +192,26 @@ def test_unreported_child_and_unreachable_handle_are_reaped_at_the_session_end(c
     anchor = cell.anchor()
     cyclic_handle = FakeHandle()
     children = [
-        cell.start_child(NOBODY),
-        cell.start_child(UNREPORTED),
-        cell.start_child(cyclic_handle),
+        cell.start_child(anchor, NOBODY),
+        cell.start_child(anchor, UNREPORTED),
+        cell.start_child(anchor, cyclic_handle),
     ]
-    for owned in children:
-        anchor.hold(owned)
     cyclic_handle.cycle = cyclic_handle
     del cyclic_handle
 
     anchor.finalize()
 
     assert [owned.popen.returncode for owned in children] == [SIGKILLED] * 3
+    for owned in children:
+        cell.assert_reaped(owned)
 
 
 def test_a_child_reaped_elsewhere_resolves_and_a_waiting_popen_is_reported_and_disarmed(
     cell: Cell,
 ) -> None:
     anchor = cell.anchor()
-    first, second = cell.start_child(), cell.start_child()
+    first, second = cell.start_child(anchor), cell.start_child(anchor)
     for owned in (first, second):
-        anchor.hold(owned)
         cell.tell_to_exit_with(owned, 3)
         assert owned.popen.wait(timeout=TEST_WAIT_SECONDS) == 3
     second.popen.returncode = None
@@ -179,6 +224,8 @@ def test_a_child_reaped_elsewhere_resolves_and_a_waiting_popen_is_reported_and_d
     assert len(failure.value.errors) == 1
     assert first.popen.returncode == 3
     assert second.popen.returncode is anchored_support.DISARMED
+    cell.assert_reaped(first)
+    cell.assert_reaped(second)
 
 
 def test_a_refused_kill_and_a_handle_still_holding_fail_the_session_and_stay_held(
@@ -186,9 +233,7 @@ def test_a_refused_kill_and_a_handle_still_holding_fail_the_session_and_stay_hel
 ) -> None:
     anchor, successor = cell.anchor(), cell.anchor()
     handle = FakeHandle()
-    held_by_handle, refused = cell.start_child(handle), cell.start_child()
-    anchor.hold(held_by_handle)
-    anchor.hold(refused)
+    held_by_handle, refused = cell.start_child(anchor, handle), cell.start_child(anchor)
     send_signal = anchored_support._pidfd_send_signal
 
     def refuse_one_pidfd(pidfd: int, signal_number: int) -> None:
@@ -214,15 +259,15 @@ def test_a_refused_kill_and_a_handle_still_holding_fail_the_session_and_stay_hel
     assert states_after_failure == (Exited(SIGKILLED), RUNNING)
     assert held_by_handle.popen.returncode == SIGKILLED
     assert refused.popen.returncode == SIGKILLED
+    cell.assert_reaped(held_by_handle)
+    cell.assert_reaped(refused)
 
 
 def test_the_session_generator_fails_the_session_for_a_handle_still_holding(cell: Cell) -> None:
     session = zombie_anchor_session()
     anchor = cell.track(next(session))
     handle = FakeHandle()
-    unheld, held_by_handle = cell.start_child(), cell.start_child(handle)
-    anchor.hold(unheld)
-    anchor.hold(held_by_handle)
+    unheld, held_by_handle = cell.start_child(anchor), cell.start_child(anchor, handle)
 
     with pytest.raises(SessionCleanupFailed) as failure:
         next(session, None)
@@ -236,3 +281,77 @@ def test_the_session_generator_fails_the_session_for_a_handle_still_holding(cell
     assert states_after_failure == Exited(SIGKILLED)
     assert unheld.popen.returncode == SIGKILLED
     assert held_by_handle.popen.returncode == SIGKILLED
+    cell.assert_reaped(unheld)
+    cell.assert_reaped(held_by_handle)
+
+
+def test_an_unreported_child_stays_unreaped_until_the_session_end(cell: Cell) -> None:
+    anchor = cell.anchor()
+    unreported = cell.start_child(anchor, UNREPORTED)
+
+    kill_children([unreported])
+    errors = resolve_children(
+        [unreported], deadline=time.monotonic() + TEST_WAIT_SECONDS, session_ended=False
+    )
+    unresolved_state = state(unreported)
+    anchor.finalize()
+
+    assert errors == []
+    assert unresolved_state == Exited(SIGKILLED)
+    cell.assert_reaped(unreported)
+
+
+@pytest.mark.parametrize(
+    "touch",
+    [
+        lambda record: kill_children([record]),
+        lambda record: resolve_children(
+            [record], deadline=time.monotonic() + TEST_WAIT_SECONDS, session_ended=True
+        ),
+        state,
+    ],
+    ids=["kill", "resolve", "state"],
+)
+def test_a_resolved_record_is_rejected_and_never_reaches_a_child_reusing_its_descriptor(
+    cell: Cell, touch: Callable[[OwnedChild], object]
+) -> None:
+    anchor = cell.anchor()
+    resolved = cell.start_child(anchor)
+    anchor.finalize()
+    later = cell.start_child(anchor)
+    assert later.pidfd == resolved.pidfd
+
+    with pytest.raises(ResolvedChildTouched):
+        touch(resolved)
+
+    assert state(later) is RUNNING
+    anchor.finalize()
+    assert later.popen.returncode == SIGKILLED
+    cell.assert_reaped(later)
+
+
+def test_a_failed_naming_leaves_no_zombie_and_no_open_pidfd(
+    cell: Cell, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    anchor = cell.anchor()
+    pidfds_before = open_pidfds()
+    open_pidfd = anchored_support._pidfd_open
+    calls = []
+
+    def fail_the_second_open(pid: int) -> int:
+        calls.append(pid)
+        if len(calls) == 2:
+            raise OSError(errno.ENOSYS, os.strerror(errno.ENOSYS))
+        return open_pidfd(pid)
+
+    monkeypatch.setattr(anchored_support, "_pidfd_open", fail_the_second_open)
+    named = cell.start_child(anchor)
+    with pytest.raises(OSError, match="Function not implemented"):
+        cell.start_child(anchor)
+    monkeypatch.undo()
+    anchor.finalize()
+
+    (unnamed,) = cell.unnamed
+    assert unnamed.returncode == 0
+    cell.assert_reaped(named)
+    assert open_pidfds() - cell.witness_descriptors() == pidfds_before

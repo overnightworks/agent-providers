@@ -1745,10 +1745,11 @@ def _a_tree_needing_repair(home: PrivateCredentialHome, outside: Path) -> None:
     for sibling in ("d", "e", "f"):
         (home.path / sibling).mkdir()
     (home.path / "link").symlink_to(outside)
-    for directory in (home.path / "a" / "b" / "c", home.path / "a" / "b", home.path / "a"):
+    leaves = [home.path / "a" / "b" / "c", *(home.path / sibling for sibling in ("d", "e", "f"))]
+    for leaf in leaves:
+        (leaf / "scratch.txt").write_text("scratch")
+    for directory in (*leaves, home.path / "a" / "b", home.path / "a"):
         directory.chmod(0o500)
-    for sibling in ("d", "e", "f"):
-        (home.path / sibling).chmod(0o500)
 
 
 def _arm_after_the_first_removal_pass(

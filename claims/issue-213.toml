@@ -1,0 +1,8 @@
+claim_id = "7db2d6c16c71422396fc42162903c314"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "e33101c52260ad231f591bfb19788710d4bb2d73"
+branch = "claude/issue-213-group-signal"
+scope = ["src/agent_providers/spawn.py", "tests/anchored_kernel.py", "tests/anchored_leaders.py", "tests/test_anchored_group_signal.py", "tests/test_anchored_release.py"]
+opened_commit = "c94d052bf718d4768fbad7d57a50e207286a6c2f"
+whole_reason = "One public group signal, the watcher's re-check and the SIGCHLD refusal in the spawn owner, with the kernel model and harness seams the 10 rows drive; test_anchored_release.py changes only its imports when the shared helpers move, so splitting would leave two copies of InstrumentedLock or the cells without their seams."

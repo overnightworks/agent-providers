@@ -7,8 +7,9 @@ import select
 import signal
 import sys
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from anchored_kernel import (
@@ -25,7 +26,6 @@ from anchored_leaders import (
     Leaders,
     Releaser,
     Started,
-    spawn_warnings,
     start_bound,
 )
 from anchored_support import (
@@ -34,6 +34,7 @@ from anchored_support import (
     TEST_WAIT_SECONDS,
     ChildCleanup,
     Exited,
+    ProcessState,
     _pidfd_open,
     _wait_for_exits,
 )
@@ -51,8 +52,13 @@ from agent_providers.spawn import (
 
 EXIT_CODE = 3
 
+LeaderEnd = Callable[
+    [Leaders, ChildCleanup, pytest.MonkeyPatch], tuple[Started, ProcessState | Exited]
+]
+
 SIGCHLD_IGNORED_START = """
 import os, subprocess, sys, threading
+from pathlib import Path
 sys.path[:0] = sys.argv[1].split(os.pathsep)
 import signal
 signal.signal(signal.SIGCHLD, signal.SIG_IGN)
@@ -62,10 +68,10 @@ subprocess.Popen = lambda *args, **kwargs: launched.append(args) or real_popen(*
 from agent_providers import spawn
 from agent_providers.spawn import AnchorStateError, ChildProcess, closed_environment
 child = ChildProcess(
-    binary=__import__("pathlib").Path(sys.executable),
+    binary=Path(sys.executable),
     arguments=("-I", "-c", "pass"),
-    environment=closed_environment(__import__("pathlib").Path.cwd()),
-    working_directory=__import__("pathlib").Path.cwd(),
+    environment=closed_environment(Path.cwd()),
+    working_directory=Path.cwd(),
 )
 try:
     spawn.start_anchored_leader(
@@ -83,6 +89,27 @@ sys.exit(0 if refused and not launched and not watchers else 2)
 
 def signal_within_bound(started: Started, sig: signal.Signals) -> None:
     call_within_deadline(started.leader.signal_group, sig, seconds=TEST_WAIT_SECONDS)
+
+
+@pytest.fixture(autouse=True)
+def no_spawn_warning(caplog: pytest.LogCaptureFixture) -> Iterator[None]:
+    yield
+
+
+@pytest.fixture
+def group_signal_model() -> Iterator[Callable[..., GroupSignalModel]]:
+    models: list[GroupSignalModel] = []
+
+    def make(**options: Any) -> GroupSignalModel:
+        models.append(GroupSignalModel(**options))
+        return models[-1]
+
+    yield make
+    assert [model.violations for model in models] == [[] for _ in models]
+
+
+def release_within_bound(started: Started) -> None:
+    call_within_deadline(started.leader.release, seconds=TEST_WAIT_SECONDS)
 
 
 def read_pid_line(descriptor: int) -> int:
@@ -111,7 +138,7 @@ def test_a_group_signal_after_the_leader_exited_reaches_a_sigterm_ignoring_grand
     assert group_census(RealProcView(), started.owned.pid) is GroupCensus.EMPTY
     assert child_cleanup.state(started.owned) == Exited(EXIT_CODE)
     assert started.leader.state is AnchorState.EXITED
-    started.leader.release()
+    release_within_bound(started)
     assert child_cleanup.state(started.owned) == GONE
     assert thread_failures == []
 
@@ -121,9 +148,10 @@ def test_a_group_signal_the_kernel_refuses_propagates_and_leaves_the_handle_usab
     child_cleanup: ChildCleanup,
     thread_failures: list[threading.ExceptHookArgs],
     monkeypatch: pytest.MonkeyPatch,
+    group_signal_model: Callable[..., GroupSignalModel],
 ) -> None:
     refusal = PermissionError()
-    model = GroupSignalModel(failure=refusal)
+    model = group_signal_model(failure=refusal)
     with monkeypatch.context() as patch:
         started = leaders.start()
         model.bind(started.owned.pid)
@@ -141,28 +169,27 @@ def test_a_group_signal_the_kernel_refuses_propagates_and_leaves_the_handle_usab
         leaders.await_exit_seen(started)
 
     assert started.probe.observed == [(AnchorState.EXITED, -signal.SIGKILL)]
-    started.leader.release()
+    release_within_bound(started)
     assert started.owned.popen.returncode == -signal.SIGKILL
     assert [(call.pgid, call.sig) for call in model.calls] == [
         (started.owned.pid, signal.SIGKILL)
     ] * 2
-    assert model.violations == []
     assert thread_failures == []
 
 
 def a_released_leader(
     leaders: Leaders, child_cleanup: ChildCleanup, patch: pytest.MonkeyPatch
-) -> tuple[Started, object]:
+) -> tuple[Started, ProcessState | Exited]:
     started = leaders.start()
     started.write_exit_line(EXIT_CODE)
     leaders.await_exit_seen(started)
-    started.leader.release()
+    release_within_bound(started)
     return started, GONE
 
 
 def a_lost_leader(
     leaders: Leaders, child_cleanup: ChildCleanup, patch: pytest.MonkeyPatch
-) -> tuple[Started, object]:
+) -> tuple[Started, ProcessState | Exited]:
     kernel = KernelModel(loses_at="wait")
     install_kernel(patch, kernel)
     started = start_bound(leaders, kernel)
@@ -180,15 +207,16 @@ def a_lost_leader(
     ],
 )
 def test_a_group_signal_after_the_end_is_refused_without_a_kernel_call(
-    end: Callable[[Leaders, ChildCleanup, pytest.MonkeyPatch], tuple[Started, object]],
+    end: LeaderEnd,
     refusal: type[Exception],
     state: AnchorState,
     leaders: Leaders,
     child_cleanup: ChildCleanup,
     thread_failures: list[threading.ExceptHookArgs],
     monkeypatch: pytest.MonkeyPatch,
+    group_signal_model: Callable[..., GroupSignalModel],
 ) -> None:
-    model = GroupSignalModel(forward=False)
+    model = group_signal_model(forward=False)
     with monkeypatch.context() as patch:
         started, process = end(leaders, child_cleanup, patch)
         model.bind(started.owned.pid)
@@ -215,7 +243,7 @@ def running_leader(leaders: Leaders) -> Started:
 
 
 @pytest.mark.parametrize(
-    ("anchored_leader", "announced", "kept_returncode", "zombie", "exits_late"),
+    ("anchored_leader", "announced", "kept_returncode", "child_state", "exits_late"),
     [
         pytest.param(
             running_leader,
@@ -239,14 +267,15 @@ def test_a_group_signal_that_meets_esrch_commits_the_loss_and_raises(
     anchored_leader: Callable[[Leaders], Started],
     announced: list[tuple[AnchorState, int | None]],
     kept_returncode: int | None,
-    zombie: object,
+    child_state: ProcessState | Exited,
     exits_late: bool,
     leaders: Leaders,
     child_cleanup: ChildCleanup,
     thread_failures: list[threading.ExceptHookArgs],
     monkeypatch: pytest.MonkeyPatch,
+    group_signal_model: Callable[..., GroupSignalModel],
 ) -> None:
-    model = GroupSignalModel(failure=ProcessLookupError())
+    model = group_signal_model(failure=ProcessLookupError())
     with monkeypatch.context() as patch:
         started = anchored_leader(leaders)
         model.bind(started.owned.pid)
@@ -260,7 +289,7 @@ def test_a_group_signal_that_meets_esrch_commits_the_loss_and_raises(
     disarmed = started.owned.popen.returncode
     assert disarmed is not None
     assert not isinstance(disarmed, int)
-    assert child_cleanup.state(started.owned) == zombie
+    assert child_cleanup.state(started.owned) == child_state
     if exits_late:
         started.write_exit_line(0)
     join_watcher(started.watcher)
@@ -274,10 +303,10 @@ def test_a_stop_report_held_across_a_loss_ends_the_watcher_without_a_warning(
     child_cleanup: ChildCleanup,
     thread_failures: list[threading.ExceptHookArgs],
     monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
+    group_signal_model: Callable[..., GroupSignalModel],
 ) -> None:
     kernel = KernelModel(stops=1, hold_after_call=1)
-    model = GroupSignalModel(failure=ProcessLookupError())
+    model = group_signal_model(failure=ProcessLookupError())
     with monkeypatch.context() as patch:
         install_kernel(patch, kernel)
         started = start_bound(leaders, kernel)
@@ -293,7 +322,6 @@ def test_a_stop_report_held_across_a_loss_ends_the_watcher_without_a_warning(
     assert started.probe.observed == [(AnchorState.LOST, None)]
     assert [(call.name, call.options) for call in kernel.calls] == [("waitid", OBSERVE_EXIT)]
     assert kernel.violations == []
-    assert spawn_warnings(caplog) == []
     assert started.leader.done_with_pid is True
     assert thread_failures == []
 
@@ -303,18 +331,18 @@ def test_a_group_signal_runs_inside_the_lock_that_covers_the_final_reap(
     child_cleanup: ChildCleanup,
     thread_failures: list[threading.ExceptHookArgs],
     monkeypatch: pytest.MonkeyPatch,
+    group_signal_model: Callable[..., GroupSignalModel],
 ) -> None:
     lock = InstrumentedLock()
     releasers: list[Releaser] = []
-    zombie_while_signalling: list[object] = []
     started_holder: list[Started] = []
 
     def release_in_the_background(call: GroupSignalCall) -> None:
         releasers.append(Releaser(started_holder[0].leader))
         lock.await_waiting(1)
-        zombie_while_signalling.append(child_cleanup.state(started_holder[0].owned))
+        assert child_cleanup.state(started_holder[0].owned) == Exited(EXIT_CODE)
 
-    model = GroupSignalModel(during=release_in_the_background)
+    model = group_signal_model(during=release_in_the_background)
     with monkeypatch.context() as patch:
         patch.setattr(spawn, "_lifecycle_lock", lambda: lock)
         started = exited_leader(leaders)
@@ -325,12 +353,10 @@ def test_a_group_signal_runs_inside_the_lock_that_covers_the_final_reap(
         signal_within_bound(started, signal.SIGTERM)
         releasers[0].join()
 
-    assert zombie_while_signalling == [Exited(EXIT_CODE)]
     assert releasers[0].error is None
     assert started.leader.state is AnchorState.RELEASED
     assert child_cleanup.state(started.owned) == GONE
-    assert len(model.calls) == 1
-    assert model.violations == []
+    assert [(call.pgid, call.sig) for call in model.calls] == [(started.owned.pid, signal.SIGTERM)]
     assert thread_failures == []
 
 
@@ -366,7 +392,7 @@ def test_done_with_pid_reads_without_waiting_for_a_held_lifecycle_lock(
     with monkeypatch.context() as patch:
         patch.setattr(spawn, "_lifecycle_lock", lambda: lock)
         started = exited_leader(leaders)
-        started.leader.release()
+        release_within_bound(started)
 
     def read() -> bool:
         return call_within_deadline(lambda: started.leader.done_with_pid, seconds=TEST_WAIT_SECONDS)

@@ -508,8 +508,7 @@ class AnchoredLeader:
                 return
             except ProcessLookupError:
                 transition = self._apply(LeaderGone())
-        if transition.announces:
-            self._announce()
+        self._announce_when(transition)
         raise ChildIdentityLost("the leader was reaped elsewhere; its process group is gone")
 
     def _apply(self, event: LeaderEvent) -> LeaderTransition:
@@ -525,6 +524,9 @@ class AnchoredLeader:
     def _commit(self, event: LeaderEvent) -> None:
         with self._lock:
             transition = self._apply(event)
+        self._announce_when(transition)
+
+    def _announce_when(self, transition: LeaderTransition) -> None:
         if transition.announces:
             self._announce()
 

@@ -3609,7 +3609,7 @@ def test_tool_surface_probe_refuses_to_start_when_the_zombie_pool_is_saturated(
         await asyncio.gather(*(started.wait() for started in reapers_started))
         with pytest.raises(UnavailableError) as exc:
             if probe_kind == "async":
-                await verify_cli_tool_surface()
+                await averify_no_builtin_cli_tools()
             else:
                 verify_no_builtin_cli_tools()
         assert str(exc.value) == (

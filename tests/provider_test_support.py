@@ -870,6 +870,52 @@ def fail_to_start_the_runner_thread(
     monkeypatch.setattr(threading.Thread, "start", start)
 
 
+_START_CLAIM_WAIT_SECONDS: Final = 5
+
+
+def start_then_raise(
+    monkeypatch,
+    error: BaseException,
+    target: Callable[..., Any] = process._run_cli_bounded,
+    *,
+    thread_claims_first: bool,
+) -> threading.Event:
+    """Make the start of the thread running ``target`` raise after the real start ran.
+
+    Orders the two claims on ``ClaimedStartThread.take_start_claim``. With
+    ``thread_claims_first`` the started thread claims before ``start()`` raises.
+    Otherwise it waits at the returned gate, so the starter claims first until
+    the test sets the gate.
+    """
+    real_start = threading.Thread.start
+    real_claim = process.ClaimedStartThread.take_start_claim
+    thread_has_claimed = threading.Event()
+    gate = threading.Event()
+    if thread_claims_first:
+        gate.set()
+
+    def claim(thread: process.ClaimedStartThread) -> bool:
+        if threading.current_thread() is not thread:
+            return real_claim(thread)
+        assert gate.wait(timeout=_START_CLAIM_WAIT_SECONDS), "the start claim gate never opened"
+        won = real_claim(thread)
+        thread_has_claimed.set()
+        return won
+
+    def start(worker: threading.Thread) -> None:
+        real_start(worker)
+        if worker._target is target:
+            if thread_claims_first:
+                assert thread_has_claimed.wait(timeout=_START_CLAIM_WAIT_SECONDS), (
+                    "the started thread never took its claim"
+                )
+            raise error
+
+    monkeypatch.setattr(process.ClaimedStartThread, "take_start_claim", claim)
+    monkeypatch.setattr(threading.Thread, "start", start)
+    return gate
+
+
 class FailingLogHandler(logging.Handler):
     """A log handler whose every emit fails and is handled, keeping the records it failed on."""
 

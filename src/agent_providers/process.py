@@ -550,6 +550,29 @@ class _CliRunRequest:
     prompt_file_arg_index: int | None
 
 
+class ClaimedStartThread(threading.Thread):
+    """A thread whose starter and the thread itself race once for the right to act.
+
+    ``Thread.start()`` can raise while the thread runs on. Whoever takes the
+    claim first owns the thread's work; the other does nothing with it. The
+    claim is never released and nothing waits on it, so a second interruption
+    cannot strand an owner.
+    """
+
+    def __init__(self, *arguments, **keywords) -> None:
+        super().__init__(*arguments, **keywords)
+        self._start_claim = threading.Lock()
+
+    def take_start_claim(self) -> bool:
+        return self._start_claim.acquire(blocking=False)
+
+    def run(self) -> None:
+        if self.take_start_claim():
+            super().run()
+            return
+        del self._target, self._args, self._kwargs
+
+
 def run_cli_bounded(
     child: ChildProcess,
     **options: Unpack[_CliRunKeywordArgs],
@@ -578,11 +601,15 @@ def run_cli_bounded(
         prompt_file_arg_index=options.get("prompt_file_arg_index"),
     )
     state = _BoundedRunState()
-    worker = threading.Thread(target=_run_cli_bounded, args=(state, child, request), daemon=True)
+    worker = ClaimedStartThread(
+        target=_run_cli_bounded, args=(state, child, request), daemon=True
+    )
     failures = StepFailures()
     with failures.contained("start"):
         worker.start()
     if failures.failed("start"):
+        if not worker.take_start_claim():
+            raise failures.error_raised_by("start")
         return _settle_unstarted_run(state, request, failures)
     if state.completed.wait(timeout=max(request.deadline - time.monotonic(), 0)):
         return _recorded_outcome(state)

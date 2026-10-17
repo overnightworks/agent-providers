@@ -61,6 +61,7 @@ from provider_test_support import (
     override_provider_runtime,
     override_turn_runtime,
     shell_child,
+    start_then_raise,
     traceback_frames_hold,
     use_codex_process_pool,
 )
@@ -1255,6 +1256,55 @@ def test_control_flow_from_an_image_thread_that_cannot_start_passes_after_abando
     assert image_turn.process_pool.image_reservation_count() == 0
     assert list(image_turn.working_root.iterdir()) == []
     image_turn.watch.assert_nothing_leaked()
+
+
+@pytest.mark.parametrize(
+    ("error", "thread_claims_first", "expected_error"),
+    [
+        pytest.param(KeyboardInterrupt(), False, KeyboardInterrupt, id="interrupt-starter-owns"),
+        pytest.param(KeyboardInterrupt(), True, KeyboardInterrupt, id="interrupt-thread-owns"),
+        pytest.param(TimeoutError(), True, TimeoutError, id="host-timeout-thread-owns"),
+        pytest.param(
+            TimeoutError(), False, codex_image.CodexImageCliError, id="host-timeout-starter-owns",
+        ),
+    ],
+)
+def test_an_image_start_that_raises_leaves_one_owner(
+    monkeypatch, image_turn, tmp_path, error, thread_claims_first, expected_error,
+) -> None:
+    runner_calls: list[str] = []
+
+    def run_reserved_codex_cli(*arguments, **keywords) -> None:
+        runner_calls.append("ran")
+        codex_protocol.run_reserved_codex_cli(*arguments, **keywords)
+
+    monkeypatch.setattr(codex_image, "run_reserved_codex_cli", run_reserved_codex_cli)
+    child_may_exit = tmp_path / "child-may-exit"
+    os.mkfifo(child_may_exit)
+    _the_child_plays(monkeypatch, f"read line < {shlex.quote(str(child_may_exit))}")
+    gate = start_then_raise(
+        monkeypatch, error, run_reserved_codex_cli, thread_claims_first=thread_claims_first,
+    )
+
+    turn = image_turn.drive(_HANG_BOUND_SECONDS)
+
+    assert type(turn.error) is expected_error
+    if expected_error is codex_image.CodexImageCliError:
+        assert turn.error.__cause__ is None
+        assert turn.error.__context__ is None
+    else:
+        assert turn.error is error
+    at_return = (
+        image_turn.process_pool.image_reservation_count(),
+        list(image_turn.working_root.iterdir()) != [],
+    )
+    assert at_return == ((1, True) if thread_claims_first else (0, False))
+    if thread_claims_first:
+        with child_may_exit.open("w") as writer:
+            writer.write("go\n")
+    gate.set()
+    image_turn.assert_ended(turn)
+    assert runner_calls == (["ran"] if thread_claims_first else [])
 
 
 def test_a_blocked_turn_returns_by_the_settle_instant_with_its_child_reaped(

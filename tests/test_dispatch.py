@@ -92,7 +92,7 @@ _PROVIDER_ROUTES = [
     for route in (ProviderRoute.CLI, ProviderRoute.API)
 ]
 _ROUTES_WITHOUT_A_MODEL_DEFAULT = [
-    pair for pair in _PROVIDER_ROUTES if pair != ("claude", ProviderRoute.CLI)
+    pair for pair in _PROVIDER_ROUTES if pair[1] is ProviderRoute.API
 ]
 
 
@@ -148,6 +148,7 @@ def test_stream_turn_refuses_a_model_that_runs_nothing(provider, route, model, s
     turn = drive_turn(provider, route=route, model=model)
 
     assert turn.error.reason.code is SafeRouteReasonCode.ROUTE_FAILED
+    assert (turn.error.provider, turn.error.route) == (provider, route)
     assert turn.events == []
     assert started_routes == []
 

@@ -116,6 +116,16 @@ class TextToolCallRejectedError(ProviderUnavailableError):
         return (type(self), (self.provider, self.route, self.rejection), self.__dict__)
 
 
+def refuse_empty_model(provider: str, route: str, model: str | None) -> None:
+    """An empty name is never a default; the one place that refuses it."""
+    if model == "":
+        raise ProviderUnavailableError(
+            provider,
+            route,
+            normalize_route_failure(SafeRouteReasonCode.ROUTE_FAILED),
+        )
+
+
 def raise_without_chain(error: BaseException) -> NoReturn:
     """Raise ``error`` with no ``__context__`` or ``__cause__``, even from a handler.
 

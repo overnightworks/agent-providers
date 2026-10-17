@@ -55,6 +55,8 @@ from agent_providers.errors import (
     normalize_route_failure,
 )
 from agent_providers.process import (
+    CODEX_CLI_BINARY_MISSING_DETAIL,
+    GROK_CLI_BINARY_MISSING_DETAIL,
     AgentCliUnavailableError,
     CliEnvironmentCause,
     CliEnvironmentUnavailableError,
@@ -64,6 +66,7 @@ from agent_providers.process import (
     codex_cli_model_catalog,
     grok_cli_status,
     grok_cli_token_is_present,
+    require_cli_binary,
 )
 
 _ANTHROPIC_SDK_DISTRIBUTION: Final = "anthropic"
@@ -274,7 +277,8 @@ def _cli_route_preflight(
             _CLI_LOGIN_SETUP_LABEL,
         )
     return _route_preflight_snapshot(
-        capability, now, ProviderRouteReadinessState.NOT_CONFIGURED,
+        capability, now,
+        _readiness_of_fault(SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED),
         SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED, _CLI_LOGIN_SETUP_LABEL,
     )
 
@@ -433,8 +437,14 @@ def _cli_setup_method(provider: str) -> ProviderSetupMethod | CliEnvironmentCaus
         if provider == ProviderName.CLAUDE and cli_login_status().logged_in:
             return ProviderSetupMethod.CLAUDE_CLI
         if provider == ProviderName.GROK and grok_cli_token_is_present():
+            require_cli_binary(
+                current_config().grok_cli_binary, GROK_CLI_BINARY_MISSING_DETAIL,
+            )
             return ProviderSetupMethod.GROK_CLI
         if provider == ProviderName.CODEX and codex_cli_login_is_usable():
+            require_cli_binary(
+                current_config().codex_cli_binary, CODEX_CLI_BINARY_MISSING_DETAIL,
+            )
             return ProviderSetupMethod.CODEX_CLI
     except AgentCliUnavailableError as exc:
         log.warning("%s CLI probe unavailable: %s", provider, type(exc).__name__)

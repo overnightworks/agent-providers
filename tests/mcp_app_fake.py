@@ -236,6 +236,10 @@ class _Handler(BaseHTTPRequestHandler):
             return
         self._send(response)
 
+    def do_DELETE(self) -> None:
+        self._record("DELETE", b"")
+        self._send(FakeResponse(status=405, content_type=None))
+
     def do_GET(self) -> None:
         self._record("GET", b"")
         self._send(FakeResponse(status=405, content_type=None))

@@ -40,6 +40,7 @@ NON_LINUX_START = textwrap.dedent(
     """
     import os, sys
 
+    sys.path[:0] = sys.argv[2].split(os.pathsep)
     del os.O_CLOEXEC
     sys.platform = "darwin"
 
@@ -138,7 +139,14 @@ def test_a_non_linux_start_does_not_ask_for_the_user(served, boundary_calls):
 
 def test_a_non_linux_interpreter_prints_the_refusal_before_any_unix_only_import(valid_config):
     done = subprocess.run(
-        [sys.executable, "-I", "-c", NON_LINUX_START, str(valid_config)],
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            NON_LINUX_START,
+            str(valid_config),
+            os.pathsep.join(filter(None, sys.path)),
+        ],
         capture_output=True,
         text=True,
         timeout=DISPOSABLE_BOUND_SECONDS,

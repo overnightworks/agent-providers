@@ -1,0 +1,7 @@
+claim_id = "484f45d0adf54d45bb49a9902f6f1650"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "ea4e37cef009002d0d1714e26bcffcde16ea71a0"
+branch = "claude/issue-116-a1b-cli-measurements"
+scope = ["docs/decisions/0001-agent-service.md"]
+opened_commit = "8a851610c94f713db4dd1470cee5d42875213ece"

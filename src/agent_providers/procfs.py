@@ -31,7 +31,8 @@ STAT_PGRP_INDEX = 2
 STAT_THREADS_INDEX = 17
 EXITED_STATES = frozenset({"Z", "X"})
 VANISHED_ENTRY_ERRORS = (FileNotFoundError, ProcessLookupError)
-_INTEGER = re.compile(r"-?\d+")
+KERNEL_INTEGER_MAX_DIGITS = 20
+_INTEGER = re.compile(rf"-?\d{{1,{KERNEL_INTEGER_MAX_DIGITS}}}")
 
 
 class GroupCensus(Enum):

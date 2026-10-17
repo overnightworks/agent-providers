@@ -169,6 +169,8 @@ UNPARSABLE_STATS = {
     "an empty state field": stat_text(state=""),
     "a non-number group": stat_text(pgrp="x"),
     "a non-number thread count": stat_text(threads="x"),
+    "a group wider than any kernel integer": stat_text(pgrp="9" * 4301),
+    "a thread count wider than any kernel integer": stat_text(threads="9" * 4301),
     "an empty file": b"",
 }
 
@@ -620,10 +622,11 @@ def test_cleanup_gives_a_child_no_time_once_its_allowance_is_used_up():
 
 
 def test_cleanup_fails_loudly_when_the_child_outlives_the_allowance():
-    wait = ScriptedWait(expires=True)
+    stuck_child = finished_process(ScriptedWait(expires=True))
+    clock = SteppingClock()
 
     with pytest.raises(ChildNotReapedError):
-        reap_group(finished_process(wait), clock=SteppingClock())
+        reap_group(stuck_child, clock=clock)
 
 
 @dataclasses.dataclass(frozen=True)

@@ -20,7 +20,7 @@ import time
 import weakref
 from collections import deque
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from enum import Enum, StrEnum
 from pathlib import Path
@@ -377,6 +377,8 @@ _CATALOG_HOME_PREFIX: Final = "agent-cli-catalog-"
 _CATALOG_AUTH_FILE_PATH: Final = Path("auth.json")
 CredentialCopy = Callable[[bytes], bytes | None]
 _PRIVATE_HOME_COPY_MODE: Final = 0o400
+_DESCRIPTOR_LINKS: Final = Path("/proc/self/fd")
+_NON_FOLLOWING_DIRECTORY_FLAGS: Final = os.O_NOFOLLOW | os.O_DIRECTORY | os.O_CLOEXEC
 _CREDENTIAL_COPY_FAILED_DETAIL: Final = "could not prepare the private CLI credential copy"
 # Measured on claude 2.1.266: the CLI reports its subscription login from
 # this file below HOME alone, without a network call.
@@ -1495,15 +1497,45 @@ def _remove_private_tree(root: Path) -> bool:
 
 
 def _make_tree_removable(root: Path) -> None:
-    """Reopen directories a child made read-only so their entries can be unlinked."""
-    pending = [root]
-    while pending:
-        directory = pending.pop()
-        os.chmod(directory, 0o700)
-        with os.scandir(directory) as entries:
-            pending.extend(
-                Path(entry.path) for entry in entries if entry.is_dir(follow_symlinks=False)
-            )
+    """Reopen directories a child made read-only so their entries can be unlinked.
+
+    Every directory is acquired without following a link and repaired on the
+    acquired object. This needs Linux's O_PATH and a mounted /proc/self/fd.
+    """
+    if not hasattr(os, "O_PATH"):
+        raise OSError(errno.ENOTSUP, "the permission repair needs O_PATH")
+    acquired: list[int] = []
+    try:
+        acquired.append(os.open(root, os.O_PATH | _NON_FOLLOWING_DIRECTORY_FLAGS))
+        while acquired:
+            handle = acquired.pop()
+            try:
+                _repair_directory_and_acquire_subdirectories(handle, acquired)
+            finally:
+                os.close(handle)
+    finally:
+        for handle in acquired:
+            os.close(handle)
+
+
+def _repair_directory_and_acquire_subdirectories(handle: int, acquired: list[int]) -> None:
+    link = _DESCRIPTOR_LINKS / str(handle)
+    os.chmod(link, 0o700)
+    listing = os.open(link, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        with os.scandir(listing) as entries:
+            for entry in entries:
+                if entry.is_dir(follow_symlinks=False):
+                    with suppress(NotADirectoryError, FileNotFoundError):
+                        acquired.append(
+                            os.open(
+                                entry.name,
+                                os.O_PATH | _NON_FOLLOWING_DIRECTORY_FLAGS,
+                                dir_fd=listing,
+                            )
+                        )
+    finally:
+        os.close(listing)
 
 
 @contextmanager

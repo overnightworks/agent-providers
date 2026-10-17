@@ -104,6 +104,26 @@ def a_directory(directory: Path) -> Path:
     return path
 
 
+def tree_snapshot(path: Path) -> dict[str, tuple[int, bytes | str | None]]:
+    """Map each relative path to its mode and its bytes, link target, or None for a directory."""
+    snapshot: dict[str, tuple[int, bytes | str | None]] = {}
+
+    def record(entry: Path) -> None:
+        mode = entry.lstat().st_mode
+        relative = str(entry.relative_to(path))
+        if stat.S_ISLNK(mode):
+            snapshot[relative] = (stat.S_IMODE(mode), os.readlink(entry))
+        elif stat.S_ISDIR(mode):
+            snapshot[relative] = (stat.S_IMODE(mode), None)
+            for child in sorted(entry.iterdir()):
+                record(child)
+        else:
+            snapshot[relative] = (stat.S_IMODE(mode), entry.read_bytes())
+
+    record(path)
+    return snapshot
+
+
 def a_symlink_to_a_login(directory: Path) -> Path:
     target = directory / "target"
     target.write_bytes(a_codex_login())

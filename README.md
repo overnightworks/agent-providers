@@ -172,7 +172,13 @@ removed is logged by error class alone, without its path. Removal is tried at
 `close()`, then by the finalizer, then by one exit-time sweep; after that the copy
 stays under the host's root, logged at error level. A direct overwrite of a 0400 copy fails, while a CLI can create and
 rename a replacement in its disposable directory; that renewal vanishes at
-cleanup. This is not evidence that a CLI refreshes credentials in practice.
+cleanup. The permission repair that makes a child's read-only
+directories removable never follows a child-controlled symlink and, once a
+directory is acquired, acts on that acquired object; it does not promise
+containment against a same-user process that relocates an acquired directory. A
+home whose own path was replaced by a symlink is logged and left. The repair
+needs Linux's `O_PATH` and a mounted `/proc/self/fd`, which import and a removal
+that needs no repair do not. This is not evidence that a CLI refreshes credentials in practice.
 
 ## Safe diagnostic codes
 

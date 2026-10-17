@@ -1,8 +1,0 @@
-claim_id = "e9dd8c059cbe422f9619ebbd011ca5f0"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "83a6f8ae0511cb4b7b1751eebfa65f936d375def"
-branch = "claude/issue-109-ending-decider-sonar-markers"
-scope = ["packages/agent-client/src/agent_client/run_stream.py", "packages/agent-service/src/agent_service/config.py", "packages/agent-service/src/agent_service/signing.py", "tests/test_wire_protocol.py"]
-opened_commit = "8c11db2f5851af921e917ce0c76187183301752a"
-whole_reason = "Two folded #27 findings bundled as one small card lane: the due-ending decider with its pinning test, and the two rule-specific Sonar markers; each part is a few lines."

@@ -68,8 +68,8 @@ from agent_providers.claude.provider import (
     clear_cli_tool_surface_cache,
     clear_client_cache,
     cli_login_status,
+    cli_model_catalog,
     is_available,
-    list_cli_model_aliases,
     parse_json_response,
     verify_cli_tool_surface,
     verify_no_builtin_cli_tools,
@@ -282,7 +282,7 @@ def test_clearing_the_provider_login_cache_delegates_to_the_runner() -> None:
     clear.assert_called_once()
 
 
-# ── list_cli_model_aliases ───────────────────────────────────────────
+# ── cli_model_catalog ───────────────────────────────────────────
 
 
 def _catalog_run(
@@ -300,7 +300,10 @@ def _catalog_run(
     )
 
 
-def test_list_cli_model_aliases_parses_available_line() -> None:
+AVAILABLE_LINE = "Usage: /model <name>. Available: sonnet, opus.\n"
+
+
+def _catalog_read_from(stdout: str) -> provider.ClaudeCliModelCatalog:
     with (
         patch(
             "agent_providers.claude.provider._find_claude_binary",
@@ -308,47 +311,76 @@ def test_list_cli_model_aliases_parses_available_line() -> None:
         ),
         patch(
             "agent_providers.claude.provider.run_claude_catalog_cli",
-            return_value=_catalog_run(CLAUDE_MODEL_CATALOG_STDOUT),
+            return_value=_catalog_run(stdout),
         ),
     ):
-        aliases = list_cli_model_aliases()
-
-    assert aliases == [
-        "sonnet",
-        "opus",
-        "haiku",
-        "fable",
-        "best",
-        "sonnet[1m]",
-        "opus[1m]",
-        "fable[1m]",
-        "opusplan",
-        "default",
-    ]
+        return cli_model_catalog()
 
 
-def test_list_cli_model_aliases_unexpected_output_raises_named_error() -> None:
-    with (
-        patch(
-            "agent_providers.claude.provider._find_claude_binary",
-            return_value=Path("/usr/bin/claude"),
+@pytest.mark.parametrize(
+    ("stdout", "label", "aliases"),
+    (
+        (
+            CLAUDE_MODEL_CATALOG_STDOUT, "Opus 5 (1M context)",
+            (
+                "sonnet", "opus", "haiku", "fable", "best", "sonnet[1m]", "opus[1m]",
+                "fable[1m]", "opusplan", "default",
+            ),
         ),
-        patch(
-            "agent_providers.claude.provider.run_claude_catalog_cli",
-            return_value=_catalog_run("no usable output here\n"),
+        (
+            "Current model: `Opus 5.5 (default)`\n" + AVAILABLE_LINE,
+            "Opus 5.5 (default)", ("sonnet", "opus"),
         ),
-    ):
-        with pytest.raises(UnavailableError, match="did not contain a parseable"):
-            list_cli_model_aliases()
+        (
+            "Current model: `Opus 5` (effort: `high`)\n" + AVAILABLE_LINE,
+            "Opus 5", ("sonnet", "opus"),
+        ),
+    ),
+    ids=("fixture-with-effort", "measured-2.1.302-shape", "several-backtick-pairs"),
+)
+def test_claude_catalog_names_the_current_model(
+    stdout: str, label: str, aliases: tuple[str, ...], caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    catalog = _catalog_read_from(stdout)
+
+    assert catalog.current_model_label == label
+    assert catalog.aliases == aliases
+    assert label not in caplog.text
 
 
-def test_list_cli_model_aliases_no_binary_raises_named_error() -> None:
-    with patch("agent_providers.claude.provider._find_claude_binary", return_value=None):
-        with pytest.raises(UnavailableError, match="Claude CLI not found"):
-            list_cli_model_aliases()
+@pytest.mark.parametrize(
+    "current_model_text",
+    (
+        "",
+        "Current model: `Opus 5.5 (default)`\nCurrent model: `Sonnet 5`\n",
+        "Current model: `Opus 5.5 (default)\n",
+        "Current model: ``\n",
+        "Current model: `Opus\x1b[31m 5`\n",
+        "Note: Current model: `Opus 5`\n",
+    ),
+    ids=(
+        "no-line", "two-lines", "no-closing-backtick", "empty-text", "control-character",
+        "marker-mid-line",
+    ),
+)
+def test_claude_catalog_without_one_readable_current_model_has_no_label(
+    current_model_text: str, caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    catalog = _catalog_read_from(current_model_text + AVAILABLE_LINE)
+
+    assert catalog.current_model_label is None
+    assert catalog.aliases == ("sonnet", "opus")
+    assert "Opus" not in caplog.text
 
 
-def test_list_cli_model_aliases_timeout_raises_named_error() -> None:
+def test_a_current_model_line_alone_is_not_a_catalog() -> None:
+    with pytest.raises(UnavailableError, match="did not contain a parseable"):
+        _catalog_read_from("Current model: `Opus 5.5 (default)`\n")
+
+
+def test_the_model_catalog_timeout_raises_named_error() -> None:
     with (
         patch(
             "agent_providers.claude.provider._find_claude_binary",
@@ -360,10 +392,10 @@ def test_list_cli_model_aliases_timeout_raises_named_error() -> None:
         ),
     ):
         with pytest.raises(UnavailableError, match="timed out"):
-            list_cli_model_aliases()
+            cli_model_catalog()
 
 
-def test_list_cli_model_aliases_spawn_failure_raises_named_error() -> None:
+def test_the_model_catalog_spawn_failure_raises_named_error() -> None:
     with (
         patch(
             "agent_providers.claude.provider._find_claude_binary",
@@ -375,10 +407,10 @@ def test_list_cli_model_aliases_spawn_failure_raises_named_error() -> None:
         ),
     ):
         with pytest.raises(UnavailableError, match="failed to run"):
-            list_cli_model_aliases()
+            cli_model_catalog()
 
 
-def test_list_cli_model_aliases_nonzero_exit_raises_named_error() -> None:
+def test_the_model_catalog_nonzero_exit_raises_named_error() -> None:
     with (
         patch(
             "agent_providers.claude.provider._find_claude_binary",
@@ -390,10 +422,10 @@ def test_list_cli_model_aliases_nonzero_exit_raises_named_error() -> None:
         ),
     ):
         with pytest.raises(UnavailableError, match="Claude CLI could not list models"):
-            list_cli_model_aliases()
+            cli_model_catalog()
 
 
-def test_list_cli_model_aliases_runs_the_closed_catalog_spawn(
+def test_the_model_catalog_runs_the_closed_catalog_spawn(
     tmp_path, monkeypatch,
 ) -> None:
     fake = tmp_path / "claude"
@@ -409,9 +441,9 @@ def test_list_cli_model_aliases_runs_the_closed_catalog_spawn(
         "agent_providers.claude.provider._find_claude_binary",
         return_value=fake,
     ):
-        aliases = list_cli_model_aliases()
+        catalog = cli_model_catalog()
 
-    assert aliases == ["sonnet", "opus"]
+    assert catalog.aliases == ("sonnet", "opus")
 
 
 # ── _call_api ───────────────────────────────────────────────────────
@@ -1401,11 +1433,27 @@ _HOME_ENTRYPOINTS = {
 }
 
 
+@pytest.fixture
+def collection_only_when_forced():
+    was_enabled = gc.isenabled()
+    gc.disable()
+    yield
+    if was_enabled:
+        gc.enable()
+
+
+@pytest.mark.parametrize(
+    "collected_while_refused",
+    (True, False),
+    ids=("collected-while-refused", "collected-once-permitted"),
+)
 @pytest.mark.parametrize("entrypoint", _HOME_ENTRYPOINTS)
 def test_a_refused_home_removal_never_replaces_a_failed_calls_error(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    collection_only_when_forced,
     entrypoint: str,
+    collected_while_refused: bool,
 ) -> None:
     run, failure, _result = _HOME_ENTRYPOINTS[entrypoint]
     removal = _RefusedHomeRemoval(monkeypatch)
@@ -1417,10 +1465,15 @@ def test_a_refused_home_removal_never_replaces_a_failed_calls_error(
     assert removal.refused
     assert all(home.exists() for home in removal.refused)
     _assert_logged_by_class_alone(caplog, removal.refused)
-    removal.lift()
     raised.value.__traceback__ = None
     del raised
+    if collected_while_refused:
+        gc.collect()
+    removal.lift()
     gc.collect()
+    if collected_while_refused:
+        assert all(home.exists() for home in removal.refused)
+        process._sweep_failed_homes_at_exit()
     assert not any(home.exists() for home in removal.refused)
 
 
@@ -4789,7 +4842,7 @@ def test_the_claude_cli_faults_are_unavailable_errors_and_not_each_other(parent,
 def _a_claude_binary_missing_at(site: str, monkeypatch: pytest.MonkeyPatch):
     if site == "require":
         monkeypatch.setattr(provider, "_find_claude_binary", lambda: None)
-        return list_cli_model_aliases
+        return cli_model_catalog
     monkeypatch.setattr(
         provider, "averify_no_builtin_cli_tools", AsyncMock(return_value=Path("/usr/bin/claude")),
     )
@@ -4860,7 +4913,7 @@ def test_the_claude_model_listing_raises_only_the_claude_family(
     make_fault(tmp_path)
 
     with pytest.raises(UnavailableError) as raised:
-        list_cli_model_aliases()
+        cli_model_catalog()
 
     assert type(raised.value) is raised_class
     assert str(raised.value) == detail
@@ -4874,7 +4927,7 @@ def test_a_credential_copy_that_cannot_be_written_raises_cli_unavailable(
     monkeypatch.setattr(provider, "_find_claude_binary", lambda: Path("/usr/bin/claude"))
     with a_credential_destination_that_fails(fault):
         with pytest.raises(UnavailableError) as raised:
-            list_cli_model_aliases()
+            cli_model_catalog()
 
     assert type(raised.value) is CliUnavailableError
     assert str(raised.value) == CLAUDE_CLI_UNAVAILABLE_DETAIL

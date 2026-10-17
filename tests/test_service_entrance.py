@@ -260,6 +260,12 @@ TOKEN_REJECTIONS = [
         MINT.workload, lambda: MINT.user(sub=None), UNAUTHORIZED, id="user-token-without-subject"
     ),
     pytest.param(
+        MINT.workload,
+        lambda: MINT.user(sub="user-\ud800"),
+        UNAUTHORIZED,
+        id="user-subject-with-a-lone-surrogate",
+    ),
+    pytest.param(
         lambda: MINT.workload(realm_access={"roles": ["default-roles-agent-test"]}),
         MINT.user,
         FORBIDDEN,

@@ -5,8 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
-import tempfile
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -35,16 +33,15 @@ from agent_providers.codex.protocol import (
     CodexCliStreamFailure,
     codex_child_process,
     codex_cli_failure_reason,
+    create_codex_turn_home,
     error_item_message,
     event_item,
     event_item_type,
     failed_turn_message,
-    install_codex_turn_login,
     parse_codex_line,
     run_reserved_codex_cli,
     top_level_error_message,
 )
-from agent_providers.config import current_config
 from agent_providers.constants import TURN_TIMEOUT_SECONDS
 from agent_providers.errors import (
     CodexProcessPoolSaturatedError,
@@ -59,6 +56,7 @@ from agent_providers.process import (
     CliLineChannel,
     CliRunOutcome,
     CliRunReason,
+    PrivateHomeNotCreatedError,
 )
 from agent_providers.sandbox.paths import (
     CODEX_HOME_DIRECTORY_NAME,
@@ -128,20 +126,17 @@ class CodexCliToolTransport:
     def __init__(self, *, model: str, catalog: ToolCatalog) -> None:
         self._model = model
         self._catalog = catalog
-        self._turn_directory = tempfile.TemporaryDirectory(
-            prefix=CODEX_TOOL_TURN_DIRECTORY_PREFIX,
-            dir=current_config().cli_working_directory_root,
-        )
-        os.chmod(self._turn_directory.name, 0o700)
-        self._turn_root = Path(self._turn_directory.name).resolve()
-        self._work_directory = self._turn_root / "work"
-        self._codex_home = self._turn_root / CODEX_HOME_DIRECTORY_NAME
-        self._work_directory.mkdir(mode=0o700)
-        self._codex_home.mkdir(mode=0o700)
         try:
-            install_codex_turn_login(self._codex_home)
+            self._home = create_codex_turn_home(CODEX_TOOL_TURN_DIRECTORY_PREFIX)
+        except PrivateHomeNotCreatedError:
+            raise_without_chain(
+                ProviderUnavailableError(
+                    "codex",
+                    "cli",
+                    normalize_route_failure(SafeRouteReasonCode.CLI_BINARY_UNAVAILABLE),
+                )
+            )
         except AgentCliUnavailableError:
-            self._turn_directory.cleanup()
             raise_without_chain(
                 ProviderUnavailableError(
                     "codex",
@@ -149,6 +144,9 @@ class CodexCliToolTransport:
                     normalize_route_failure(SafeRouteReasonCode.CLI_AUTH_REJECTED),
                 )
             )
+        self._turn_root = self._home.path.resolve()
+        self._work_directory = self._turn_root / "work"
+        self._codex_home = self._turn_root / CODEX_HOME_DIRECTORY_NAME
         self._deadline = time.monotonic() + TURN_TIMEOUT_SECONDS
         self._thread_id: str | None = None
         self._round_index = 0
@@ -257,7 +255,7 @@ class CodexCliToolTransport:
         if self._closed:
             return
         self._closed = True
-        await asyncio.to_thread(self._turn_directory.cleanup)
+        await asyncio.to_thread(self._home.close)
 
 
 def _codex_tool_arguments(

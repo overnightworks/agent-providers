@@ -35,6 +35,7 @@ import os
 import sys
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -491,3 +492,34 @@ def test_a_child_inherits_no_descriptor_the_parent_holds_open(
         os.close(write_end)
 
     assert output.strip() == "False"
+
+
+@pytest.mark.parametrize(
+    ("stream_buffer_limit", "forwarded_keywords"),
+    [(1 << 20, {"limit": 1 << 20}), (None, {})],
+    ids=["a-requested-limit-is-forwarded", "no-request-leaves-asyncios-default"],
+)
+def test_the_async_door_forwards_the_requested_stream_buffer_limit_to_asyncio(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    stream_buffer_limit: int | None,
+    forwarded_keywords: dict[str, int],
+) -> None:
+    recorded_keywords: list[dict[str, Any]] = []
+
+    async def record_start(*_command: str, **keywords: Any) -> object:
+        recorded_keywords.append(keywords)
+        return object()
+
+    monkeypatch.setattr(spawn.asyncio, "create_subprocess_exec", record_start)
+    child = ChildProcess(
+        binary=Path("/usr/bin/claude"),
+        arguments=("-p",),
+        environment=closed_environment(tmp_path),
+        working_directory=tmp_path,
+    )
+
+    asyncio.run(open_async_pipes(child, stream_buffer_limit=stream_buffer_limit))
+
+    (keywords,) = recorded_keywords
+    assert {key: value for key, value in keywords.items() if key == "limit"} == forwarded_keywords

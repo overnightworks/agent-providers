@@ -8,9 +8,11 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from provider_test_support import a_claude_cli_child, install_claude_cli_children
 
 from agent_providers.claude import provider
 from agent_providers.claude.provider import (
+    _STREAM_BUFFER_LIMIT,
     CLAUDE_CLI_LOGIN_REFUSED_DETAIL,
     CLAUDE_CLI_UNAVAILABLE_DETAIL,
     CliLoginRefusedError,
@@ -29,65 +31,11 @@ from agent_providers.events import (
 )
 
 A_CORRELATION_ID = "job-42"
-_ASYNCIO_DEFAULT_LIMIT = 64 * 1024
 
 
 @pytest.fixture(autouse=True)
 def _no_real_killpg(monkeypatch):
     monkeypatch.setattr(provider.os, "killpg", MagicMock())
-
-
-class FakeStreamReader:
-    """Minimal stand-in for asyncio.StreamReader.readline()."""
-
-    def __init__(self, lines: list[bytes]) -> None:
-        self._lines = list(lines)
-
-    async def readline(self) -> bytes:
-        if not self._lines:
-            return b""
-        return self._lines.pop(0)
-
-    async def read(self, size: int = -1) -> bytes:
-        if not self._lines:
-            return b""
-        if size < 0:
-            out = b"".join(self._lines)
-            self._lines = []
-            return out
-        out = self._lines.pop(0)
-        if len(out) <= size:
-            return out
-        self._lines.insert(0, out[size:])
-        return out[:size]
-
-
-def _make_fake_proc(
-    stdout_lines: list[bytes],
-    *,
-    returncode: int = 0,
-    stderr_bytes: bytes = b"",
-) -> Any:
-    proc = MagicMock()
-    proc.stdout = FakeStreamReader(stdout_lines)
-    proc.stderr = FakeStreamReader([stderr_bytes] if stderr_bytes else [])
-    proc.returncode = returncode
-
-    async def _wait() -> None:
-        return None
-
-    proc.wait = _wait
-    proc.kill = MagicMock()
-    proc.pid = 4242
-    proc.stdin = MagicMock()
-    proc.stdin.write = MagicMock()
-
-    async def _drain() -> None:
-        return None
-
-    proc.stdin.drain = _drain
-    proc.stdin.close = MagicMock()
-    return proc
 
 
 def _assistant_line(text: str) -> bytes:
@@ -283,10 +231,7 @@ def test_stream_yields_ordered_events(monkeypatch) -> None:
         _result_line("Hi, done."),
     ]
 
-    async def fake_exec(*_cmd, **_kw):
-        return _make_fake_proc(lines)
-
-    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    install_claude_cli_children(monkeypatch, a_claude_cli_child(stream_lines=lines))
 
     events = asyncio.run(_collect(
         acall_claude_with_mcp_stream(prompt="hi", user_id="u"),
@@ -312,10 +257,7 @@ def test_stream_skips_malformed_lines(monkeypatch, caplog) -> None:
         _result_line("hello"),
     ]
 
-    async def fake_exec(*_cmd, **_kw):
-        return _make_fake_proc(lines)
-
-    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    install_claude_cli_children(monkeypatch, a_claude_cli_child(stream_lines=lines))
 
     events = asyncio.run(_collect(
         acall_claude_with_mcp_stream(prompt="hi", user_id="u"),
@@ -336,10 +278,7 @@ def test_stream_regression_matches_non_streaming_final_text(monkeypatch) -> None
         _result_line(expected),
     ]
 
-    async def fake_exec(*_cmd, **_kw):
-        return _make_fake_proc(lines)
-
-    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    install_claude_cli_children(monkeypatch, a_claude_cli_child(stream_lines=lines))
 
     events = asyncio.run(_collect(
         acall_claude_with_mcp_stream(prompt="hi", user_id="u"),
@@ -358,10 +297,7 @@ def test_stream_falls_back_to_assembled_text_when_no_result(monkeypatch) -> None
         _assistant_line("piece two"),
     ]
 
-    async def fake_exec(*_cmd, **_kw):
-        return _make_fake_proc(lines)
-
-    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    install_claude_cli_children(monkeypatch, a_claude_cli_child(stream_lines=lines))
 
     events = asyncio.run(_collect(
         acall_claude_with_mcp_stream(prompt="hi", user_id="u"),
@@ -375,10 +311,7 @@ def test_stream_nonzero_exit_raises(monkeypatch) -> None:
         provider, "_require_claude_binary", lambda: "/bin/claude",
     )
 
-    async def fake_exec(*_cmd, **_kw):
-        return _make_fake_proc([], returncode=2, stderr_bytes=b"boom")
-
-    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    install_claude_cli_children(monkeypatch, a_claude_cli_child(returncode=2, stderr=b"boom"))
 
     stream = acall_claude_with_mcp_stream(prompt="hi", user_id="u")
     collected = _collect(stream)
@@ -391,10 +324,10 @@ def test_stream_binary_missing_raises(monkeypatch) -> None:
         provider, "_require_claude_binary", lambda: "/bin/claude",
     )
 
-    async def fake_exec(*_cmd, **_kw):
-        raise FileNotFoundError()
+    def binary_vanishes(_child, _limit):
+        raise FileNotFoundError
 
-    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    install_claude_cli_children(monkeypatch, factory=binary_vanishes)
 
     stream = acall_claude_with_mcp_stream(prompt="hi", user_id="u")
     collected = _collect(stream)
@@ -409,21 +342,13 @@ def test_stream_timeout_kills_subprocess(monkeypatch) -> None:
 
     killed = {"value": False}
 
-    class StallingReader(FakeStreamReader):
-        async def readline(self) -> bytes:
-            await asyncio.sleep(10)
-            return b""
-
-    async def fake_exec(*_cmd, **_kw):
-        proc = _make_fake_proc([])
-        proc.returncode = None
-        proc.stdout = StallingReader([])
-        return proc
+    install_claude_cli_children(
+        monkeypatch, a_claude_cli_child(returncode=None, stdout_stalls=True),
+    )
 
     def _killpg(_pid, _sig):
         killed["value"] = True
 
-    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
     monkeypatch.setattr(provider.os, "killpg", _killpg)
 
     stream = acall_claude_with_mcp_stream(
@@ -440,10 +365,7 @@ def test_completed_stream_does_not_signal_process_group(monkeypatch) -> None:
         provider, "_require_claude_binary", lambda: "/bin/claude",
     )
 
-    async def fake_exec(*_cmd, **_kw):
-        return _make_fake_proc([_result_line("ok")])
-
-    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    install_claude_cli_children(monkeypatch, a_claude_cli_child(stream_lines=[_result_line("ok")]))
 
     events = asyncio.run(_collect(
         acall_claude_with_mcp_stream(prompt="hi", user_id="u"),
@@ -510,19 +432,18 @@ def test_stream_consumes_oversized_tool_result_line(monkeypatch) -> None:
         _result_line("done"),
     ]
 
-    async def fake_exec(*_cmd, **kwargs):
-        proc = _make_fake_proc([])
-        proc.stdout = asyncio.StreamReader(limit=kwargs.get("limit", _ASYNCIO_DEFAULT_LIMIT))
-        for line in lines:
-            proc.stdout.feed_data(line)
-        proc.stdout.feed_eof()
-        return proc
-
-    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    spawns = install_claude_cli_children(
+        monkeypatch,
+        factory=lambda _child, limit: a_claude_cli_child(
+            stream_lines=lines, stdout_limit=limit,
+        ),
+    )
 
     events = asyncio.run(_collect(
         acall_claude_with_mcp_stream(prompt="hi", user_id="u"),
     ))
+    assert spawns.stream_buffer_limits == [_STREAM_BUFFER_LIMIT]
+    assert _STREAM_BUFFER_LIMIT >= len(lines[1])
     tool_results = [e for e in events if isinstance(e, ToolResultEvent)]
     assert len(tool_results) == 1
     assert tool_results[0].content == huge_payload
@@ -556,10 +477,9 @@ def _error_result_line(text: str = LOGIN_REFUSED_TEXT) -> bytes:
 def _stream_outcome(monkeypatch, lines: list[bytes], returncode: int = 0):
     monkeypatch.setattr(provider, "_require_claude_binary", lambda: "/bin/claude")
 
-    async def fake_exec(*_cmd, **_kw):
-        return _make_fake_proc(lines, returncode=returncode)
-
-    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    install_claude_cli_children(
+        monkeypatch, a_claude_cli_child(stream_lines=lines, returncode=returncode),
+    )
     seen: list[StreamEvent] = []
 
     async def drive() -> None:
@@ -586,10 +506,9 @@ def _drive_over_the_turn_transport(monkeypatch, lines: list[bytes], returncode: 
 
     monkeypatch.setattr(provider, "_require_claude_binary", lambda: "/bin/claude")
 
-    async def fake_exec(*_cmd, **_kw):
-        return _make_fake_proc(lines, returncode=returncode)
-
-    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    install_claude_cli_children(
+        monkeypatch, a_claude_cli_child(stream_lines=lines, returncode=returncode),
+    )
     seen: list[StreamEvent] = []
 
     async def drive() -> None:

@@ -2,18 +2,67 @@ import asyncio
 import re
 import socket
 import struct
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
+from http import HTTPStatus
 from urllib.parse import urlsplit
 
 import h11
 from mcp_app_fake import WAIT_SECONDS
 
-from agent_service.tool_relay import LOOPBACK_HOST, Relay
+from agent_service.mcp_wire import JSON_MEDIA_TYPE, HttpAnswer
+from agent_service.tool_relay import LOOPBACK_HOST, Relay, RelayRequest
 
 RUN_ID = "run-under-test"
 _READ_BYTES = 65_536
 _CLIENT_REQUEST = h11.Request(method="POST", target="/mcp", headers=[("host", "x")])
+
+
+OWNER_BODY = b'{"owner":"answer"}'
+OWNER_ANSWER = HttpAnswer(HTTPStatus.OK, JSON_MEDIA_TYPE, OWNER_BODY)
+
+
+class ScriptedOwner:
+    """A fake of the ``RelayOwner`` port: records requests, can gate, fail and be cancelled."""
+
+    def __init__(
+        self,
+        answers: Sequence[HttpAnswer] = (),
+        failure: Exception | None = None,
+        *,
+        gated: bool = False,
+    ) -> None:
+        self.requests: list[RelayRequest] = []
+        self.entered = asyncio.Event()
+        self.cancelled = False
+        self._answers = list(answers)
+        self._failure = failure
+        self._gate = asyncio.Event()
+        if not gated:
+            self.release()
+
+    def release(self) -> None:
+        self._gate.set()
+
+    async def answer(self, request: RelayRequest) -> HttpAnswer:
+        self.requests.append(request)
+        self.entered.set()
+        try:
+            await self._gate.wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        if self._failure is not None:
+            raise self._failure
+        return self._answers.pop(0) if self._answers else OWNER_ANSWER
+
+    @property
+    def bodies(self) -> list[bytes]:
+        return [request.body for request in self.requests]
+
+    async def wait_entered(self) -> None:
+        async with asyncio.timeout(WAIT_SECONDS):
+            await self.entered.wait()
 
 
 @dataclass(frozen=True)
@@ -161,13 +210,19 @@ async def close_bounded(relay: Relay) -> None:
         await relay.close()
 
 
-def drive(scenario: Callable[[Relay], Awaitable[None]], run_id: str = RUN_ID) -> None:
+def drive(
+    scenario: Callable[[Relay], Awaitable[None]],
+    run_id: str = RUN_ID,
+    owner: ScriptedOwner | None = None,
+) -> None:
     async def main() -> None:
-        relay = await Relay.start(run_id)
+        scripted = owner or ScriptedOwner()
+        relay = await Relay.start(run_id, scripted)
         try:
             async with asyncio.timeout(WAIT_SECONDS * 3):
                 await scenario(relay)
         finally:
+            scripted.release()
             await close_bounded(relay)
 
     asyncio.run(main())

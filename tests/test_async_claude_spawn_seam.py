@@ -30,7 +30,11 @@ from provider_test_support import (
 from agent_providers.claude import provider
 from agent_providers.spawn import ChildProcess, closed_environment
 
-GUARDED_MODULES = ("test_claude_provider.py", "test_claude_adapter.py")
+GUARDED_MODULES = (
+    "test_claude_provider.py",
+    "test_claude_adapter.py",
+    "test_claude_provider_streaming.py",
+)
 PATCHING_CALLS = frozenset({"setattr", "patch", "object"})
 GATE_DEADLINE_SECONDS = 5
 GUARDED_DOOR_NAMES = frozenset({"create_subprocess_exec", "open_async_pipes"})

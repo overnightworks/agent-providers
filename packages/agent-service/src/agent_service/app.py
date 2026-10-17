@@ -8,8 +8,9 @@ checked in a fixed order, and the first failure answers:
 2. the body's protocol version, then its shape (``agent_service.run_request``);
 3. whether the app may ask for the purpose;
 4. the route (``agent_service.routing``);
-5. for the CLI route, the service's one admission slot (``agent_service.admission``): a
-   second subscription run answers ``busy`` with ``Retry-After`` before anything is signed;
+5. for the CLI route, the service's admission limit (``agent_service.admission``): a
+   subscription run beyond it answers ``busy`` with ``Retry-After`` before anything is
+   signed;
 6. for an app with an MCP origin, whether the run's capability fits the 8,192
    characters every verifier accepts (``capability_too_large``).
 
@@ -111,7 +112,7 @@ def create_app(
     callers = CallerCheck(build_verifier(config.identity, fetch_key_set, monotonic_clock), config)
     installed_runners = runners or Runners()
     installed_records = records or RunRecords(wall_clock)
-    subscription_slot = AdmissionSlot()
+    subscription_slot = AdmissionSlot(config.runs.max_parallel_cli_runs)
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
     @app.post("/runs")
@@ -162,7 +163,7 @@ class _RunResponse(StreamingResponse):
     paused behind a blocked send is only finalized by the garbage collector.
 
     It also releases the run's lease on exit, after the frames are closed. That
-    frees the slot only for a run that never began, because the lease is
+    frees the place only for a run that never began, because the lease is
     released once the run is over, however long the connection hangs on.
     """
 

@@ -1,25 +1,26 @@
-"""The service's one admission slot: at most one subscription run is active at a time.
+"""The service's admission limit: at most N subscription runs are active at a time.
 
-A ``Lease`` is the holder's proof. It frees the slot once, and only while it still
-holds it, so a late release by an old response never frees the slot of a newer run.
+A ``Lease`` is the holder's proof of one place. It frees that place once, and only while
+it still holds it, so a late release by an old response never frees the place of a newer run.
 """
 
 from __future__ import annotations
 
 
 class AdmissionSlot:
-    def __init__(self) -> None:
-        self._holder: Lease | None = None
+    def __init__(self, places: int) -> None:
+        self._places = places
+        self._holders: set[Lease] = set()
 
     def try_take(self) -> Lease | None:
-        if self._holder is not None:
+        if len(self._holders) >= self._places:
             return None
-        self._holder = Lease(self)
-        return self._holder
+        lease = Lease(self)
+        self._holders.add(lease)
+        return lease
 
     def free(self, lease: Lease) -> None:
-        if self._holder is lease:
-            self._holder = None
+        self._holders.discard(lease)
 
 
 class Lease:

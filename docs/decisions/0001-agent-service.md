@@ -158,7 +158,8 @@ body rules be fixed before the build.
   (default 120) and `max_duration_s` (default 600), which must satisfy
   heartbeat < stall <= idle < maximum, and the
   budget `max_tool_calls` (default 30) and `max_bytes` (default 4 MiB,
-  4194304), both positive integers outside that ordering;
+  4194304), and `max_parallel_cli_runs` (default 5), all positive integers
+  outside that ordering;
   `[profiles.<name>]` one profile per provider;
   `[purposes."<p>"]` an optional `cli_provider` and `api_alias`;
   `[apps.<app>]` its `workload_client`, its purposes, and its tools' effects,
@@ -891,17 +892,18 @@ Rules:
 unprivileged user, an empty private working directory, a strict per-run MCP
 config with an exact tool allowlist, restricted built-in tools, no session
 persistence, a finite max-turns, and a process-group kill and reap on cancel or
-timeout. Tokens never appear in argv, events or logs. Admission allows one
-active subscription run: the service holds one admission slot (one per process, not per
-registered app), and a CLI run takes a lease on it before its run id or any signature exists. A second request
-gets `429 busy` with `Retry-After: 10` at once. Refusals and API runs take nothing.
-The lease is released once the run has stopped, even if its record fails; a response
-that ends before its run began releases it too. Only the lease that holds the slot can
-free it. The slot lives in
-one process, because the service runs one replica with one worker (A1d). There is no
-queue.
+timeout. Tokens never appear in argv, events or logs. Admission allows a
+service-wide limit of parallel subscription runs (default 5, `[runs]
+max_parallel_cli_runs`, one limit for the whole service, not per registered app);
+a CLI run takes a lease on one place before its run id or any signature exists.
+Beyond the limit a request gets `429 busy` with `Retry-After: 10` at once. Refusals
+and API runs take nothing. The lease is released once the run has stopped, even if
+its record fails; a response that ends before its run began releases it too. Only a
+lease that still holds its place can free it. The limit lives in one process,
+because the service runs one replica with one worker (A1d). There is no queue and
+no fallback to the API route.
 
-**Consequence.** Subscription runs are strictly serial, and a busy service says
+**Consequence.** Subscription runs are bounded by that limit, and a full service says
 so instead of waiting.
 
 ### A1b measured: claude 2.1.302

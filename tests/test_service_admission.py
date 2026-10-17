@@ -1,8 +1,8 @@
-"""H7 admission: one subscription run at a time per service, the slot a lease holds.
+"""H7 admission: at most N parallel subscription runs per service, each holding a lease.
 
-A busy CLI route answers ``busy`` with ``Retry-After`` before anything is signed; refusals
+A full CLI route answers ``busy`` with ``Retry-After`` before anything is signed; refusals
 and API runs take nothing; the lease is released when the run is over or the response ends,
-and a late release by an old response never frees a newer run's slot.
+and a late release by an old response never frees a newer run's place.
 """
 
 from __future__ import annotations
@@ -52,22 +52,39 @@ from agent_service.run_records import RunRecords
 from agent_service.runners import Runner, Runners
 
 WAIT_LIMIT_S: Final = 10
+PLACES: Final = 2
 MINT = TokenMint()
 FINAL = (FinalEvent(text="done"),)
 BOB_ON_THE_API_ROUTE = {"groups": [SONGMAKER_GROUP], "sub": "user-bob"}
 
 
 class HeldRunner:
-    """A CLI runner whose run stays open until a test lets it go, for a bounded time."""
+    """A CLI runner whose runs stay open until a test lets them go, each for a bounded time."""
 
     def __init__(self) -> None:
         self.entered = threading.Event()
-        self.proceed = threading.Event()
+        self.gates: list[threading.Event] = []
+        self._everything_proceeds = threading.Event()
 
     async def run(self, admitted):
+        gate = threading.Event()
+        self.gates.append(gate)
         self.entered.set()
-        await asyncio.to_thread(self.proceed.wait, WAIT_LIMIT_S)
+        if self._everything_proceeds.is_set():
+            gate.set()
+        await asyncio.to_thread(gate.wait, WAIT_LIMIT_S)
         yield FinalEvent(text="done")
+
+    def proceed_all(self) -> None:
+        self._everything_proceeds.set()
+        for gate in self.gates:
+            gate.set()
+
+
+@dataclass
+class _HeldRun:
+    response: Future[httpx.Response]
+    gate: threading.Event
 
 
 @dataclass
@@ -82,15 +99,22 @@ class _Service:
         headers = run_headers(workload or MINT.workload(), user or MINT.user())
         return post_run(self.base_url, headers, run_body(**body))
 
-    def begin_held_cli_run(self) -> Future[httpx.Response]:
+    def begin_held_cli_run(self) -> _HeldRun:
         self.held.entered.clear()
-        run = self.pool.submit(self.run)
+        response = self.pool.submit(self.run)
         assert self.held.entered.wait(WAIT_LIMIT_S), "the CLI run was not admitted"
-        return run
+        return _HeldRun(response, self.held.gates[-1])
 
-    def let_go(self, run: Future[httpx.Response]) -> httpx.Response:
-        self.held.proceed.set()
-        return run.result(WAIT_LIMIT_S)
+    def fill_the_places(self) -> list[_HeldRun]:
+        return [self.begin_held_cli_run() for _ in range(PLACES)]
+
+    def let_go(self, run: _HeldRun) -> httpx.Response:
+        run.gate.set()
+        return run.response.result(WAIT_LIMIT_S)
+
+    def let_all_go(self, runs: list[_HeldRun]) -> None:
+        for run in runs:
+            _assert_streamed_to_a_terminal(self.let_go(run))
 
 
 @pytest.fixture
@@ -98,13 +122,15 @@ def service(tmp_path, monkeypatch) -> Iterator[_Service]:
     held = HeldRunner()
     api = ScriptedRunner(FINAL)
     signed = record_signed_tokens(monkeypatch)
-    config = capable_service_config(tmp_path, songmaker=TUNED_AT_THE_LIMIT)
+    config = capable_service_config(tmp_path, songmaker=TUNED_AT_THE_LIMIT).model_copy(
+        update={"runs": RunConfig(max_parallel_cli_runs=PLACES)}
+    )
     app = create_app(config, runners=Runners(cli=held, api=api), fetch_key_set=MINT.fetch_key_set)
     with served(app) as base_url, ThreadPoolExecutor() as pool:
         try:
             yield _Service(base_url, held, api, signed, pool)
         finally:
-            held.proceed.set()
+            held.proceed_all()
 
 
 def _assert_streamed_to_a_terminal(response: httpx.Response) -> None:
@@ -112,15 +138,16 @@ def _assert_streamed_to_a_terminal(response: httpx.Response) -> None:
     assert isinstance(decoded_events(response.content)[0], RunStarted)
 
 
-def test_a_free_cli_route_is_admitted_and_holds_the_lease(service):
+def test_a_cli_route_with_a_free_place_is_admitted_and_holds_one_lease(service):
     first = service.begin_held_cli_run()
+    second = service.begin_held_cli_run()
 
-    assert_rejected(service.run(), RejectionCode.BUSY, 429)
-
-    _assert_streamed_to_a_terminal(service.let_go(first))
+    service.let_all_go([first, second])
 
 
-def test_a_busy_cli_route_answers_busy_before_a_run_id_or_a_signature(service, monkeypatch):
+def test_a_cli_request_with_every_place_taken_answers_busy_before_a_run_id_or_a_signature(
+    service, monkeypatch
+):
     run_ids: list[uuid.UUID] = []
     mint_run_id = uuid.uuid4
 
@@ -129,14 +156,14 @@ def test_a_busy_cli_route_answers_busy_before_a_run_id_or_a_signature(service, m
         return run_ids[-1]
 
     monkeypatch.setattr("agent_service.app.uuid.uuid4", counting_run_id)
-    first = service.begin_held_cli_run()
+    held = service.fill_the_places()
     run_ids_before, signed_before = len(run_ids), len(service.signed)
 
     busy = service.run()
 
     assert_rejected(busy, RejectionCode.BUSY, 429)
     assert (len(run_ids), len(service.signed)) == (run_ids_before, signed_before)
-    service.let_go(first)
+    service.let_all_go(held)
 
 
 @pytest.mark.parametrize(
@@ -146,33 +173,37 @@ def test_a_busy_cli_route_answers_busy_before_a_run_id_or_a_signature(service, m
         pytest.param(MINT.user(groups=()), {}, RejectionCode.NOT_ENABLED, id="route-not-enabled"),
     ],
 )
-def test_a_refusal_before_the_slot_takes_nothing(service, user, body, code):
-    assert_rejected(service.run(user, **body), code, 403)
+def test_a_refusal_before_the_limit_takes_nothing(service, user, body, code):
+    for _ in range(PLACES):
+        assert_rejected(service.run(user, **body), code, 403)
 
-    _assert_streamed_to_a_terminal(service.let_go(service.begin_held_cli_run()))
+    service.let_all_go(service.fill_the_places())
 
 
-def test_an_api_run_while_the_cli_is_busy_is_admitted_and_takes_and_frees_nothing(service):
-    first = service.begin_held_cli_run()
+def test_an_api_run_while_every_cli_place_is_taken_is_admitted_and_takes_nothing(service):
+    held = service.fill_the_places()
 
     api_run = service.run(MINT.user(**BOB_ON_THE_API_ROUTE))
 
     _assert_streamed_to_a_terminal(api_run)
     assert len(service.api.admitted) == 1
     assert_rejected(service.run(), RejectionCode.BUSY, 429)
-    service.let_go(first)
+    service.let_all_go(held)
 
 
-def test_a_capability_too_large_after_the_take_releases_the_lease(service):
-    assert_rejected(
-        service.run(MINT.user(sub=QUOTATION_MARKS_256)), RejectionCode.CAPABILITY_TOO_LARGE, 422
-    )
+def test_a_capability_too_large_after_the_take_releases_its_place(service):
+    for _ in range(PLACES):
+        assert_rejected(
+            service.run(MINT.user(sub=QUOTATION_MARKS_256)),
+            RejectionCode.CAPABILITY_TOO_LARGE,
+            422,
+        )
 
-    _assert_streamed_to_a_terminal(service.let_go(service.begin_held_cli_run()))
+    service.let_all_go(service.fill_the_places())
 
 
 @pytest.mark.parametrize("failing_step", ["AdmittedRun", "run_frames", "_RunResponse"])
-def test_a_failure_before_the_response_exists_releases_the_lease(
+def test_a_failure_before_the_response_exists_releases_its_place(
     service, monkeypatch, failing_step
 ):
     def broken(*args, **kwargs):
@@ -180,19 +211,34 @@ def test_a_failure_before_the_response_exists_releases_the_lease(
 
     with monkeypatch.context() as broken_hand_over:
         broken_hand_over.setattr(f"agent_service.app.{failing_step}", broken)
-        assert service.run().status_code == 500
+        for _ in range(PLACES):
+            assert service.run().status_code == 500
 
-    _assert_streamed_to_a_terminal(service.let_go(service.begin_held_cli_run()))
+    service.let_all_go(service.fill_the_places())
 
 
-def test_two_concurrent_cli_requests_give_one_busy_answer_with_the_header_on_the_wire(service):
-    requests = [service.pool.submit(service.run) for _ in range(2)]
-    refused, _ = wait(requests, WAIT_LIMIT_S, return_when=FIRST_COMPLETED)
+def test_simultaneous_cli_requests_beyond_the_places_give_exactly_one_busy_answer_on_the_wire(
+    service,
+):
+    requests = [service.pool.submit(service.run) for _ in range(PLACES + 1)]
+    refused, admitted = wait(requests, WAIT_LIMIT_S, return_when=FIRST_COMPLETED)
 
     (busy,) = (request.result() for request in refused)
     assert_rejected(busy, RejectionCode.BUSY, 429)
-    (admitted,) = set(requests) - refused
-    _assert_streamed_to_a_terminal(service.let_go(admitted))
+    assert len(admitted) == PLACES
+    service.held.proceed_all()
+    for request in admitted:
+        _assert_streamed_to_a_terminal(request.result(WAIT_LIMIT_S))
+
+
+def test_releasing_one_lease_admits_exactly_one_more_request(service):
+    first, second = service.fill_the_places()
+    _assert_streamed_to_a_terminal(service.let_go(first))
+
+    third = service.begin_held_cli_run()
+
+    assert_rejected(service.run(), RejectionCode.BUSY, 429)
+    service.let_all_go([second, third])
 
 
 def test_unavailable_keeps_its_own_retry_after():
@@ -250,7 +296,7 @@ def test_a_run_that_is_over_releases_its_lease_even_when_its_record_fails(
 ):
     if recorder_fails:
         _FailingRecorderOver(monkeypatch)()
-    slot = AdmissionSlot()
+    slot = AdmissionSlot(places=1)
     lease = slot.try_take()
 
     _consumed(runner, lease, recorder_fails=recorder_fails)
@@ -259,8 +305,9 @@ def test_a_run_that_is_over_releases_its_lease_even_when_its_record_fails(
 
 
 def test_a_late_release_by_an_old_run_leaves_the_lease_of_a_newer_run_held():
-    slot = AdmissionSlot()
+    slot = AdmissionSlot(PLACES)
     old_lease = slot.try_take()
+    other_lease = slot.try_take()
     _consumed(ScriptedRunner(FINAL), old_lease)
     newer_lease = slot.try_take()
     assert newer_lease is not None
@@ -270,12 +317,24 @@ def test_a_late_release_by_an_old_run_leaves_the_lease_of_a_newer_run_held():
     assert slot.try_take() is None
     newer_lease.release()
     assert slot.try_take() is not None
+    assert other_lease is not None
+
+
+def test_releasing_the_same_lease_twice_frees_one_place_only():
+    slot = AdmissionSlot(PLACES)
+    first, _second = slot.try_take(), slot.try_take()
+
+    first.release()
+    first.release()
+
+    assert slot.try_take() is not None
+    assert slot.try_take() is None
 
 
 def test_a_response_closed_before_its_first_step_releases_the_lease():
     async def scenario() -> int:
         app = create_app(
-            service_config(),
+            service_config(runs={"max_parallel_cli_runs": 1}),
             runners=Runners(cli=ScriptedRunner(FINAL)),
             fetch_key_set=shared_mint().fetch_key_set,
         )
@@ -294,6 +353,7 @@ STALLING_RUNS = {
     "idle_timeout_s": 3.0,
     "max_duration_s": 8.0,
 }
+ONE_PLACE = {"max_parallel_cli_runs": 1}
 
 
 class GatedRunner:
@@ -353,13 +413,13 @@ async def _asked_until_admitted(app, attempts: int = 100) -> _Asking:
         asking = _Asking(app)
         if await asking.status() == 200:
             return asking
-    raise AssertionError("the slot was never freed")
+    raise AssertionError("the place was never freed")
 
 
 def _gated_app(runs: dict[str, object] | None = None):
     runner = GatedRunner()
     app = create_app(
-        service_config(runs=runs),
+        service_config(runs={**ONE_PLACE, **(runs or {})}),
         runners=Runners(cli=runner),
         fetch_key_set=shared_mint().fetch_key_set,
     )
@@ -376,7 +436,7 @@ def _gated_app(runs: dict[str, object] | None = None):
         ),
     ],
 )
-def test_the_slot_stays_taken_until_the_stopped_run_has_been_closed(gone):
+def test_the_place_stays_taken_until_the_stopped_run_has_been_closed(gone):
     async def scenario() -> tuple[int, int]:
         runner, app = _gated_app()
         departing = ClientSocket(**gone)

@@ -169,6 +169,12 @@ def test_initialize_without_a_protocol_version_is_invalid_params() -> None:
             id="O2b-discover-with-a-supported-header",
         ),
         pytest.param(json_rpc("ping", 4), None, EMPTY_BAD_REQUEST, id="O2c-ping-without-header"),
+        pytest.param(
+            json_rpc("notifications/initialized"),
+            None,
+            EMPTY_BAD_REQUEST,
+            id="O2d-notification-without-header",
+        ),
         pytest.param(b"{not json", SUPPORTED, EMPTY_BAD_REQUEST, id="O3a-malformed-json"),
         pytest.param(
             b"[" + json_rpc("ping", 1) + b"]", SUPPORTED, EMPTY_BAD_REQUEST, id="O3b-batch"
@@ -439,7 +445,9 @@ def test_a_call_in_flight_when_another_connection_refuses_the_owner_gets_nothing
 
     drive(scenario, owner=owner, calls=calls)
 
-    assert len(failure_lines(caplog)) == 3
+    assert [(event, kind) for event, kind, _ in failure_lines(caplog)] == [
+        (OWNER_FAILED, "CapabilityReflected")
+    ] * 3
 
 
 def test_a_gated_call_sends_nothing_until_released_and_then_exactly_its_reply() -> None:
@@ -453,7 +461,7 @@ def test_a_gated_call_sends_nothing_until_released_and_then_exactly_its_reply() 
         waiting = asyncio.create_task(caller.answer())
         await bystander.send(message_for(relay, json_rpc("ping", 6)))
         assert (await bystander.answer()).status == HTTPStatus.OK
-        assert not waiting.done()
+        assert caller.received_bytes == 0
         calls.release()
         answer = await waiting
         assert answer.status == HTTPStatus.OK

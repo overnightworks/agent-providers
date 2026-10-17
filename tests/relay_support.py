@@ -239,6 +239,10 @@ class RawClient:
         parser.send(_CLIENT_REQUEST)
         parser.send(h11.EndOfMessage())
 
+    @property
+    def received_bytes(self) -> int:
+        return self._received
+
     async def send(self, raw: bytes) -> None:
         self._writer.write(raw)
         async with asyncio.timeout(WAIT_SECONDS):

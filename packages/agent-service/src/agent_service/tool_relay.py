@@ -431,12 +431,14 @@ class RepeatedToolOffer(Exception):
         super().__init__("an allowed tool was offered more than once")
 
 
-def _narrowed_to(allowed: Sequence[str], offered: Sequence[ToolDefinition]) -> list[ToolDefinition]:
+def _narrowed_to(
+    allowed: Sequence[str], offered: Sequence[ToolDefinition]
+) -> tuple[ToolDefinition, ...]:
     permitted = frozenset(allowed)
     kept = [tool for tool in offered if tool.name in permitted]
     if len({tool.name for tool in kept}) != len(kept):
         raise_without_chain(RepeatedToolOffer())
-    return kept
+    return tuple(kept)
 
 
 class McpRelayOwner:

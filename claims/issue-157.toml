@@ -1,8 +1,0 @@
-claim_id = "d1275c6a79b14038b8b451c3eeeac9e9"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "706a4cf4ebf927a197e1365a5c1cf79ef4231f5e"
-branch = "claude/issue-157-eigene-sprache-11-setup-wahrheit"
-scope = ["README.md", "src/agent_providers/catalog.py", "src/agent_providers/codex/protocol.py", "src/agent_providers/process.py", "tests/test_catalog.py", "tests/test_claude_adapter.py", "tests/test_claude_provider.py", "tests/test_process.py"]
-opened_commit = "66453616ed27f5d8f9d533b2f490fca5214930ca"
-whole_reason = "One setup answer: the binary check in the setup path, its one helper in process.py with the Grok reader fix, the README rows and the carried PR #149 follow-ups in the same catalog and Claude test modules land together."

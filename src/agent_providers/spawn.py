@@ -27,6 +27,7 @@ import os
 import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
 from typing import Final, Literal
@@ -190,3 +191,139 @@ async def open_async_pipes(
         start_new_session=True,
         **buffer_limit,
     )
+
+
+class ChildIdentityLost(RuntimeError):
+    """Something else reaped the leader, so its number no longer names it."""
+
+
+class AnchorStateError(RuntimeError):
+    """A call the leader's current state does not allow."""
+
+
+class AnchorState(Enum):
+    RUNNING = "running"
+    EXITED = "exited"
+    RELEASED = "released"
+    LOST = "lost"
+
+
+@dataclass(frozen=True)
+class LeaderStatus:
+    state: AnchorState
+    returncode: int | None
+
+
+@dataclass(frozen=True)
+class LeaderExited:
+    returncode: int
+
+
+@dataclass(frozen=True)
+class LeaderStopped:
+    pass
+
+
+@dataclass(frozen=True)
+class LeaderReaped:
+    returncode: int
+
+
+@dataclass(frozen=True)
+class LeaderNotReaped:
+    pass
+
+
+@dataclass(frozen=True)
+class LeaderGone:
+    pass
+
+
+LeaderEvent = LeaderExited | LeaderStopped | LeaderReaped | LeaderNotReaped | LeaderGone
+
+
+@dataclass(frozen=True)
+class LeaderTransition:
+    status: LeaderStatus
+    announces: bool
+
+
+LEADER_STARTED: Final = LeaderStatus(AnchorState.RUNNING, None)
+
+_ANCHORED_STATES: Final = frozenset({AnchorState.RUNNING, AnchorState.EXITED})
+
+
+def exit_observation(si_code: int, si_status: int) -> LeaderExited | LeaderStopped:
+    """Classify the report of a non-reaping ``waitid`` on the leader.
+
+    Only an exit, a kill or a dump ends the leader. A tracer sees a traced
+    child's stops whatever the wait options, so ``CLD_TRAPPED`` and
+    ``CLD_STOPPED`` are stops, not ends. Any other code is not a result of
+    this call and raises.
+    """
+    if si_code == os.CLD_EXITED:
+        return LeaderExited(si_status)
+    if si_code in (os.CLD_KILLED, os.CLD_DUMPED):
+        return LeaderExited(-si_status)
+    if si_code in (os.CLD_TRAPPED, os.CLD_STOPPED):
+        return LeaderStopped()
+    raise ValueError(f"not a waitid report for an exit or a stop: si_code={si_code}")
+
+
+def reap_outcome(reaped_pid: int, wait_status: int) -> LeaderReaped | LeaderNotReaped:
+    """Classify the result of the final ``waitpid`` on the leader.
+
+    Only a status with ``WIFEXITED`` or ``WIFSIGNALED`` reaped the leader; pid
+    0, a stop and a continue did not. Any other status raises.
+    """
+    if reaped_pid == 0:
+        return LeaderNotReaped()
+    if os.WIFEXITED(wait_status) or os.WIFSIGNALED(wait_status):
+        return LeaderReaped(os.waitstatus_to_exitcode(wait_status))
+    if os.WIFSTOPPED(wait_status) or os.WIFCONTINUED(wait_status):
+        return LeaderNotReaped()
+    raise ValueError(f"not a waitpid status: {wait_status:#x}")
+
+
+def advance(status: LeaderStatus, event: LeaderEvent) -> LeaderTransition:
+    """The leader's whole lifecycle: one transition per status and event.
+
+    RELEASED and LOST absorb every event, so a delayed observation cannot
+    restore an identity the handle no longer holds. The announcement is true
+    exactly when the state leaves RUNNING, so it comes once on every path to
+    the end, a loss included. A return code is only ever one the kernel
+    reported for this child: a loss from RUNNING has none.
+    """
+    unchanged = LeaderTransition(status, announces=False)
+    match status.state, event:
+        case AnchorState.RUNNING, LeaderExited(returncode):
+            return LeaderTransition(LeaderStatus(AnchorState.EXITED, returncode), announces=True)
+        case AnchorState.RUNNING, LeaderReaped(returncode):
+            return LeaderTransition(LeaderStatus(AnchorState.RELEASED, returncode), announces=True)
+        case AnchorState.RUNNING, LeaderGone():
+            return LeaderTransition(LeaderStatus(AnchorState.LOST, None), announces=True)
+        case AnchorState.EXITED, LeaderReaped(returncode):
+            return LeaderTransition(LeaderStatus(AnchorState.RELEASED, returncode), announces=False)
+        case AnchorState.EXITED, LeaderGone():
+            return LeaderTransition(
+                LeaderStatus(AnchorState.LOST, status.returncode), announces=False
+            )
+        case _:
+            return unchanged
+
+
+def admit_group_signal(state: AnchorState) -> None:
+    if state is AnchorState.RELEASED:
+        raise AnchorStateError(
+            "the leader was released; its process group number is no longer held"
+        )
+    if state is AnchorState.LOST:
+        raise ChildIdentityLost(
+            "the leader was reaped elsewhere; its process group number is not safe"
+        )
+
+
+def admit_release(state: AnchorState) -> bool:
+    if state is AnchorState.LOST:
+        raise ChildIdentityLost("the leader was reaped elsewhere; there is nothing left to release")
+    return state in _ANCHORED_STATES

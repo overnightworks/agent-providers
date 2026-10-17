@@ -15,6 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 import uvicorn
+from service_support import logging_state_snapshot  # noqa: F401 - a fixture, requested by name
 from test_service_claude_version import _config_file_naming, _logged_program
 from test_service_config import CLI_SECTION, NO_PROFILE, _written
 
@@ -51,7 +52,7 @@ NON_LINUX_START = textwrap.dedent(
 
 
 @pytest.fixture
-def served(monkeypatch):
+def served(monkeypatch, logging_state_restored):
     runs = []
     monkeypatch.setattr(uvicorn, "run", lambda app, **where: runs.append(where))
     return runs

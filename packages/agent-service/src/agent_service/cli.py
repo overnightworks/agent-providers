@@ -9,6 +9,7 @@ with exit status 2 and one line naming the reason; nothing is served.
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 from typing import Final
@@ -16,6 +17,19 @@ from typing import Final
 from agent_service.process_hardening import StartupHardeningRefused, harden_process
 
 EXIT_BAD_CONFIG: Final = 2
+TRANSPORT_LOGGER_ROOTS: Final = ("httpx", "httpcore")
+CLOSED_LOGGER_LEVEL: Final = logging.CRITICAL + 1
+
+
+def close_transport_loggers() -> None:
+    """Set the transport loggers above every call the dependencies make.
+
+    A level fails ``isEnabledFor`` before any record exists, and a logger made later inherits
+    it; a filter would act only after the record was built, and never on a child's.
+    """
+    children = [name for name in logging.Logger.manager.loggerDict if name.startswith("httpcore.")]
+    for name in [*TRANSPORT_LOGGER_ROOTS, *children]:
+        logging.getLogger(name).setLevel(CLOSED_LOGGER_LEVEL)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -50,6 +64,7 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return EXIT_BAD_CONFIG
+    close_transport_loggers()
     uvicorn.run(create_app(config), host=config.server.host, port=config.server.port)
     return 0
 

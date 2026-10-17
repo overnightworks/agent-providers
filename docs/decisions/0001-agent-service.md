@@ -406,7 +406,7 @@ compromise.
   the same `signed_capability` that admission uses and drops the token at once. A
   verifier rejects future-issued capabilities with its trusted clock, which rejects
   measurement tokens (`iat` 9,999,999,999) as `issued-in-future`.
-- **D20 one-line refusals.** `signing.shown_text` is the one escaper of
+- **D20 one-line refusals.** `secret_file.shown_text` is the one escaper of
   operator-supplied text in a refusal; `config.py` shows the config path and every
   location component through it.
 

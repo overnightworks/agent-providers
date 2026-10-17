@@ -12,6 +12,7 @@ dependencies = [
     "overnightworks-webauth[jwt] @ https://github.com/overnightworks/webauth/releases/download/v0.13.0/overnightworks_webauth-0.13.0-py3-none-any.whl",
     "fastapi>=0.115,<1",
     "httpx>=0.27,<1",
+    "h11>=0.16,<1",
     "starlette>=1,<2",
     "uvicorn>=0.30,<1",
     "pydantic>=2,<3",

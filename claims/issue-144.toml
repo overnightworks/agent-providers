@@ -1,8 +1,0 @@
-claim_id = "6272123df87c44259e70995471c270c9"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "0fd92e1a42387826310692e38d02750f17291dbe"
-branch = "claude/issue-144-a1b-6b-claude-profil-pflicht-token-file"
-scope = ["README.md", "docs/decisions/0001-agent-service.md", "packages/agent-service/src/agent_service/config.py", "tests/service_support.py", "tests/test_service_capability.py", "tests/test_service_config.py", "tests/test_service_signing.py"]
-opened_commit = "0210e706a0b92c9b5e70cde12a3b413272ec9a1f"
-whole_reason = "One document contract: the profile rules and the tools rule are one config change, and the shared builders and fixtures they invalidate must move with it to keep the suite green; splitting leaves main red."

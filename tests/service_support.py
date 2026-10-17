@@ -45,6 +45,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import FastAPI
 from jwt.algorithms import RSAAlgorithm
+from provider_test_support import fake_cli_executable
 from pydantic import ValidationError
 
 import agent_service.signing as signing
@@ -72,6 +73,7 @@ CLI_PROFILE: Final = "claude-main"
 COWRITER_ALIAS: Final = "cowriter"
 SONGMAKER_ORIGIN: Final = "https://songmaker.internal"
 PROCESS_TOKEN: Final = "setup-token-for-the-test-process"
+PINNED_CLAUDE_VERSION: Final = "2.1.302"
 RUN_ID_PLACEHOLDER: Final = "00000000-0000-4000-8000-000000000000"
 
 
@@ -95,12 +97,25 @@ def process_token_file() -> Path:
     return path
 
 
+@functools.cache
+def process_claude_cli() -> Path:
+    directory = _process_secret_directory() / "claude-cli"
+    directory.mkdir()
+    return fake_cli_executable(
+        directory, {("--version",): f"{PINNED_CLAUDE_VERSION} (Claude Code)\n"}
+    )
+
+
 def _service_config_document(
     issuer: str, runs: Mapping[str, object] | None, songmaker: Mapping[str, object] | None
 ) -> dict[str, Any]:
     return {
         **({} if runs is None else {"runs": runs}),
         "identity": {"issuer": issuer, "jwks_url": TEST_JWKS_URL},
+        "cli": {
+            "claude_binary": str(process_claude_cli()),
+            "claude_version": PINNED_CLAUDE_VERSION,
+        },
         "signing": {"key_file": str(process_signing_key_file())},
         "profiles": {CLI_PROFILE: {"provider": "claude", "token_file": str(process_token_file())}},
         "purposes": {

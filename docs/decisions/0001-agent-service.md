@@ -163,6 +163,8 @@ body rules be fixed before the build.
   4194304), and `max_parallel_cli_runs` (default 5), all positive integers
   outside that ordering;
   `[profiles.<name>]` at most one profile, for Claude, with a required `token_file`;
+  `[cli]` the absolute `claude_binary` and the `claude_version` (three integers)
+  it must report, required by a Claude profile and probed at startup;
   `[purposes."<p>"]` an optional `cli_provider` and `api_alias`;
   `[apps.<app>]` its `workload_client`, its purposes, and its tools' effects,
   where an unlisted tool counts as side-effecting. `agent_service.routing.route`
@@ -214,7 +216,10 @@ Per-person subscription mapping waits for a named caller.
 whether background purposes may use it (H12), and its login. A Claude profile's
 login is one `claude setup-token` token read from the profile's `token_file`
 (A1b ruling, Q2 a). Until the additional provider routes arrive, the service
-accepts at most one subscription profile, for Claude. It requires a `token_file`.
+accepts at most one subscription profile, for Claude. It requires a `token_file`
+and a `[cli]` section: at startup the service runs `claude_binary --version` in a
+throwaway home, and a version other than `claude_version`, or none it can read,
+exits 2 naming both versions (A1b-7a).
 Codex and Grok profiles are refused at startup; their login contracts are decided
 with their routes. The profile list is service configuration, kept as code
 in edge; the login files live in `~/.secrets`, never in a repository.

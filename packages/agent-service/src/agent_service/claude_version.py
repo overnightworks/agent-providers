@@ -1,0 +1,90 @@
+"""The Claude version the installation pins, and the startup probe that holds the program to it."""
+
+from __future__ import annotations
+
+import re
+import tempfile
+from pathlib import Path
+from typing import Annotated, Final
+
+from pydantic import BeforeValidator
+
+from agent_providers.process import CliRun, run_catalog_cli
+from agent_providers.spawn import ChildProcess, closed_environment
+from agent_service.secret_file import shown_text
+
+VERSION_PATTERN: Final = r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+VERSION_OUTPUT_SUFFIX: Final = " (Claude Code)"
+SHOWN_OUTPUT_CHARACTERS: Final = 60
+MALFORMED_PIN: Final = (
+    "must be three dot-separated integers without leading zeros, written as a string,"
+    " such as 2.1.302"
+)
+
+
+class ClaudeVersionRefused(ValueError):
+    """The program does not report the pinned version; the message follows the config path."""
+
+
+def _pin_in_grammar(value: object) -> str:
+    if not isinstance(value, str) or re.fullmatch(VERSION_PATTERN, value) is None:
+        raise ValueError(MALFORMED_PIN)
+    return value
+
+
+PinnedClaudeVersion = Annotated[str, BeforeValidator(_pin_in_grammar)]
+
+
+def parse_version_output(stdout: str) -> str | None:
+    """The version ``claude --version`` printed, or ``None`` when the output is anything else."""
+    text = stdout.removesuffix("\n")
+    if not text.endswith(VERSION_OUTPUT_SUFFIX):
+        return None
+    version = text.removesuffix(VERSION_OUTPUT_SUFFIX)
+    return version if re.fullmatch(VERSION_PATTERN, version) else None
+
+
+def _why_no_version(run: CliRun | None) -> str:
+    if run is None:
+        return "probe could not start or its start deadline expired"
+    if not run.complete:
+        return "probe did not complete"
+    if run.returncode != 0:
+        return f"exit status {run.returncode}"
+    if not run.stdout.strip():
+        return "printed nothing"
+    first_line = run.stdout.splitlines()[0]
+    return f"printed {shown_text(first_line[:SHOWN_OUTPUT_CHARACTERS])}"
+
+
+def _probe(binary: Path) -> CliRun | None:
+    with tempfile.TemporaryDirectory(prefix="agent-service-claude-version-") as home:
+        child = ChildProcess(
+            binary=binary,
+            arguments=("--version",),
+            environment=closed_environment(Path(home)),
+            working_directory=Path(home),
+        )
+        return run_catalog_cli(child)
+
+
+def _version_printed_by(run: CliRun | None) -> str | None:
+    if run is None or not run.complete or run.returncode != 0:
+        return None
+    return parse_version_output(run.stdout)
+
+
+def require_pinned_version(binary: Path, pinned: str) -> None:
+    """Run ``binary --version`` in a throwaway home and refuse unless it reports ``pinned``."""
+    run = _probe(binary)
+    reported = _version_printed_by(run)
+    shown_binary = shown_text(str(binary))
+    if reported is None:
+        raise ClaudeVersionRefused(
+            f"cli.claude_version: {shown_binary} did not print a version ({_why_no_version(run)});"
+            f" the pinned version is {pinned}"
+        )
+    if reported != pinned:
+        raise ClaudeVersionRefused(
+            f"cli.claude_version: {shown_binary} reports {reported}, not the pinned {pinned}"
+        )

@@ -17,9 +17,11 @@ from pydantic import ValidationError
 from service_support import (
     CALLED_PLAINLY_OR_FROM_AN_ACTIVE_HANDLER,
     LAST_TOOL_NAME_LENGTH_AT_THE_LIMIT,
+    PINNED_CLAUDE_VERSION,
     PROCESS_TOKEN,
     called_from,
     everything_a_refusal_holds,
+    process_claude_cli,
     process_signing_key_file,
     process_token_file,
     reaches_private_key,
@@ -44,6 +46,15 @@ SONGMAKER_ORIGIN_LINE = 'mcp_origin = "https://songmaker.internal"\n'
 SIGNING_KEY_LINE = f"key_file = {json.dumps(str(process_signing_key_file()))}"
 SIGNING_SECTION = f"[signing]\n{SIGNING_KEY_LINE}\n\n"
 TOKEN_FILE_LINE = f"token_file = {json.dumps(str(process_token_file()))}"
+CLAUDE_BINARY_LINE = f"claude_binary = {json.dumps(str(process_claude_cli()))}"
+CLAUDE_VERSION_LINE = f'claude_version = "{PINNED_CLAUDE_VERSION}"'
+
+
+def cli_section(*lines: str) -> str:
+    return "".join(["[cli]\n", *(f"{line}\n" for line in lines if line), "\n"])
+
+
+CLI_SECTION = cli_section(CLAUDE_BINARY_LINE, CLAUDE_VERSION_LINE)
 TOOLS_LINE = 'tools = { read_song = "read_only" }'
 
 VALID_CONFIG = f"""
@@ -55,7 +66,7 @@ jwks_url = "https://keycloak.test/realms/agent-test/protocol/openid-connect/cert
 host = "127.0.0.1"
 port = 8099
 
-{SIGNING_SECTION}[profiles.claude-main]
+{CLI_SECTION}{SIGNING_SECTION}[profiles.claude-main]
 provider = "claude"
 {TOKEN_FILE_LINE}
 
@@ -1055,10 +1066,81 @@ def test_a_document_with_several_defects_is_refused_on_one_line_naming_one_of_th
     assert any(field in refusal for field in fields)
 
 
-def test_a_cli_section_is_refused_until_it_has_a_consumer(tmp_path, capsys):
-    refusal = _refused_on_one_line(_written(tmp_path, VALID_CONFIG + "\n[cli]\n"), capsys)
+MALFORMED_PIN_REFUSAL = (
+    "cli.claude_version: must be three dot-separated integers without leading zeros,"
+    " written as a string, such as 2.1.302"
+)
+NOT_A_PROGRAM_PATH = (
+    "cli.claude_binary: {shown}must be an absolute path to the claude program; ~ is not expanded"
+)
 
-    assert refusal == "cli: Extra inputs are not permitted"
+
+@pytest.mark.parametrize(
+    ("binary_line", "refusal"),
+    [
+        pytest.param(
+            'claude_binary = "claude"',
+            NOT_A_PROGRAM_PATH.format(shown="claude "),
+            id="bare-name",
+        ),
+        pytest.param(
+            'claude_binary = "./claude"',
+            NOT_A_PROGRAM_PATH.format(shown="./claude "),
+            id="dot-relative",
+        ),
+        pytest.param(
+            'claude_binary = "~/claude"',
+            NOT_A_PROGRAM_PATH.format(shown="~/claude "),
+            id="tilde",
+        ),
+        pytest.param("claude_binary = 7", NOT_A_PROGRAM_PATH.format(shown=""), id="number"),
+        pytest.param("", "cli.claude_binary: Field required", id="missing"),
+    ],
+)
+def test_a_claude_program_that_is_not_an_absolute_path_is_refused_by_field(
+    tmp_path, capsys, binary_line, refusal
+):
+    text = _with(CLI_SECTION, cli_section(binary_line, CLAUDE_VERSION_LINE))
+
+    assert _refused_on_one_line(_written(tmp_path, text), capsys) == refusal
+
+
+@pytest.mark.parametrize(
+    ("version_line", "refusal"),
+    [
+        pytest.param("", "cli.claude_version: Field required", id="missing"),
+        pytest.param('claude_version = "2.1"', MALFORMED_PIN_REFUSAL, id="two-integers"),
+        pytest.param('claude_version = "2.1.302.1"', MALFORMED_PIN_REFUSAL, id="four-integers"),
+        pytest.param('claude_version = "v2.1.302"', MALFORMED_PIN_REFUSAL, id="v-prefix"),
+        pytest.param('claude_version = "2.01.302"', MALFORMED_PIN_REFUSAL, id="leading-zero"),
+        pytest.param('claude_version = "2.1.x"', MALFORMED_PIN_REFUSAL, id="not-a-number"),
+        pytest.param('claude_version = ""', MALFORMED_PIN_REFUSAL, id="empty"),
+        pytest.param("claude_version = 2", MALFORMED_PIN_REFUSAL, id="integer"),
+    ],
+)
+def test_a_pinned_version_that_is_not_three_integers_is_refused_by_field(
+    tmp_path, capsys, version_line, refusal
+):
+    text = _with(CLI_SECTION, cli_section(CLAUDE_BINARY_LINE, version_line))
+
+    assert _refused_on_one_line(_written(tmp_path, text), capsys) == refusal
+
+
+def test_a_claude_profile_without_the_cli_section_is_refused(tmp_path, capsys):
+    refusal = _refused_on_one_line(_written(tmp_path, _with(CLI_SECTION, "")), capsys)
+
+    assert refusal == "cli: required for a claude profile"
+
+
+def test_a_claude_profile_without_cli_is_refused_before_its_token_file_is_opened(tmp_path, capsys):
+    unreadable = tmp_path / "missing.token"
+    text = _with(CLI_SECTION, "").replace(
+        TOKEN_FILE_LINE, f"token_file = {json.dumps(str(unreadable))}"
+    )
+
+    assert _refused_on_one_line(_written(tmp_path, text), capsys) == (
+        "cli: required for a claude profile"
+    )
 
 
 def test_a_second_signing_table_is_refused_as_a_duplicate_table(tmp_path, capsys):

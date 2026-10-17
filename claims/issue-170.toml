@@ -1,7 +1,0 @@
-claim_id = "14b89794c2a34baca52bd6875de1ef9b"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "6071079b81e4d5cbebd8aa40b0cd6083a002344a"
-branch = "claude/issue-170-a1b-9c2b-log-ohne-capability"
-scope = ["tests/service_support.py", "tests/test_service_app_tools.py", "tests/test_service_reflected_failure_log.py"]
-opened_commit = "2bb0e8fe25b523dc6b405654bb4a2c19672bebc0"

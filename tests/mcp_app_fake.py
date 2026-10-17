@@ -230,6 +230,7 @@ class McpAppFake(ThreadingHTTPServer):
     def __init__(self, responder: Responder, credentials: TlsCredentials) -> None:
         super().__init__((LOOPBACK, 0), _Handler)
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
         context.load_cert_chain(credentials.certificate_file, credentials.key_file)
         self.socket = context.wrap_socket(
             self.socket, server_side=True, do_handshake_on_connect=False

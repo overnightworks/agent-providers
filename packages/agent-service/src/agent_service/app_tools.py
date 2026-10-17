@@ -20,6 +20,7 @@ from collections.abc import AsyncIterator, Iterator, Mapping
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from enum import StrEnum
+from http import HTTPStatus
 from itertools import count
 from typing import Any, Final, NoReturn
 
@@ -29,6 +30,7 @@ from agent_client.capability import MCP_ENDPOINT_PATH, McpOrigin
 from agent_client.wire import MAX_EVENT_BYTES, JsonObject
 from agent_providers.errors import raise_without_chain
 from agent_service.mcp_wire import (
+    LATEST_PROTOCOL_VERSION,
     SESSION_ID_HEADER,
     InitializeParams,
     JsonRpcError,
@@ -47,6 +49,7 @@ from agent_service.mcp_wire import (
     read_tool_outcome,
     request_headers,
     require_acknowledgement,
+    require_session_id,
     require_supported_version,
 )
 
@@ -55,7 +58,6 @@ MAX_TOOL_LIST_PAGES: Final = 10
 _IDENTITY_ENCODING: Final = "identity"
 _CLIENT_NAME: Final = "agent-service"
 _CLIENT_VERSION: Final = "1"
-_OFFERED_VERSION: Final = tuple(ProtocolVersion)[-1]
 _FIRST_REQUEST_ID: Final = 1
 
 
@@ -147,12 +149,18 @@ class _Conversation:
         return headers
 
     async def _post(
-        self, body: bytes, negotiated: ProtocolVersion | None, session_id: str | None
+        self,
+        body: bytes,
+        negotiated: ProtocolVersion | None,
+        session_id: str | None,
+        required_status: HTTPStatus | None,
     ) -> _Received:
         headers = self._headers(negotiated, session_id)
         async with self.http.stream("POST", self.endpoint, content=body, headers=headers) as sent:
             if not 200 <= sent.status_code < 300:
                 raise_without_chain(UpstreamRefused(sent.status_code))
+            if required_status is not None and sent.status_code != required_status:
+                _protocol_error(ProtocolFailure.UNEXPECTED_STATUS)
             _require_identity_encoding(sent)
             return _Received(
                 sent.status_code,
@@ -170,9 +178,7 @@ class _Conversation:
     ) -> _Answered:
         request_id = next(self.request_ids)
         message = JsonRpcRequest(id=request_id, method=method.value, params=params)
-        received = await self._post(encode_message(message), negotiated, session_id)
-        if received.status != httpx.codes.OK:
-            _protocol_error(ProtocolFailure.UNEXPECTED_STATUS)
+        received = await self._post(encode_message(message), negotiated, session_id, HTTPStatus.OK)
         with _wire_refusals_as_protocol_errors():
             reply = read_answer(received.content_type, received.body)
         if reply.id != request_id:
@@ -185,7 +191,7 @@ class _Conversation:
         self, method: McpMethod, negotiated: ProtocolVersion, session_id: str | None
     ) -> None:
         body = encode_message(JsonRpcNotification(method=method.value))
-        received = await self._post(body, negotiated, session_id)
+        received = await self._post(body, negotiated, session_id, None)
         with _wire_refusals_as_protocol_errors():
             require_acknowledgement(received.status, received.body)
 
@@ -209,7 +215,7 @@ class AppToolsSession:
     async def list_tools(self) -> tuple[ToolDefinition, ...]:
         tools: list[ToolDefinition] = []
         params: JsonObject = {}
-        for page in range(1, MAX_TOOL_LIST_PAGES + 1):
+        for _ in range(MAX_TOOL_LIST_PAGES):
             with _wire_refusals_as_protocol_errors():
                 listed = read_payload(
                     ListToolsResult, await self._request(McpMethod.TOOLS_LIST, params)
@@ -229,7 +235,7 @@ class AppToolsSession:
 
 async def _handshake(conversation: _Conversation) -> AppToolsSession:
     initialize_params: JsonObject = {
-        "protocolVersion": _OFFERED_VERSION.value,
+        "protocolVersion": LATEST_PROTOCOL_VERSION.value,
         "capabilities": {},
         "clientInfo": {"name": _CLIENT_NAME, "version": _CLIENT_VERSION},
     }
@@ -238,8 +244,11 @@ async def _handshake(conversation: _Conversation) -> AppToolsSession:
         negotiated = require_supported_version(
             read_payload(InitializeParams, answered.result).protocol_version
         )
-    await conversation.notify(McpMethod.INITIALIZED, negotiated, answered.session_id)
-    return AppToolsSession(conversation, negotiated, answered.session_id)
+        session_id = (
+            None if answered.session_id is None else require_session_id(answered.session_id)
+        )
+    await conversation.notify(McpMethod.INITIALIZED, negotiated, session_id)
+    return AppToolsSession(conversation, negotiated, session_id)
 
 
 def _http_client(tls_context: ssl.SSLContext) -> httpx.AsyncClient:

@@ -36,10 +36,8 @@ from mcp_app_fake import (
 
 from agent_client.wire import MAX_EVENT_BYTES
 from agent_service.app_tools import (
-    MAX_TOOL_LIST_PAGES,
     AppToolsSession,
     ProtocolFailure,
-    UpstreamError,
     UpstreamProtocolError,
     UpstreamRefused,
     open_app_tools,
@@ -111,6 +109,14 @@ def list_tool_names(fake: McpAppFake, context: ssl.SSLContext) -> list[str]:
         return [tool.name for tool in await session.list_tools()]
 
     return in_session(fake, context, names)
+
+
+def list_then_call_echo(fake: McpAppFake, context: ssl.SSLContext) -> Any:
+    async def both(session: AppToolsSession) -> Any:
+        await session.list_tools()
+        return await session.call_tool("echo", {"word": "hi"})
+
+    return in_session(fake, context, both)
 
 
 def call_echo(fake: McpAppFake, context: ssl.SSLContext) -> Any:
@@ -192,34 +198,35 @@ def test_a_failed_handshake_leaves_no_client_open(
     assert all(client.is_closed for client in opened_clients.clients)
 
 
+TEN_PAGES = 10
+
+
 def test_pagination_returns_every_page_in_order_with_each_cursor_echoed(serve, context):
-    last = MAX_TOOL_LIST_PAGES - 1
+    last = TEN_PAGES - 1
     pages = [
         tool_listing([f"tool-{index}"], None if index == last else f"page-{index + 1}")
-        for index in range(MAX_TOOL_LIST_PAGES)
+        for index in range(TEN_PAGES)
     ]
     fake = serve(ScriptedApp(pages=pages))
 
     names = list_tool_names(fake, context)
 
-    assert names == [f"tool-{index}" for index in range(MAX_TOOL_LIST_PAGES)]
+    assert names == [f"tool-{index}" for index in range(TEN_PAGES)]
     cursors = [r.message["params"].get("cursor") for r in requests_for(fake, "tools/list")]
-    assert cursors == [None, *[f"page-{index}" for index in range(1, MAX_TOOL_LIST_PAGES)]]
+    assert cursors == [None, *[f"page-{index}" for index in range(1, TEN_PAGES)]]
 
 
 def test_a_further_cursor_on_the_last_allowed_page_is_refused_and_no_more_is_requested(
     serve, context
 ):
-    pages = [
-        tool_listing([f"tool-{index}"], f"page-{index + 1}") for index in range(MAX_TOOL_LIST_PAGES)
-    ]
+    pages = [tool_listing([f"tool-{index}"], f"page-{index + 1}") for index in range(TEN_PAGES + 1)]
     fake = serve(ScriptedApp(pages=pages))
 
     with pytest.raises(UpstreamProtocolError) as refused:
         list_tool_names(fake, context)
 
     assert refused.value.reason == ProtocolFailure.PAGE_BOUND
-    assert len(requests_for(fake, "tools/list")) == MAX_TOOL_LIST_PAGES
+    assert len(requests_for(fake, "tools/list")) == TEN_PAGES
 
 
 def test_an_empty_string_cursor_is_followed_as_a_cursor(serve, context):
@@ -306,23 +313,35 @@ def test_a_call_returns_the_joined_text_and_is_posted_once(serve, context):
 
 
 def test_concurrent_calls_answered_in_reverse_order_each_get_their_own_answer(serve, context):
-    fast_arrived = threading.Event()
+    slow_arrived = threading.Event()
+    fast_answered = threading.Event()
 
     def slow_waits_for_fast(request: RecordedRequest) -> FakeResponse:
         name = request.message["params"]["name"]
-        if name == "fast":
-            fast_arrived.set()
-        else:
-            assert fast_arrived.wait(WAIT_SECONDS)
+        if name == "slow":
+            slow_arrived.set()
+            assert fast_answered.wait(WAIT_SECONDS)
         return rpc_result(request, {"content": [{"type": "text", "text": name}]})
 
     fake = serve(ScriptedApp(overrides={"tools/call": slow_waits_for_fast}))
 
+    completed: list[str] = []
+
+    async def named(session: AppToolsSession, name: str):
+        outcome = await session.call_tool(name, {})
+        completed.append(name)
+        return outcome
+
     async def both(session: AppToolsSession):
-        return await asyncio.gather(session.call_tool("slow", {}), session.call_tool("fast", {}))
+        slow = asyncio.create_task(named(session, "slow"))
+        assert await asyncio.to_thread(slow_arrived.wait, WAIT_SECONDS)
+        fast = await named(session, "fast")
+        fast_answered.set()
+        return [await slow, fast]
 
     outcomes = in_session(fake, context, both)
 
+    assert completed == ["fast", "slow"]
     assert [outcome.content for outcome in outcomes] == ["slow", "fast"]
     ids = [call.message["id"] for call in requests_for(fake, "tools/call")]
     assert len(set(ids)) == 2
@@ -379,12 +398,13 @@ def test_a_json_rpc_error_carries_its_code_and_never_its_message(serve, context)
 def test_only_initialize_goes_without_a_protocol_version_header(serve, context):
     fake = serve()
 
-    call_echo(fake, context)
+    list_then_call_echo(fake, context)
 
     versions = {r.rpc_method: r.headers.get("mcp-protocol-version") for r in fake.requests}
     assert versions == {
         "initialize": None,
         "notifications/initialized": VERSION,
+        "tools/list": VERSION,
         "tools/call": VERSION,
     }
 
@@ -437,14 +457,25 @@ def test_a_non_2xx_status_is_a_refusal_carrying_only_the_status(serve, context, 
     assert refused.value.status == status
 
 
-def test_a_request_answered_with_a_2xx_other_than_200_is_a_protocol_error(serve, context):
-    created = FakeResponse(status=201, body=b"{}")
+@pytest.mark.parametrize(
+    "created",
+    [
+        FakeResponse(status=201, body=b"{}"),
+        withheld(FakeResponse(status=201, body=b"{}", headers={"Content-Encoding": "gzip"})),
+        withheld(FakeResponse(status=201, body=b"{}")),
+    ],
+    ids=["plain", "gzip-withheld", "body-withheld"],
+)
+def test_a_request_answered_with_a_2xx_other_than_200_is_refused_before_its_body_is_read(
+    serve, context, created
+):
     fake = serve(answering("initialize", created))
 
     with pytest.raises(UpstreamProtocolError) as refused:
         list_tool_names(fake, context)
 
     assert refused.value.reason == ProtocolFailure.UNEXPECTED_STATUS
+    assert not fake.tail_released.is_set()
 
 
 def test_a_refused_status_wins_over_an_encoded_body_that_is_still_withheld(serve, context):
@@ -463,19 +494,36 @@ def test_a_refused_status_wins_over_an_encoded_body_that_is_still_withheld(serve
 def test_an_issued_session_id_is_echoed_on_every_later_request(serve, context):
     fake = serve(ScriptedApp(session_id="session-1"))
 
-    call_echo(fake, context)
+    list_then_call_echo(fake, context)
 
-    later = fake.requests[1:]
-    assert later
-    assert {r.headers.get("mcp-session-id") for r in later} == {"session-1"}
+    sent = {r.rpc_method: r.headers.get("mcp-session-id") for r in fake.requests[1:]}
+    assert sent == {
+        "notifications/initialized": "session-1",
+        "tools/list": "session-1",
+        "tools/call": "session-1",
+    }
 
 
 def test_no_session_id_is_sent_when_the_app_issues_none(serve, context):
     fake = serve()
 
-    call_echo(fake, context)
+    list_then_call_echo(fake, context)
 
     assert all("mcp-session-id" not in r.headers for r in fake.requests)
+
+
+def test_a_session_id_outside_visible_ascii_is_refused_without_echoing_it(serve, context):
+    canary = "capability-canary"
+    fake = serve(ScriptedApp(session_id=f"{canary}\xe9"))
+
+    with pytest.raises(UpstreamProtocolError) as refused:
+        list_tool_names(fake, context)
+
+    assert refused.value.reason == WireRefusal.INVALID_SESSION_ID
+    assert refused.value.__cause__ is None
+    assert refused.value.__context__ is None
+    assert canary not in f"{refused.value!s} {refused.value!r}"
+    assert [r.rpc_method for r in fake.requests] == ["initialize"]
 
 
 def test_a_context_trusting_the_test_ca_reaches_the_app(serve, context):
@@ -492,8 +540,7 @@ def test_a_context_that_does_not_verify_the_app_never_reaches_it(serve, authorit
         fake = serve(served_credentials=authority.credentials_for("other.test"))
         untrusting = context
 
-    with pytest.raises(Exception) as refused:
+    with pytest.raises(httpx.ConnectError):
         list_tool_names(fake, untrusting)
 
-    assert not isinstance(refused.value, UpstreamError)
     assert fake.requests == []

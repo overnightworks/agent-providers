@@ -1,7 +1,0 @@
-claim_id = "8e9cc25570ac4fd99b16a506ef054e33"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "0fd92e1a42387826310692e38d02750f17291dbe"
-branch = "fix/dependency-bumps"
-scope = [".github/workflows/ci.yml", ".github/workflows/release.yml", "uv.lock"]
-opened_commit = "5d8f7d29894fcb9fbb9ff8520499bf076200884e"

@@ -18,7 +18,6 @@ import inspect
 import itertools
 import logging
 import math
-import re
 import traceback
 import types
 import uuid
@@ -45,6 +44,7 @@ from service_support import (
     TokenMint,
     alice_admitted_run,
     driven,
+    failure_lines,
     get_run,
     in_loop,
     instant,
@@ -109,29 +109,6 @@ def _call(tool_use_id: str, name: str = "read_song") -> ToolCallEvent:
 def _release(runner: GatedRunner, script: tuple[StreamEvent | Exception | None, ...]) -> None:
     for item in script:
         runner.exhaust() if item is EXHAUSTED else runner.release(item)
-
-
-_FAILURE_LINE = re.compile(r"(?P<event>.+?): (?P<kind>\w+) at (?P<positions>.+)")
-_POSITION = re.compile(r"[\w.]+\.py:\d+:[\w<>]+")
-
-
-def _failure_lines(caplog: pytest.LogCaptureFixture) -> list[tuple[str, str, str]]:
-    """Each ERROR line as its event, its class and the function that raised.
-
-    Every line must be the event, the class and well-formed stack positions
-    alone, with nothing attached to the record.
-    """
-    lines = []
-    for record in caplog.records:
-        if record.levelno < logging.ERROR:
-            continue
-        assert record.exc_info is None
-        line = _FAILURE_LINE.fullmatch(record.getMessage())
-        assert line is not None, record.getMessage()
-        positions = line["positions"].split(", ")
-        assert all(_POSITION.fullmatch(position) for position in positions), positions
-        lines.append((line["event"], line["kind"], positions[-1].rsplit(":", 1)[1]))
-    return lines
 
 
 def _assert_recorded(
@@ -506,7 +483,7 @@ async def test_a_close_that_raises_during_a_drop_still_records_the_ending_and_lo
         await drive.frames.aclose()
 
     _assert_recorded(drive.status(), RunState.CANCELLED, events=2, at=45, lost=ClientLoss.DROPPED)
-    assert _failure_lines(caplog) == [
+    assert failure_lines(caplog) == [
         (f"Closing the runner of run {drive.run_id} failed", "OSError", "_closed")
     ]
     assert RECORDING_FAILURE_CANARY not in caplog.text
@@ -520,7 +497,7 @@ async def test_a_runner_that_raises_is_logged_by_its_class_and_stack_never_by_it
         await drive.run_to(ALL_THE_WAY_TO_THE_MAXIMUM)
 
     assert drive.status().failure_code is FailureCode.PROVIDER_ERROR
-    assert _failure_lines(caplog) == [
+    assert failure_lines(caplog) == [
         (f"The runner of run {drive.run_id} failed", "RuntimeError", "run")
     ]
     assert RECORDING_FAILURE_CANARY not in caplog.text
@@ -537,7 +514,7 @@ def test_a_failure_is_logged_by_its_class_and_stack_never_by_its_text_notes_or_c
         failure.add_note("canary-note")
         log_failure(logging.getLogger(__name__), "The cleanup of run 7 failed", failure)
 
-    assert _failure_lines(caplog) == [
+    assert failure_lines(caplog) == [
         (
             "The cleanup of run 7 failed",
             "RuntimeError",
@@ -942,7 +919,7 @@ async def test_a_recording_defect_surfaces_as_a_supervision_failure(caplog):
         with pytest.raises(_EndNotRecorded, match=_Step.RECORD_END.canary):
             await anext(drive.frames)
 
-    assert _failure_lines(caplog) == []
+    assert failure_lines(caplog) == []
 
 
 class _Closer(enum.Enum):
@@ -1175,7 +1152,7 @@ async def test_every_failure_of_a_run_s_ending_propagates_or_is_logged_once(capl
     if cancelled:
         assert propagated == "cancelled"
     raised = collections.Counter([propagated]) - collections.Counter(["cancelled", "returned"])
-    logged = collections.Counter(kind for _event, kind, _raiser in _failure_lines(caplog))
+    logged = collections.Counter(kind for _event, kind, _raiser in failure_lines(caplog))
     assert raised + logged == ending.injected
     assert unretrieved == []
     assert not [step for step in _Step if step.canary in caplog.text]
@@ -1256,7 +1233,7 @@ async def test_which_failure_of_a_run_s_ending_propagates_and_which_are_logged(
         closer, delivered, drive = await _end_a_run(ending)
 
     assert _propagated(closer, delivered=delivered) == propagates
-    assert [(event, kind) for event, kind, _raiser in _failure_lines(caplog)] == [
+    assert [(event, kind) for event, kind, _raiser in failure_lines(caplog)] == [
         (event.format(drive.run_id), kind) for event, kind in logged
     ]
     assert unretrieved == []
@@ -1274,7 +1251,7 @@ async def test_a_closer_cancelled_while_the_record_ends_is_cancelled_and_the_fai
         )
 
     assert _propagated(closer, delivered=delivered) == "cancelled"
-    assert [(event, kind) for event, kind, _raiser in _failure_lines(caplog)] == [
+    assert [(event, kind) for event, kind, _raiser in failure_lines(caplog)] == [
         (_CLEANUP.format(drive.run_id), "_EndNotRecorded")
     ]
     assert unretrieved == []
@@ -1291,7 +1268,7 @@ async def _observed_ending(
         _propagated(closer, delivered=delivered),
         [
             (event.replace(str(drive.run_id), "{}"), kind)
-            for event, kind, _raiser in _failure_lines(caplog)
+            for event, kind, _raiser in failure_lines(caplog)
         ],
         drive.types,
         None if status is None else (status.state, status.client_lost),
@@ -1550,7 +1527,7 @@ async def test_a_stray_cancellation_recorded_again_stays_one_failure_of_its_firs
     assert second is first
     assert raised.value is first
     assert first.part is FailedPart.SUPERVISION
-    assert _failure_lines(caplog) == []
+    assert failure_lines(caplog) == []
 
 
 class _CancelledLikeAnyOther(asyncio.CancelledError):
@@ -1582,7 +1559,7 @@ async def test_two_equal_but_distinct_stray_cancellations_stay_two_failures(capl
         failures.leave(cancellation=None, body_failure=None)
     assert raised.value is second
     assert second.part is FailedPart.CLEANUP
-    assert [(event, kind) for event, kind, _raiser in _failure_lines(caplog)] == [
+    assert [(event, kind) for event, kind, _raiser in failure_lines(caplog)] == [
         (_SUPERVISION.format(run_id), RunStepCancelled.__name__)
     ]
 
@@ -1621,7 +1598,7 @@ async def test_one_stray_cancellation_met_by_two_steps_of_a_close_propagates_onc
             await asyncio.wait({closer})
 
     assert type(closer.exception()) is RunStepCancelled
-    assert _failure_lines(caplog) == []
+    assert failure_lines(caplog) == []
     assert unretrieved == []
 
 
@@ -1675,7 +1652,7 @@ async def test_a_stray_cancellation_reaches_the_asgi_server_as_the_step_s_failur
     assert type(response.exception()) is RunStepCancelled
     propagated = "".join(traceback.format_exception(response.exception()))
     assert not [step for step in _Step if step.canary in propagated]
-    assert _failure_lines(caplog) == []
+    assert failure_lines(caplog) == []
     assert not [step for step in _Step if step.canary in caplog.text]
     status = drive.status(store.started[0].run_id)
     assert status is not None
@@ -1792,7 +1769,7 @@ async def test_a_finished_task_of_a_run_is_shut_down_only_while_its_cancellation
             await asyncio.wait({closer})
 
     assert _propagated(closer, delivered=False) == propagates
-    assert [(event, kind) for event, kind, _raiser in _failure_lines(caplog)] == [
+    assert [(event, kind) for event, kind, _raiser in failure_lines(caplog)] == [
         (event.format(drive.run_id), kind) for event, kind in logged
     ]
     assert unretrieved == []
@@ -1842,7 +1819,7 @@ async def test_a_cancellation_thrown_into_the_body_without_a_request_yields_to_a
         await asyncio.wait({closer})
 
     assert _propagated(closer, delivered=False) == propagates
-    assert [(event, kind) for event, kind, _raiser in _failure_lines(caplog)] == [
+    assert [(event, kind) for event, kind, _raiser in failure_lines(caplog)] == [
         (event.format(run_id), kind) for event, kind in logged
     ]
     assert unretrieved == []
@@ -1869,7 +1846,7 @@ async def test_a_clock_failure_racing_the_close_is_logged_once_however_soon_the_
                 await asyncio.sleep(0)
             await drive.frames.aclose()
 
-    assert [(event, kind) for event, kind, _raiser in _failure_lines(caplog)] == [
+    assert [(event, kind) for event, kind, _raiser in failure_lines(caplog)] == [
         (_SUPERVISION.format(drive.run_id), "_ClockBroke")
     ] * len(broken)
     assert unretrieved == []
@@ -1944,7 +1921,7 @@ async def test_a_run_without_a_runner_ends_its_record_before_it_hands_out_a_fram
 
     assert _propagated(client, delivered=delivered) == propagates
     assert len(taken) == frames
-    assert [(event, kind) for event, kind, _raiser in _failure_lines(caplog)] == [
+    assert [(event, kind) for event, kind, _raiser in failure_lines(caplog)] == [
         (event.format(run_id), kind) for event, kind in logged
     ]
     assert unretrieved == []
@@ -1970,7 +1947,7 @@ async def test_a_response_without_a_runner_cancelled_in_its_first_send_is_cancel
         await asyncio.wait({response})
 
     assert response.cancelled()
-    assert [(event, kind) for event, kind, _raiser in _failure_lines(caplog)] == [
+    assert [(event, kind) for event, kind, _raiser in failure_lines(caplog)] == [
         (_CLEANUP.format(records.started[0].run_id), "_DisconnectNotRecorded")
     ]
     status = drive.status(records.started[0].run_id)

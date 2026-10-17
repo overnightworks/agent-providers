@@ -78,6 +78,7 @@ def _streamed(runner: Runner | None, records: RunRecords | None = None) -> bytes
         principal=Principal("https://keycloak.test/realms/agent-test", "user-alice"),
         request=RunRequest.model_validate(run_body()),
         route=Cli("claude-main"),
+        capability=None,
     )
 
     async def collected() -> bytes:

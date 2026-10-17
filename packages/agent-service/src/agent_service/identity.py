@@ -5,7 +5,10 @@ issuer and audience (decision record 0001, H1). The workload token is checked
 first, then the user token, and the first failure decides: a token that does
 not verify is ``unauthorized``, a key set that cannot be fetched is
 ``unavailable``, and verified tokens that do not bind one registered app to one
-end user are ``forbidden`` (H3).
+end user are ``forbidden`` (H3). A user token whose subject is missing, or is
+not valid Unicode text (a lone surrogate), is a credential no later token can
+name, so it is ``unauthorized`` for every app; any other subject, of any
+length, is accepted.
 
 A workload token binds its app only through claims a user token cannot carry:
 the realm role ``agent-workload``, which only service accounts hold, and
@@ -21,6 +24,7 @@ from dataclasses import dataclass
 from typing import Final
 
 import anyio.to_thread
+from pydantic import TypeAdapter, ValidationError
 from webauth.jwt_verification import (
     JwtVerifier,
     KeySetFetch,
@@ -30,11 +34,12 @@ from webauth.jwt_verification import (
     VerifiedClaims,
 )
 
-from agent_client.wire import RejectionCode
+from agent_client.wire import RejectionCode, UnicodeText
 from agent_service.config import IdentityConfig, ServiceConfig
 
 WORKLOAD_ROLE: Final = "agent-workload"
 MAX_WORKLOAD_TOKEN_SECONDS: Final = 300
+_UNICODE_TEXT: Final = TypeAdapter(UnicodeText)
 
 
 @dataclass(frozen=True)
@@ -93,7 +98,7 @@ class CallerCheck:
     async def _checked_caller(self, workload_token: str | None, user_token: str | None) -> Caller:
         workload = await self._verified(workload_token)
         user = await self._verified(user_token)
-        if user.subject is None:
+        if user.subject is None or not _is_unicode_text(user.subject):
             raise _Refused(RejectionCode.UNAUTHORIZED)
         groups = self._groups(user.claims)
         app = self._workload_app(workload)
@@ -135,6 +140,14 @@ class CallerCheck:
         if app is None:
             raise _Refused(RejectionCode.FORBIDDEN)
         return app
+
+
+def _is_unicode_text(text: str) -> bool:
+    try:
+        _UNICODE_TEXT.validate_python(text)
+    except ValidationError:
+        return False
+    return True
 
 
 def _rejection_code(rejected: Rejected) -> RejectionCode:

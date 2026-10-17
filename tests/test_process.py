@@ -4492,9 +4492,10 @@ def test_control_flow_raised_while_settling_an_unstarted_run_propagates_after_pu
     callbacks["on_spawn_failed"] = _raising(KeyboardInterrupt())
     channel = CliLineChannel(maximum_lines=1)
 
-    with pytest.raises(KeyboardInterrupt):
+    with pytest.raises(KeyboardInterrupt) as raised:
         _run_pooled(":", callbacks, stdout_line_channel=channel)
 
+    assert raised.value.__context__ is None
     published = channel.receive(timeout=0)
     assert isinstance(published, CliRunOutcome)
     assert published.reason is CliRunReason.SPAWN_FAILED

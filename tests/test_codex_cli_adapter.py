@@ -982,6 +982,7 @@ class _HomeReleases:
 
 _TURN_SECONDS = 0.3
 _HANG_BOUND_SECONDS = 20
+_START_THREADS_JOIN_SECONDS = 5
 _ALLOWANCE_SECONDS = 0.5
 _TINY_GRACE_SECONDS = 0.01
 
@@ -1272,6 +1273,7 @@ def test_control_flow_from_an_image_thread_that_cannot_start_passes_after_abando
 def test_an_image_start_that_raises_leaves_one_owner(
     monkeypatch, image_turn, tmp_path, error, thread_claims_first, expected_error,
 ) -> None:
+    threads_of_earlier_tests = set(threading.enumerate())
     runner_calls: list[str] = []
     releases = _HomeReleases(monkeypatch)
 
@@ -1295,7 +1297,7 @@ def test_an_image_start_that_raises_leaves_one_owner(
         )
         os.write(child_may_exit_writer, b"go\n")
         gate.set()
-        _join_the_start_threads()
+        _join_the_new_start_threads(threads_of_earlier_tests)
     finally:
         os.close(child_may_exit_writer)
     image_turn.assert_ended(turn)
@@ -1303,10 +1305,15 @@ def test_an_image_start_that_raises_leaves_one_owner(
     assert releases.token_releases == 1
 
 
-def _join_the_start_threads() -> None:
+def _join_the_new_start_threads(threads_of_earlier_tests: set[threading.Thread]) -> None:
+    deadline = time.monotonic() + _START_THREADS_JOIN_SECONDS
     for runner in threading.enumerate():
-        if isinstance(runner, process.ClaimedStartThread):
-            runner.join(timeout=_HANG_BOUND_SECONDS)
+        is_new_start_thread = (
+            isinstance(runner, process.ClaimedStartThread)
+            and runner not in threads_of_earlier_tests
+        )
+        if is_new_start_thread:
+            runner.join(timeout=max(0.0, deadline - time.monotonic()))
             assert not runner.is_alive(), "a runner thread never ended"
 
 

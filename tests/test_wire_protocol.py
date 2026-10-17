@@ -637,6 +637,23 @@ def test_a_cut_short_run_ends_by_the_effect_of_its_calls(
 
 
 @pytest.mark.parametrize(
+    "effect",
+    [ToolEffect.READ_ONLY, ToolEffect.SIDE_EFFECTING],
+)
+def test_the_ending_a_stream_hands_out_is_the_only_one_it_accepts(effect: ToolEffect) -> None:
+    def stream_with_call() -> RunStream:
+        stream = RunStream()
+        _accept_all(stream, [started(), call(1, "call-1", effect)])
+        return stream
+
+    due = stream_with_call().cancellation_terminal()
+    other = interrupted(2) if due.type == "cancelled" else cancelled(2)
+
+    assert stream_with_call().accept(due) is None
+    assert stream_with_call().accept(other) is not None
+
+
+@pytest.mark.parametrize(
     "events",
     [
         pytest.param([], id="a run that never started"),

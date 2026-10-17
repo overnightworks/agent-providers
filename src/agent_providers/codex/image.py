@@ -39,18 +39,19 @@ from agent_providers.codex.protocol import (
     INFORMATIONAL_ITEM_TYPES,
     ITEM_EVENT_TYPES,
     CodexCliStreamFailure,
+    CodexLoginMirrorError,
     codex_child_process,
     codex_cli_failure_reason,
+    copy_codex_login_mirror,
     error_item_message,
     event_item_type,
     failed_turn_message,
-    install_codex_turn_login,
     parse_codex_line,
     run_reserved_codex_cli,
     top_level_error_message,
 )
 from agent_providers.config import current_config, current_turn_config
-from agent_providers.errors import SafeRouteReasonCode, raise_without_chain
+from agent_providers.errors import SafeRouteReasonCode
 from agent_providers.images import ImagePolicy
 from agent_providers.process import (
     AgentCliUnavailableError,
@@ -119,7 +120,7 @@ class CodexImageError(Exception):
 
 
 class CodexImageLoginError(CodexImageError):
-    """The isolated Codex CLI home has no usable login copy."""
+    """The isolated Codex CLI home has no usable login mirror."""
 
 
 class ImageToolBlockedReason(StrEnum):
@@ -217,9 +218,9 @@ def generate_codex_image(
         work_dir.mkdir(mode=0o700)
         codex_home.mkdir(mode=0o700)
         try:
-            install_codex_turn_login(codex_home)
-        except AgentCliUnavailableError:
-            raise_without_chain(CodexImageLoginError())
+            copy_codex_login_mirror(codex_home)
+        except CodexLoginMirrorError as exc:
+            raise CodexImageLoginError() from exc
         try:
             outcome = _run_codex_image_cli(
                 prompt=prompt,

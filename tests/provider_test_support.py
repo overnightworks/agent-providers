@@ -16,8 +16,6 @@ against values this package owns.
 from __future__ import annotations
 
 import asyncio
-import errno
-import gc
 import json
 import logging
 import os
@@ -26,13 +24,11 @@ import stat
 import tempfile
 import threading
 import traceback
-import types
-from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -88,99 +84,10 @@ def a_codex_login(*, tokens: dict[str, Any] | None = None, **top_level: Any) -> 
     return json.dumps(document).encode()
 
 
-CREDENTIAL_FILE_BOUND_BYTES: Final = 256 * 1024
-
-
 def a_fifo(directory: Path) -> Path:
     path = directory / "source"
     os.mkfifo(path)
     return path
-
-
-def a_directory(directory: Path) -> Path:
-    path = directory / "source"
-    path.mkdir()
-    return path
-
-
-def a_symlink_to_a_login(directory: Path) -> Path:
-    target = directory / "target"
-    target.write_bytes(a_codex_login())
-    link = directory / "source"
-    link.symlink_to(target)
-    return link
-
-
-def a_dangling_symlink(directory: Path) -> Path:
-    link = directory / "source"
-    link.symlink_to(directory / "gone")
-    return link
-
-
-def a_usable_login_over_the_bound(directory: Path) -> Path:
-    login = a_codex_login()
-    path = directory / "source"
-    path.write_bytes(login + b" " * (CREDENTIAL_FILE_BOUND_BYTES + 1 - len(login)))
-    return path
-
-
-DESTINATION_FAULTS: Final = ("write", "fchmod", "close", "close-after-failed-write")
-
-
-@contextmanager
-def a_credential_destination_that_fails(fault: str) -> Iterator[list[int]]:
-    """Fail one call on the descriptor of the file a credential copy is created in.
-
-    The destination is the descriptor ``os.open`` returns for an ``O_CREAT``
-    open; every other descriptor passes through. A failing ``os.close`` closes
-    the descriptor for real before it raises, as Linux does. It yields every
-    close made on a destination descriptor, so a test can assert exactly one.
-    """
-    destinations: set[int] = set()
-    closed_destinations: set[int] = set()
-    closes_of_destinations: list[int] = []
-    real_open, real_write, real_fchmod, real_close = os.open, os.write, os.fchmod, os.close
-
-    def open_destination(path, flags, *arguments, **keywords):
-        descriptor = real_open(path, flags, *arguments, **keywords)
-        closed_destinations.discard(descriptor)
-        if flags & os.O_CREAT:
-            destinations.add(descriptor)
-        return descriptor
-
-    def write(descriptor, data):
-        if descriptor in destinations and fault in ("write", "close-after-failed-write"):
-            raise OSError(errno.EIO, "synthetic write failure")
-        return real_write(descriptor, data)
-
-    def fchmod(descriptor, mode):
-        if descriptor in destinations and fault == "fchmod":
-            raise OSError(errno.EIO, "synthetic fchmod failure")
-        real_fchmod(descriptor, mode)
-
-    def close(descriptor):
-        was_destination = descriptor in destinations
-        if was_destination or descriptor in closed_destinations:
-            closes_of_destinations.append(descriptor)
-        destinations.discard(descriptor)
-        if was_destination:
-            closed_destinations.add(descriptor)
-        real_close(descriptor)
-        if was_destination and fault in ("close", "close-after-failed-write"):
-            raise OSError(errno.EIO, "synthetic close failure")
-
-    with (
-        patch.object(os, "open", open_destination),
-        patch.object(os, "write", write),
-        patch.object(os, "fchmod", fchmod),
-        patch.object(os, "close", close),
-    ):
-        yield closes_of_destinations
-
-
-def a_path_through_a_regular_file(directory: Path) -> Path:
-    (directory / "file").write_text("{}")
-    return directory / "file" / "auth.json"
 
 GROK_LOGGED_IN = """You are logged in with grok.com.
 
@@ -708,33 +615,16 @@ def exception_chain(error: BaseException) -> list[BaseException]:
     return chain
 
 
-def _shown(value: object) -> str:
-    if isinstance(value, memoryview | bytearray):
-        value = bytes(value)
-    if isinstance(value, bytes):
-        return value.decode(errors="replace")
-    return str(value)
-
-
 def traceback_frames_hold(error: BaseException, text: str) -> bool:
     for link in exception_chain(error):
         frame_holder = link.__traceback__
         while frame_holder is not None:
             for value in frame_holder.tb_frame.f_locals.values():
-                shown = _shown(value)
+                shown = value.decode(errors="replace") if isinstance(value, bytes) else str(value)
                 if text in shown:
                     return True
             frame_holder = frame_holder.tb_next
     return False
-
-def live_frames_holding(text: str) -> list[types.FrameType]:
-    return [
-        item
-        for item in gc.get_objects()
-        if isinstance(item, types.FrameType)
-        and any(text in _shown(value) for value in item.f_locals.values())
-    ]
-
 
 A_RUNNER_FAILURE_CANARY: Final = "runner-failure-canary-7c1d"
 ANOTHER_RUNNER_FAILURE_CANARY: Final = "second-runner-failure-canary-2e8b"

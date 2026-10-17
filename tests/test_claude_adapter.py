@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import sys
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from types import SimpleNamespace
 
 import pytest
-from provider_test_support import override_provider_runtime
+from provider_test_support import a_credential_destination_that_fails, override_provider_runtime
 
 from agent_providers.claude import adapter as claude_adapter
 from agent_providers.claude import provider as claude_provider
@@ -233,21 +234,37 @@ def test_claude_cli_turn_with_an_unusable_credential_reports_it_as_not_signed_in
     assert isinstance(cause.__cause__, CliLoginUnusableError)
 
 
-def test_claude_cli_turn_whose_private_home_cannot_be_made_reports_the_cli_unavailable(
-    tmp_path
-) -> None:
+@contextlib.contextmanager
+def _a_working_root_that_was_removed(tmp_path) -> Iterator[None]:
     root = tmp_path / "removed-root"
     root.mkdir(mode=0o700)
     override_provider_runtime(cli_working_directory_root=root)
     root.rmdir()
-    driving = _drive_real_claude_turn()
+    yield
 
-    with pytest.raises(ProviderUnavailableError) as failure:
-        asyncio.run(driving)
+
+@contextlib.contextmanager
+def _a_credential_copy_that_cannot_be_written(_tmp_path) -> Iterator[None]:
+    with a_credential_destination_that_fails("write"):
+        yield
+
+
+@pytest.mark.parametrize(
+    "environment_fault",
+    (_a_working_root_that_was_removed, _a_credential_copy_that_cannot_be_written),
+    ids=("home-not-made", "credential-copy-not-written"),
+)
+def test_claude_cli_turn_that_cannot_run_here_reports_the_cli_unavailable(
+    tmp_path, environment_fault,
+) -> None:
+    with environment_fault(tmp_path):
+        driving = _drive_real_claude_turn()
+
+        with pytest.raises(ProviderUnavailableError) as failure:
+            asyncio.run(driving)
 
     assert failure.value.reason.code is SafeRouteReasonCode.CLI_UNAVAILABLE
     cause = failure.value.__cause__
     assert type(cause) is CliUnavailableError
     assert str(cause) == CLAUDE_CLI_UNAVAILABLE_DETAIL
     assert isinstance(cause.__cause__, CliEnvironmentUnavailableError)
-    assert not root.exists()

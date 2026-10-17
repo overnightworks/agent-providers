@@ -68,10 +68,15 @@ class AgentCliUnavailableError(Exception):
 
 
 class CliLoginUnusableError(AgentCliUnavailableError):
-    """The CLI login is missing, unreadable, invalid or too large, or has no status."""
+    """The configured CLI login is missing, unreadable, invalid or too large.
+
+    Or the CLI reported no login status.
+    """
 
 
 class CliEnvironmentCause(StrEnum):
+    """Why a CLI cannot run here, whatever its login."""
+
     BINARY_MISSING = "binary_missing"
     HOME_NOT_CREATED = "home_not_created"
     CREDENTIAL_COPY_NOT_WRITTEN = "credential_copy_not_written"
@@ -1874,15 +1879,13 @@ def _probe_grok_status() -> GrokCliStatus:
 def grok_cli_token_is_present() -> bool:
     """Whether the Grok CLI credential mirror contains a non-empty access token."""
     try:
-        raw_auth = current_config().grok_cli_auth_file.read_text()
+        document = json.loads(current_config().grok_cli_auth_file.read_text())
     except FileNotFoundError:
         return False
     except OSError as exc:
         raise CliLoginUnusableError("could not read Grok CLI credentials") from exc
-    try:
-        document = json.loads(raw_auth)
-    except json.JSONDecodeError as exc:
-        raise CliLoginUnusableError(GROK_CLI_CREDENTIALS_INVALID_DETAIL) from exc
+    except json.JSONDecodeError:
+        raise_without_chain(CliLoginUnusableError(GROK_CLI_CREDENTIALS_INVALID_DETAIL))
     if not isinstance(document, dict):
         raise CliLoginUnusableError(GROK_CLI_CREDENTIALS_INVALID_DETAIL)
     for realm in document.values():

@@ -40,6 +40,7 @@ from pydantic import SecretStr
 from agent_providers import process, spawn
 from agent_providers.claude import provider
 from agent_providers.claude.provider import (
+    CLAUDE_CLI_BINARY_NOT_FOUND_DETAIL,
     CLAUDE_CLI_LOGIN_NOT_CONFIGURED_DETAIL,
     CLAUDE_CLI_UNAVAILABLE_DETAIL,
     ClaudeResponse,
@@ -3557,7 +3558,9 @@ def test_one_shot_deadline_keeps_and_caches_a_zombie_probe_failure(
 # ── #351 round 6, Finding 6: the reaper pool caps new probes too ─────
 
 
+@pytest.mark.parametrize("probe_kind", ("async", "sync"))
 def test_tool_surface_probe_refuses_to_start_when_the_zombie_pool_is_saturated(
+    probe_kind: str,
     claude_binary,
     monkeypatch,
 ) -> None:
@@ -3605,7 +3608,10 @@ def test_tool_surface_probe_refuses_to_start_when_the_zombie_pool_is_saturated(
 
         await asyncio.gather(*(started.wait() for started in reapers_started))
         with pytest.raises(UnavailableError) as exc:
-            verify_no_builtin_cli_tools()
+            if probe_kind == "async":
+                await verify_cli_tool_surface()
+            else:
+                verify_no_builtin_cli_tools()
         assert str(exc.value) == (
             "Claude CLI process pool is at its concurrency limit (2); refusing to start another"
         )
@@ -4418,7 +4424,7 @@ def test_the_claude_cli_faults_are_unavailable_errors_and_not_each_other(parent,
 def _a_claude_binary_missing_at(site: str, monkeypatch: pytest.MonkeyPatch):
     if site == "require":
         monkeypatch.setattr(provider, "_find_claude_binary", lambda: None)
-        return provider._require_claude_binary
+        return list_cli_model_aliases
     monkeypatch.setattr(
         provider, "averify_no_builtin_cli_tools", AsyncMock(return_value=Path("/usr/bin/claude")),
     )
@@ -4437,13 +4443,21 @@ def _a_claude_binary_missing_at(site: str, monkeypatch: pytest.MonkeyPatch):
     return lambda: asyncio.run(acall_claude_with_mcp_stream(prompt="hi", user_id="u-1").__anext__())
 
 
-@pytest.mark.parametrize("site", ("require", "acall-cli", "mcp", "mcp-stream"))
+@pytest.mark.parametrize(
+    ("site", "detail"),
+    (
+        ("require", "Claude CLI not found"),
+        ("acall-cli", CLAUDE_CLI_BINARY_NOT_FOUND_DETAIL),
+        ("mcp", CLAUDE_CLI_BINARY_NOT_FOUND_DETAIL),
+        ("mcp-stream", CLAUDE_CLI_BINARY_NOT_FOUND_DETAIL),
+    ),
+)
 def test_a_missing_claude_binary_raises_cli_unavailable(
-    site: str, _no_tool_gate_open, monkeypatch: pytest.MonkeyPatch
+    site: str, detail: str, _no_tool_gate_open, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     run = _a_claude_binary_missing_at(site, monkeypatch)
 
-    with pytest.raises(CliUnavailableError):
+    with pytest.raises(CliUnavailableError, match=detail):
         run()
 
 
@@ -4488,28 +4502,14 @@ def test_the_claude_model_listing_raises_only_the_claude_family(
     assert isinstance(raised.value.__cause__, process.AgentCliUnavailableError)
 
 
-@pytest.mark.parametrize(
-    "make_fault",
-    (_cli_root_removed, _credential_source_replaced_by_a_link),
-    ids=("home-not-made", "linked-credential"),
-)
-def test_the_claude_private_home_raises_only_the_claude_family(
-    make_fault, tmp_path: Path
-) -> None:
-    make_fault(tmp_path)
-
-    with pytest.raises(UnavailableError) as raised:
-        provider._claude_private_home()
-
-    assert not isinstance(raised.value, process.AgentCliUnavailableError)
-    assert isinstance(raised.value.__cause__, process.AgentCliUnavailableError)
-
-
 @pytest.mark.parametrize("fault", DESTINATION_FAULTS)
-def test_a_credential_copy_that_cannot_be_written_raises_cli_unavailable(fault: str) -> None:
+def test_a_credential_copy_that_cannot_be_written_raises_cli_unavailable(
+    fault: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(provider, "_find_claude_binary", lambda: Path("/usr/bin/claude"))
     with a_credential_destination_that_fails(fault):
         with pytest.raises(UnavailableError) as raised:
-            provider._claude_private_home()
+            list_cli_model_aliases()
 
     assert type(raised.value) is CliUnavailableError
     assert str(raised.value) == CLAUDE_CLI_UNAVAILABLE_DETAIL

@@ -437,6 +437,21 @@ def test_the_grok_cli_listing_reads_the_login_its_status_run_reports(
     assert failure.value.reason.code is expected_code
 
 
+def test_the_grok_cli_listing_reads_a_status_run_that_did_not_complete_as_logged_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(tmp_path, "grok", {})
+    monkeypatch.setattr(
+        process, "run_catalog_cli",
+        lambda *_arguments, **_keywords: process.CliRun(0, GROK_LOGGED_IN, "", complete=False),
+    )
+
+    with pytest.raises(ProviderModelCatalogUnavailableError) as failure:
+        list_provider_models("grok", ProviderRoute.CLI)
+
+    assert failure.value.reason.code is SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED
+
+
 def test_the_grok_cli_listing_reads_a_probe_that_outlives_its_caller_budget_as_logged_out(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -483,18 +498,19 @@ def _claude_binary_removed(tmp_path: Path) -> None:
 
 CLAUDE_LISTING_FAULTS = [
     pytest.param(
-        _cli_root_removed, SafeRouteReasonCode.CLI_UNAVAILABLE, id="home-not-made",
+        _cli_root_removed, SafeRouteReasonCode.CLI_UNAVAILABLE,
+        ProviderRouteReadinessState.DISTURBED, id="home-not-made",
     ),
     pytest.param(
         _claude_credential_replaced_by_a_link, SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED,
-        id="credential-source-a-link",
+        ProviderRouteReadinessState.NOT_CONFIGURED, id="credential-source-a-link",
     ),
 ]
 
 
-@pytest.mark.parametrize(("make_fault", "expected_code"), CLAUDE_LISTING_FAULTS)
+@pytest.mark.parametrize(("make_fault", "expected_code", "_readiness"), CLAUDE_LISTING_FAULTS)
 def test_the_claude_cli_listing_names_the_meaning_of_the_fault_that_stopped_it(
-    tmp_path: Path, make_fault, expected_code: SafeRouteReasonCode,
+    tmp_path: Path, make_fault, expected_code: SafeRouteReasonCode, _readiness,
 ) -> None:
     _configure_cli(tmp_path, "claude", {CLAUDE_MODEL_COMMAND: CLAUDE_MODEL_CATALOG_STDOUT})
     make_fault(tmp_path)
@@ -514,9 +530,12 @@ def test_the_claude_cli_listing_without_a_binary_is_unavailable(tmp_path: Path) 
     assert failure.value.reason.code is SafeRouteReasonCode.CLI_UNAVAILABLE
 
 
-@pytest.mark.parametrize(("make_fault", "expected_code"), CLAUDE_LISTING_FAULTS)
+@pytest.mark.parametrize(
+    ("make_fault", "expected_code", "expected_readiness"), CLAUDE_LISTING_FAULTS,
+)
 def test_a_claude_route_that_was_signed_in_reports_the_fault_that_broke_its_listing(
     tmp_path: Path, make_fault, expected_code: SafeRouteReasonCode,
+    expected_readiness: ProviderRouteReadinessState,
 ) -> None:
     _configure_cli(tmp_path, "claude", {
         CLAUDE_STATUS_COMMAND: CLAUDE_LOGGED_IN,
@@ -529,7 +548,7 @@ def test_a_claude_route_that_was_signed_in_reports_the_fault_that_broke_its_list
 
     snapshot = probe_provider_route("claude", ProviderRoute.CLI)
 
-    assert snapshot.readiness is ProviderRouteReadinessState.DISTURBED
+    assert snapshot.readiness is expected_readiness
     assert snapshot.reason.code is expected_code
 
 
@@ -642,8 +661,9 @@ def test_a_wrong_typed_codex_login_is_named_in_the_setup_warning(
 ) -> None:
     caplog.set_level("WARNING", logger="agent_providers.catalog")
 
-    _codex_setup(tmp_path, a_codex_login(tokens={"account_id": 7}))
+    configuration = _codex_setup(tmp_path, a_codex_login(tokens={"account_id": 7}))
 
+    assert isinstance(configuration, ProviderNotLoggedIn)
     assert "codex CLI probe unavailable: CliLoginUnusableError" in caplog.text
 
 

@@ -3326,6 +3326,38 @@ def test_credential_probe_names_malformed_mounted_credentials(
         function()
 
 
+def _a_credential_document_holding(canary: str) -> str:
+    return '{"realm": {"key": "' + canary + '"'
+
+
+@pytest.mark.parametrize("inside_active_handler", [False, True], ids=["plainly", "from-a-handler"])
+def test_a_malformed_grok_credential_refusal_holds_no_text_of_the_document(
+    tmp_path, inside_active_handler: bool,
+) -> None:
+    canary = "grok-credential-canary-5d2e"
+    credential_file = tmp_path / "grok.json"
+    credential_file.write_text(_a_credential_document_holding(canary))
+    override_provider_runtime(grok_cli_auth_file=credential_file)
+
+    def refusal() -> CliLoginUnusableError:
+        with pytest.raises(CliLoginUnusableError) as raised:
+            process.grok_cli_token_is_present()
+        return raised.value
+
+    if inside_active_handler:
+        try:
+            raise RuntimeError("unrelated")
+        except RuntimeError:
+            held = refusal()
+    else:
+        held = refusal()
+
+    assert exception_chain(held) == [held]
+    assert not traceback_frames_hold(held, canary)
+    for link in exception_chain(held):
+        assert canary not in repr(vars(link))
+
+
 _A_COMPLETE_CODEX_LOGIN = json.loads(a_codex_login())
 
 

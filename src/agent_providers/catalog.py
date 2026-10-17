@@ -204,7 +204,7 @@ def probe_provider_route(provider: str, route: ProviderRoute) -> ProviderRouteSn
             SafeRouteReasonCode.CATALOGUE_PROTOCOL_ERROR,
         )
         return ProviderRouteSnapshot(
-            (), reason, None, None, ProviderRouteReadinessState.DISTURBED,
+            (), reason, None, None, _readiness_of_fault(reason.code),
             capability, reason, now,
             _CLI_LOGIN_SETUP_LABEL if route is ProviderRoute.CLI else _API_KEY_SETUP_LABEL,
         )
@@ -213,7 +213,7 @@ def probe_provider_route(provider: str, route: ProviderRoute) -> ProviderRouteSn
             SafeRouteReasonCode.ROUTE_FAILED,
         )
         return ProviderRouteSnapshot(
-            (), reason, None, None, ProviderRouteReadinessState.DISTURBED,
+            (), reason, None, None, _readiness_of_fault(reason.code),
             capability, reason, now,
             _CLI_LOGIN_SETUP_LABEL if route is ProviderRoute.CLI else _API_KEY_SETUP_LABEL,
         )
@@ -269,18 +269,20 @@ def _cli_route_preflight(
             return None
     except AgentCliUnavailableError as exc:
         reason_code = _cli_fault_reason_code(exc)
-        readiness = (
-            ProviderRouteReadinessState.NOT_CONFIGURED
-            if reason_code is SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED
-            else ProviderRouteReadinessState.DISTURBED
-        )
         return _route_preflight_snapshot(
-            capability, now, readiness, reason_code, _CLI_LOGIN_SETUP_LABEL,
+            capability, now, _readiness_of_fault(reason_code), reason_code,
+            _CLI_LOGIN_SETUP_LABEL,
         )
     return _route_preflight_snapshot(
         capability, now, ProviderRouteReadinessState.NOT_CONFIGURED,
         SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED, _CLI_LOGIN_SETUP_LABEL,
     )
+
+
+def _readiness_of_fault(reason_code: SafeRouteReasonCode) -> ProviderRouteReadinessState:
+    if reason_code is SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED:
+        return ProviderRouteReadinessState.NOT_CONFIGURED
+    return ProviderRouteReadinessState.DISTURBED
 
 
 def _cli_fault_reason_code(fault: Exception) -> SafeRouteReasonCode:

@@ -83,11 +83,9 @@ class SigningKey:
 def load_signing_key(path: Path) -> SigningKey:
     """Reads the file through one descriptor and raises ``UnsoundSigningKey`` for any refusal."""
     try:
-        contents = read_secret_file(path, "key file")
+        return SigningKey.from_private_key(_parsed_private_key(read_secret_file(path, "key file")))
     except UnsoundSecretFile as refusal:
         raise UnsoundSigningKey(str(refusal)) from None
-    try:
-        return SigningKey.from_private_key(_parsed_private_key(contents))
     except UnsoundSigningKey as refusal:
         raise UnsoundSigningKey(f"{shown_text(str(path))} {refusal}") from None
 

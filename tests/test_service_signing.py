@@ -17,7 +17,12 @@ import uvicorn
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import dsa, ec, ed25519, rsa
 from jwt.algorithms import RSAAlgorithm
-from service_support import generated_rsa_key, pem_of, written_key_file
+from service_support import (
+    everything_a_refusal_holds,
+    generated_rsa_key,
+    pem_of,
+    written_key_file,
+)
 from test_service_config import VALID_CONFIG, _written
 from webauth.jwt_verification import JwtVerifier, Rejected, RejectionReason, VerifiedClaims
 
@@ -251,6 +256,34 @@ def test_an_unsound_key_file_stops_startup_with_one_line_naming_its_path_and_no_
         f"agent-service: refusing to start: {config_file}: signing.key_file: "
         f"{shown_key_file} {reason}\n"
     )
+
+
+REFUSED_BUT_REAL_KEYS = [
+    pytest.param(lambda: ec.generate_private_key(ec.SECP256R1()), id="ec-p256"),
+    pytest.param(lambda: generated_rsa_key(2048), id="rsa-2048"),
+]
+
+
+@pytest.mark.parametrize("key", REFUSED_BUT_REAL_KEYS)
+def test_a_refused_real_key_leaks_no_key_material_into_what_the_refusal_or_its_handler_holds(
+    tmp_path, key
+):
+    key_file = written_key_file(tmp_path, key())
+    key_body = key_file.read_text().splitlines()[1]
+
+    with pytest.raises(UnsoundSigningKey) as refusal:
+        load_signing_key(key_file)
+    held_by_the_refusal = repr(everything_a_refusal_holds(refusal.value))
+
+    try:
+        load_signing_key(key_file)
+    except UnsoundSigningKey as handled:
+        held_by_the_handler = repr(everything_a_refusal_holds(handled))
+    else:
+        pytest.fail("the unsound key was accepted")
+
+    assert key_body not in held_by_the_refusal
+    assert key_body not in held_by_the_handler
 
 
 @pytest.mark.parametrize(("path", "shown"), CONTROL_PATHS_AS_SHOWN.items())

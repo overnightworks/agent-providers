@@ -590,7 +590,7 @@ def _holding(contents: bytes, mode: int = 0o600) -> Callable[[Path, pytest.Monke
 
 
 def _outgrowing_a_reported_size_of_zero(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
-    token_file = _token_file_with(tmp_path, b"x" * (64 * 1024) + CANARY.encode())
+    token_file = _token_file_with(tmp_path, CANARY.encode() + b"x" * (64 * 1024))
     real_fstat = os.fstat
 
     def reporting_zero(descriptor):

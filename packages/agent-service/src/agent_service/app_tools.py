@@ -196,20 +196,17 @@ class _Conversation:
         require_answer_headers: Callable[[httpx.Response], None],
     ) -> _Received:
         headers = self._headers(negotiated, session_id)
-        refusal: UpstreamError | None = None
         try:
             async with self.http.stream(
                 "POST", self.endpoint, content=body, headers=headers
             ) as sent:
                 try:
                     return await self._received(sent, require_answer_headers)
-                except UpstreamError as established:
-                    refusal = established
+                except UpstreamError:
+                    await _close_refused(sent)
+                    raise
         except httpx.HTTPError as failure:
-            if refusal is None:
-                _transport_failure(failure)
-        assert refusal is not None
-        raise_without_chain(refusal)
+            _transport_failure(failure)
 
     @staticmethod
     async def _received(
@@ -309,12 +306,17 @@ async def _handshake(conversation: _Conversation) -> AppToolsSession:
     return AppToolsSession(conversation, negotiated, session_id)
 
 
+async def _close_refused(response: httpx.Response) -> None:
+    """Close a refused response; a failing close never replaces the refusal."""
+    with suppress(httpx.HTTPError):
+        await response.aclose()
+
+
 async def _refuse_redirect(response: httpx.Response) -> None:
     """Decide a 3xx before httpx parses its ``Location``; a failing close never replaces it."""
     if not 300 <= response.status_code < 400:
         return
-    with suppress(httpx.HTTPError):
-        await response.aclose()
+    await _close_refused(response)
     raise_without_chain(UpstreamRedirected(response.status_code))
 
 

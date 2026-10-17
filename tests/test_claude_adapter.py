@@ -8,12 +8,23 @@ from collections.abc import AsyncIterator
 from types import SimpleNamespace
 
 import pytest
+from provider_test_support import override_provider_runtime
 
 from agent_providers.claude import adapter as claude_adapter
 from agent_providers.claude import provider as claude_provider
-from agent_providers.claude.provider import CliLoginRefusedError, UnavailableError
+from agent_providers.claude.provider import (
+    CLAUDE_CLI_LOGIN_NOT_CONFIGURED_DETAIL,
+    CLAUDE_CLI_UNAVAILABLE_DETAIL,
+    CliLoginNotConfiguredError,
+    CliLoginRefusedError,
+    CliToolSurfaceError,
+    CliUnavailableError,
+    UnavailableError,
+)
+from agent_providers.config import current_config
 from agent_providers.errors import ProviderUnavailableError, SafeRouteReasonCode
 from agent_providers.events import AssistantTextEvent, StreamEvent
+from agent_providers.process import CliEnvironmentUnavailableError, CliLoginUnusableError
 from agent_providers.tool_loop import ToolOutcome
 
 
@@ -149,10 +160,19 @@ def test_claude_api_turn_fails_with_a_safe_code_when_the_sdk_is_unusable(
 @pytest.mark.parametrize(
     ("provider_error", "safe_code"),
     [
+        (CliUnavailableError("gone"), SafeRouteReasonCode.CLI_BINARY_UNAVAILABLE),
+        (CliLoginNotConfiguredError("signed out"), SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED),
         (CliLoginRefusedError("refused"), SafeRouteReasonCode.CLI_AUTH_REJECTED),
+        (CliToolSurfaceError("surface"), SafeRouteReasonCode.TOOL_EXECUTION_FAILED),
         (UnavailableError("other"), SafeRouteReasonCode.CLI_PROTOCOL_ERROR),
     ],
-    ids=["login-refused", "other-api-error"],
+    ids=[
+        "cli-unavailable",
+        "login-not-configured",
+        "login-refused",
+        "tool-surface",
+        "other-api-error",
+    ],
 )
 def test_claude_cli_turn_reports_a_provider_failure_with_its_safe_code(
     monkeypatch, provider_error, safe_code
@@ -175,3 +195,56 @@ def test_claude_cli_turn_reports_a_provider_failure_with_its_safe_code(
         asyncio.run(turn)
 
     assert failure.value.reason.code is safe_code
+
+
+async def _drive_real_claude_turn() -> None:
+    async for _event in claude_adapter.stream_claude_turn(
+        user_id="user-1", system="system", model="claude-test", messages=[],
+    ):
+        pass
+
+
+def _a_credential_that(fault: str, tmp_path) -> None:
+    source = current_config().claude_cli_auth_file
+    source.unlink()
+    if fault == "linked":
+        target = tmp_path / "elsewhere.json"
+        target.write_text("{}")
+        source.symlink_to(target)
+    if fault == "oversize":
+        source.write_bytes(b"x" * (256 * 1024 + 1))
+
+
+@pytest.mark.parametrize("fault", ("missing", "linked", "oversize"))
+def test_claude_cli_turn_with_an_unusable_credential_reports_it_as_not_signed_in(
+    fault: str, tmp_path
+) -> None:
+    _a_credential_that(fault, tmp_path)
+
+    with pytest.raises(ProviderUnavailableError) as failure:
+        asyncio.run(_drive_real_claude_turn())
+
+    assert failure.value.reason.code is SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED
+    cause = failure.value.__cause__
+    assert type(cause) is CliLoginNotConfiguredError
+    assert str(cause) == CLAUDE_CLI_LOGIN_NOT_CONFIGURED_DETAIL
+    assert isinstance(cause.__cause__, CliLoginUnusableError)
+
+
+def test_claude_cli_turn_whose_private_home_cannot_be_made_reports_the_cli_unavailable(
+    tmp_path
+) -> None:
+    root = tmp_path / "removed-root"
+    root.mkdir(mode=0o700)
+    override_provider_runtime(cli_working_directory_root=root)
+    root.rmdir()
+
+    with pytest.raises(ProviderUnavailableError) as failure:
+        asyncio.run(_drive_real_claude_turn())
+
+    assert failure.value.reason.code is SafeRouteReasonCode.CLI_BINARY_UNAVAILABLE
+    cause = failure.value.__cause__
+    assert type(cause) is CliUnavailableError
+    assert str(cause) == CLAUDE_CLI_UNAVAILABLE_DETAIL
+    assert isinstance(cause.__cause__, CliEnvironmentUnavailableError)
+    assert not root.exists()

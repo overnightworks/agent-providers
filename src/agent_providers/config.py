@@ -27,10 +27,15 @@ test-suite counterpart of clearing a settings cache.
 
 from __future__ import annotations
 
+import os
+import stat
 import threading
+from enum import StrEnum
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
+
+from agent_providers.errors import raise_without_chain
 
 
 class McpServerSpec(BaseModel):
@@ -84,9 +89,15 @@ class ProviderRuntimeConfig(BaseModel):
 
     ``cli_working_directory_root`` is the directory below which every child
     creates its private working directory and every temporary file this layer
-    writes, so a deployment that confines the agent CLIs — songmaker sandboxes
-    them under ``/tmp`` — states that root once instead of inheriting whatever
-    ``TMPDIR`` happens to be.
+    writes, so a deployment states that root once instead of inheriting
+    whatever ``TMPDIR`` happens to be. It holds every credential copy, so
+    :func:`configure` refuses a root that is not private: an absolute path to an
+    existing directory, not a symlink, owned by the process's effective user,
+    with mode exactly 0700. The host keeps that owner, mode and path
+    resolution, and the process's effective identity, for the process
+    lifetime. The check proves privacy only on a filesystem with POSIX
+    ownership and modes, and claims no protection against a hostile
+    replacement after startup.
 
     ``cli_binary_search_path`` is the only place a bare CLI name is resolved
     from. A child is always started from an absolute binary; resolving one
@@ -134,6 +145,30 @@ class TurnRuntimeNotConfiguredError(RuntimeError):
     """A turn path ran under a configuration that covers only the catalog."""
 
 
+class WorkingRootViolation(StrEnum):
+    RELATIVE = "relative"
+    MISSING = "missing"
+    SYMLINK = "symlink"
+    FOREIGN_OWNER = "foreign_owner"
+    WRONG_MODE = "wrong_mode"
+    UNINSPECTABLE = "uninspectable"
+
+
+class WorkingRootNotPrivateError(RuntimeError):
+    """``cli_working_directory_root`` is not a private directory.
+
+    It names only the closed violation, never the path or the failure of the
+    inspection that found it: the root is the parent of every credential copy.
+    """
+
+    def __init__(self, violation: WorkingRootViolation) -> None:
+        super().__init__(f"cli_working_directory_root is not private: {violation.value}.")
+        self.violation = violation
+
+    def __reduce__(self) -> tuple[type[WorkingRootNotPrivateError], tuple[WorkingRootViolation]]:
+        return (type(self), (self.violation,))
+
+
 _NOT_CONFIGURED_DETAIL = (
     "The agent-provider runtime is unconfigured. Call "
     "agent_providers.config.configure() during application startup."
@@ -150,8 +185,29 @@ _ALREADY_CONFIGURED_DETAIL = (
     "first to install another one."
 )
 
+_PRIVATE_DIRECTORY_MODE = 0o700
+
 _configured: ProviderRuntimeConfig | None = None
 _configuration_lock = threading.Lock()
+
+
+def _inspect_working_root(root: Path) -> None:
+    if not root.is_absolute():
+        raise_without_chain(WorkingRootNotPrivateError(WorkingRootViolation.RELATIVE))
+    try:
+        status = os.lstat(root)
+    except (FileNotFoundError, NotADirectoryError):
+        raise_without_chain(WorkingRootNotPrivateError(WorkingRootViolation.MISSING))
+    except (OSError, ValueError):
+        raise_without_chain(WorkingRootNotPrivateError(WorkingRootViolation.UNINSPECTABLE))
+    if stat.S_ISLNK(status.st_mode):
+        raise_without_chain(WorkingRootNotPrivateError(WorkingRootViolation.SYMLINK))
+    if not stat.S_ISDIR(status.st_mode):
+        raise_without_chain(WorkingRootNotPrivateError(WorkingRootViolation.MISSING))
+    if status.st_uid != os.geteuid():
+        raise_without_chain(WorkingRootNotPrivateError(WorkingRootViolation.FOREIGN_OWNER))
+    if stat.S_IMODE(status.st_mode) != _PRIVATE_DIRECTORY_MODE:
+        raise_without_chain(WorkingRootNotPrivateError(WorkingRootViolation.WRONG_MODE))
 
 
 def configure(config: ProviderRuntimeConfig) -> None:
@@ -161,8 +217,18 @@ def configure(config: ProviderRuntimeConfig) -> None:
     every startup path it owns without ordering them. Installing a differing
     one is refused: two owners disagreeing about one deployment is a defect,
     and letting the later caller win would silently discard the earlier value.
+
+    Every call first inspects ``cli_working_directory_root`` and raises
+    :class:`WorkingRootNotPrivateError` unless it is an absolute path to an
+    existing directory, not a symlink, owned by the effective user, with mode
+    exactly 0700. A refusal installs nothing and leaves an earlier installation
+    in place. The host keeps the root's owner, mode and path resolution, and the
+    process's effective identity, for the process lifetime; the check proves
+    privacy only on a filesystem with POSIX ownership and modes and guards
+    against no hostile replacement after startup.
     """
     global _configured
+    _inspect_working_root(config.cli_working_directory_root)
     with _configuration_lock:
         if _configured is not None and _configured != config:
             raise ProviderRuntimeAlreadyConfiguredError(_ALREADY_CONFIGURED_DETAIL)

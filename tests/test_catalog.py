@@ -305,7 +305,10 @@ def test_a_signed_in_cli_route_is_not_configured_once_its_binary_is_gone(
 def test_a_cli_route_whose_private_home_cannot_be_made_is_disturbed(
     provider: str, tmp_path: Path,
 ) -> None:
-    override_provider_runtime(cli_working_directory_root=tmp_path / "missing-root")
+    removed_root = tmp_path / "removed-root"
+    removed_root.mkdir(mode=0o700)
+    override_provider_runtime(cli_working_directory_root=removed_root)
+    removed_root.rmdir()
     clear_agent_cli_caches()
 
     snapshot = probe_provider_route(provider, ProviderRoute.CLI)

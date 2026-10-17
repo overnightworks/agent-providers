@@ -27,7 +27,7 @@ It owns the machinery that is the same in every deployment:
 
 | Module | Owns |
 |---|---|
-| `agent_providers.config` | The deployment facts every module reads, installed once per process via `configure()` |
+| `agent_providers.config` | The deployment facts every module reads, installed once per process via `configure()`, which refuses a working root that is not private |
 | `agent_providers.catalog` | Live provider/route readiness probes and the model names each route offers, aliases or ids as the provider lists them (`probe_provider_route`, `list_provider_models`) |
 | `agent_providers.dispatch` | Routing one turn to a provider and route, and the image capability |
 | `agent_providers.events` | The `StreamEvent` union a turn emits in-process (assistant text, tool call, tool result, final); not the service wire |
@@ -201,6 +201,18 @@ A turn path reached
 without `turns` raises `TurnRuntimeNotConfiguredError` instead of running against a
 guess.
 
+`configure()` refuses a `cli_working_directory_root` that is not private: it
+must be an absolute path to an existing directory, not a symlink, owned by the
+process's effective user, with mode exactly 0700. It raises
+`WorkingRootNotPrivateError`, whose `violation` is a member of the closed
+`WorkingRootViolation` and whose text never holds the path. Every call
+inspects, so an identical re-install does too, and a refusal installs nothing.
+Create the root with `install -d -m 0700 <root>`, never `/tmp` itself, in every
+process that configures, and keep its owner, mode, path and the process's
+effective identity for the process lifetime. The check proves privacy only on a
+filesystem with POSIX ownership and modes, and gives no protection against a
+hostile replacement after startup.
+
 The other host obligations arrive as arguments where they are needed:
 
 - `ToolExecutor` (`agent_providers.tool_loop`) — the port that runs one tool
@@ -281,6 +293,11 @@ A host migrates at its pin bump to 0.3.0; both configuration models refuse unkno
 | The tool messages `Co-Writer tool failed.`, `Co-Writer tool response was invalid.`, `Co-Writer tool-call limit was reached.` | `Tool failed.`, `Tool response was invalid.`, `Tool-call limit was reached.` | Map the `code` for product wording. `Tool response was invalid.` is also the `str()` of `TextToolCallRejectedError`. The other twelve messages are unchanged. |
 | The catalog error `Unknown co-writer provider '<name>'` | `Unknown provider '<name>'` | Update any text match; the exception types are unchanged. |
 | `ToolProtocolMarkup()` defaults `songmaker` / `Songmaker`; `ToolCatalog.markup` optional | Both fields and `ToolCatalog.markup` required | Declare `markup=ToolProtocolMarkup(tag_namespace="songmaker", product_name="Songmaker")`; the rendered prompt stays byte-identical. |
+| `sandbox.paths.CODEX_IMAGE_TURN_DIRECTORY_PREFIX` = `"songmaker-cover-codex-"` | `sandbox.paths.CODEX_IMAGE_TURN_DIRECTORY_PREFIX` = `"agent-cli-codex-image-turn-"` | The kernel profile permits `<root>/agent-cli-codex-image-turn-*/codex-home/`, where `<root>` is the resolved `cli_working_directory_root`. Load it with the pin bump. |
+| `sandbox.paths.CODEX_TOOL_TURN_DIRECTORY_PREFIX` = `"songmaker-codex-tool-"` | `sandbox.paths.CODEX_TOOL_TURN_DIRECTORY_PREFIX` = `"agent-cli-codex-tool-turn-"` | The same for `<root>/agent-cli-codex-tool-turn-*/codex-home/`. |
+| `sandbox.paths.CODEX_SANDBOX_PROOF_DIRECTORY` = `"songmaker-codex-sandbox-probe"` | removed | A host's sandbox proof allocates its directory as an image turn does: `CODEX_IMAGE_TURN_DIRECTORY_PREFIX` and a random part, below `<root>`, inside the runtime that configures it. Its own profile rule goes. |
+| `grok.transport.GROK_CLI_TURN_DIRECTORY_PREFIX` = `"songmaker-grok-cli-"` | `grok.transport.GROK_CLI_TURN_DIRECTORY_PREFIX` = `"agent-cli-grok-turn-"` | None; no profile names it. |
+| `configure()` accepts any `cli_working_directory_root` | `configure()` raises `config.WorkingRootNotPrivateError`, naming a closed `config.WorkingRootViolation` and never the path, unless the root is an absolute path to an existing directory, not a symlink, owned by the process's effective user, with mode exactly 0700 | Create a private root (for example `install -d -m 0700 <root>`), never `/tmp` itself, in every process that configures. Keep its owner, mode and path for the process lifetime. The profile names its resolved path. |
 | A Codex turn whose private home cannot be created or made private (`mkdtemp`, the home `chmod` or the `work` `mkdir` raises `OSError`) | Raised unchained: `ProviderUnavailableError` with `CLI_BINARY_UNAVAILABLE` ("CLI is unavailable.") on the tool turn; `CodexImageCliError("could not create a private CLI home")` on the image turn | A full or unwritable `cli_working_directory_root` now reaches the host's CLI-failure path instead of its unexpected-error path. The message holds no path. Songmaker shows it as `JOB_ERROR_COVER_IMAGE_CLI_FAILED` (`src/songmaker_cli/jobs/_runtime.py:111-116`, `:139`). |
 | `dispatch.stream_turn` and `dispatch.call_provider_once` take a required `model` of type `str` | `dispatch.stream_turn` and `dispatch.call_provider_once` take a required `model` of type `str` or `None` | Map "nothing chosen" to `None`. `None` runs the Claude CLI's own default, and so does `call_provider_once` for Claude without an Anthropic key; every other route refuses it with `ROUTE_FAILED`, as before. `""` is still refused with `ROUTE_FAILED`. |
 | `claude.provider.call_claude`, `claude.provider.acall_claude`, `claude.provider.acall_claude_with_mcp`, `claude.provider.acall_claude_with_mcp_stream`, `claude.adapter.call_claude_once` and `claude.adapter.stream_claude_turn` with `model=None` ran the configured `turns.claude_chat_model` | `claude.provider.call_claude`, `claude.provider.acall_claude`, `claude.provider.acall_claude_with_mcp`, `claude.provider.acall_claude_with_mcp_stream`, `claude.adapter.call_claude_once` and `claude.adapter.stream_claude_turn` with `model=None` run the Claude CLI's own default; with an Anthropic key, `call_claude` and `acall_claude` refuse it with `ROUTE_FAILED` | Pass a model wherever you relied on the configured one, and always on the API. `model=""` is now refused with `ROUTE_FAILED` on each of them; it used to reach the CLI or the API. `call_claude` without a model no longer needs `turns`. |
@@ -290,13 +307,18 @@ A host migrates at its pin bump to 0.3.0; both configuration models refuse unkno
 
 `agent_providers.sandbox.paths` holds directory-name prefix constants —
 `CODEX_IMAGE_TURN_DIRECTORY_PREFIX`, `CODEX_TOOL_TURN_DIRECTORY_PREFIX`,
-`CODEX_SANDBOX_PROOF_DIRECTORY`, `CODEX_HOME_DIRECTORY_NAME`. They are the
-contract between this package and a host's kernel sandbox profile: every
-confined Codex run works inside Bubblewrap with one writable place named by one
-of these prefixes. This library ships the constants, not a profile — a host
-brings its own AppArmor/seccomp profile that permits exactly those prefixes and
-derives it from these values, so a rename becomes a red test rather than a
-silently refused mount.
+`CODEX_HOME_DIRECTORY_NAME`. They are the contract between this package and a
+host's kernel sandbox profile: every confined Codex run works inside Bubblewrap
+with one writable place, and its directory lies directly below the host's
+private `cli_working_directory_root`. This library ships the constants, not a
+profile. A host brings its own AppArmor/seccomp profile and derives it from
+these values: it permits exactly
+`/oldroot<R>/<prefix>*/codex-home/ -> /newroot<R>/<prefix>*/codex-home/` for the
+image and tool prefixes, where `R` is the root's resolved path. A renamed prefix
+or a moved root needs the profile reloaded with the pin, so a rename becomes a
+red test rather than a silently refused mount. A host's sandbox proof allocates
+its directory as an image turn does: `CODEX_IMAGE_TURN_DIRECTORY_PREFIX` plus a
+random part, below the root, inside the runtime that configures it.
 
 The Codex image gate admits the events Codex CLI 0.163.0 measurably emits for
 a cover turn, and no command at all. One real turn on 0.163.0 (16.10.2026)

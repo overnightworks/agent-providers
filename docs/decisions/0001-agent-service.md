@@ -35,6 +35,7 @@ flowchart LR
     subgraph internal["Internal network only"]
         Svc["Agent service<br/>verify user + app, policy (purpose table, /ki-abo, owner binding), route"]
         CLI["CLI route<br/>isolated claude -p, one profile"]
+        Relay["per-run relay (loopback)"]
         API["API route<br/>service tool loop"]
     end
     LLM["LiteLLM (edge)<br/>upstream keys, budgets, aliases"]
@@ -47,7 +48,8 @@ flowchart LR
     Svc --> API
     API -- "LiteLLM alias<br/>(per-app virtual key)" --> LLM
     LLM --> Up
-    CLI -- "capability token" --> MCP
+    CLI -- "tool calls, no capability" --> Relay
+    Relay -- "capability token" --> MCP
     API -- "capability token" --> MCP
     Svc -- "SSE events, GET /runs/{id}" --> App
 ```
@@ -210,7 +212,9 @@ Per-person subscription mapping waits for a named caller.
 
 **Decision.** A profile is one subscription login, with a name, a provider
 (`claude`, `codex`, `grok`), whether background purposes may use it (H12), and
-the place its login lives under the secrets owner. There is one profile per
+its login. A Claude profile's login is one `claude setup-token` token read from the
+profile's `token_file` (A1b ruling, Q2 a); Codex and Grok keep their device-code
+logins, decided when their routes arrive (A1r3). There is one profile per
 provider. The profile list is service configuration, kept as code in edge; the
 login files live in `~/.secrets`, never in a repository.
 
@@ -240,8 +244,10 @@ a request that names its own tools or MCP endpoint could reach anything.
   to the audience (the app's MCP origin), the app, the principal, the run id, the
   purpose and the tool allowlist. It expires at ⌊admission + `[runs]
   max_duration_s`⌋, whether or not the run ended earlier, and nothing revokes it
-  (A1a4 O4). The CLI gets it in its per-run MCP
-  config header; the API-route tool loop sends the same one. The app's MCP server
+  (A1a4 O4). The CLI never gets it: a per-run relay on
+  loopback owns the run's tool events, the run's MCP config names only the relay, and
+  the capability reaches only the app (A1b ruling, Q1 a). The API-route tool loop
+  sends the same capability to the app. The app's MCP server
   checks it on every request, opens a fresh DB session and re-checks ownership.
 - Hardening: redirects are denied, egress is limited to the registered origins,
   Host and Origin are validated, and the service sits on an internal Docker
@@ -487,6 +493,136 @@ compromise.
     order table and the README rows `agent_service.app`, `agent_service.signing`,
     `agent_service.capability` and `agent_service.runners`.
 
+### A1b MCP transport (head decision HD1, 17.10.2026)
+
+A1b-9v. The relay of Q1 (a) speaks MCP to the CLI, and the service speaks MCP to
+the app. This section records which implementation does that and vets the
+alternative. HD1 is a head decision for internal machinery, not an operator
+ruling; the operator may object. It serves Q1 (a), ruled by the operator on
+17.10.2026 ("OK"), and keeps line 16 true: the capability never reaches the CLI.
+It does not reopen the choice of the MCP SDK beyond vetting HD1. The sources of
+the SDK were read and never executed (PyPI, 17.10.2026).
+
+**c1 Redirects.** Both SDK versions follow same-origin, method-keeping redirects
+themselves and ignore `follow_redirects` (2.3.0: `streamable_http.py:727-732`).
+Only a raising `httpx2` response hook pre-empts that. H3 denies redirects, so the
+SDK's default would have to be defeated.
+
+**c2 SSE resumption.** 2.3.0 resumes an interrupted SSE answer with
+`Last-Event-ID` (`streamable_http.py:511-514`). No parameter disables it.
+
+**c3 The automatic GET stream.** After `initialized`, 2.3.0 opens a GET stream with
+its own reconnect (`streamable_http.py:224-273`). The inspected SDK's
+`handle_get_stream` returns immediately without a session ID
+(`mcp/client/streamable_http.py:232`, mcp 2.3.0), so the automatic
+GET applies only when a session ID exists. No parameter disables it. A hook
+failure inside a request task ends the whole transport task group.
+
+**c4 Logger names and what each logs.**
+
+- The SDK uses the logger names `mcp.*` and also `client` (`client/session.py:71`;
+  1.30.0: `:30`).
+- It logs outgoing messages, including tool arguments, at DEBUG
+  (`streamable_http.py:635`), and SSE messages at DEBUG (`:191`).
+- It logs parse failures with `logger.exception` (`:212`, `:462`), redirect
+  locations at WARNING (`:244`, `:292`, `:391`) and transport failures with
+  `logger.exception` (`:693`).
+- `httpx2` logs request lines at INFO. `httpcore2.*` logs the `repr` of trace data,
+  response headers included, at DEBUG (`httpcore2/_trace.py:39-45`).
+- A logger with `propagate = False` and no handler still reaches stderr through
+  `logging.lastResort`.
+
+**c5 The added dependencies.**
+
+- `mcp` 2.3.0 adds four dependencies that are not locked: `mcp-types`,
+  `jsonschema`, `sse-starlette` and `python-multipart`. Fact 12 of #115 named
+  `opentelemetry-api` where `python-multipart` belongs. `mcp`'s `httpx2` is locked
+  only through the core's optional `api` extra (`anthropic`,
+  `pyproject.toml:17-18`), not as a service dependency. 1.30.0 needs `httpx<1`, `httpx-sse` and `pydantic-settings`.
+- PyPI metadata of 2.3.0 (17.10.2026) lists, besides those: `opentelemetry-api`,
+  `anyio`, `httpx2`, `pyjwt[crypto]`, `starlette`, `typing-inspection`, `uvicorn`,
+  `pydantic` and `typing-extensions`. At `9b78f3a`, `uv.lock` has no package named
+  `mcp-types`, `jsonschema`, `python-multipart`, `sse-starlette` or `mcp`;
+  `opentelemetry-api` (through FastAPI) and the others named here are locked
+  already.
+- The core already installs `httpx` 0.28.1 (`pyproject.toml:13`), with `httpcore`
+  1.0.9 and `h11` 0.16.0 below it (`uv.lock`). The service imports none of them
+  and declares none (`packages/agent-service/pyproject.toml:9-20`).
+
+**c6 `mcp-types`.** PyPI metadata of `mcp-types` 2.3.0 (17.10.2026) requires
+`pydantic>=2.12.0` and `typing-extensions>=4.13.0`, with Python `>=3.10`; it
+lists no other dependency, so by its metadata it installs alone. `mcp` 2.3.0
+pins it with `mcp-types==2.3.0`. Whether it imports alone was not executed.
+Decision: not taken. The pin inside `mcp` does not constrain a consumer that
+installs `mcp-types` alone, and its published metadata supports standalone use:
+envelope types, per-version validators and a protocol-version registry. HD1's own
+client needs about seven messages, and a dependency for them is not worth its
+maintenance.
+
+**c7 What the pinned CLI needs from the relay** (section "A1b-0c the CLI as an
+MCP client, no login", cells c1 to c9, claude 2.1.302).
+
+- It connects before its first message and without a login, and calls
+  `tools/list`. The request order is `POST server/discover`, `POST initialize`,
+  `POST notifications/initialized`, `GET`, `POST tools/list`.
+- It sends the `Authorization` value of the config's `headers` unchanged on every
+  request, `GET` included.
+- The `server/discover` probe (protocol `2026-07-28`) falls back to `initialize`
+  when it gets a JSON-RPC error with status 200, or a plain `{"error":"unsupported"}`
+  body with 400 or 404.
+- `initialize` carries `protocolVersion` `2025-11-25`. If the server answers
+  `2025-06-18` or `2025-03-26`, the CLI sends that version afterwards; with an
+  unknown version (measured: `1999-01-01`) it stops and init reports the server
+  `failed`.
+- A plain `application/json` answer is accepted (`Accept: application/json,
+  text/event-stream` on `POST`). A 202 with an empty body for
+  `notifications/initialized` is accepted.
+- `MCP-Protocol-Version` is absent on `initialize` and present on every later
+  request. `Mcp-Session-Id` is echoed when the server issued one.
+- The `GET` answered 405 is neither retried within 5 s nor counted as a failure.
+- After a 401 on every `POST` it stops after requests 1 and 2 and init reports
+  `failed`.
+- An HTTP server config starts no process, and no `DELETE` and no
+  `notifications/cancelled` arrives at the end of the session, so in the measured cases
+  (EOF on stdin, `SIGTERM`) the relay cannot learn the session ended from the CLI.
+
+**c8 The decision: HD1.** The service speaks a small JSON-only MCP profile itself,
+with no MCP SDK dependency.
+
+- *What it needs.* About seven messages. Towards the app: `initialize`,
+  `initialized`, `tools/list` and `tools/call`. Towards the CLI, the same plus
+  `ping` and `cancelled`.
+- *Why not the SDK.* SDK 2.3.0 would need four of its behaviours defeated (c1 to
+  c4: its redirects, its SSE resumption, its GET stream and its logging; the GET
+  stream applies only when a session ID exists, and HD1 allows a profile without one) and it
+  would bring four new dependencies (c5). The relay's measured needs (c7) are met
+  by plain POST with JSON answers, a 405 answer to the `GET`, and a JSON-RPC error
+  with status 200, or a 400 or 404, to `server/discover`.
+- *What it is built on.* The client uses `httpx`, the stack the core already
+  installs. The service declares it directly with the core's range, because it
+  imports it; `httpx2` would be a second HTTP stack that reaches the service only
+  through an optional extra. The relay uses `asyncio.start_server` with `h11`,
+  already locked below `uvicorn` and `httpcore`. It uses no server framework, so
+  the relay takes no signal handlers, no `sys.exit` and no access log. The locked
+  `uvicorn` 0.54.0 would replace the SIGINT and SIGTERM handlers on the main thread
+  (`Server.serve()` with `capture_signals()`, `uvicorn/server.py:88-90`,
+  `:331-349`), call `sys.exit(STARTUP_FAILURE)` when the bind fails (`:188-192`),
+  and cancel the remaining request tasks at shutdown without closing their
+  transports (`:281-311`).
+- *Interoperability.* It supports A1m's JSON-only profile only, not arbitrary
+  Streamable HTTP servers: POST, `application/json` answers, the
+  `MCP-Protocol-Version` header after `initialize`, 202 with an empty body for
+  notifications, and an optional `Mcp-Session-Id`.
+- *Cost.* About 400 lines, plus interoperability proofs against the pinned CLI
+  (A1b-0c) and against A1m.
+- *Neighbouring decisions.* HD2: results are released only after acceptance (line
+  17); the relay answers the CLI's `tools/call` only after the runner has been
+  resumed past that call's `ToolResultEvent`, and a refusal, cancellation or close
+  prevents the answer. HD3: the init check detects; it does not gate (line 18).
+- *H9.* Its import contract says "client → stdlib, pydantic, HTTP and the MCP SDK
+  only". That sentence is about `agent-client` and is untouched; HD1 adds no
+  MCP SDK to any package, so it stays true.
+
 ## H4 MCP is optional per app
 
 **Context.** Not every app has tools.
@@ -695,7 +831,7 @@ Piece 2 of A1a3 (`agent_service.run_events`, the budget beside `seq`):
     `tool_call`; a refused call (limit, stream rules, unsendable) is never
     executed, and stopping the runner at once is not an execution barrier.
     This anchors the promise that the event comes "before the tool runs"
-    (`wire.py:175`). A1b (CLI runner) and A2b (API route and tool loop) own
+    (`wire.py:211`). A1b (CLI runner) and A2b (API route and tool loop) own
     the obligation and one test each.
 
 A runner must end when its step is cancelled or closed, and its close must
@@ -905,6 +1041,91 @@ no fallback to the API route.
 
 **Consequence.** Subscription runs are bounded by that limit, and a full service says
 so instead of waiting.
+
+### A1b ruling (operator, 17.10.2026)
+
+The operator ruled the open questions of A1b (the CLI runner) on 17.10.2026. The
+words below are copied from the A1b item (#115, "Ruled by the operator"); the
+journal links hold the operator's questions and the reasoning. The mechanism of
+the parallel-run limit stands once, in H7's Decision.
+
+- **Q3 What contains a run? Ruled (a) on 17.10.2026**, verbatim: "q3=a" ([journal](https://github.com/overnightworks/agent-providers/issues/115#issuecomment-6231933018), with the operator's question and the head's reasoning).
+  - **What (a) is:** one non-root service that makes itself non-dumpable, starts Claude only with the CLI's own restrictions (`--tools ""`, `--strict-mcp-config`, `--setting-sources ""`) and reaps the run's process group. The model reads no file and runs no command; the CLI's restrictions plus the relay (Q1 a) are its whole reach. Lines 15 and 19-21 state the promise.
+  - **Accepted residuals:** the pinned, checksum-verified Claude binary is trusted, and a faulty one could read the signing key. A process the CLI itself detaches with `setsid` survives until the container restarts.
+  - **If built-in tools are ever enabled,** the provider's own sandbox is switched on. A1b builds no sandbox of its own.
+- **Parallel subscription runs. Ruled 5 on 17.10.2026**, verbatim: "nicht pro profile => der dienst soll das festlegen. kein automatisches ausweichen! default ist "hoch" keine ahnugn => 20 oder so? push back wo ich falsch liege!", then, after the head's pushback, "ja 5" ([journal](https://github.com/overnightworks/agent-providers/issues/115#issuecomment-6232221116)).
+  - The mechanism of this ruling stands in H7's Decision. The measurement of memory per run before the default is ever raised is A1b-12a.
+- **Q1, Q2 and Q8, and the ruled lines. Ruled on 17.10.2026**, verbatim: "OK", in answer to the head's two open questions ([journal](https://github.com/overnightworks/agent-providers/issues/115#issuecomment-6232435577)).
+  - **Q1 How does a tool call wait for the service's acceptance? (a), the relay.** A per-run relay on loopback owns the run's tool events. The run's MCP config names only the relay, the relay's intercepted call is the one source of `tool_call` and `tool_result`, and the capability reaches only the app (line 16). The service speaks MCP itself (HD1); H3's capability sentence and #18's row change (A1b-R). The design is in the slice cards (A1b-10a1 to A1b-10b2).
+  - **Q2 What form does a profile's login take? (a), the setup token.** One `claude setup-token` token per profile, "a one-year OAuth token" (code.claude.com/docs/en/authentication, 17.10.2026), passed only as `CLAUDE_CODE_OAUTH_TOKEN` in the child's closed environment, never as a file and never in any argv.
+    - `[profiles.<name>] token_file` is read once at startup with the key's file rules (line 14), and an API-key shape is refused.
+    - No higher-ranked credential can reach the child: Bedrock, Vertex, Foundry, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY` and `apiKeyHelper`. The environment admits only named variables, `--setting-sources ""` drops the settings files, and `apiKeySource` is checked on every run.
+    - Renewal: you replace the file the O1 way and restart (line 2). An expired token ends runs with the closed cause of line 11. Whether the CLI writes or refreshes a credential is measured in A1b-0b1.
+    - Codex and Grok use device-code logins whose renewal only the service may own; that is decided when their routes arrive (A1r3).
+  - **Q8 What happens when termination cannot be confirmed? The quarantine, not an exit** (line 20). The place of a run whose end cannot be confirmed stays taken, and the service does not restart. It keeps sending `SIGKILL` and checking in the background, frees that one place once the group is empty, and logs one ERROR line. The other places keep working; if every place hangs, the service answers busy, and a restart by the operator is the way out. This replaces the earlier recommendation "the service exits", which dated from the single-slot design. The design is in the slice cards ("Design: containment lost", A1b-3f).
+  - **The three principles stand as presented:** one long-lived token file per profile, whose absence or fault stops startup and which never appears in argv or a log, while the operator's own login stays untouched; Claude has no built-in tools and gets only the app's tools, every call accepted by the service first; at most 5 parallel subscription runs, and a place is reused only once its earlier run is confirmed ended.
+  - **The lines:** 2, 14, 15, 16 and 17 are ruled as worded; 20 is ruled as reworded to the quarantine. Line 9 is ruled with the five places above.
+
+#### The ruled lines 2, 9, 14, 15, 16, 17 and 20 (verbatim from #115's expectation list)
+
+2. [ruled by the operator 17.10.2026: "OK"] **Ein Profil nennt seine Token-Datei. Ein neues Token heißt: Datei tauschen und den Dienst neu starten. Dein eigenes Claude-Login bleibt unberührt.**
+   - *Erbt (Betreiber):* Kein App-Container hält ein Abo-Login (`:64`). *Erbt (Kopf):* H2b. Neu ist die Form des Logins (Q2 = a, das Setup-Token).
+   - *Beispiel:* Läuft das Token nach einem Jahr ab, erzeugst du mit `claude setup-token` ein neues. Du ersetzt die Datei unter `~/.secrets/agent-service/` und startest den Dienst neu. Dein Claude im Terminal bleibt angemeldet, weil der Dienst `~/.claude` nie liest.
+   - *Gegenbeispiel:* Der Dienst liest die Datei vor jedem Lauf neu, sodass ein Tausch ohne Neustart wirkt.
+   - *Default:* entfällt; wie formuliert entschieden.
+   - *Beleg:* A1b-0b1, A1b-6a.
+9. [ruled by the operator 17.10.2026: "ja 5"] **Es gibt N Plätze für den ganzen Dienst, Default 5, in der Konfiguration des Dienstes. Erst wenn alle belegt sind, kommt sofort „beschäftigt“ mit Wiederholzeit. Kein automatisches Ausweichen auf den API-Weg.**
+   - *Geerbt (Kopf):* H7 „one active subscription run … 429 Retry-After … no queue“ (jetzt: N parallele Abo-Läufe, ein Limit für den Dienst, nicht je Profil) und #68 „die Weigerung kommt vor der Capability“. Nur Abo-Läufe belegen einen Platz.
+   - *Beispiel:* Mit den fünf Plätzen belegt will Songmaker einen sechsten Abo-Lauf: Er bekommt sofort „The service is busy; retry later.“ mit `Retry-After: 10`. Ein Lauf auf dem API-Weg, den er ausdrücklich verlangt, startet trotzdem und belegt nichts; ein abgewiesener Antrag belegt nichts. Steht in der Konfiguration `max_parallel_cli_runs = 2`, sind es zwei Plätze.
+   - *Gegenbeispiel:* Der sechste Antrag wird nicht still auf den API-Weg umgeleitet, nicht in eine Warteschlange gestellt, und `Retry-After` nennt nicht die Restzeit des laufenden Laufs (bis zu 600 s).
+   - *Default:* 5 Plätze (`[runs] max_parallel_cli_runs`, ganze Zahl ab 1, beim Start geprüft; 0 oder negativ wird abgelehnt); Wiederholzeit 10 s als Konstante neben `RETRY_UNAVAILABLE_AFTER_SECONDS` (`app.py:59`).
+   - *Beleg:* A1b-1; A1b-12a misst den Speicher je Lauf, bevor der Default erhöht wird.
+14. [ruled by the operator 17.10.2026: "OK"] **Eine fehlende, offene oder falsche Token-Datei stoppt den Start, ohne ihren Inhalt zu zeigen.**
+    - *Erbt (Betreiber):* die Datei-Regeln des Signierschlüssels (O1 und A1a4 Punkte 1-2, `:327-341`). Neu ist ihre Anwendung auf das Abo-Token.
+    - *Beispiel:* Ist die Datei für die Gruppe lesbar, ist sie ein Ordner, oder steht darin ein API-Schlüssel (`sk-ant-api…`) statt eines Abo-Tokens, startet der Dienst nicht. Er nennt `profiles.<name>.token_file` und den Pfad, nie den Inhalt.
+    - *Gegenbeispiel:* Der Dienst startet, und nur die Abo-Läufe scheitern, bis die Datei stimmt.
+    - *Default:* entfällt; wie formuliert entschieden.
+    - *Beleg:* A1b-6a.
+15. [ruled by the operator 17.10.2026: "OK"] **Das Modell eines Laufs liest keine Datei und führt keinen Befehl aus. Es erreicht nur die erlaubten Werkzeuge der App (Zeile 18). Dem gepinnten Claude-Programm selbst wird vertraut.**
+    - *Erbt (Betreiber):* Q3 = (a), „q3=a“ (17.10.2026). *Erbt (Kopf):* H7 „unprivileged user, empty private working directory, restricted built-in tools“ und #18 „only the selected profile's login is visible“.
+    - *Was (a) festlegt:*
+      - Das Programm startet ohne eingebaute Werkzeuge (`--tools ""`), nur mit der MCP-Konfiguration des Laufs (`--strict-mcp-config`) und ohne Einstellungsdateien (`--setting-sources ""`). Meldet es beim Start trotzdem ein eingebautes Werkzeug, endet der Lauf (Zeile 18).
+      - Der Dienst läuft nie als root und macht sich nicht auslesbar (`PR_SET_DUMPABLE` 0). Speicher und Umgebung des Dienstes sind darum für das Programm zu.
+      - Werden eingebaute Werkzeuge je eingeschaltet, wird die Sandbox des Anbieters eingeschaltet. Eine eigene Sandbox bauen wir nicht.
+    - *Angenommene Restrisiken:*
+      - **Das Programm ist vertraut.** Es läuft mit dem Benutzer des Dienstes. Es selbst könnte den Signierschlüssel, die Token-Datei, die Ordner anderer Läufe und jede Datei des Dienstes lesen und ändern und dem Dienst Signale schicken. Ein fehlerhaftes Programm könnte mit dem Schlüssel Capabilities für jede App und jeden Nutzer ausstellen. Dagegen schützt allein, dass genau die gepinnte, per Prüfsumme geprüfte Version läuft (Zeile 7).
+      - **Der `setsid`-Entkommene.** Ein Prozess, den das Programm selbst mit `setsid` abkoppelt, lebt bis zum Neustart des Containers und reicht so weit wie das Programm (Zeile 19).
+    - *Das Netz:* Der Lauf teilt das Netz des Dienstes und erreicht, was der Container erreicht. Dazu gehören der Port des Dienstes und das Relay seines Laufs auf dem lokalen Loopback, die internen Dienste in den Netzen des Containers (LiteLLM, die MCP-Server der Apps, step-ca) und die freigegebenen Ziele.
+    - *Beispiel:* Bittet jemand im Co-Writer das Modell, den Signierschlüssel zu lesen oder `ls` auszuführen, hat es dafür kein Werkzeug. Es kann nur die Werkzeuge rufen, die `[apps.songmaker] tools` nennt.
+    - *Gegenbeispiel:* Der Dienst baut um jeden Lauf eine eigene Sandbox, damit auch ein fehlerhaftes Programm den Schlüssel nicht sieht (Q3 d, nicht gewählt).
+    - *Default:* entfällt; wie formuliert entschieden.
+    - *Beleg:* A1b-4a, A1b-5, A1b-7n, A1b-12b.
+16. [ruled by the operator 17.10.2026: "OK"] **Kein Token steht in einer Befehlszeile, im Stream, in einer Antwort oder im Log, und die Capability erreicht das Claude-Programm nie.**
+    - *Erbt (Kopf):* H7 „tokens never in argv, events or logs“ und A1a4 Punkt 14. Neu ist, dass die Capability nur noch die App erreicht. Das ändert H3 (`:242-243`) und den Zeilentext von #18 (Q1 = a, das Relay).
+    - *Beispiel:* Wer auf dem Rechner `ps` aufruft, sieht in keiner Befehlszeile ein Token. Das Abo-Token steht nur in der Umgebung des Programms; dort lesen es der Benutzer des Dienstes und root. Schickt die App die Capability in einer Antwort zurück, wird die Antwort nicht weitergegeben, und der Lauf scheitert.
+    - *Gegenbeispiel:* Die Capability steht, wie H3 heute sagt, in der 0600-MCP-Datei des Laufs. Das Programm könnte sie lesen und bis zu 10 Minuten lang die Werkzeuge der App in deinem Namen aufrufen (Betreiber-Ruling O4).
+    - *Default:* entfällt; wie formuliert entschieden.
+    - *Beleg:* A1b-0b1, A1b-4a, A1b-9b1, A1b-9b2, A1b-9c, A1b-10a2, A1b-10b2, A1b-11.
+17. [ruled by the operator 17.10.2026: "OK"] **Kein Werkzeug läuft, bevor der Dienst genau diesen Aufruf angenommen hat. Kein Ergebnis erreicht das Modell, bevor der Dienst genau dieses Ergebnis angenommen hat.**
+    - *Erbt (Kopf):* A1a3 Punkt 20 und #38. Die Wirkung in der App ist unumkehrbar, darum wird gesprochen entschieden.
+    - *Beispiel:*
+      - Schickt das Programm zwei Aufrufe gleichzeitig und erlaubt das Budget nur noch einen, wird nur der erste in der App ausgeführt, der zweite nie.
+      - Ist ein Ergebnis zu groß für das Byte-Budget, endet der Lauf, und das Modell sieht das Ergebnis nie.
+      - „Angenommen“ heißt: Der Dienst hat das Ereignis geprüft, gezählt, aufgezeichnet und in den Ausgang gelegt (Fakt 4). Ob der Client es schon empfangen hat, sagt das nicht.
+    - *Gegenbeispiel:* Das Programm ruft die App selbst auf, und der Dienst meldet den Aufruf nur nachträglich. So arbeitet der Kern heute mit `--allowedTools` (Fakt 9).
+    - *Default:* entfällt; wie formuliert entschieden.
+    - *Beleg:* A1b-10b1, A1b-10b2, A1b-11.
+20. [ruled by the operator 17.10.2026: "OK", als Quarantäne nach Q8] **Kann der Dienst nicht bestätigen, dass die Prozessgruppe eines Laufs leer ist, bleibt der Platz dieses Laufs belegt. Der Dienst versucht es im Hintergrund weiter, gibt genau diesen Platz frei, sobald die Gruppe leer ist, und schreibt eine ERROR-Zeile. Die anderen Plätze arbeiten weiter; der Dienst beendet sich nicht und startet nicht neu.**
+    - *Neu* (Q8). Ein Überlebender verbraucht das Abo und könnte Werkzeuge rufen; darum geht sein Platz an keinen neuen Lauf.
+    - *„Bestätigt“ heißt:* Nach SIGKILL an die Gruppe meldet `killpg(pgid, 0)` innerhalb der Frist, dass kein Mitglied mehr lebt. Eine Gruppen-ID wird nicht neu vergeben, solange ein Mitglied lebt.
+    - *Im Hintergrund:* Der Dienst schickt genau dieser Gruppe in festem Abstand weiter SIGKILL und prüft erneut, so lange, bis sie leer ist. Erst dann wird der Platz frei. Die ERROR-Zeile nennt den Lauf und kommt einmal, nicht bei jedem Versuch.
+    - *Angenommene Restrisiken:*
+      - Einen Prozess, den das Programm selbst mit `setsid` abkoppelt, sieht diese Bestätigung nicht. Er lebt bis zum Neustart des Containers (Zeile 19). Dass das Programm keinen abkoppelt, beruht auf dem Vertrauen in die gepinnte Version (Zeile 15).
+      - Hängen alle Plätze, antwortet der Dienst auf jeden Abo-Lauf „beschäftigt“. Der Ausweg ist dann dein Neustart des Dienstes.
+    - *Beispiel:* Von fünf Plätzen hängt einer, weil ein Prozess seines Laufs nach SIGKILL nicht endet. Im Log steht eine ERROR-Zeile mit diesem Lauf. Vier Abo-Läufe laufen nebeneinander weiter, ein weiterer bekommt „beschäftigt“. Endet der hängende Prozess zwei Minuten später doch, ist der Platz ohne Neustart wieder frei. Hängen alle fünf, bekommt jeder Abo-Lauf „beschäftigt“, bis du den Dienst neu startest.
+    - *Gegenbeispiel:* Der Dienst beendet sich, und der Container startet neu (die frühere Empfehlung Q8 a); das bricht die vier gesunden Läufe ab. Oder der Platz wird trotzdem frei, und ein neuer Lauf startet neben dem Überlebenden (früher Q8 c).
+    - *Default:* entfällt; als Quarantäne entschieden.
+    - *Beleg:* A1b-3, A1b-3f, A1b-8.
 
 ### A1b measured: claude 2.1.302
 
@@ -1474,7 +1695,7 @@ settles the open points named here.
 | A1a3 Liveness and limits | agent-providers | Heartbeat, idle timeout, maximum duration, tool-call and byte limits, and slow clients. This row owns H6's limits. | — | A1a1 |
 | A1a4 Signing key and capability | agent-providers | An RS256 capability is minted at admission and handed to the runner, with one key, its `kid` and a documented rotation. The registry gains the MCP origin. | — | A1a1 |
 | A1a5 Job tickets | agent-providers | `POST /job-tickets` (own audience, at most 24 h), ticket runs and the `background` flag. The ticket binds `/ki-abo` and the app group (H12). | — | A1a4 |
-| A1b CLI runner | agent-providers | H7 isolation, and only the selected profile's login is visible to its run. The service-wide limit of parallel subscription runs (default 5) is taken, and a request beyond it gets 429 `busy` with `Retry-After`. Cancel and disconnect kill and reap the process group. The per-run MCP config carries the capability, and no token appears in argv or logs. | — | A1a1 |
+| A1b CLI runner | agent-providers | H7 isolation, and only the selected profile's login is visible to its run. The service-wide limit of parallel subscription runs (default 5) is taken, and a request beyond it gets 429 `busy` with `Retry-After`. Cancel and disconnect kill and reap the process group. The run's MCP config names only the relay, which owns the run's tool events; the capability reaches only the app, and no token appears in argv or logs. | — | A1a1 |
 | A1m MCP helper | agent-providers | The `agent-client` Streamable HTTP MCP server helper verifies the capability (format from A1a4), denies redirects, validates Host/Origin, and refuses a bad audience, an expired capability, a wrong run or a tool off the allowlist. | — | A0b, A1a4 |
 | A1d Deployment | edge | A tagged service image is built from the agent-providers release. It runs in edge compose on an internal network with egress limited to the registered origins and LiteLLM. The profile config is code, each profile's login sits in its own volume from `~/.secrets`, and Keycloak has the `agent-service` audience plus the workload clients. A live smoke test with the operator's account reaches a terminal event. | — | A1b, A1m, edge#12 live |
 | A1s Songmaker co-writer moves | songmaker | The co-writer runs through the service with the operator's real login, and its tools work over MCP with ownership checks. The in-process co-writer route is removed, along with the local provider/model/route choice. | — | A1d, Songmaker on Keycloak (K12) |

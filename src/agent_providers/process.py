@@ -287,6 +287,8 @@ def cli_settle_deadline(deadline: float) -> float:
 
 CLI_PROBE_CALLER_TIMEOUT_SECONDS = PROBE_TIMEOUT_SECONDS + _cli_settle_margin_seconds()
 _BACKGROUND_REAP_POLL_SECONDS: Final = 0.1
+_BACKGROUND_REAP_LIMIT_SECONDS: Final = 60.0
+_reap_callbacks_held_until_exit: list[Callable[[int, bool], None]] = []
 
 log = logging.getLogger(__name__)
 
@@ -1210,6 +1212,9 @@ class PrivateCredentialHome:
     Removal never decides a call's outcome. A home that cannot be removed is
     logged by error class alone and stays owned: its finalizer retries when the
     home is collected or the process exits.
+
+    Its bookkeeping waits on no lock a signal could leave held: state changes
+    are attribute stores and single operations on identity-hashed containers.
     """
 
     def __init__(
@@ -1221,23 +1226,25 @@ class PrivateCredentialHome:
         missing_credential_is_error: bool,
         credential_copy: CredentialCopy | None = None,
     ) -> None:
+        registry_key = object()
+        created: str | None = None
         try:
-            created = tempfile.mkdtemp(
-                prefix=prefix, dir=current_config().cli_working_directory_root,
+            try:
+                created = tempfile.mkdtemp(
+                    prefix=prefix, dir=current_config().cli_working_directory_root,
+                )
+            except OSError:
+                raise_without_chain(AgentCliUnavailableError("could not create a private CLI home"))
+            self._finalizer = weakref.finalize(
+                self, _remove_abandoned_tree, Path(created), os.getpid(), registry_key,
             )
-        except OSError:
-            raise_without_chain(AgentCliUnavailableError("could not create a private CLI home"))
-        self._home = Path(created)
-        self._reservations = 0
-        self._cleanup_requested = False
-        self._cleaned = False
-        self._lock = threading.Lock()
-        self._finalizer = weakref.finalize(
-            self, _remove_abandoned_tree, self._home, os.getpid(),
-        )
-        with _live_homes_lock:
-            _live_homes.add(self)
-        try:
+            _live_home_finalizers[registry_key] = self._finalizer
+            self._registry_key = registry_key
+            self._home = Path(created)
+            self._reservation_tokens: set[_PrivateCredentialHomeReservation] = set()
+            self._cleanup_requested = False
+            self._cleaned = False
+            self._removal_claim = threading.Lock()
             try:
                 os.chmod(self._home, 0o700)
             except OSError:
@@ -1249,8 +1256,8 @@ class PrivateCredentialHome:
                 credential_copy=credential_copy,
                 missing_credential_is_error=missing_credential_is_error,
             )
-        except BaseException:
-            self._discard_failed_setup()
+        except BaseException:  # NOSONAR(S5754) removes the tree, re-raises
+            _discard_failed_home(created, registry_key)
             raise
 
     @property
@@ -1258,52 +1265,43 @@ class PrivateCredentialHome:
         return self._home
 
     def reserve(self) -> _PrivateCredentialHomeReservation:
-        with self._lock:
-            if self._cleanup_requested:
-                raise RuntimeError("private credential home is closing")
-            self._reservations += 1
-        return _PrivateCredentialHomeReservation(self)
+        token = _PrivateCredentialHomeReservation(self)
+        self._reservation_tokens.add(token)
+        if self._cleanup_requested:
+            self._reservation_tokens.discard(token)
+            self._remove_if_unused()
+            raise RuntimeError("private credential home is closing")
+        return token
 
     def close(self) -> None:
         """Remove the home once no child holds it; never raises for a failed removal."""
-        with self._lock:
-            self._cleanup_requested = True
-            self._remove_if_unused_locked()
+        self._cleanup_requested = True
+        self._remove_if_unused()
 
-    def _discard_failed_setup(self) -> None:
-        if _remove_private_tree(self._home):
-            self._finalizer.detach()
+    def _release(self, token: _PrivateCredentialHomeReservation) -> None:
+        self._reservation_tokens.discard(token)
+        self._remove_if_unused()
 
-    def _release(self) -> None:
-        with self._lock:
-            self._reservations -= 1
-            if self._reservations < 0:
-                raise RuntimeError("private credential home reservation released twice")
-            self._remove_if_unused_locked()
-
-    def _remove_if_unused_locked(self) -> None:
-        if (
-            self._cleanup_requested
-            and not self._reservations
-            and not self._cleaned
-            and _remove_private_tree(self._home)
-        ):
-            self._cleaned = True
-            self._finalizer.detach()
+    def _remove_if_unused(self) -> None:
+        if not self._cleanup_requested or self._reservation_tokens:
+            return
+        if not self._removal_claim.acquire(blocking=False):
+            return
+        try:
+            if not self._cleaned and _remove_private_tree(self._home):
+                self._cleaned = True
+                self._finalizer.detach()
+                _live_home_finalizers.pop(self._registry_key, None)
+        finally:
+            self._removal_claim.release()
 
 
 class _PrivateCredentialHomeReservation:
     def __init__(self, home: PrivateCredentialHome) -> None:
         self._home = home
-        self._released = False
-        self._lock = threading.Lock()
 
     def release(self) -> None:
-        with self._lock:
-            if self._released:
-                return
-            self._released = True
-        self._home._release()
+        self._home._release(self)
 
     def on_spawn_failed(self) -> None:
         self.release()
@@ -1312,7 +1310,15 @@ class _PrivateCredentialHomeReservation:
         self.release()
 
 
-def _remove_abandoned_tree(root: Path, creator_process_id: int) -> None:
+def _discard_failed_home(created: str | None, registry_key: object) -> None:
+    if created is not None and _remove_private_tree(Path(created)):
+        finalizer = _live_home_finalizers.pop(registry_key, None)
+        if finalizer is not None:
+            finalizer.detach()
+
+
+def _remove_abandoned_tree(root: Path, creator_process_id: int, registry_key: object) -> None:
+    _live_home_finalizers.pop(registry_key, None)
     if os.getpid() != creator_process_id:
         return
     if not _remove_private_tree(root):
@@ -1320,10 +1326,8 @@ def _remove_abandoned_tree(root: Path, creator_process_id: int) -> None:
 
 
 def _sweep_failed_homes_at_exit() -> None:
-    with _live_homes_lock:
-        live_homes = tuple(_live_homes)
-    for home in live_homes:
-        home._finalizer()
+    for finalizer in _live_home_finalizers.copy().values():
+        finalizer()
     for root, creator_process_id in tuple(_homes_awaiting_exit_sweep):
         if os.getpid() == creator_process_id:
             _remove_private_tree(root)
@@ -1331,17 +1335,7 @@ def _sweep_failed_homes_at_exit() -> None:
 
 # The sweep finalizes the still-live homes itself, so it holds whichever of its
 # and weakref's exit hooks atexit runs first; a finalizer runs at most once.
-_live_homes: weakref.WeakSet["PrivateCredentialHome"] = weakref.WeakSet()
-_live_homes_lock = threading.Lock()
-
-
-def _replace_live_homes_lock_in_child() -> None:
-    global _live_homes_lock
-    _live_homes_lock = threading.Lock()
-
-
-# A forked child inherits a lock whose holding thread does not exist there.
-os.register_at_fork(after_in_child=_replace_live_homes_lock_in_child)
+_live_home_finalizers: dict[object, weakref.finalize] = {}
 _homes_awaiting_exit_sweep: set[tuple[Path, int]] = set()
 atexit.register(_sweep_failed_homes_at_exit)
 
@@ -1658,12 +1652,22 @@ def _reap_in_background(
     on_reaped: Callable[[int, bool], None] | None,
 ) -> None:
     failures = StepFailures()
+    outlived_bound = False
     with failures.contained("background reap of agent CLI process group"):
+        bound = time.monotonic() + _BACKGROUND_REAP_LIMIT_SECONDS
         while _process_group_exists(process.pid):
+            if time.monotonic() >= bound:
+                outlived_bound = True
+                break
             process.poll()
             time.sleep(_BACKGROUND_REAP_POLL_SECONDS)
-    with failures.contained("on_reaped"):
-        _notify_reaped(on_reaped, process.pid, became_zombie=True)
+    if outlived_bound:
+        log.error("agent CLI process group %s outlived its background reap", process.pid)
+        if on_reaped is not None:
+            _reap_callbacks_held_until_exit.append(on_reaped)
+    else:
+        with failures.contained("on_reaped"):
+            _notify_reaped(on_reaped, process.pid, became_zombie=True)
     failures.report()
 
 

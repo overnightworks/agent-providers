@@ -1009,6 +1009,126 @@ def _a_session_leader(command: str) -> subprocess.Popen[bytes]:
     )
 
 
+_A_SHORT_REAP_BOUND_SECONDS = 0.2
+_REAP_BOUND_SLACK_SECONDS = 0.5
+
+
+@pytest.fixture
+def a_background_reap_over_a_group_that_never_dies(monkeypatch):
+    monkeypatch.setattr(process, "_BACKGROUND_REAP_LIMIT_SECONDS", _A_SHORT_REAP_BOUND_SECONDS)
+    monkeypatch.setattr(process, "_BACKGROUND_REAP_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(process, "_process_group_exists", lambda _process_id: True)
+    held: list = []
+    monkeypatch.setattr(process, "_reap_callbacks_held_until_exit", held)
+    return held
+
+
+def test_a_background_reap_ends_at_its_bound_and_keeps_what_it_holds(
+    tmp_path: Path, a_background_reap_over_a_group_that_never_dies, caplog,
+) -> None:
+    held = a_background_reap_over_a_group_that_never_dies
+    process_pool = CodexProcessPool(maximum_processes=2, maximum_image_runs=1)
+    pool_reservation = process_pool.reserve(CodexProcessKind.IMAGE)
+    home = _build_home(_a_source_login(tmp_path))
+    home_reservation = home.reserve()
+    child = _a_session_leader(":")
+    process_pool.bind(pool_reservation, child.pid)
+    release_pool = pool_callbacks(process_pool, pool_reservation)["on_reaped"]
+
+    def on_reaped(process_id: int, became_zombie: bool) -> None:
+        release_pool(process_id, became_zombie)
+        home_reservation.on_reaped(process_id, became_zombie)
+
+    caplog.set_level(logging.ERROR, logger=process.__name__)
+    started = time.monotonic()
+
+    process._reap_in_background(child, on_reaped)
+
+    assert time.monotonic() - started < _A_SHORT_REAP_BOUND_SECONDS + _REAP_BOUND_SLACK_SECONDS
+    [record] = caplog.records
+    assert record.getMessage() == (
+        f"agent CLI process group {child.pid} outlived its background reap"
+    )
+    assert record.exc_info is None
+    assert held[-1] is on_reaped
+    assert process_pool.reservation_count() == 1
+    home.close()
+    assert home.path.exists()
+    child.communicate()
+    held[-1](child.pid, True)
+    assert process_pool.reservation_count() == 0
+    assert not home.path.exists()
+
+
+_REAP_OUTLIVED_IN_A_SUBPROCESS_SCRIPT = """
+import gc
+import subprocess
+import sys
+from pathlib import Path
+
+from agent_providers import process
+from agent_providers.config import ProviderRuntimeConfig, configure
+from agent_providers.process import PrivateCredentialHome
+
+configure(ProviderRuntimeConfig.model_validate_json(sys.argv[1]))
+process._BACKGROUND_REAP_LIMIT_SECONDS = 0.2
+process._BACKGROUND_REAP_POLL_SECONDS = 0.01
+process._process_group_exists = lambda _process_id: True
+home = PrivateCredentialHome(
+    Path(sys.argv[2]),
+    Path(".claude/.credentials.json"),
+    prefix="private-home-",
+    missing_credential_is_error=True,
+)
+home_path = home.path
+child = subprocess.Popen(("/bin/sh", "-c", ":"))
+process._reap_in_background(child, home.reserve().on_reaped)
+child.wait()
+home.close()
+del home, child
+gc.collect()
+print(home_path)
+print(home_path.exists())
+"""
+
+
+def test_a_home_whose_reap_outlived_its_bound_stays_until_exit(tmp_path: Path) -> None:
+    home_path, existed_after_collection = _run_home_script(
+        _REAP_OUTLIVED_IN_A_SUBPROCESS_SCRIPT, tmp_path,
+    )
+
+    assert existed_after_collection == "True"
+    assert not Path(home_path).exists()
+
+
+def test_a_zombie_whose_group_never_dies_frees_its_runner_thread(
+    monkeypatch, a_background_reap_over_a_group_that_never_dies,
+) -> None:
+    held = a_background_reap_over_a_group_that_never_dies
+    monkeypatch.setattr(process, "_reap_process_group", lambda _process: True)
+    threads_before = set(threading.enumerate())
+    reaped: list[tuple[int, bool]] = []
+
+    outcome = run_cli_bounded(
+        shell_child("-c", "printf ready"),
+        stdin_payload=None,
+        read="all",
+        deadline=time.monotonic() + 1,
+        on_reaped=lambda process_id, became_zombie: reaped.append((process_id, became_zombie)),
+    )
+    settled_at = time.monotonic()
+    runner_threads = set(threading.enumerate()) - threads_before
+    for runner_thread in runner_threads:
+        runner_thread.join(timeout=_A_SHORT_REAP_BOUND_SECONDS + _REAP_BOUND_SLACK_SECONDS)
+
+    assert outcome.became_zombie is True
+    assert not any(runner_thread.is_alive() for runner_thread in runner_threads)
+    assert time.monotonic() - settled_at < _A_SHORT_REAP_BOUND_SECONDS + _REAP_BOUND_SLACK_SECONDS
+    assert reaped == []
+    assert len(held) == 1
+
+
+
 def test_bounded_runner_stops_collecting_at_the_byte_limit(monkeypatch) -> None:
     monkeypatch.setattr("agent_providers.process.CLI_OUTPUT_READ_LIMIT_BYTES", 32)
 
@@ -1847,7 +1967,364 @@ def test_private_credential_home_survives_the_exit_of_a_forked_child(tmp_path: P
     assert completed.stdout.split() == ["True", "False"]
 
 
-_FORK_WHILE_REGISTRY_LOCKED_SCRIPT = """
+_HOME_CODES = {
+    "construction": (
+        PrivateCredentialHome.__init__,
+        process._discard_failed_home,
+        process._remove_private_tree,
+    ),
+    "reserve": (
+        PrivateCredentialHome.reserve,
+        PrivateCredentialHome._remove_if_unused,
+        process._remove_private_tree,
+    ),
+    "release": (
+        process._PrivateCredentialHomeReservation.release,
+        PrivateCredentialHome._release,
+        PrivateCredentialHome._remove_if_unused,
+        process._remove_private_tree,
+    ),
+    "close": (
+        PrivateCredentialHome.close,
+        PrivateCredentialHome._remove_if_unused,
+        process._remove_private_tree,
+    ),
+    "removal attempt": (
+        PrivateCredentialHome._remove_if_unused,
+        process._remove_private_tree,
+    ),
+}
+_HOME_OPERATION_ARRANGEMENTS = {
+    "construction": lambda source: lambda: _build_home(source),
+    "reserve": lambda source: _build_home(source).reserve,
+    "release": lambda source: _a_closing_home_holding_a_reservation(source).release,
+    "close": lambda source: _build_home(source).close,
+    "removal attempt": lambda source: _build_home(source).close,
+}
+
+
+def _home_code(operation: str) -> frozenset:
+    return frozenset(function.__code__ for function in _HOME_CODES[operation])
+
+
+def _a_source_login(directory: Path) -> Path:
+    source = directory / "source.json"
+    source.write_text(_CATALOG_AUTH_PAYLOAD)
+    return source
+
+
+def _build_home(source: Path) -> PrivateCredentialHome:
+    return PrivateCredentialHome(
+        source,
+        Path(".claude/.credentials.json"),
+        prefix="private-home-",
+        missing_credential_is_error=True,
+    )
+
+
+def _a_closing_home_holding_a_reservation(source: Path):
+    home = _build_home(source)
+    reservation = home.reserve()
+    home.close()
+    return reservation
+
+
+def _interrupted_by_a_keyboard_interrupt_at(position: int, codes: frozenset, operation) -> bool:
+    tracer_found_at_entry = sys.gettrace()
+    gc.disable()
+    sys.settrace(_interrupt_at_line(position, codes))
+    try:
+        completed_with = operation()
+    except KeyboardInterrupt:
+        return True
+    finally:
+        sys.settrace(tracer_found_at_entry)
+        gc.enable()
+    del completed_with
+    return False
+
+
+def _a_fresh_home_is_used_and_removed_by_another_thread(source: Path) -> None:
+    result: list[Path] = []
+
+    def use_a_fresh_home() -> None:
+        home = _build_home(source)
+        home.reserve().release()
+        home.close()
+        result.append(home.path)
+
+    worker = threading.Thread(target=use_a_fresh_home)
+    worker.start()
+    worker.join(timeout=1)
+    assert not worker.is_alive()
+    assert not result[0].exists()
+
+
+@pytest.mark.parametrize("operation", _HOME_CODES)
+def test_an_interruption_at_any_line_of_a_private_home_never_blocks_the_next(
+    tmp_path: Path, operation: str,
+) -> None:
+    source = _a_source_login(tmp_path)
+    position = 1
+    while True:
+        run = _HOME_OPERATION_ARRANGEMENTS[operation](source)
+        interrupted = _interrupted_by_a_keyboard_interrupt_at(
+            position, _home_code(operation), run,
+        )
+        del run
+        if not interrupted:
+            break
+        _a_fresh_home_is_used_and_removed_by_another_thread(source)
+        gc.collect()
+        assert not list(tmp_path.glob("private-home-*")), f"line event {position}"
+        position += 1
+    assert position > 1
+
+
+class _LedgerOfRemovals:
+    def __init__(self, home: PrivateCredentialHome) -> None:
+        self.removals = 0
+        self.tokens_held_at_a_removal: list[bool] = []
+        real_remove = process._remove_private_tree
+
+        def remove_and_record(root: Path) -> bool:
+            self.removals += 1
+            self.tokens_held_at_a_removal.append(bool(home._reservation_tokens))
+            return real_remove(root)
+
+        self._patch = patch.object(process, "_remove_private_tree", remove_and_record)
+
+    def __enter__(self) -> _LedgerOfRemovals:
+        self._patch.start()
+        return self
+
+    def __exit__(self, *_exception) -> None:
+        self._patch.stop()
+
+
+class _ThreadedOperation:
+    """Runs an operation on a thread, stopping it at its k-th line event inside the given code."""
+
+    _BOUND_SECONDS = 5
+
+    def __init__(self, operation, *, pause_in: frozenset = frozenset(), at_line: int = 0) -> None:
+        self._operation = operation
+        self._pause_in = pause_in
+        self._pause_at_line = at_line
+        self._seen_lines = 0
+        self._stopped_or_ended = threading.Event()
+        self._resume = threading.Event()
+        self.paused = False
+        self.outcome = None
+        self.refusal: RuntimeError | None = None
+        self._thread = threading.Thread(target=self._run)
+
+    def start(self) -> None:
+        self._thread.start()
+        assert self._stopped_or_ended.wait(self._BOUND_SECONDS), "the operation hung"
+
+    def finish(self) -> None:
+        self._resume.set()
+        self._thread.join(self._BOUND_SECONDS)
+        assert not self._thread.is_alive()
+
+    def _run(self) -> None:
+        tracer_found_at_entry = sys.gettrace()
+        sys.settrace(self._on_call)
+        try:
+            self.outcome = self._operation()
+        except RuntimeError as refusal:
+            self.refusal = refusal
+        finally:
+            sys.settrace(tracer_found_at_entry)
+            self._stopped_or_ended.set()
+
+    def _on_call(self, frame, event, argument):
+        return self._on_line if frame.f_code in self._pause_in else None
+
+    def _on_line(self, frame, event, argument):
+        if event == "line":
+            self._seen_lines += 1
+            if self._seen_lines == self._pause_at_line:
+                self.paused = True
+                self._stopped_or_ended.set()
+                self._resume.wait(self._BOUND_SECONDS)
+        return self._on_line
+
+
+def _code_of(*functions) -> frozenset:
+    return frozenset(function.__code__ for function in functions)
+
+
+_RESERVING_CODE = _code_of(*_HOME_CODES["reserve"])
+_CLOSING_CODE = _code_of(*_HOME_CODES["close"])
+_RELEASING_CODE = _code_of(*_HOME_CODES["release"])
+
+
+def _run_interleaved_at_every_line(
+    source: Path, *, paused_code: frozenset, operations_of, outcome_holds,
+) -> None:
+    position = 1
+    while True:
+        home = _build_home(source)
+        with _LedgerOfRemovals(home) as ledger:
+            paused_operation, other_operation = operations_of(home)
+            paused = _ThreadedOperation(
+                paused_operation, pause_in=paused_code, at_line=position,
+            )
+            paused.start()
+            other = _ThreadedOperation(other_operation)
+            other.start()
+            paused.finish()
+            outcome_holds(home, ledger, paused, other)
+        if not paused.paused:
+            break
+        position += 1
+    assert position > 1
+
+
+def _assert_a_reservation_attempt_kept_or_refused_its_home(home, ledger, attempt) -> None:
+    if attempt.refusal is not None:
+        assert str(attempt.refusal) == "private credential home is closing"
+        assert not home._reservation_tokens
+        assert ledger.removals == 1
+    else:
+        assert ledger.removals == 0
+        assert home.path.exists()
+        attempt.outcome.release()
+        assert ledger.removals == 1
+    assert not home.path.exists()
+    assert ledger.tokens_held_at_a_removal == [False]
+
+
+@pytest.mark.parametrize("paused_operation", ("reserve", "close"))
+def test_reserve_and_close_interleaved_at_every_line_remove_a_home_once(
+    tmp_path: Path, paused_operation: str,
+) -> None:
+    reserving_is_paused = paused_operation == "reserve"
+
+    def operations_of(home):
+        return (home.reserve, home.close) if reserving_is_paused else (home.close, home.reserve)
+
+    def outcome_holds(home, ledger, paused, other) -> None:
+        reserving = paused if reserving_is_paused else other
+        _assert_a_reservation_attempt_kept_or_refused_its_home(home, ledger, reserving)
+
+    _run_interleaved_at_every_line(
+        _a_source_login(tmp_path),
+        paused_code=_RESERVING_CODE if reserving_is_paused else _CLOSING_CODE,
+        operations_of=operations_of,
+        outcome_holds=outcome_holds,
+    )
+
+
+@pytest.mark.parametrize("paused_operation", ("close", "release"))
+def test_close_and_the_last_release_interleaved_at_every_line_remove_a_home_once(
+    tmp_path: Path, paused_operation: str,
+) -> None:
+    closing_is_paused = paused_operation == "close"
+    def operations_of(home):
+        release = home.reserve().release
+        return (home.close, release) if closing_is_paused else (release, home.close)
+
+    def outcome_holds(home, ledger, _paused, _other) -> None:
+        assert ledger.removals == 1
+        assert ledger.tokens_held_at_a_removal == [False]
+        assert not home.path.exists()
+
+    _run_interleaved_at_every_line(
+        _a_source_login(tmp_path),
+        paused_code=_CLOSING_CODE if closing_is_paused else _RELEASING_CODE,
+        operations_of=operations_of,
+        outcome_holds=outcome_holds,
+    )
+
+
+@pytest.mark.parametrize("holding_a_reservation", (False, True))
+def test_a_closing_home_refuses_a_new_reservation(
+    tmp_path: Path, holding_a_reservation: bool,
+) -> None:
+    home = _build_home(_a_source_login(tmp_path))
+    held = home.reserve() if holding_a_reservation else None
+    home.close()
+
+    with pytest.raises(RuntimeError, match="private credential home is closing"):
+        home.reserve()
+
+    assert home.path.exists() is holding_a_reservation
+    if held is not None:
+        held.release()
+    assert not home.path.exists()
+
+
+@pytest.mark.parametrize(
+    "callbacks",
+    (
+        ("release", "release"),
+        ("on_spawn_failed", "on_reaped"),
+        ("on_reaped", "on_spawn_failed"),
+    ),
+)
+def test_a_reservation_is_released_once(tmp_path: Path, callbacks: tuple[str, str]) -> None:
+    home = _build_home(_a_source_login(tmp_path))
+    other_reservation = home.reserve()
+    reservation = home.reserve()
+    home.close()
+    with _LedgerOfRemovals(home) as ledger:
+        getattr(reservation, callbacks[0])(*_CALLBACK_ARGUMENTS[callbacks[0]])
+        getattr(reservation, callbacks[1])(*_CALLBACK_ARGUMENTS[callbacks[1]])
+
+        assert ledger.removals == 0
+        other_reservation.release()
+
+    assert ledger.removals == 1
+    assert not home.path.exists()
+
+
+_CALLBACK_ARGUMENTS = {"release": (), "on_spawn_failed": (), "on_reaped": (1, True)}
+
+
+def test_the_home_registry_forgets_every_closed_or_collected_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _a_source_login(tmp_path)
+    registered_before = len(process._live_home_finalizers)
+    closed = [_build_home(source) for _ in range(10)]
+    for home in closed:
+        home.close()
+    unclosed = [_build_home(source) for _ in range(10)]
+    assert len(process._live_home_finalizers) == registered_before + 10
+    del closed, unclosed, home
+    gc.collect()
+    with pytest.raises(CliCredentialNotConfiguredError):
+        PrivateCredentialHome(
+            tmp_path / "missing.json",
+            Path(".claude/.credentials.json"),
+            prefix="private-home-",
+            missing_credential_is_error=True,
+        )
+    real_rmtree = process.shutil.rmtree
+
+    def refuse_removal(_path) -> None:
+        raise PermissionError
+
+    monkeypatch.setattr(process.shutil, "rmtree", refuse_removal)
+    unremovable = _build_home(source)
+    unremovable_path = unremovable.path
+    unremovable.close()
+    del unremovable
+    gc.collect()
+    monkeypatch.setattr(process.shutil, "rmtree", real_rmtree)
+
+    assert len(process._live_home_finalizers) == registered_before
+    awaiting_entry = (unremovable_path, os.getpid())
+    assert awaiting_entry in process._homes_awaiting_exit_sweep
+    process._homes_awaiting_exit_sweep.discard(awaiting_entry)
+    real_rmtree(unremovable_path)
+    assert not list(tmp_path.glob("private-home-*"))
+
+
+_FORK_WHILE_A_HOME_IS_MID_REMOVAL_SCRIPT = """
 import os
 import signal
 import sys
@@ -1859,41 +2336,55 @@ from agent_providers.config import ProviderRuntimeConfig, configure
 from agent_providers.process import PrivateCredentialHome
 
 configure(ProviderRuntimeConfig.model_validate_json(sys.argv[1]))
-lock_held = threading.Event()
-release_lock = threading.Event()
 
 
-def hold_registry_lock():
-    with process._live_homes_lock:
-        lock_held.set()
-        release_lock.wait()
-
-
-worker = threading.Thread(target=hold_registry_lock)
-worker.start()
-lock_held.wait()
-child = os.fork()
-if child == 0:
-    home = PrivateCredentialHome(
+def a_home():
+    return PrivateCredentialHome(
         Path(sys.argv[2]),
         Path(".claude/.credentials.json"),
         prefix="private-home-",
         missing_credential_is_error=True,
     )
+
+
+removal_started = threading.Event()
+release_removal = threading.Event()
+parent_home = a_home()
+parent_home_path = parent_home.path
+remove_tree = process._remove_private_tree
+
+
+def remove_blocking_for_the_parent_home(root):
+    if root == parent_home_path:
+        removal_started.set()
+        release_removal.wait()
+    return remove_tree(root)
+
+
+process._remove_private_tree = remove_blocking_for_the_parent_home
+worker = threading.Thread(target=parent_home.close)
+worker.start()
+removal_started.wait()
+child = os.fork()
+if child == 0:
+    fresh_home = a_home()
+    fresh_home.reserve().release()
+    fresh_home.close()
+    print(not fresh_home.path.exists(), flush=True)
     process._sweep_failed_homes_at_exit()
     os._exit(0)
 failure_guard = threading.Timer(15, os.kill, (child, signal.SIGKILL))
 failure_guard.start()
 _, status = os.waitpid(child, 0)
 failure_guard.cancel()
-release_lock.set()
+release_removal.set()
 worker.join()
 print(os.waitstatus_to_exitcode(status))
 """
 
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="needs os.fork")
-def test_forked_child_creates_and_sweeps_homes_while_the_parent_holds_the_registry_lock(
+def test_a_forked_child_uses_a_fresh_home_while_a_parent_thread_is_mid_removal(
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "source.json"
@@ -1903,7 +2394,7 @@ def test_forked_child_creates_and_sweeps_homes_while_the_parent_holds_the_regist
         [
             sys.executable,
             "-c",
-            _FORK_WHILE_REGISTRY_LOCKED_SCRIPT,
+            _FORK_WHILE_A_HOME_IS_MID_REMOVAL_SCRIPT,
             current_config().model_dump_json(),
             str(source),
         ],
@@ -1913,7 +2404,7 @@ def test_forked_child_creates_and_sweeps_homes_while_the_parent_holds_the_regist
         timeout=60,
     )
 
-    assert completed.stdout.split() == ["0"]
+    assert completed.stdout.split() == ["True", "0"]
 
 
 @pytest.mark.parametrize(("credential_home_variable", "auth_field"), _CATALOG_PROVIDERS)
@@ -2783,7 +3274,7 @@ def _acquires_or_releases_a_descriptor(frame) -> bool:
     return any(marker in source for marker in _LINES_THAT_ACQUIRE_OR_RELEASE_A_DESCRIPTOR)
 
 
-def _interrupt_at_line(position: int):
+def _interrupt_at_line(position: int, codes=_CREDENTIAL_HANDLING_CODE):
     seen_lines = 0
 
     def on_line(frame, event, argument):
@@ -2797,7 +3288,7 @@ def _interrupt_at_line(position: int):
         return on_line
 
     def on_call(frame, event, argument):
-        return on_line if frame.f_code in _CREDENTIAL_HANDLING_CODE else None
+        return on_line if frame.f_code in codes else None
 
     return on_call
 

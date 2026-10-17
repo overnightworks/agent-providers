@@ -145,8 +145,10 @@ a fresh private home below
 are mode 0400. The source is opened only for reading. A turn's home remains
 until its direct child has exited, including a delayed spawn or background
 reap; a grandchild that outlives that child is not waited for, and the
-synchronous call's timeout kills only the direct child. A catalog home lasts for
-its bounded probe. Removal never changes a call's outcome: a home that cannot be
+synchronous call's timeout kills only the direct child. A process group that
+survives SIGKILL for 60 s is logged once, and its reservation and home stay held
+until the process exits, when the exit sweep removes the home. A catalog home
+lasts for its bounded probe. Removal never changes a call's outcome: a home that cannot be
 removed is logged by error class alone, without its path. Removal is tried at
 `close()`, then by the finalizer, then by one exit-time sweep; after that the copy
 stays under the host's root, logged at error level. A direct overwrite of the copy fails, while a CLI can create and

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import ctypes
 import errno
 import json
@@ -331,9 +330,9 @@ def test_a_same_user_child_granted_ptracer_permission_cannot_read_the_service_af
     try:
         stdout, stderr = service.communicate(timeout=BOUND_SECONDS)
     finally:
-        with contextlib.suppress(ProcessLookupError):
+        if service.returncode is None:
             os.killpg(service.pid, signal.SIGKILL)
-        service.wait()
+        service.wait(timeout=BOUND_SECONDS)
 
     assert service.returncode == 0, (stdout, stderr)
     report = json.loads(stdout.strip().splitlines()[-1])

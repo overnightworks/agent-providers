@@ -1,8 +1,0 @@
-claim_id = "7246d03acc4f442eb91711c833793916"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "ea4e37cef009002d0d1714e26bcffcde16ea71a0"
-branch = "claude/issue-119-admission-lease"
-scope = ["README.md", "docs/decisions/0001-agent-service.md", "packages/agent-service/src/agent_service/admission.py", "packages/agent-service/src/agent_service/app.py", "packages/agent-service/src/agent_service/config.py", "packages/agent-service/src/agent_service/run_events.py", "tests/service_support.py", "tests/test_service_admission.py", "tests/test_service_config.py"]
-opened_commit = "e0b4ff6ac1558609be2aff9bc92d932d7287afd2"
-whole_reason = "One admission feature across the service's app and run modules, its tests, one ADR paragraph and the README rows; the files form one change and do not split."

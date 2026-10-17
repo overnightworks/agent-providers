@@ -18,6 +18,7 @@ from types import SimpleNamespace
 
 import anchored_support
 import pytest
+from anchored_kernel import watcher_thread
 from anchored_support import (
     GONE,
     RUNNING,
@@ -419,3 +420,22 @@ def test_leaving_the_cleanup_scope_by_an_exception_still_ends_children_and_close
         assert deferred.popen.returncode == SIGKILLED
     finally:
         anchor.hand_over(zombie_anchor)
+
+
+def test_wait_stopped_rejects_an_exit_report_and_leaves_the_child_unreaped(
+    child_cleanup: ChildCleanup, scripts: ScriptChildren
+) -> None:
+    started = scripts.start()
+    os.write(started.stdin, b"3\n")
+    assert child_cleanup.wait_exited(started.owned) == 3
+
+    with pytest.raises(AssertionError):
+        child_cleanup.wait_stopped(started.owned)
+
+    assert child_cleanup.state(started.owned) == Exited(3)
+    assert child_cleanup.wait_exited(started.owned) == 3
+
+
+def test_watcher_thread_fails_loudly_when_no_watcher_exists() -> None:
+    with pytest.raises(AssertionError):
+        watcher_thread(os.getpid())

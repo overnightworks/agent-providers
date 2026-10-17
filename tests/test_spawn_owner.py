@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from anchored_kernel import WATCHER_THREAD_PREFIX
+from anchored_kernel import join_watcher, watcher_thread
 from anchored_support import TEST_WAIT_SECONDS, ChildCleanup
 
 from agent_providers import spawn
@@ -523,14 +523,6 @@ def _read_until_eof_within_bound(descriptor: int) -> str:
         chunks.append(chunk)
 
 
-def _join_watcher_within_bound(pid: int) -> None:
-    name = f"{WATCHER_THREAD_PREFIX}{pid}"
-    watcher = next((t for t in threading.enumerate() if t.name == name), None)
-    if watcher is not None:
-        watcher.join(TEST_WAIT_SECONDS)
-        assert not watcher.is_alive(), "the watcher did not end within the bound"
-
-
 @needs_proc_fd
 def test_an_anchored_leader_inherits_no_descriptor_the_parent_holds_open(
     tmp_path: Path, child_cleanup: ChildCleanup,
@@ -538,6 +530,7 @@ def test_an_anchored_leader_inherits_no_descriptor_the_parent_holds_open(
     def stdout_of_anchored_leader(child: ChildProcess) -> str:
         output_read, output_write = os.pipe()
         nothing = os.open(os.devnull, os.O_RDWR)
+        released = threading.Event()
         try:
             captured = child_cleanup.capture(
                 lambda: start_anchored_leader(
@@ -545,17 +538,20 @@ def test_an_anchored_leader_inherits_no_descriptor_the_parent_holds_open(
                     stdin=nothing,
                     stdout=output_write,
                     stderr=nothing,
-                    on_exit=lambda: None,
+                    on_exit=lambda: released.wait(TEST_WAIT_SECONDS),
                 )
             )
             os.close(output_write)
             output_write = -1
-            output = _read_until_eof_within_bound(output_read)
             (owned,) = captured.children
-            _join_watcher_within_bound(owned.pid)
-            del captured
-            return output
+            watcher = watcher_thread(owned.pid)
+            try:
+                return _read_until_eof_within_bound(output_read)
+            finally:
+                released.set()
+                join_watcher(watcher)
         finally:
+            released.set()
             for descriptor in (nothing, output_read, output_write):
                 if descriptor >= 0:
                     os.close(descriptor)

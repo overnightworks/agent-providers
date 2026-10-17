@@ -1,8 +1,0 @@
-claim_id = "68d1fb0c059b4b9799394574382df7c0"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "6f6af01b0f62e334e28e2bc24f646715bb26d240"
-branch = "fix/restore-pr-108"
-scope = ["README.md", "src/agent_providers/codex/image.py", "src/agent_providers/codex/protocol.py", "src/agent_providers/codex/transport.py", "src/agent_providers/codex_login.py", "src/agent_providers/process.py", "tests/provider_test_support.py", "tests/test_codex_cli_adapter.py", "tests/test_process.py"]
-opened_commit = "7f80c2cadea813c3c74e0cfdf701c26d4bfa409e"
-whole_reason = "An exact restore of the nine files PR #108 landed and the PR #110 merge silently reverted; they only make sense restored together."

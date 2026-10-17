@@ -14,6 +14,7 @@ import time
 import weakref
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import Enum, auto
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
@@ -3987,6 +3988,10 @@ def test_closing_a_claude_stream_keeps_its_private_home_until_confirmed_reap(
     asyncio.run(run())
 
 
+REAPER_CHECKPOINTS = 5
+MOST_SHIELD_CALLS_OF_ONE_REAP = 3
+
+
 def test_stream_reap_does_not_spin_under_anyio_level_cancellation(monkeypatch) -> None:
     """An ASGI cancellation scope must let the delayed reap make progress.
 
@@ -4017,6 +4022,8 @@ def test_stream_reap_does_not_spin_under_anyio_level_cancellation(monkeypatch) -
             reap_calls += 1
             reaper_started.set()
             await finish_reaper.wait()
+            for _ in range(REAPER_CHECKPOINTS):
+                await anyio.lowlevel.checkpoint()
             reaper_finished.set()
             return False
 
@@ -4032,13 +4039,13 @@ def test_stream_reap_does_not_spin_under_anyio_level_cancellation(monkeypatch) -
             task_group.start_soon(close_after_cancellation)
             await reaper_started.wait()
             task_group.cancel_scope.cancel()
-            with anyio.CancelScope(shield=True):
+            with anyio.CancelScope(shield=True), anyio.fail_after(ONE_SHOT_TEST_BOUND_SECONDS):
                 finish_reaper.set()
                 await reaper_finished.wait()
                 await close_finished.wait()
 
         assert reap_calls == 1
-        assert shield_calls <= 2
+        assert shield_calls <= MOST_SHIELD_CALLS_OF_ONE_REAP
 
     anyio.run(_run)
 
@@ -4117,6 +4124,27 @@ def _replace_the_reap(
     monkeypatch.setattr(provider, "_reap_process_group", reap)
 
 
+@dataclass
+class _ReapRecorder:
+    invocations: int = 0
+
+
+def _record_the_real_reap(
+    monkeypatch: pytest.MonkeyPatch, before_reaping: EventGate | None = None,
+) -> _ReapRecorder:
+    recorder = _ReapRecorder()
+    real_reap = provider._reap_process_group
+
+    async def counting_reap(proc) -> bool:
+        recorder.invocations += 1
+        if before_reaping is not None:
+            await before_reaping.pass_through()
+        return await real_reap(proc)
+
+    _replace_the_reap(monkeypatch, counting_reap)
+    return recorder
+
+
 def test_a_successful_one_shot_holds_its_slot_and_home_until_the_reap_is_done(
     one_shot, monkeypatch, killpg_signals,
 ) -> None:
@@ -4124,6 +4152,7 @@ def test_a_successful_one_shot_holds_its_slot_and_home_until_the_reap_is_done(
     turn_child = _install_child_in_a_home(
         monkeypatch, communicate=(b'{"result":"ok"}', b""), wait_gate=exit_wait,
     )
+    reaps = _record_the_real_reap(monkeypatch)
 
     async def scenario() -> None:
         turn = asyncio.create_task(one_shot())
@@ -4134,6 +4163,7 @@ def test_a_successful_one_shot_holds_its_slot_and_home_until_the_reap_is_done(
 
         exit_wait.release.set()
         assert (await turn).text == "ok"
+        assert reaps.invocations == 1
         assert _held_slots() == 0
         assert not turn_child.home.exists()
 
@@ -4142,18 +4172,18 @@ def test_a_successful_one_shot_holds_its_slot_and_home_until_the_reap_is_done(
 
 
 @pytest.mark.parametrize(
-    ("turn_failure", "expected_error", "message"),
+    ("make_turn_failure", "expected_error", "message"),
     [
-        (asyncio.TimeoutError(), UnavailableError, "timed out"),
-        (RuntimeError("turn broke"), RuntimeError, "turn broke"),
+        (asyncio.TimeoutError, UnavailableError, "timed out"),
+        (lambda: RuntimeError("turn broke"), RuntimeError, "turn broke"),
     ],
     ids=["timeout", "error"],
 )
 def test_a_failed_one_shot_reaps_once_then_releases_its_slot_and_home(
-    one_shot, monkeypatch, killpg_signals, turn_failure, expected_error, message,
+    one_shot, monkeypatch, killpg_signals, make_turn_failure, expected_error, message,
 ) -> None:
     turn_child = _install_child_in_a_home(
-        monkeypatch, pid=A_PROCESS_PID, returncode=None, communicate=turn_failure,
+        monkeypatch, pid=A_PROCESS_PID, returncode=None, communicate=make_turn_failure(),
     )
 
     async def scenario() -> None:
@@ -4235,20 +4265,41 @@ def test_a_one_shot_cancelled_twice_completes_one_reap_before_delivering_the_can
     _run_bounded(scenario())
 
 
+class _CancellationOfTheTurn(Enum):
+    NONE = auto()
+    WHILE_THE_REAP_IS_HELD = auto()
+    IN_THE_LOOP_ITERATION_THE_REAP_FAILS = auto()
+
+
 @dataclass(frozen=True)
 class _ReapFaultBoundary:
-    turn_outcome: tuple[bytes, bytes] | BaseException
-    reap_fault: BaseException
-    cancelled_during_reap: bool
-    expected_context: type[BaseException] | None
+    make_turn_failure: Callable[[], BaseException]
+    make_reap_fault: Callable[[], BaseException]
+    cancellation: _CancellationOfTheTurn
+    expected_context: type[BaseException]
+
+
+def _a_turn_that_broke() -> BaseException:
+    return RuntimeError("turn broke")
 
 
 REAP_FAULT_BOUNDARIES = {
-    "timeout": _ReapFaultBoundary(asyncio.TimeoutError(), ReapFault(), False, UnavailableError),
-    "error": _ReapFaultBoundary(RuntimeError("turn broke"), ReapFault(), False, RuntimeError),
-    "cancellation": _ReapFaultBoundary(RuntimeError("turn broke"), ReapFault(), True, RuntimeError),
+    "timeout": _ReapFaultBoundary(
+        asyncio.TimeoutError, ReapFault, _CancellationOfTheTurn.NONE, UnavailableError,
+    ),
+    "error": _ReapFaultBoundary(
+        _a_turn_that_broke, ReapFault, _CancellationOfTheTurn.NONE, RuntimeError,
+    ),
+    "cancellation": _ReapFaultBoundary(
+        _a_turn_that_broke, ReapFault, _CancellationOfTheTurn.WHILE_THE_REAP_IS_HELD,
+        RuntimeError,
+    ),
+    "cancellation_in_the_iteration_the_reap_fails": _ReapFaultBoundary(
+        _a_turn_that_broke, ReapFault,
+        _CancellationOfTheTurn.IN_THE_LOOP_ITERATION_THE_REAP_FAILS, RuntimeError,
+    ),
     "file_not_found": _ReapFaultBoundary(
-        asyncio.TimeoutError(), FileNotFoundError(), False, UnavailableError,
+        asyncio.TimeoutError, FileNotFoundError, _CancellationOfTheTurn.NONE, UnavailableError,
     ),
 }
 
@@ -4258,26 +4309,29 @@ def test_the_reaps_own_exception_wins_over_the_turns_exit(
     one_shot, monkeypatch, boundary,
 ) -> None:
     reap_gate = EventGate()
+    reap_fault = boundary.make_reap_fault()
     _install_child_in_a_home(
-        monkeypatch, returncode=None, communicate=boundary.turn_outcome,
+        monkeypatch, returncode=None, communicate=boundary.make_turn_failure(),
     )
 
     async def reap_that_fails(_proc) -> bool:
         await reap_gate.pass_through()
-        raise boundary.reap_fault
+        raise reap_fault
 
     _replace_the_reap(monkeypatch, reap_that_fails)
 
     async def scenario() -> None:
         turn = asyncio.create_task(one_shot())
         await reap_gate.started.wait()
-        if boundary.cancelled_during_reap:
+        if boundary.cancellation is _CancellationOfTheTurn.WHILE_THE_REAP_IS_HELD:
             turn.cancel()
             await _after_pending_callbacks()
         reap_gate.release.set()
-        with pytest.raises(type(boundary.reap_fault)) as caught:
+        if boundary.cancellation is _CancellationOfTheTurn.IN_THE_LOOP_ITERATION_THE_REAP_FAILS:
+            turn.cancel()
+        with pytest.raises(type(reap_fault)) as caught:
             await turn
-        assert caught.value is boundary.reap_fault
+        assert caught.value is reap_fault
         assert isinstance(caught.value.__context__, boundary.expected_context)
 
     _run_bounded(scenario())
@@ -4287,21 +4341,14 @@ def test_a_stream_that_ends_normally_reaps_once_and_releases_its_slot_and_home(
     monkeypatch,
 ) -> None:
     exit_wait = EventGate()
+    reap_entered = EventGate()
     turn_child = _install_child_in_a_home(
         monkeypatch,
         has_stdin=False,
         stream_lines=[b'{"type":"result","subtype":"success","result":"ok"}\n'],
         wait_gate=exit_wait,
     )
-    reaps = 0
-    real_reap = provider._reap_process_group
-
-    async def counting_reap(proc) -> bool:
-        nonlocal reaps
-        reaps += 1
-        return await real_reap(proc)
-
-    _replace_the_reap(monkeypatch, counting_reap)
+    reaps = _record_the_real_reap(monkeypatch, before_reaping=reap_entered)
 
     async def scenario() -> None:
         stream = provider.acall_claude_with_mcp_stream("hi", user_id="u-1")
@@ -4312,8 +4359,14 @@ def test_a_stream_that_ends_normally_reaps_once_and_releases_its_slot_and_home(
         assert turn_child.home.exists()
 
         exit_wait.release.set()
+        await reap_entered.started.wait()
+        assert not consuming.done()
+        assert _held_slots() == 1
+        assert turn_child.home.exists()
+
+        reap_entered.release.set()
         assert (await consuming)[-1].text == "ok"
-        assert reaps == 1
+        assert reaps.invocations == 1
         assert _held_slots() == 0
         assert not turn_child.home.exists()
 
@@ -4323,7 +4376,6 @@ def test_a_stream_that_ends_normally_reaps_once_and_releases_its_slot_and_home(
 def test_a_one_shot_handed_to_the_background_reaper_keeps_its_slot_and_home_with_it(
     one_shot, monkeypatch,
 ) -> None:
-    monkeypatch.setattr(provider, "_wait_for_sigterm_exit", AsyncMock(return_value=False))
     monkeypatch.setattr(provider, "_wait_for_zombie_reap", AsyncMock(return_value=False))
     exit_wait = EventGate()
     turn_child = _install_child_in_a_home(

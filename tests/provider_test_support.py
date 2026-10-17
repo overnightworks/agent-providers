@@ -27,18 +27,19 @@ import tempfile
 import threading
 import traceback
 import types
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from agent_client.tools import ToolDeclaration
 from agent_providers import process
 from agent_providers.catalog import ProviderRoute
+from agent_providers.claude import provider as claude_provider
 from agent_providers.config import (
     ProviderRuntimeConfig,
     configure,
@@ -283,6 +284,136 @@ def close_fake_cli_pipes() -> None:
             if not stream.closed:
                 stream.close()
     _fake_cli_processes.clear()
+
+
+class ClaudeCliStreamReader:
+    """The stand-in for the ``asyncio.StreamReader`` of a Claude child pipe."""
+
+    def __init__(
+        self, lines: Sequence[bytes], *, limit: int | None = None, stalls: bool = False,
+    ) -> None:
+        self._lines = list(lines)
+        self._limit = limit
+        self._stalls = stalls
+
+    async def readline(self) -> bytes:
+        if not self._lines:
+            return await self._end_of_stream()
+        line = self._lines.pop(0)
+        if self._limit is not None and len(line) > self._limit:
+            raise ValueError("Separator is not found, and chunk exceed the limit")
+        return line
+
+    async def read(self, size: int = -1) -> bytes:
+        if not self._lines:
+            return await self._end_of_stream()
+        payload = b"".join(self._lines)
+        if size >= 0:
+            self._lines = [payload[size:]] if len(payload) > size else []
+            return payload[:size]
+        self._lines = []
+        return payload
+
+    async def _end_of_stream(self) -> bytes:
+        if self._stalls:
+            await asyncio.get_running_loop().create_future()
+        return b""
+
+
+@dataclass(frozen=True)
+class EventGate:
+    """Holds one child call open until the test sets ``release``."""
+
+    started: asyncio.Event = field(default_factory=asyncio.Event)
+    release: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def pass_through(self) -> None:
+        self.started.set()
+        await self.release.wait()
+
+
+def _gated_answer(
+    answer: object, gate: EventGate | None,
+) -> Callable[..., Awaitable[object]]:
+    async def respond(*_arguments: object) -> object:
+        if gate is not None:
+            await gate.pass_through()
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+    return respond
+
+
+CLAUDE_CLI_CHILD_SURFACE: Final = (
+    "pid", "returncode", "communicate", "wait", "stdin", "stdout", "stderr",
+)
+CLAUDE_CLI_STDIN_SURFACE: Final = ("write", "drain", "close")
+
+
+def a_claude_cli_child(
+    *,
+    pid: int = 2468,
+    returncode: int | None = 0,
+    communicate: tuple[bytes, bytes] | BaseException = (b"", b""),
+    communicate_gate: EventGate | None = None,
+    stream_lines: Sequence[bytes] = (),
+    stderr: bytes = b"",
+    stdout_limit: int | None = None,
+    stdout_stalls: bool = False,
+    wait_outcome: int | BaseException = 0,
+    wait_gate: EventGate | None = None,
+    has_stdin: bool = True,
+) -> MagicMock:
+    """Build the async twin of ``fake_cli_process``: an ``asyncio.subprocess.Process`` stand-in."""
+    child = MagicMock(spec_set=CLAUDE_CLI_CHILD_SURFACE, pid=pid, returncode=returncode)
+    child.communicate = AsyncMock(side_effect=_gated_answer(communicate, communicate_gate))
+    child.wait = AsyncMock(side_effect=_gated_answer(wait_outcome, wait_gate))
+    child.stdout = ClaudeCliStreamReader(
+        stream_lines, limit=stdout_limit, stalls=stdout_stalls,
+    )
+    child.stderr = ClaudeCliStreamReader([stderr] if stderr else [])
+    if has_stdin:
+        child.stdin = MagicMock(spec_set=CLAUDE_CLI_STDIN_SURFACE)
+        child.stdin.drain = AsyncMock()
+    else:
+        child.stdin = None
+    return child
+
+
+@dataclass(frozen=True)
+class ClaudeCliSpawns:
+    """What the provider asked the async door to start, in order."""
+
+    children: list[ChildProcess] = field(default_factory=list)
+    stream_buffer_limits: list[int | None] = field(default_factory=list)
+
+
+def install_claude_cli_children(
+    monkeypatch: pytest.MonkeyPatch,
+    *queued_children: MagicMock,
+    factory: Callable[[ChildProcess, int | None], MagicMock] | None = None,
+) -> ClaudeCliSpawns:
+    """Answer every async Claude spawn with a queued child, then with ``factory``'s.
+
+    The one place that names the async door the provider spawns through.
+    """
+    spawns = ClaudeCliSpawns()
+    waiting = list(queued_children)
+
+    async def open_async_pipes(
+        child: ChildProcess, *, stream_buffer_limit: int | None = None,
+    ) -> MagicMock:
+        spawns.children.append(child)
+        spawns.stream_buffer_limits.append(stream_buffer_limit)
+        if waiting:
+            return waiting.pop(0)
+        if factory is None:
+            pytest.fail(f"a Claude child was spawned with none queued: {child.command}")
+        return factory(child, stream_buffer_limit)
+
+    monkeypatch.setattr(claude_provider, "open_async_pipes", open_async_pipes)
+    return spawns
 
 
 def override_provider_runtime(**deployment_facts: Any) -> None:

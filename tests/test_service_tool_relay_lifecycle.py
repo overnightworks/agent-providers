@@ -354,7 +354,7 @@ def test_a_request_completed_in_the_turn_its_deadline_passes_never_reaches_the_o
     drive_stepped(scenario, owner)
 
 
-@pytest.mark.parametrize("turns_of_timer_cleanup", [3, 4, 5, 6])
+@pytest.mark.parametrize("turns_of_timer_cleanup", range(8))
 def test_the_body_deadline_counts_from_the_parsed_head_whatever_the_timer_cleanup_takes(
     turns_of_timer_cleanup: int,
 ) -> None:
@@ -362,7 +362,10 @@ def test_the_body_deadline_counts_from_the_parsed_head_whatever_the_timer_cleanu
 
     async def scenario(relay: Relay, clock: StepClock) -> None:
         client = await RawClient.connect(port_of(relay))
-        await client.send(partial_length_body(relay)[: -len(b"abc")])
+        head = partial_length_body(relay)[: -len(b"abc")]
+        await client.send(head[:10])
+        await parked_at(clock, HEAD_RECEIVE_SECONDS)
+        await client.send(head[10:])
         await yield_turns(turns_of_timer_cleanup)
         clock.advance_to(BODY_RECEIVE_SECONDS + 1)
         await yield_turns(turns_of_timer_cleanup)

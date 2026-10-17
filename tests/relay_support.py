@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import contextvars
 import gc
+import json
 import re
 import socket
 import struct
@@ -15,9 +16,18 @@ import h11
 from mcp_app_fake import WAIT_SECONDS
 from service_support import StepClock, SteppedLoop
 
-from agent_service.mcp_wire import JSON_MEDIA_TYPE, HttpAnswer
+from agent_client.wire import JsonObject
+from agent_service.mcp_wire import (
+    JSON_MEDIA_TYPE,
+    PROTOCOL_VERSION_HEADER,
+    CallToolParams,
+    HttpAnswer,
+    JsonRpcResponse,
+    Reply,
+    RequestId,
+)
 from agent_service.run_liveness import LoopClock, RunClock
-from agent_service.tool_relay import LOOPBACK_HOST, Relay, RelayRequest
+from agent_service.tool_relay import LOOPBACK_HOST, Relay, RelayOwner, RelayRequest
 
 RUN_ID = "run-under-test"
 _READ_BYTES = 65_536
@@ -72,6 +82,40 @@ class ScriptedOwner:
     async def wait_entered(self) -> None:
         async with asyncio.timeout(WAIT_SECONDS):
             await self.entered.wait()
+
+
+class ScriptedCalls:
+    """A fake of the ``ToolCalls`` port: records calls, can gate, and records a cancellation."""
+
+    def __init__(self, replies: Sequence[Reply] = (), *, gated: bool = False) -> None:
+        self.calls: list[tuple[RequestId, CallToolParams]] = []
+        self.entered = asyncio.Event()
+        self.cancelled = False
+        self._replies = list(replies)
+        self._gate = asyncio.Event()
+        if not gated:
+            self.release()
+
+    def release(self) -> None:
+        self._gate.set()
+
+    async def call(self, request_id: RequestId, params: CallToolParams) -> Reply:
+        self.calls.append((request_id, params))
+        self.entered.set()
+        try:
+            await self._gate.wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        return self._replies.pop(0) if self._replies else clean_reply(request_id)
+
+    async def wait_entered(self) -> None:
+        async with asyncio.timeout(WAIT_SECONDS):
+            await self.entered.wait()
+
+
+def clean_reply(request_id: RequestId) -> JsonRpcResponse:
+    return JsonRpcResponse(id=request_id, result={"content": [{"type": "text", "text": "done"}]})
 
 
 class SuppressingOwner(ScriptedOwner):
@@ -273,6 +317,24 @@ def post(relay: Relay, body: bytes = b"") -> bytes:
     return RequestHead.standard(relay, len(body)).encode() + body
 
 
+def json_rpc(
+    method: str, request_id: RequestId | None = None, params: JsonObject | None = None
+) -> bytes:
+    message: dict[str, object] = {"jsonrpc": "2.0", "method": method}
+    if request_id is not None:
+        message["id"] = request_id
+    if params is not None:
+        message["params"] = params
+    return json.dumps(message).encode()
+
+
+def post_message(relay: Relay, body: bytes, protocol_version: str | None = None) -> bytes:
+    head = RequestHead.standard(relay, len(body)).with_field("Content-Type", JSON_MEDIA_TYPE)
+    if protocol_version is not None:
+        head = head.with_field(PROTOCOL_VERSION_HEADER, protocol_version)
+    return head.encode() + body
+
+
 def chunked_head(relay: Relay) -> RequestHead:
     return (
         RequestHead.standard(relay).without("Content-Length").adding("Transfer-Encoding", "chunked")
@@ -384,9 +446,10 @@ class HoldingSteppedLoop(SteppedLoop):
 def drive(
     scenario: Callable[[Relay], Awaitable[None]],
     run_id: str = RUN_ID,
-    owner: ScriptedOwner | None = None,
+    owner: RelayOwner | None = None,
     clock: RunClock | None = None,
     loop_factory: Callable[[], asyncio.AbstractEventLoop] | None = None,
+    calls: ScriptedCalls | None = None,
 ) -> None:
     async def main() -> None:
         scripted = owner or ScriptedOwner()
@@ -395,7 +458,9 @@ def drive(
             async with asyncio.timeout(WAIT_SECONDS * 3):
                 await scenario(relay)
         finally:
-            scripted.release()
+            for gate in (scripted, calls):
+                if isinstance(gate, ScriptedOwner | ScriptedCalls):
+                    gate.release()
             loop = asyncio.get_running_loop()
             if isinstance(loop, HoldingSteppedLoop):
                 loop.release_acceptance()

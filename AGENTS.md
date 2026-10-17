@@ -35,8 +35,10 @@ owner needs.
 - The library reaches back into no host. The core depends on the agent
   client, `pydantic`, `httpx` and `anyio` at runtime, and on nothing else — no
   host application, no web framework, no database. Everything host-specific
-  arrives through the `ProviderRuntimeConfig` a host installs with
-  `configure()` and the ports it supplies.
+  arrives from the host: through the
+  `ProviderRuntimeConfig` it installs with `configure()`, through the ports it
+  supplies, or, for the subscription run the agent service drives without a
+  core runtime, as explicit arguments validated at construction.
 - The agent client is light: it depends on `pydantic` only and owns the tool
   contract `ToolDeclaration` in `agent_client.tools`. The core builds on it and
   re-exports the identical class from `agent_providers.tools`; the client never

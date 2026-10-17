@@ -3,9 +3,12 @@
 The provider layer runs Claude, Grok and Codex on someone else's machine: its
 binaries, credential mirrors, mounted resource directories, API
 keys and the MCP server a turn attaches are deployment facts the host
-owns, not values this package may guess. It therefore reads them from one
-frozen value the host installs once per process via :func:`configure`, instead
-of reaching into an application settings module.
+owns, not values this package may guess. Its catalog and turn paths
+therefore read them from one frozen value the host installs once per process
+via :func:`configure`, instead of reaching into an application settings
+module; the subscription run
+(:class:`agent_providers.claude.provider.ClaudeRun`) takes them as explicit
+arguments instead.
 
 The configuration is cut along the two ways into this library. A host that only
 asks which models exist and whether a provider is logged in configures

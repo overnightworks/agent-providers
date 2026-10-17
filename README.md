@@ -194,10 +194,12 @@ needed to observe these codes.
 
 ## The ports a host supplies
 
-Nothing is configured by default. A host installs one `ProviderRuntimeConfig`
-per process with `configure()`, and every module reads it back through
-`current_config()`; until then `current_config()` raises rather than guessing a
-binary path.
+Nothing is configured by default. A host that runs the catalog or turn paths
+installs one `ProviderRuntimeConfig` per process with `configure()`, and those
+paths read it back through `current_config()`; until then `current_config()`
+raises rather than guessing a binary path. The subscription run the agent
+service drives (`claude.provider.ClaudeRun`) takes its facts as explicit
+arguments instead and reads no installed configuration.
 
 The configuration is cut along the two ways into this library. `ProviderRuntimeConfig`
 carries what the catalog path reads — the CLI binaries, the search path a bare

@@ -41,10 +41,15 @@ uv build --all-packages      # the three wheels the release attaches
 
 ## Code patterns
 
-- **Deployment facts come from `ProviderRuntimeConfig`.** Nothing reads
-  configuration from an environment variable or a global; the host installs one
-  config per process with `configure()` and every module reads it back with
-  `current_config()`.
+- **Deployment facts come from the host, never from an environment variable
+  or a module default.** A host that runs the catalog or turn paths installs
+  one `ProviderRuntimeConfig` per process with `configure()`, and those paths
+  read it back with `current_config()`; they gain no explicit-argument twin
+  that skips it. The agent service installs no core runtime: it reads its own
+  config file and passes each fact as an argument to the subscription run
+  (`ClaudeRun`), which validates at construction and reads no installed
+  configuration — a test pins each such entry working after `reset_config()`.
+  No path invents a default for a host fact.
 - **Host obligations are ports, passed in.** The tool set (`ToolExecutor`,
   `ToolCatalog`), the MCP server (`McpServerSpec`), and the image constraints
   (`ImagePolicy`) arrive from the host — the library never invents them.

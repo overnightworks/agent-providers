@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,7 +23,13 @@ SPAWN_LOGGER = "agent_providers.spawn"
 class ExitProbe:
     """The ``on_exit`` callback: counts its calls and reads the handle from inside them."""
 
-    def __init__(self, *, failure: Exception | None = None, held: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        failure: Exception | None = None,
+        held: bool = False,
+        then: Callable[[AnchoredLeader], None] | None = None,
+    ) -> None:
         self.seen = threading.Event()
         self.release = threading.Event()
         if not held:
@@ -31,6 +38,7 @@ class ExitProbe:
         self.leader: AnchoredLeader | None = None
         self._bound = threading.Event()
         self._failure = failure
+        self._then = then
 
     def bind(self, leader: AnchoredLeader | None) -> None:
         self.leader = leader
@@ -41,6 +49,8 @@ class ExitProbe:
         assert self.leader is not None
         self.observed.append((self.leader.state, self.leader.returncode))
         self.seen.set()
+        if self._then is not None:
+            self._then(self.leader)
         assert self.release.wait(TEST_WAIT_SECONDS), "the callback was never released"
         if self._failure is not None:
             raise self._failure

@@ -1,7 +1,8 @@
-"""Protocol models for the kernel's ``waitid`` as the anchored leader's watcher sees it.
+"""Protocol models for the kernel's ``waitid`` and ``waitpid`` as the anchored leader sees them.
 
-They replace ``os.waitid`` for ``agent_providers.spawn`` only; the child owner binds its own
-``waitid`` at import and never passes through them. They forward the code under test's numeric
+They replace ``os.waitid`` (and, through ``waitpid``, ``os.waitpid``) for
+``agent_providers.spawn`` only; the child owner binds its own ``waitid`` at import and never
+passes through them. They forward the code under test's numeric
 calls, so they live outside the support module that names no pid number. Each model owns its
 call log, its holds and its violation list: a protocol break is recorded, never raised inside
 the watcher, and a hold that the test never opens lets the call through after the bound.
@@ -15,10 +16,12 @@ import threading
 from collections import deque
 from dataclasses import dataclass
 from types import SimpleNamespace
+from typing import Literal
 
 from anchored_support import TEST_WAIT_SECONDS
 
 real_waitid = os.waitid
+real_waitpid = os.waitpid
 
 WATCHER_THREAD_PREFIX = "child-exit:"
 OBSERVE_EXIT = os.WEXITED | os.WNOWAIT
@@ -31,6 +34,7 @@ class WaitidCall:
     thread: str
     pid: int
     options: int
+    name: str = "waitid"
 
 
 def watcher_thread(pid: int) -> threading.Thread:
@@ -49,22 +53,99 @@ def traced_stop() -> SimpleNamespace:
     return SimpleNamespace(si_code=os.CLD_TRAPPED, si_status=int(signal.SIGTRAP))
 
 
+WaitpidAnswer = tuple[int, int] | Exception
+
+
 class RecordingKernel:
-    def __init__(self) -> None:
+    """One ordered log of ``waitid`` and ``waitpid`` calls, with holds and refuse-after-reap.
+
+    A hold is the n-th call of its name, before the real call is made (``hold_before_call``,
+    ``hold_before_waitpid``) or after it returned (``hold_after_call``, which sets ``reached``).
+    A pid that a forwarded ``waitpid`` returned, or that an injected loss named, is reaped for
+    good: every later call naming it is a recorded violation answered with ``ChildProcessError``
+    and never forwarded.
+    """
+
+    def __init__(
+        self,
+        *,
+        hold_before_call: int | None = None,
+        hold_after_call: int | None = None,
+        hold_before_waitpid: int | None = None,
+        waitpid_answer: WaitpidAnswer | None = None,
+    ) -> None:
         self._changed = threading.Condition()
         self.calls: list[WaitidCall] = []
         self.violations: list[str] = []
+        self.reached = threading.Event()
+        self._opened = threading.Event()
+        self._holds = {
+            ("waitid", "before"): hold_before_call,
+            ("waitid", "after"): hold_after_call,
+            ("waitpid", "before"): hold_before_waitpid,
+        }
+        self._waitpid_answer = waitpid_answer
+        self._reaped: set[int] = set()
+        self._leader_pid: int | None = None
+
+    def bind(self, leader_pid: int) -> None:
+        self._leader_pid = leader_pid
+
+    def open_hold(self) -> None:
+        self._opened.set()
+
+    def await_reached(self) -> None:
+        assert self.reached.wait(TEST_WAIT_SECONDS), "the hold after the real call was not reached"
 
     def await_calls(self, count: int) -> None:
         with self._changed:
             if not self._changed.wait_for(lambda: len(self.calls) >= count, TEST_WAIT_SECONDS):
                 raise AssertionError(f"fewer than {count} waitid calls within the bound")
 
-    def _record(self, pid: int, options: int) -> int:
+    def waitpid(self, pid: int, options: int) -> tuple[int, int]:
+        position = self._record(pid, options, "waitpid")
+        self._hold(position, "waitpid", "before")
         with self._changed:
-            self.calls.append(WaitidCall(threading.current_thread().name, pid, options))
+            refusal = self._waitpid_refusal(pid, options)
+            if refusal:
+                self._violate(refusal)
+                raise ChildProcessError(refusal)
+            answer, self._waitpid_answer = self._waitpid_answer, None
+            if isinstance(answer, Exception):
+                self._reaped.add(pid)
+                raise answer
+            if answer is not None:
+                return answer
+            result = real_waitpid(pid, options)
+            if result[0] == pid:
+                self._reaped.add(pid)
+            return result
+
+    def _waitpid_refusal(self, pid: int, options: int) -> str | None:
+        if pid != self._leader_pid:
+            return f"a waitpid named pid {pid}, not the bound leader"
+        if options != os.WNOHANG:
+            return f"a waitpid carried options {options:#x}"
+        return self._reaped_refusal(pid)
+
+    def _reaped_refusal(self, pid: int) -> str | None:
+        if pid in self._reaped:
+            return f"a call named pid {pid} after it was reaped"
+        return None
+
+    def _record(self, pid: int, options: int, name: str = "waitid") -> int:
+        with self._changed:
+            self.calls.append(WaitidCall(threading.current_thread().name, pid, options, name))
             self._changed.notify_all()
-            return len(self.calls)
+            return sum(call.name == name for call in self.calls)
+
+    def _hold(self, position: int, name: str, when: Literal["before", "after"]) -> None:
+        if position != self._holds[name, when]:
+            return
+        if when == "after":
+            self.reached.set()
+        if not self._opened.wait(TEST_WAIT_SECONDS):
+            self._violate(f"{name} call {position} was held past the bound")
 
     def _violate(self, message: str) -> None:
         with self._changed:
@@ -72,21 +153,19 @@ class RecordingKernel:
 
 
 class PassThroughKernel(RecordingKernel):
-    """Logs every call and forwards it, optionally holding one before its entry."""
-
-    def __init__(self, *, hold_before_call: int | None = None) -> None:
-        super().__init__()
-        self._hold_before_call = hold_before_call
-        self._opened = threading.Event()
-
-    def open_hold(self) -> None:
-        self._opened.set()
+    """Logs every call and forwards it, optionally holding one before or after the real call."""
 
     def __call__(self, idtype: int, pid: int, options: int):
         position = self._record(pid, options)
-        if position == self._hold_before_call and not self._opened.wait(TEST_WAIT_SECONDS):
-            self._violate(f"call {position} was held past the bound")
-        return real_waitid(idtype, pid, options)
+        self._hold(position, "waitid", "before")
+        with self._changed:
+            refusal = self._reaped_refusal(pid)
+        if refusal:
+            self._violate(refusal)
+            raise ChildProcessError(refusal)
+        reported = real_waitid(idtype, pid, options)
+        self._hold(position, "waitid", "after")
+        return reported
 
 
 class KernelModel(RecordingKernel):
@@ -97,28 +176,38 @@ class KernelModel(RecordingKernel):
     reap, answered without one, and every later call for that pid is a violation.
     """
 
-    def __init__(self, *, stops: int = 0, loses_at: str | None = None) -> None:
-        super().__init__()
+    def __init__(
+        self, *, stops: int = 0, loses_at: str | None = None, **holds: int | None
+    ) -> None:
+        super().__init__(**holds)
         self._stops = deque(traced_stop() for _ in range(stops))
         self._loses_at = loses_at
         self._lost = False
         self._stops_without_consumption = 0
 
     def __call__(self, idtype: int, pid: int, options: int):
-        self._record(pid, options)
+        position = self._record(pid, options)
+        self._hold(position, "waitid", "before")
         refusal = self._refusal(idtype, pid, options)
         if refusal:
             self._violate(refusal)
             raise ChildProcessError(refusal)
         if options & os.WEXITED:
-            return self._observe_exit(pid, options)
-        return self._consume_stop_report(pid, options)
+            reported = self._observe_exit(pid, options)
+        else:
+            reported = self._consume_stop_report(pid, options)
+        self._hold(position, "waitid", "after")
+        return reported
 
     def _refusal(self, idtype: int, pid: int, options: int) -> str | None:
         if idtype != os.P_PID or pid != self._watched_pid():
             return f"a call named pid {pid}, not the watched leader"
         if self._lost:
             return "a call followed a reported loss"
+        with self._changed:
+            reaped = self._reaped_refusal(pid)
+        if reaped:
+            return reaped
         if options & os.WEXITED and options & os.WSTOPPED:
             return "a stop consumer carried WEXITED and could reap"
         if options & os.WEXITED and options != OBSERVE_EXIT:
@@ -128,8 +217,11 @@ class KernelModel(RecordingKernel):
         return None
 
     @staticmethod
-    def _watched_pid() -> int:
-        return int(threading.current_thread().name.removeprefix(WATCHER_THREAD_PREFIX))
+    def _watched_pid() -> int | None:
+        name = threading.current_thread().name
+        if not name.startswith(WATCHER_THREAD_PREFIX):
+            return None
+        return int(name.removeprefix(WATCHER_THREAD_PREFIX))
 
     def _observe_exit(self, pid: int, options: int):
         with self._changed:

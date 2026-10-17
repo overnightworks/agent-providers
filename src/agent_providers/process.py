@@ -20,7 +20,7 @@ import threading
 import time
 import weakref
 from collections import deque
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum, StrEnum
@@ -1505,8 +1505,11 @@ def _make_tree_removable(root: Path) -> None:
     names of its subdirectories, so the descriptors in use grow with the
     tree's depth and not its width. Each level's frame is on the stack before
     its listing descriptor is opened, so the stack's cleanup closes it from the
-    statement that receives it. Cleanup is guaranteed for an exception raised
-    by any operation called here, whatever its class. An asynchronous
+    statement that receives it. Every acquired descriptor is passed to
+    os.close, and a close that raises does not stop the cleanup: every
+    remaining frame is still closed and the first exception propagates. An
+    exception raised instead of the real close is not covered, because Linux
+    releases the descriptor even when close fails. An asynchronous
     interruption between two statements is the host obligation the README's
     Interruptions paragraph states, and no claim is made about it.
     """
@@ -1524,8 +1527,19 @@ def _make_tree_removable(root: Path) -> None:
             else:
                 frames.pop().close()
     finally:
-        for frame in frames:
-            frame.close()
+        _close_all(frame.listing for frame in frames if frame.listing is not None)
+
+
+def _close_all(descriptors: Iterable[int]) -> None:
+    """Close every descriptor, then raise the first failure so none stays open."""
+    first_failure: BaseException | None = None
+    for descriptor in descriptors:
+        try:
+            os.close(descriptor)
+        except BaseException as failure:
+            first_failure = first_failure or failure
+    if first_failure is not None:
+        raise first_failure
 
 
 def _directory_flags(*names: str) -> int:

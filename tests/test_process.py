@@ -2044,6 +2044,49 @@ def test_private_credential_home_closes_every_handle_when_the_repair_fails_midwa
     assert not home.path.exists()
 
 
+@pytest.mark.parametrize("failing_close_index", [0, 1], ids=["root_frame", "middle_frame"])
+def test_a_close_failing_during_unwinding_does_not_leave_the_other_frames_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failing_close_index: int,
+) -> None:
+    (tmp_path / "a" / "b").mkdir(parents=True)
+    real_open, real_close, real_scandir = os.open, os.close, os.scandir
+    listings: list[int] = []
+    listing_closes: list[int] = []
+    interruption = KeyboardInterrupt()
+    deepest_failure = RuntimeError("deepest listing read failed")
+
+    def open_(path, flags, *args, **options):
+        descriptor = real_open(path, flags, *args, **options)
+        if not flags & os.O_PATH:
+            listings.append(descriptor)
+        return descriptor
+
+    def scandir(path=".", *args, **options):
+        if len(listings) == 3:
+            raise deepest_failure
+        return real_scandir(path, *args, **options)
+
+    def close(descriptor: int) -> None:
+        real_close(descriptor)
+        if descriptor in listings:
+            listing_closes.append(descriptor)
+            if len(listing_closes) == failing_close_index + 1:
+                raise interruption
+
+    monkeypatch.setattr(os, "open", open_)
+    monkeypatch.setattr(os, "scandir", scandir)
+    monkeypatch.setattr(os, "close", close)
+    descriptors_before = _descriptor_count()
+
+    with pytest.raises(KeyboardInterrupt) as raised:
+        process._make_tree_removable(tmp_path)
+
+    assert raised.value is interruption
+    assert raised.value.__context__ is deepest_failure
+    assert len(listings) == 3
+    assert _descriptor_count() == descriptors_before
+
+
 @pytest.mark.parametrize(
     ("step", "child_is_skipped"),
     [("child", True), ("chmod", False), ("listing", False), ("scan", False)],

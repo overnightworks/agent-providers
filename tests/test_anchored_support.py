@@ -437,5 +437,7 @@ def test_wait_stopped_rejects_an_exit_report_and_leaves_the_child_unreaped(
 
 
 def test_watcher_thread_fails_loudly_when_no_watcher_exists() -> None:
+    pid_without_a_watcher = os.getpid()
+
     with pytest.raises(AssertionError):
-        watcher_thread(os.getpid())
+        watcher_thread(pid_without_a_watcher)

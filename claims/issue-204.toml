@@ -1,8 +1,0 @@
-claim_id = "ee6451fa39d04ee986d9366c1dadf481"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "fec05d3b5be8b4bbd78db3ba09395adca44f758b"
-branch = "claude/issue-204-a1b-3p1b2b-freigabe"
-scope = ["src/agent_providers/spawn.py", "tests/anchored_kernel.py", "tests/anchored_leaders.py", "tests/test_anchored_child.py", "tests/test_anchored_release.py"]
-opened_commit = "22ad787af83f72d016eac2c6efa3b7c4953ad95d"
-whole_reason = "One handle's release and the kernel model that proves it: the production change is one file and its test module, and the model additions and ExitProbe.then are what the 12 rows drive; splitting them would leave the cells without their seams."

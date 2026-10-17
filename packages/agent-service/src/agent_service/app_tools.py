@@ -6,7 +6,9 @@ calls one. The client is not a general Streamable HTTP client: it sends POST
 only, accepts ``application/json`` answers only and reads them as raw bytes
 bounded at ``MAX_EVENT_BYTES``. Every wire rule is ``mcp_wire``'s; this module
 owns only the conversation: status precedence, answer correlation, the
-session id and the pagination bound.
+session id and the pagination bound. The capability is held as an object and its
+token is read once, when the client's ``httpx.Auth`` writes the ``Authorization``
+header.
 
 Wire, protocol, HTTP-status and transport failures leave as the closed
 ``UpstreamError`` members below, which name only a reason or a status, never a
@@ -31,6 +33,7 @@ import httpx
 from agent_client.capability import MCP_ENDPOINT_PATH, McpOrigin
 from agent_client.wire import MAX_EVENT_BYTES, JsonObject
 from agent_providers.errors import raise_without_chain
+from agent_service.capability import Capability
 from agent_service.mcp_wire import (
     LATEST_PROTOCOL_VERSION,
     SESSION_ID_HEADER,
@@ -173,7 +176,6 @@ def _require_acknowledgement_headers(response: httpx.Response) -> None:
 class _Conversation:
     http: httpx.AsyncClient
     endpoint: str
-    capability: str
     request_ids: Iterator[int]
 
     def _headers(
@@ -181,7 +183,6 @@ class _Conversation:
     ) -> dict[str, str]:
         headers = {
             **request_headers(negotiated),
-            "Authorization": f"Bearer {self.capability}",
             "Accept-Encoding": _IDENTITY_ENCODING,
         }
         if session_id is not None:
@@ -312,6 +313,17 @@ async def _close_refused(response: httpx.Response) -> None:
         await response.aclose()
 
 
+class _BearerCapability(httpx.Auth):
+    """The one reader of the token: it is written into a request here and nowhere else."""
+
+    def __init__(self, capability: Capability) -> None:
+        self._capability = capability
+
+    def auth_flow(self, request: httpx.Request) -> Iterator[httpx.Request]:
+        request.headers["Authorization"] = f"Bearer {self._capability.token}"
+        yield request
+
+
 async def _refuse_redirect(response: httpx.Response) -> None:
     """Decide a 3xx before httpx parses its ``Location``; a failing close never replaces it."""
     if not 300 <= response.status_code < 400:
@@ -320,8 +332,9 @@ async def _refuse_redirect(response: httpx.Response) -> None:
     raise_without_chain(UpstreamRedirected(response.status_code))
 
 
-def _http_client(tls_context: ssl.SSLContext) -> httpx.AsyncClient:
+def _http_client(capability: Capability, tls_context: ssl.SSLContext) -> httpx.AsyncClient:
     return httpx.AsyncClient(
+        auth=_BearerCapability(capability),
         transport=httpx.AsyncHTTPTransport(retries=0, verify=tls_context),
         follow_redirects=False,
         event_hooks={"response": [_refuse_redirect]},
@@ -335,13 +348,25 @@ def _http_client(tls_context: ssl.SSLContext) -> httpx.AsyncClient:
     )
 
 
+async def _close_client(http: httpx.AsyncClient, *, body_completed: bool) -> None:
+    """Close the client; its failure maps to a closed error unless one is already leaving."""
+    try:
+        await http.aclose()
+    except httpx.HTTPError as failure:
+        if body_completed:
+            _transport_failure(failure)
+
+
 @asynccontextmanager
 async def open_app_tools(
-    origin: McpOrigin, capability: str, tls_context: ssl.SSLContext
+    origin: McpOrigin, capability: Capability, tls_context: ssl.SSLContext
 ) -> AsyncIterator[AppToolsSession]:
     """Handshake with the app at ``origin``; the caller's context decides whom to trust."""
-    async with _http_client(tls_context) as http:
-        conversation = _Conversation(
-            http, f"{origin}{MCP_ENDPOINT_PATH}", capability, count(_FIRST_REQUEST_ID)
-        )
+    http = _http_client(capability, tls_context)
+    try:
+        conversation = _Conversation(http, f"{origin}{MCP_ENDPOINT_PATH}", count(_FIRST_REQUEST_ID))
         yield await _handshake(conversation)
+    except BaseException:
+        await _close_client(http, body_completed=False)
+        raise
+    await _close_client(http, body_completed=True)

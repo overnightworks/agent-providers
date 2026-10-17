@@ -1631,16 +1631,16 @@ async def _reap_behind_shield(proc: AsyncPipedProcess) -> None:
     any cancellation; otherwise the cancellation is delivered afterwards.
     """
     reap_task = asyncio.create_task(_reap_process_group(proc))
-    direct_cancellation_arrived = False
+    direct_cancellation: asyncio.CancelledError | None = None
     with anyio.CancelScope(shield=True):
         while not reap_task.done():
             try:
                 await asyncio.shield(reap_task)
-            except asyncio.CancelledError:
-                direct_cancellation_arrived = True
+            except asyncio.CancelledError as cancellation:
+                direct_cancellation = cancellation
     reap_task.result()
-    if direct_cancellation_arrived:
-        raise asyncio.CancelledError
+    if direct_cancellation is not None:
+        raise direct_cancellation
     await anyio.lowlevel.checkpoint_if_cancelled()
 
 

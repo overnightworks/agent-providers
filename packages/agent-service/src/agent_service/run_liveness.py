@@ -349,18 +349,20 @@ class RunFailures:
     ) -> RunStepCancelled:
         """The one ``RunStepCancelled`` of ``cancelled``, told apart by identity alone.
 
-        The stray is held weakly and made inert once converted: a failure that
-        later propagates reaches this collection through its traceback, and a
-        second failure raised while the stray was handled links it as its
-        context, so the stray's frames must not live on through either.
+        The stray is held weakly and made inert each time it is recorded: a
+        failure that later propagates reaches this collection through its
+        traceback, and a second failure raised while the stray was handled links
+        it as its context, so neither the stray's traceback nor its own chain may
+        keep the frames of the step it left. The positions are taken first, when
+        it is converted.
         """
         known = self._converted.get(id(cancelled))
         if known is not None and known[0]() is cancelled:
-            return known[1]
-        converted = RunStepCancelled(part, cancelled)
-        traceback.clear_frames(cancelled.__traceback__)
-        cancelled.__traceback__ = None
-        self._converted[id(cancelled)] = (weakref.ref(cancelled), converted)
+            converted = known[1]
+        else:
+            converted = RunStepCancelled(part, cancelled)
+            self._converted[id(cancelled)] = (weakref.ref(cancelled), converted)
+        _make_inert(cancelled)
         return converted
 
     @property
@@ -405,6 +407,14 @@ class RunFailures:
             raise
         finally:
             self.leave(cancellation=None, body_failure=body_failure)
+
+
+def _make_inert(stray: asyncio.CancelledError) -> None:
+    """Cut the stray from every frame it met: its traceback and its own links."""
+    stray.__traceback__ = None
+    stray.__cause__ = None
+    stray.__context__ = None
+    stray.__suppress_context__ = False
 
 
 def _cancel_requested(task: asyncio.Task[object] | None) -> bool:

@@ -1360,9 +1360,18 @@ def _reaches_a_frame_of(root: object, function: Callable[..., object]) -> bool:
     return False
 
 
+def _a_lookup_that_fails() -> None:
+    local_value = {"payload": _Step.RECORD_END.canary}
+    raise LookupError(local_value["payload"])
+
+
 def _a_step_cancelled_unasked() -> None:
     local_value = {"payload": _Step.RECORD_END.canary}
-    raise _cancelled_unasked(_Step.RECORD_END) from LookupError(local_value["payload"])
+    try:
+        _a_lookup_that_fails()
+    except LookupError as lookup:
+        raise _cancelled_unasked(_Step.RECORD_END) from lookup
+    raise AssertionError(local_value)
 
 
 def _cancelled_after_passing_a_step(_step: _Step) -> asyncio.CancelledError:
@@ -1412,6 +1421,42 @@ async def test_a_propagated_stray_cancellation_keeps_no_frame_of_the_step_it_lef
 
     assert type(propagated) is RunStepCancelled
     assert not _reaches_a_frame_of(propagated, _a_step_cancelled_unasked)
+    assert not _reaches_a_frame_of(propagated, _a_lookup_that_fails)
+
+
+def _raised_again_by_a_function_holding_a_payload(
+    cancelled: asyncio.CancelledError,
+) -> asyncio.CancelledError:
+    with pytest.raises(asyncio.CancelledError) as again:
+        _raises_holding_a_payload(cancelled)
+    return again.value
+
+
+def _raises_holding_a_payload(cancelled: asyncio.CancelledError) -> None:
+    local_value = {"payload": _Step.CLOCK.canary}
+    try:
+        raise cancelled
+    finally:
+        del local_value
+
+
+@in_loop
+async def test_a_stray_cancellation_recorded_again_keeps_no_frame_of_what_raised_it_again():
+    """Rule 14: a repeated record makes the stray inert again, whoever links it."""
+    failures = RunFailures(uuid.uuid4())
+    cancelled = _cancelled_unasked(_Step.CLOCK)
+    failures.add(FailedPart.SUPERVISION, cancelled)
+    failures.add(FailedPart.SUPERVISION, _raised_again_by_a_function_holding_a_payload(cancelled))
+    secondary = RuntimeError("secondary")
+    secondary.__cause__ = cancelled
+    failures.add(FailedPart.SUPERVISION, secondary)
+    with pytest.raises(RunStepCancelled) as propagated:
+        failures.leave(cancellation=None, body_failure=None)
+    del cancelled, secondary
+    gc.collect()
+
+    assert not _reaches_a_frame_of(propagated.value, _raises_holding_a_payload)
+    assert not _reaches_a_frame_of(failures, _raises_holding_a_payload)
 
 
 @pytest.mark.parametrize("again", list(FailedPart))

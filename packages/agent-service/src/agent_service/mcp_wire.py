@@ -30,6 +30,7 @@ from agent_providers.errors import raise_without_chain
 JSON_MEDIA_TYPE: Final = "application/json"
 EVENT_STREAM_MEDIA_TYPE: Final = "text/event-stream"
 PROTOCOL_VERSION_HEADER: Final = "MCP-Protocol-Version"
+SESSION_ID_HEADER: Final = "Mcp-Session-Id"
 _ASSUMED_PROTOCOL_VERSION: Final = "2025-03-26"
 _SERVER_NAME: Final = "agent-service"
 _SERVER_VERSION: Final = "1"

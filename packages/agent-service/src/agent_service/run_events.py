@@ -54,6 +54,7 @@ from agent_providers.events import (
     ToolCallEvent,
     ToolResultEvent,
 )
+from agent_service.admission import Lease
 from agent_service.config import AppConfig, RunConfig
 from agent_service.run_liveness import (
     FailedPart,
@@ -96,8 +97,9 @@ async def run_frames(
     runs: RunConfig,
     clock: RunClock,
     records: RunRecords,
+    lease: Lease | None = None,
 ) -> AsyncGenerator[bytes, None]:
-    wire = _WireRun(admitted, app, runs, records)
+    wire = _WireRun(admitted, app, runs, records, lease)
     failures = RunFailures(admitted.run_id)
     started = wire.started()
     started_at = clock()
@@ -137,13 +139,19 @@ def _client_lost_when_closed(wire: _WireRun, failures: RunFailures) -> Iterator[
 
 class _WireRun:
     def __init__(
-        self, admitted: AdmittedRun, app: AppConfig, runs: RunConfig, records: RunRecords
+        self,
+        admitted: AdmittedRun,
+        app: AppConfig,
+        runs: RunConfig,
+        records: RunRecords,
+        lease: Lease | None,
     ) -> None:
         self._admitted = admitted
         self._run_id = admitted.run_id
         self._app = app
         self._runs = runs
         self._records = records
+        self._lease = lease
         self._recorder: RunRecorder | None = None
         self._stream = RunStream()
         self._seq = 0
@@ -162,9 +170,13 @@ class _WireRun:
         )
 
     def run_over(self) -> None:
-        self._recorder_of_started_run().over(
-            None if self.ended else self._stream.cancellation_terminal()
-        )
+        try:
+            self._recorder_of_started_run().over(
+                None if self.ended else self._stream.cancellation_terminal()
+            )
+        finally:
+            if self._lease is not None:
+                self._lease.release()
 
     def client_lost(self, loss: ClientLoss) -> None:
         self._recorder_of_started_run().lost(loss)

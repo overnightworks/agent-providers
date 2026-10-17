@@ -900,7 +900,7 @@ so instead of waiting.
 
 ### A1b measured: claude 2.1.302
 
-Measured on 17.10.2026 on `/home/felix-hummert/.local/share/claude/versions/2.1.302`
+Measured on 17.10.2026 on `$HOME/.local/share/claude/versions/2.1.302`
 (`claude --version` prints `2.1.302 (Claude Code)`), a 285,793,528-byte Bun
 executable. No cell used a login, a token or an Anthropic account. Nothing here
 reads `~/.claude`.

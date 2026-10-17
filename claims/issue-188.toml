@@ -1,0 +1,8 @@
+claim_id = "af598b8975b24824ac610d51bc98e554"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "961f4fda1fd01e38908222c501ae21dd09418a0b"
+branch = "claude/issue-188-a1b-3p1b1-start-und-waechter"
+scope = ["src/agent_providers/spawn.py", "tests/anchored_kernel.py", "tests/test_anchored_child.py", "tests/test_spawn_owner.py"]
+opened_commit = "1af9a64304abd9965f6e798aebcfad3225d02781"
+whole_reason = "One leader owner: the start, its watcher thread and the certificate live in spawn.py, with their kernel models and cells beside it and the spawn-owner guard that must admit the new Popen call."

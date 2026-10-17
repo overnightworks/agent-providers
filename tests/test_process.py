@@ -1579,17 +1579,18 @@ def test_a_private_home_refusal_inside_a_handler_carries_no_chain(
     assert not list(tmp_path.glob("private-home-*"))
 
 
-def test_the_frame_check_reads_credential_views() -> None:
-    non_ascii_canary = "credential-canary-\u00e9"
+_A_NON_ASCII_CREDENTIAL_CANARY: str = "credential-canary-\u00e9"
 
+
+def test_the_frame_check_reads_credential_views() -> None:
     def hold_in_a_view() -> None:
-        payload = non_ascii_canary.encode()
+        payload = _A_NON_ASCII_CREDENTIAL_CANARY.encode()
         view = memoryview(payload)
         del payload
         raise RuntimeError(len(view))
 
     def hold_in_a_buffer() -> None:
-        payload = non_ascii_canary.encode()
+        payload = _A_NON_ASCII_CREDENTIAL_CANARY.encode()
         buffer = bytearray(payload)
         del payload
         raise RuntimeError(len(buffer))
@@ -1597,7 +1598,7 @@ def test_the_frame_check_reads_credential_views() -> None:
     for hold in (hold_in_a_view, hold_in_a_buffer):
         with pytest.raises(RuntimeError) as raised:
             hold()
-        assert traceback_frames_hold(raised.value, non_ascii_canary)
+        assert traceback_frames_hold(raised.value, _A_NON_ASCII_CREDENTIAL_CANARY)
 
 
 def test_private_credential_home_reports_a_failed_copy_without_its_path(

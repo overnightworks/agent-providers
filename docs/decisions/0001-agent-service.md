@@ -1694,8 +1694,8 @@ Measured on 17.10.2026 on 2.1.302 (`claude --version` prints `2.1.302 (Claude Co
 checked without the token in the same sandbox) with the operator's dedicated
 measurement token, authorized for this cell. It reached the CLI only as
 `CLAUDE_CODE_OAUTH_TOKEN` in the child's environment (the A1b-0b1 route);
-`<token>` stands for it, and the scans below found it, the `sk-ant` prefix and every other
-definite signature in none of the stored evidence. Live runs: 3 (cap 3), no retry.
+`<token>` stands for it, and the token-aware scan found it, the `sk-ant` prefix and every other
+definite signature neither in the stored evidence nor in this section's diff. Live runs: 3 (cap 3), no retry.
 
 **Harness.** A1b-0b1's harness (network not unshared, private home, empty working
 directory, both deleted after each run, `--die-with-parent`) with these changes. The
@@ -1713,7 +1713,9 @@ written to stdin, which is then closed. The CLI runs through the bounded runner
 240 s (S5); the machine's probe lock is held for every run. Init reports `tools`
 exactly `mcp__fake__step`, `mcp_servers` exactly `fake` `connected`, `model`
 `"claude-haiku-5-5"` and `claude_code_version` `2.1.302` in all three runs; the
-`modelUsage` key is `claude-haiku-5-5` in all three.
+`modelUsage` key is `claude-haiku-5-5` in all three. bwrap binds only the scripts
+read-only and the run's own directory read-write, at the same paths, instead of the whole
+`<scratch>` directory; it keeps 0b1's `/run/systemd/resolve` bind.
 
 **H, the additive hypothesis.** The CLI counts one turn per model response, whatever
 `tool_use`, text or thinking blocks the response carries. `N` is the run's
@@ -1732,7 +1734,7 @@ server sends no byte for it and logs `held`. `initialize`, notifications, `tools
 `ping`, `GET` and `DELETE` take none. Under the assumption A (the CLI makes no model
 request while a call is unanswered and none after a response without a call, and every
 result it hands the model is the server's), a run has at most `P + 1` responses, so at
-most 5, 5 and 34, and 44 in all. A's known breaches (a call the CLI answers locally, a
+most 5, 5 and 33 (34 had k been 2), 43 here against the planned cap of 44. A's known breaches (a call the CLI answers locally, a
 request it sends on its own) are detected in the stream, abort the run and stop the
 series; none was detected. The bound counts the responses visible in the stream. The
 quota exposure is larger by what the stream does not show (requests outside it, which
@@ -1818,7 +1820,7 @@ would cross `N` could stop up to `p - 1` calls before call `M + 1` (with `M = 30
 `N = 31`, serve 29 calls and refuse a following three-call response, so the service
 never sees call 31), and all three runs here could still match, because S1, S3 and S5
 cannot tell response counting from call counting. The formula alone does not discharge
-line 13's "the service's limit always fires first"; A1b-4a owns resolving that
+line 13's promise that the turn limit never fires first (#115: „greift nie vorher"); A1b-4a owns resolving that
 remaining application condition before it makes the promise. Parallel calls (S2) stay
 not measured.
 

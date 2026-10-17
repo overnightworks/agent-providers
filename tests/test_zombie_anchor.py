@@ -87,8 +87,8 @@ class Cell:
             self._reap_unnamed(popen, stdin_writer)
             raise
         self._stdin_writers[popen.pid] = stdin_writer
-        self._witnesses[popen.pid] = os.dup(owned.pidfd)
         anchor.hold(owned)
+        self._witnesses[popen.pid] = os.dup(owned.pidfd)
         return owned
 
     def _reap_unnamed(self, popen: subprocess.Popen, stdin_writer: int) -> None:
@@ -124,6 +124,11 @@ def open_pidfds() -> set[int]:
         except FileNotFoundError:
             continue
     return descriptors
+
+
+def child_pids() -> set[int]:
+    children = Path(f"/proc/self/task/{os.getpid()}/children").read_text()
+    return {int(pid) for pid in children.split()}
 
 
 @pytest.fixture
@@ -355,3 +360,25 @@ def test_a_failed_naming_leaves_no_zombie_and_no_open_pidfd(
     assert unnamed.returncode == 0
     cell.assert_reaped(named)
     assert open_pidfds() - cell.witness_descriptors() == pidfds_before
+
+
+def test_a_failed_witness_duplication_leaves_no_zombie_and_no_open_pidfd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session_anchor = ZombieAnchor()
+    own_cell = Cell(tmp_path, session_anchor)
+    pidfds_before = open_pidfds()
+    children_before = child_pids()
+
+    def exhausted(descriptor: int) -> int:
+        raise OSError(errno.EMFILE, os.strerror(errno.EMFILE))
+
+    with monkeypatch.context() as exhausting:
+        exhausting.setattr(os, "dup", exhausted)
+        with pytest.raises(OSError, match="Too many open files"):
+            own_cell.start_child(own_cell.anchor())
+    own_cell.close()
+    session_anchor.finalize()
+
+    assert child_pids() == children_before
+    assert open_pidfds() == pidfds_before

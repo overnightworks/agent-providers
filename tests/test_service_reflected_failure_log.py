@@ -78,8 +78,9 @@ def closed_error_of(origin: str, context: ssl.SSLContext) -> UpstreamError:
             async with open_app_tools(origin, CAPABILITY, context) as session:
                 await session.list_tools()
 
+    handshake = handshake_and_list()
     with pytest.raises(UpstreamError) as raised:
-        asyncio.run(handshake_and_list())
+        asyncio.run(handshake)
     return raised.value
 
 

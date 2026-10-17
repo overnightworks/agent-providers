@@ -3,6 +3,6 @@ agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
 role = "builder"
 base = "eb3224e4c78a3cbd1b46572e8e95630c8d1a379f"
 branch = "claude/issue-220-watcher-handover"
-scope = ["README.md", "src/agent_providers/spawn.py", "tests/anchored_kernel.py", "tests/anchored_start_cases.py", "tests/anchored_support.py", "tests/test_anchored_group_signal.py", "tests/test_anchored_start.py"]
+scope = ["README.md", "pyproject.toml", "src/agent_providers/spawn.py", "tests/anchored_kernel.py", "tests/anchored_start_cases.py", "tests/anchored_support.py", "tests/test_anchored_group_signal.py", "tests/test_anchored_start.py"]
 opened_commit = "2e7aaefeb902cd5dfad038c3feb5caf75a14a35c"
 whole_reason = "One protocol (the watcher's ownership hand-over and the start's rollback) in the spawn owner, the kernel-model parameter, the wait bound and the two test modules that prove it inside disposable interpreters on four interpreter versions, and the README sentence that publishes its residual; splitting would land the rollback without its contained proof or the residual without its obligation. The anchored family's import-root hand-over moves to its one owner in the same slice, because S6 is its second user."

@@ -417,7 +417,7 @@ class AnchoredLeader:
         if not self._lock.acquire(blocking=False):
             return False
         try:
-            terminal = self._status.state in (AnchorState.RELEASED, AnchorState.LOST)
+            terminal = self._status.state not in _ANCHORED_STATES
         finally:
             self._lock.release()
         return terminal and not self._watcher.is_alive()

@@ -35,8 +35,11 @@ SIGKILLED = -9
 class ExitProbe:
     """The ``on_exit`` callback: counts its calls and reads the handle from inside them."""
 
-    def __init__(self, *, failure: Exception | None = None) -> None:
+    def __init__(self, *, failure: Exception | None = None, held: bool = False) -> None:
         self.seen = threading.Event()
+        self.release = threading.Event()
+        if not held:
+            self.release.set()
         self.observed: list[tuple[AnchorState, int | None]] = []
         self.leader: AnchoredLeader | None = None
         self._bound = threading.Event()
@@ -51,6 +54,7 @@ class ExitProbe:
         assert self.leader is not None
         self.observed.append((self.leader.state, self.leader.returncode))
         self.seen.set()
+        assert self.release.wait(TEST_WAIT_SECONDS), "the callback was never released"
         if self._failure is not None:
             raise self._failure
 
@@ -147,6 +151,10 @@ def spawn_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
     ]
 
 
+def watcher_names() -> set[str]:
+    return {t.name for t in threading.enumerate() if t.name.startswith(WATCHER_THREAD_PREFIX)}
+
+
 def process_status(pid: int) -> tuple[str, int, int]:
     stat = Path(f"/proc/{pid}/stat").read_text()
     state, _parent, group, session = stat.rpartition(")")[2].split()[:4]
@@ -163,6 +171,9 @@ def test_an_exited_leader_stays_an_unreaped_anchor_of_this_process(
     leaders: Leaders, child_cleanup: ChildCleanup
 ) -> None:
     started = leaders.start()
+    watcher = leaders.watcher_of(started)
+    assert watcher is not None
+    assert watcher.daemon
 
     started.write_exit_line(3)
     leaders.await_exit_seen(started)
@@ -179,7 +190,7 @@ def test_an_exited_leader_stays_an_unreaped_anchor_of_this_process(
 def test_a_missing_binary_raises_unchanged_and_starts_no_watcher(
     tmp_path: Path, leaders: Leaders
 ) -> None:
-    threads_before = set(threading.enumerate())
+    watchers_before = watcher_names()
     descriptors_before = set(os.listdir("/proc/self/fd"))
     missing = leaders.describe(tmp_path / "missing-binary")
     on_exit = ExitProbe()
@@ -193,8 +204,8 @@ def test_a_missing_binary_raises_unchanged_and_starts_no_watcher(
             on_exit=on_exit,
         )
 
-    assert set(threading.enumerate()) == threads_before
-    assert set(os.listdir("/proc/self/fd")) == descriptors_before
+    assert watcher_names() <= watchers_before
+    assert set(os.listdir("/proc/self/fd")) - descriptors_before == set()
 
 
 def test_a_raising_on_exit_is_logged_by_pid_and_class_and_stays_off_the_excepthook(
@@ -266,6 +277,7 @@ def test_stopped_leaders_are_consumed_for_their_own_pid_only(
         started.write_exit_line(0)
         leaders.await_exit_seen(started)
         assert (started.leader.state, started.leader.returncode) == (AnchorState.EXITED, 0)
+        assert child_cleanup.state(started.owned) == Exited(0)
 
 
 @pytest.mark.parametrize(
@@ -287,10 +299,14 @@ def test_a_loss_the_kernel_reports_leaves_the_real_zombie_intact_and_disarms_pop
     model = KernelModel(stops=stops, loses_at=loses_at)
     with monkeypatch.context() as patch:
         patch.setattr(os, "waitid", model)
-        started = leaders.start()
+        started = leaders.start(ExitProbe(held=True))
         started.write_exit_line(0)
         child_cleanup.wait_exited(started.owned)
-        leaders.await_exit_seen(started)
+        assert started.probe.seen.wait(TEST_WAIT_SECONDS), "on_exit was not called within the bound"
+        assert started.leader.state is AnchorState.LOST
+        assert started.leader.done_with_pid is False
+        started.probe.release.set()
+        leaders.join_watcher(started)
 
     assert started.leader.state is AnchorState.LOST
     assert started.probe.observed == [(AnchorState.LOST, None)]
@@ -307,10 +323,10 @@ def test_a_loss_the_kernel_reports_leaves_the_real_zombie_intact_and_disarms_pop
     owned = started.owned
     dropped = child_cleanup.drop_popen(owned)
     probe = started.probe
-    probe.bind(None)
-    del started
     with warnings.catch_warnings(record=True) as emitted:
         warnings.simplefilter("always")
+        probe.bind(None)
+        del started
         gc.collect()
         leaders.start_bare()
 

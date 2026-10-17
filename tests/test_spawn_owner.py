@@ -32,13 +32,17 @@ from __future__ import annotations
 import ast
 import asyncio
 import os
+import select
 import sys
+import threading
+import time
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
-from anchored_support import ChildCleanup
+from anchored_kernel import WATCHER_THREAD_PREFIX
+from anchored_support import TEST_WAIT_SECONDS, ChildCleanup
 
 from agent_providers import spawn
 from agent_providers.spawn import (
@@ -505,6 +509,28 @@ def test_a_child_inherits_no_descriptor_the_parent_holds_open(
     _run_descriptor_probe(tmp_path, stdout_of)
 
 
+def _read_until_eof_within_bound(descriptor: int) -> str:
+    deadline = time.monotonic() + TEST_WAIT_SECONDS
+    chunks: list[bytes] = []
+    while True:
+        remaining = deadline - time.monotonic()
+        assert remaining > 0, "the child kept stdout open past the bound"
+        if not select.select([descriptor], [], [], remaining)[0]:
+            continue
+        chunk = os.read(descriptor, 4096)
+        if not chunk:
+            return b"".join(chunks).decode()
+        chunks.append(chunk)
+
+
+def _join_watcher_within_bound(pid: int) -> None:
+    name = f"{WATCHER_THREAD_PREFIX}{pid}"
+    watcher = next((t for t in threading.enumerate() if t.name == name), None)
+    if watcher is not None:
+        watcher.join(TEST_WAIT_SECONDS)
+        assert not watcher.is_alive(), "the watcher did not end within the bound"
+
+
 @needs_proc_fd
 def test_an_anchored_leader_inherits_no_descriptor_the_parent_holds_open(
     tmp_path: Path, child_cleanup: ChildCleanup,
@@ -513,7 +539,7 @@ def test_an_anchored_leader_inherits_no_descriptor_the_parent_holds_open(
         output_read, output_write = os.pipe()
         nothing = os.open(os.devnull, os.O_RDWR)
         try:
-            child_cleanup.capture(
+            captured = child_cleanup.capture(
                 lambda: start_anchored_leader(
                     child,
                     stdin=nothing,
@@ -524,9 +550,11 @@ def test_an_anchored_leader_inherits_no_descriptor_the_parent_holds_open(
             )
             os.close(output_write)
             output_write = -1
-            with os.fdopen(output_read) as output:
-                output_read = -1
-                return output.read()
+            output = _read_until_eof_within_bound(output_read)
+            (owned,) = captured.children
+            _join_watcher_within_bound(owned.pid)
+            del captured
+            return output
         finally:
             for descriptor in (nothing, output_read, output_write):
                 if descriptor >= 0:

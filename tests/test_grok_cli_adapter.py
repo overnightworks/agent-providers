@@ -43,6 +43,7 @@ from provider_test_support import (
 
 from agent_client.tools import ToolDeclaration
 from agent_providers import process
+from agent_providers.catalog import ProviderRoute
 from agent_providers.config import current_config, current_turn_config
 from agent_providers.errors import (
     ProviderUnavailableError,
@@ -216,8 +217,8 @@ async def _collect_transport_responses(transport) -> list[object]:
     return [item async for item in transport.stream(InitialTurn("system", []))]
 
 
-def test_grok_tool_command_pins_native_tool_and_web_isolation() -> None:
-    model = "grok-test"
+@pytest.mark.parametrize("model", ["grok-test", None])
+def test_grok_tool_command_pins_native_tool_and_web_isolation(model) -> None:
     session_id = "3e04bf5b-4e1c-4f26-8e1e-2f17c5f6d9cf"
     common = (
         "--prompt-file",
@@ -230,8 +231,7 @@ def test_grok_tool_command_pins_native_tool_and_web_isolation() -> None:
         "1",
         "--no-subagents",
         "--disable-web-search",
-        "--model",
-        model,
+        *(("--model", model) if model is not None else ()),
     )
 
     assert grok_cli_adapter._grok_cli_tool_arguments(model) == common
@@ -240,14 +240,6 @@ def test_grok_tool_command_pins_native_tool_and_web_isolation() -> None:
         "--resume",
         session_id,
     )
-
-
-@pytest.mark.parametrize("session_id", [None, "3e04bf5b-4e1c-4f26-8e1e-2f17c5f6d9cf"])
-def test_grok_arguments_leave_out_model_without_one(session_id) -> None:
-    arguments = grok_cli_adapter._grok_cli_tool_arguments(None, session_id)
-
-    assert "--model" not in arguments
-    assert ("--resume" in arguments) is (session_id is not None)
 
 
 @pytest.mark.parametrize("model", [None, "grok-4.5"])
@@ -266,7 +258,8 @@ def test_stream_turn_runs_the_grok_cli_across_rounds(monkeypatch, model) -> None
     turn = drive_turn("grok", model=model)
 
     assert_a_tool_round_then_its_resume(
-        turn, calls, resumed_with=GROK_SESSION_ID, model=model,
+        turn, calls, model=model,
+        resume_follows=lambda command: command[-2:] == ("--resume", GROK_SESSION_ID),
     )
 
 
@@ -281,6 +274,7 @@ def test_grok_transport_refuses_an_empty_model_before_any_home(monkeypatch) -> N
         grok_cli_adapter.GrokCliToolTransport(model="", catalog=SAMPLE_TOOL_CATALOG)
 
     assert refusal.value.reason.code is SafeRouteReasonCode.ROUTE_FAILED
+    assert (refusal.value.provider, refusal.value.route) == ("grok", ProviderRoute.CLI)
 
 
 def test_grok_tool_transport_starts_then_resumes_in_one_private_credential_home(

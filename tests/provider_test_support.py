@@ -568,16 +568,19 @@ def cli_rounds_runner(rounds, outcome, calls):
     return run_cli_bounded
 
 
-def assert_a_tool_round_then_its_resume(turn, calls, *, resumed_with, model) -> None:
-    """Two spawns that carry ``model`` on both rounds, or on neither when ``None``."""
+def assert_a_tool_round_then_its_resume(turn, calls, *, resume_follows, model) -> None:
+    """Two spawns that carry ``model`` on both rounds, or on neither when ``None``.
+
+    ``resume_follows`` says whether a command is the provider's resume of the first round.
+    """
     assert turn.error is None
     assert turn.executed
     assert len(calls) == 2
     assert [("--model" in command) for command in calls] == [model is not None] * 2
     if model is not None:
         assert [command[command.index("--model") + 1] for command in calls] == [model] * 2
-    assert resumed_with in calls[1]
-    assert resumed_with not in calls[0]
+    assert resume_follows(calls[1])
+    assert not resume_follows(calls[0])
     assert isinstance(turn.events[-1], FinalEvent)
     assert turn.events[-1].text == "done"
 

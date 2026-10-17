@@ -148,6 +148,7 @@ def test_stream_turn_refuses_a_model_that_runs_nothing(provider, route, model, s
     turn = drive_turn(provider, route=route, model=model)
 
     assert turn.error.reason.code is SafeRouteReasonCode.ROUTE_FAILED
+    assert (turn.error.provider, turn.error.route) == (provider, route)
     assert turn.events == []
     assert started_routes == []
 

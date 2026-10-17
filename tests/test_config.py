@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 import os
+import pickle
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-from provider_test_support import override_provider_runtime
+from provider_test_support import CALLER_CONTEXTS, override_provider_runtime
 
 from agent_providers.catalog import (
     ProviderRoute,
@@ -123,6 +125,18 @@ def _with_mode(mode: int) -> Callable[[Path, pytest.MonkeyPatch], Path]:
     return root_with_mode
 
 
+def _owned_by_another_user_and_world_readable(
+    base: Path, monkeypatch: pytest.MonkeyPatch,
+) -> Path:
+    root = _owned_by_another_user(base, monkeypatch)
+    root.chmod(0o755)
+    return root
+
+
+def _containing_a_nul_byte(base: Path, _monkeypatch: pytest.MonkeyPatch) -> Path:
+    return base / "nul\0byte"
+
+
 def _below_a_self_looping_symlink(base: Path, _monkeypatch: pytest.MonkeyPatch) -> Path:
     loop = base / "loop"
     loop.symlink_to(loop)
@@ -145,6 +159,11 @@ _REFUSED_ROOTS = (
     ),
     pytest.param(WorkingRootViolation.SYMLINK, _a_dangling_symlink, id="dangling-symlink"),
     pytest.param(WorkingRootViolation.FOREIGN_OWNER, _owned_by_another_user, id="foreign-owner"),
+    pytest.param(
+        WorkingRootViolation.FOREIGN_OWNER,
+        _owned_by_another_user_and_world_readable,
+        id="foreign-owner-with-wrong-mode",
+    ),
     *(
         pytest.param(WorkingRootViolation.WRONG_MODE, _with_mode(mode), id=f"mode-{mode:o}")
         for mode in (0o755, 0o750, 0o701, 0o500, 0o1700, 0o2700)
@@ -152,6 +171,7 @@ _REFUSED_ROOTS = (
     pytest.param(
         WorkingRootViolation.UNINSPECTABLE, _below_a_self_looping_symlink, id="self-looping-parent",
     ),
+    pytest.param(WorkingRootViolation.UNINSPECTABLE, _containing_a_nul_byte, id="nul-byte"),
     pytest.param(
         WorkingRootViolation.UNINSPECTABLE,
         _with_a_component_longer_than_the_filesystem_allows,
@@ -167,24 +187,42 @@ class _Refusal:
     log_records: list[logging.LogRecord]
 
 
+def _configure_while_handling_an_exception_naming_the_root(config: ProviderRuntimeConfig) -> None:
+    try:
+        raise PermissionError(13, "denied", str(Path("/") / THE_ROOT_NAME))
+    except PermissionError:
+        configure(config)
+
+
 @pytest.fixture
 def refusal(
-    request, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    request,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    while_the_caller_handles_an_exception: bool,
 ) -> _Refusal:
     expected_violation, make_root = request.param
     base = _a_private_directory(tmp_path / THE_ROOT_NAME)
     config = _runtime_with_root(tmp_path, make_root(base, monkeypatch))
     reset_config()
     with caplog.at_level(logging.DEBUG), pytest.raises(WorkingRootNotPrivateError) as raised:
-        configure(config)
+        if while_the_caller_handles_an_exception:
+            _configure_while_handling_an_exception_naming_the_root(config)
+        else:
+            configure(config)
     return _Refusal(expected_violation, raised.value, list(caplog.records))
 
 
-_every_refusal = pytest.mark.parametrize(
+_every_refused_root = pytest.mark.parametrize(
     "refusal",
     [pytest.param(case.values, id=case.id) for case in _REFUSED_ROOTS],
     indirect=True,
 )
+
+
+def _every_refusal(test: Callable[..., None]) -> Callable[..., None]:
+    return _every_refused_root(CALLER_CONTEXTS(test))
 
 
 def test_the_violations_are_the_closed_set_the_contract_names() -> None:
@@ -276,3 +314,19 @@ def test_a_refused_root_wins_over_a_differing_installation(tmp_path: Path) -> No
 
     assert not isinstance(raised.value, ProviderRuntimeAlreadyConfiguredError)
     assert current_config() == installed
+
+
+@pytest.mark.parametrize(
+    "duplicate",
+    [lambda error: pickle.loads(pickle.dumps(error)), copy.copy, copy.deepcopy],
+    ids=["pickle", "copy", "deepcopy"],
+)
+def test_a_refusal_survives_being_copied_with_its_violation(
+    duplicate: Callable[[WorkingRootNotPrivateError], WorkingRootNotPrivateError],
+) -> None:
+    original = WorkingRootNotPrivateError(WorkingRootViolation.WRONG_MODE)
+
+    duplicated = duplicate(original)
+
+    assert duplicated.violation is original.violation
+    assert duplicated.args == original.args

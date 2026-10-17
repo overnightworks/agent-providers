@@ -158,8 +158,8 @@ class WorkingRootViolation(StrEnum):
 class WorkingRootNotPrivateError(RuntimeError):
     """``cli_working_directory_root`` is not a private directory.
 
-    It names only the closed violation, never the path or the ``OSError`` that
-    found it: the root is the parent of every credential copy.
+    It names only the closed violation, never the path or the failure of the
+    inspection that found it: the root is the parent of every credential copy.
     """
 
     def __init__(self, violation: WorkingRootViolation) -> None:
@@ -194,21 +194,21 @@ _configuration_lock = threading.Lock()
 
 def _inspect_working_root(root: Path) -> None:
     if not root.is_absolute():
-        raise WorkingRootNotPrivateError(WorkingRootViolation.RELATIVE)
+        raise_without_chain(WorkingRootNotPrivateError(WorkingRootViolation.RELATIVE))
     try:
         status = os.lstat(root)
     except (FileNotFoundError, NotADirectoryError):
         raise_without_chain(WorkingRootNotPrivateError(WorkingRootViolation.MISSING))
-    except OSError:
+    except (OSError, ValueError):
         raise_without_chain(WorkingRootNotPrivateError(WorkingRootViolation.UNINSPECTABLE))
     if stat.S_ISLNK(status.st_mode):
-        raise WorkingRootNotPrivateError(WorkingRootViolation.SYMLINK)
+        raise_without_chain(WorkingRootNotPrivateError(WorkingRootViolation.SYMLINK))
     if not stat.S_ISDIR(status.st_mode):
-        raise WorkingRootNotPrivateError(WorkingRootViolation.MISSING)
+        raise_without_chain(WorkingRootNotPrivateError(WorkingRootViolation.MISSING))
     if status.st_uid != os.geteuid():
-        raise WorkingRootNotPrivateError(WorkingRootViolation.FOREIGN_OWNER)
+        raise_without_chain(WorkingRootNotPrivateError(WorkingRootViolation.FOREIGN_OWNER))
     if stat.S_IMODE(status.st_mode) != _PRIVATE_DIRECTORY_MODE:
-        raise WorkingRootNotPrivateError(WorkingRootViolation.WRONG_MODE)
+        raise_without_chain(WorkingRootNotPrivateError(WorkingRootViolation.WRONG_MODE))
 
 
 def configure(config: ProviderRuntimeConfig) -> None:

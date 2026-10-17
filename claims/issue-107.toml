@@ -1,8 +1,0 @@
-claim_id = "bd9750ea7cb14f3089bbca3f79c4df3e"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "b8494c1ada7287b6bfc0259efbb40407306da7b4"
-branch = "claude/issue-107-codex-login-writer"
-scope = ["README.md", "src/agent_providers/codex/image.py", "src/agent_providers/codex/protocol.py", "src/agent_providers/codex/transport.py", "src/agent_providers/codex_login.py", "src/agent_providers/process.py", "tests/provider_test_support.py", "tests/test_codex_cli_adapter.py", "tests/test_process.py"]
-opened_commit = "71cc3dc989c61afb05088071e31d6bb37246e77d"
-whole_reason = "The writer, its two turn callers and the deleted names form one cut: a turn still on the old copier keeps a second writer and its chain leak, and a deleted name without its README row fails the renamed-name test. The test support module joins because the no-bytes proofs need its frame check to read views and the turn cells reuse its source builders."

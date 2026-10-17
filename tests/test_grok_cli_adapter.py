@@ -124,9 +124,10 @@ def test_grok_turn_that_cannot_make_its_home_finds_the_cli_unavailable(
 def test_grok_round_without_its_binary_finds_the_cli_unavailable() -> None:
     transport = _transport()
     override_provider_runtime(grok_cli_binary="no-such-grok-binary-3b7e")
+    collecting = _collect_transport_responses(transport)
 
     with pytest.raises(ProviderUnavailableError) as raised:
-        asyncio.run(_collect_transport_responses(transport))
+        asyncio.run(collecting)
 
     assert raised.value.reason.code is SafeRouteReasonCode.CLI_UNAVAILABLE
 

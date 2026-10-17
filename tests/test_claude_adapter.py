@@ -221,8 +221,10 @@ def test_claude_cli_turn_with_an_unusable_credential_reports_it_as_not_signed_in
 ) -> None:
     _a_credential_that(fault, tmp_path)
 
+    driving = _drive_real_claude_turn()
+
     with pytest.raises(ProviderUnavailableError) as failure:
-        asyncio.run(_drive_real_claude_turn())
+        asyncio.run(driving)
 
     assert failure.value.reason.code is SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED
     cause = failure.value.__cause__
@@ -238,9 +240,10 @@ def test_claude_cli_turn_whose_private_home_cannot_be_made_reports_the_cli_unava
     root.mkdir(mode=0o700)
     override_provider_runtime(cli_working_directory_root=root)
     root.rmdir()
+    driving = _drive_real_claude_turn()
 
     with pytest.raises(ProviderUnavailableError) as failure:
-        asyncio.run(_drive_real_claude_turn())
+        asyncio.run(driving)
 
     assert failure.value.reason.code is SafeRouteReasonCode.CLI_UNAVAILABLE
     cause = failure.value.__cause__

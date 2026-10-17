@@ -16,9 +16,11 @@ import tempfile
 import threading
 import time
 import types
+import weakref
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from unittest.mock import patch
 
@@ -50,6 +52,7 @@ from provider_test_support import (
     override_provider_runtime,
     pool_callbacks,
     shell_child,
+    start_then_raise,
     traceback_frames_hold,
 )
 
@@ -68,6 +71,7 @@ from agent_providers.process import (
     GROK_CLI_CREDENTIALS_INVALID_DETAIL,
     AgentCliUnavailableError,
     CachedProbe,
+    ClaimedStartThread,
     CliCredentialNotConfiguredError,
     CliLineChannel,
     CliProbeBudgetExceeded,
@@ -4488,9 +4492,10 @@ def test_control_flow_raised_while_settling_an_unstarted_run_propagates_after_pu
     callbacks["on_spawn_failed"] = _raising(KeyboardInterrupt())
     channel = CliLineChannel(maximum_lines=1)
 
-    with pytest.raises(KeyboardInterrupt):
+    with pytest.raises(KeyboardInterrupt) as raised:
         _run_pooled(":", callbacks, stdout_line_channel=channel)
 
+    assert raised.value.__context__ is None
     published = channel.receive(timeout=0)
     assert isinstance(published, CliRunOutcome)
     assert published.reason is CliRunReason.SPAWN_FAILED
@@ -4701,3 +4706,227 @@ def test_control_flow_raised_by_the_log_handler_while_reporting_propagates_after
     assert isinstance(published, CliRunOutcome)
     assert published.reason is CliRunReason.SPAWN_FAILED
     failure_watch.assert_nothing_leaked()
+
+
+def _returned_or_raised(call: Callable[[], object]) -> object:
+    try:
+        return call()
+    except BaseException as raised:
+        return raised
+
+
+def _returned_or_raised_within_bound(call: Callable[[], object]) -> object:
+    results: list[object] = []
+    caller = threading.Thread(target=lambda: results.append(_returned_or_raised(call)), daemon=True)
+    caller.start()
+    caller.join(timeout=5)
+    assert not caller.is_alive(), "the call never returned"
+    return results[0]
+
+
+def _with_recorded_calls(callbacks: dict) -> tuple[dict, list[str]]:
+    calls: list[str] = []
+
+    def recording(name: str, callback: Callable[..., object]) -> Callable[..., object]:
+        def call(*arguments: object) -> object:
+            calls.append(name)
+            return callback(*arguments)
+
+        return call
+
+    return {name: recording(name, callback) for name, callback in callbacks.items()}, calls
+
+
+def _releasing_both(
+    token: process.PrivateCredentialHomeReservation, release_slot: Callable[[], None],
+) -> Callable[[], None]:
+    def release() -> None:
+        token.release()
+        release_slot()
+
+    return release
+
+
+def _record_pipe_openings(monkeypatch) -> list[object]:
+    openings: list[object] = []
+    open_pipes = process.open_pipes
+
+    def recording(*arguments, **keywords):
+        openings.append(arguments)
+        return open_pipes(*arguments, **keywords)
+
+    monkeypatch.setattr(process, "open_pipes", recording)
+    return openings
+
+
+@pytest.mark.parametrize(
+    ("error", "propagates"),
+    [
+        pytest.param(KeyboardInterrupt(), True, id="keyboard-interrupt"),
+        pytest.param(SystemExit(), True, id="system-exit"),
+        pytest.param(TimeoutError(A_RUNNER_FAILURE_CANARY), False, id="host-handler-timeout"),
+    ],
+)
+def test_a_start_that_raises_while_the_worker_waits_leaves_the_runner_the_owner(
+    monkeypatch, failure_watch, pooled_run, error, propagates,
+) -> None:
+    process_pool, pooled = pooled_run
+    callbacks, calls = _with_recorded_calls(pooled)
+    pipe_openings = _record_pipe_openings(monkeypatch)
+    gate = start_then_raise(monkeypatch, error, thread_claims_first=False)
+    channel = CliLineChannel(maximum_lines=1)
+
+    result = _returned_or_raised(
+        lambda: _run_pooled(":", callbacks, stdout_line_channel=channel)
+    )
+    gate.set()
+
+    if propagates:
+        assert result is error
+        assert (error.__context__, error.__cause__) == (None, None)
+    else:
+        assert isinstance(result, CliRunOutcome)
+        assert result.reason is CliRunReason.SPAWN_FAILED
+    published = channel.receive(timeout=0)
+    assert isinstance(published, CliRunOutcome)
+    assert published.reason is CliRunReason.SPAWN_FAILED
+    assert calls == ["on_spawn_failed"]
+    assert process_pool.reservation_count() == 0
+    assert failure_watch.reported_steps() == [f"start {type(error).__name__}"]
+    assert pipe_openings == []
+    failure_watch.assert_nothing_leaked()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(KeyboardInterrupt(), id="keyboard-interrupt"),
+        pytest.param(SystemExit(), id="system-exit"),
+        pytest.param(TimeoutError(A_RUNNER_FAILURE_CANARY), id="host-handler-timeout"),
+    ],
+)
+def test_a_start_that_raises_after_the_worker_claimed_leaves_the_worker_the_owner(
+    monkeypatch, failure_watch, pooled_run, error,
+) -> None:
+    process_pool, pooled = pooled_run
+    callbacks, calls = _with_recorded_calls(pooled)
+    start_then_raise(monkeypatch, error, thread_claims_first=True)
+    channel = CliLineChannel(maximum_lines=1)
+
+    result = _returned_or_raised_within_bound(
+        lambda: _run_pooled(":", callbacks, stdout_line_channel=channel)
+    )
+
+    assert result is error
+    assert (error.__context__, error.__cause__) == (None, None)
+    published = channel.receive(timeout=5)
+    assert isinstance(published, CliRunOutcome)
+    assert published.reason is CliRunReason.COMPLETE
+    assert calls == ["on_spawned", "on_reaped"]
+    assert process_pool.reservation_count() == 0
+    assert failure_watch.reported_steps() == []
+    failure_watch.assert_nothing_leaked()
+
+
+def test_a_start_claim_is_taken_once_and_never_waits() -> None:
+    target_calls: list[str] = []
+    thread = ClaimedStartThread(
+        target=lambda: target_calls.append("ran"), daemon=True
+    )
+
+    first = thread.take_start_claim()
+    second: list[bool] = []
+    asker = threading.Thread(target=lambda: second.append(thread.take_start_claim()), daemon=True)
+    asker.start()
+    asker.join(timeout=5)
+    assert not asker.is_alive(), "the second claim waited"
+    thread.start()
+    thread.join(timeout=5)
+
+    assert (first, second) == (True, [False])
+    assert target_calls == []
+
+
+def test_the_start_injector_raises_its_error_after_the_thread_already_ended(monkeypatch) -> None:
+    real_start = threading.Thread.start
+
+    def start_and_wait_for_the_end(worker: threading.Thread) -> None:
+        real_start(worker)
+        worker.join(timeout=5)
+
+    def nothing() -> None:
+        pass
+
+    monkeypatch.setattr(threading.Thread, "start", start_and_wait_for_the_end)
+    error = KeyboardInterrupt()
+    start_then_raise(monkeypatch, error, nothing, thread_claims_first=True)
+
+    thread = ClaimedStartThread(target=nothing, daemon=True)
+
+    with pytest.raises(KeyboardInterrupt) as raised:
+        thread.start()
+
+    assert raised.value is error
+
+
+def test_an_interruption_inside_the_starters_claim_leaks_only_what_no_child_uses(
+    monkeypatch, failure_watch, pooled_run, tmp_path,
+) -> None:
+    process_pool, pooled = pooled_run
+    home = _credential_home(tmp_path)
+    home_path = home.path
+    token = home.reserve()
+
+    callbacks, calls = _with_recorded_calls(
+        {**pooled, "on_spawn_failed": _releasing_both(token, pooled["on_spawn_failed"])}
+    )
+    pipe_openings = _record_pipe_openings(monkeypatch)
+    start_failure = RuntimeError()
+    gate = start_then_raise(monkeypatch, start_failure, thread_claims_first=False)
+    claim_ordered_by_the_gate = ClaimedStartThread.take_start_claim
+    starter = threading.current_thread()
+
+    def interrupted_after_claiming(thread: ClaimedStartThread) -> bool:
+        won = claim_ordered_by_the_gate(thread)
+        if threading.current_thread() is starter:
+            raise KeyboardInterrupt
+        return won
+
+    monkeypatch.setattr(ClaimedStartThread, "take_start_claim", interrupted_after_claiming)
+
+    result = _returned_or_raised(partial(_run_pooled, ":", callbacks))
+    gate.set()
+    failure_watch.wait_for_the_runner_threads_to_end()
+
+    assert isinstance(result, KeyboardInterrupt)
+    assert calls == []
+    assert pipe_openings == []
+    assert process_pool.reservation_count() == 1
+    home.close()
+    assert home_path.exists()
+    start_failure.with_traceback(None)
+    del home, token, callbacks, pooled, result
+    gc.collect()
+    assert not home_path.exists()
+
+
+class _GivenToAThread:
+    pass
+
+
+@pytest.mark.parametrize("starter_claimed_first", [False, True], ids=["won", "lost"])
+def test_a_finished_claimed_thread_keeps_nothing_it_was_given(starter_claimed_first) -> None:
+    given = _GivenToAThread()
+    thread = ClaimedStartThread(
+        target=lambda argument: None, args=(given,), daemon=True
+    )
+    if starter_claimed_first:
+        thread.take_start_claim()
+    reference = weakref.ref(given)
+
+    thread.start()
+    thread.join(timeout=5)
+    del given
+    gc.collect()
+
+    assert reference() is None

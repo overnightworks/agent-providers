@@ -550,6 +550,29 @@ class _CliRunRequest:
     prompt_file_arg_index: int | None
 
 
+class ClaimedStartThread(threading.Thread):
+    """A thread whose starter and the thread itself race once for the right to act.
+
+    ``Thread.start()`` can raise while the thread runs on. Whoever takes the
+    claim first owns the thread's work; the other does nothing with it. The
+    claim is never released and nothing waits on it, so a second interruption
+    cannot strand an owner.
+    """
+
+    def __init__(self, *arguments, **keywords) -> None:
+        super().__init__(*arguments, **keywords)
+        self._start_claim = threading.Lock()
+
+    def take_start_claim(self) -> bool:
+        return self._start_claim.acquire(blocking=False)
+
+    def run(self) -> None:
+        if self.take_start_claim():
+            super().run()
+            return
+        del self._target, self._args, self._kwargs
+
+
 def run_cli_bounded(
     child: ChildProcess,
     **options: Unpack[_CliRunKeywordArgs],
@@ -578,12 +601,18 @@ def run_cli_bounded(
         prompt_file_arg_index=options.get("prompt_file_arg_index"),
     )
     state = _BoundedRunState()
-    worker = threading.Thread(target=_run_cli_bounded, args=(state, child, request), daemon=True)
-    failures = StepFailures()
-    with failures.contained("start"):
+    worker = ClaimedStartThread(
+        target=_run_cli_bounded, args=(state, child, request), daemon=True
+    )
+    start_failure: BaseException | None = None
+    try:
         worker.start()
-    if failures.failed("start"):
-        return _settle_unstarted_run(state, request, failures)
+    except BaseException as error:
+        if not worker.take_start_claim():
+            raise
+        start_failure = error
+    if start_failure is not None:
+        return _settle_unstarted_run(state, request, start_failure)
     if state.completed.wait(timeout=max(request.deadline - time.monotonic(), 0)):
         return _recorded_outcome(state)
     if not state.started.is_set():
@@ -597,9 +626,11 @@ def run_cli_bounded(
 def _settle_unstarted_run(
     state: _BoundedRunState,
     request: _CliRunRequest,
-    failures: StepFailures,
+    start_failure: BaseException,
 ) -> CliRunOutcome:
-    start_failure = failures.error_raised_by("start")
+    failures = StepFailures()
+    with failures.contained("start"):
+        raise start_failure
     with failures.contained("on_spawn_failed"):
         _notify_spawn_failed(request.on_spawn_failed)
     outcome = _settle(

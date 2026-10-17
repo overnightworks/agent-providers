@@ -1,0 +1,7 @@
+claim_id = "4074cffe48a74173a9f72c1c9a6d2b01"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "aea500e615c348431e02cec9ac9bbc279fe9ff55"
+branch = "claude/issue-199-a1b-3d-adr-saetze"
+scope = ["docs/decisions/0001-agent-service.md"]
+opened_commit = "7c116cc4d855ce58e83eedd4c1c1cfb1696984a6"

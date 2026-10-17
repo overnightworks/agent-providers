@@ -284,7 +284,7 @@ class ServiceConfig(_Section):
 
 def load_config(path: Path) -> ServiceConfig:
     try:
-        text = path.read_text(encoding="utf-8")  # NOSONAR(S8707) the operator names this file at service start
+        text = path.read_text(encoding="utf-8")  # NOSONAR(S8707) the operator names this file
     except OSError as error:
         raise ConfigError(f"{shown_text(str(path))}: cannot be read: {error.strerror}") from error
     except UnicodeDecodeError as error:

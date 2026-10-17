@@ -1,8 +1,0 @@
-claim_id = "d42ca9b59bc04b649eed3f7b89835459"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "04e835c8aaa83dd2c98e45297003119ed1003f80"
-branch = "claude/issue-197-f5-ein-cli-runner"
-scope = ["tests/provider_test_support.py", "tests/test_codex_cli_adapter.py", "tests/test_grok_cli_adapter.py", "tests/test_service_run_events.py"]
-opened_commit = "f630e3fc121c078c0aa8fd415efe1b59e0a718a1"
-whole_reason = "One builder replaces two builders and a third copy; the four test files only change together, since each reads the shared record shape."

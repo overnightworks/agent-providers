@@ -1751,7 +1751,9 @@ def _a_tree_needing_repair(home: PrivateCredentialHome, outside: Path) -> None:
         (home.path / sibling).chmod(0o500)
 
 
-def _arm_after_the_first_removal_pass(monkeypatch: pytest.MonkeyPatch) -> Callable[[], bool]:
+def _arm_after_the_first_removal_pass(
+    monkeypatch: pytest.MonkeyPatch, home_path: Path,
+) -> Callable[[], bool]:
     remove_tree = process.shutil.rmtree
     first_pass_failed: list[bool] = []
 
@@ -1759,7 +1761,8 @@ def _arm_after_the_first_removal_pass(monkeypatch: pytest.MonkeyPatch) -> Callab
         try:
             remove_tree(path)
         except OSError:
-            first_pass_failed.append(True)
+            if Path(path) == home_path:
+                first_pass_failed.append(True)
             raise
 
     monkeypatch.setattr(process.shutil, "rmtree", failing_first_pass)
@@ -1809,7 +1812,7 @@ def test_private_credential_home_never_follows_an_inner_directory_swapped_for_a_
     child_directory.chmod(0o500)
     outside_before = tree_snapshot(outside)
     caplog.set_level(logging.ERROR, logger=process.__name__)
-    is_armed = _arm_after_the_first_removal_pass(monkeypatch)
+    is_armed = _arm_after_the_first_removal_pass(monkeypatch, home.path)
     real_open, real_chmod = os.open, os.chmod
     acquired_swap: list[int] = []
     swapped: list[bool] = []
@@ -1895,8 +1898,14 @@ def test_private_credential_home_needing_repair_is_left_without_a_path_fallback(
 
 
 def test_process_module_imports_where_os_has_no_o_path() -> None:
+    source_root = Path(process.__file__).parents[1]
     subprocess.run(
-        [sys.executable, "-I", "-c", "import os; del os.O_PATH; import agent_providers.process"],
+        [
+            sys.executable, "-I", "-c",
+            "import os, sys; sys.path.insert(0, sys.argv[1]); del os.O_PATH;"
+            " import agent_providers.process",
+            str(source_root),
+        ],
         check=True,
     )
 
@@ -1904,13 +1913,20 @@ def test_process_module_imports_where_os_has_no_o_path() -> None:
 _FAULT_OCCURRENCE = {"chmod": 3, "listing": 3, "child": 2}
 
 
+def _is_inside(home_path: Path, descriptor: str | Path) -> bool:
+    return Path(os.readlink(descriptor)).is_relative_to(home_path)
+
+
 def _fail_the_repair_at(
-    monkeypatch: pytest.MonkeyPatch, step: str, error: BaseException,
+    monkeypatch: pytest.MonkeyPatch, home_path: Path, step: str, error: BaseException,
 ) -> list[int]:
-    is_armed = _arm_after_the_first_removal_pass(monkeypatch)
+    is_armed = _arm_after_the_first_removal_pass(monkeypatch, home_path)
     real_open, real_chmod = os.open, os.chmod
     occurrences: dict[str, int] = {}
     live_handles_at_fault: list[int] = []
+
+    def is_descriptor_link(path) -> bool:
+        return str(path).startswith(str(process._DESCRIPTOR_LINKS))
 
     def reach(kind: str) -> None:
         if not is_armed() or live_handles_at_fault:
@@ -1922,13 +1938,14 @@ def _fail_the_repair_at(
 
     def open_(path, flags, *args, dir_fd=None, **options):
         if dir_fd is not None:
-            reach("child")
-        elif str(path).startswith(str(process._DESCRIPTOR_LINKS)) and not flags & os.O_PATH:
+            if _is_inside(home_path, process._DESCRIPTOR_LINKS / str(dir_fd)):
+                reach("child")
+        elif is_descriptor_link(path) and not flags & os.O_PATH and _is_inside(home_path, path):
             reach("listing")
         return real_open(path, flags, *args, dir_fd=dir_fd, **options)
 
     def chmod(path, mode, **options):
-        if str(path).startswith(str(process._DESCRIPTOR_LINKS)):
+        if is_descriptor_link(path) and _is_inside(home_path, path):
             reach("chmod")
         return real_chmod(path, mode, **options)
 
@@ -1953,7 +1970,7 @@ def test_private_credential_home_closes_every_handle_when_the_repair_fails_midwa
     _a_tree_needing_repair(home, outside)
     outside_before = tree_snapshot(outside)
     caplog.set_level(logging.ERROR, logger=process.__name__)
-    live_handles_at_fault = _fail_the_repair_at(monkeypatch, step, error)
+    live_handles_at_fault = _fail_the_repair_at(monkeypatch, home.path, step, error)
     descriptors_before = _descriptor_count()
 
     if isinstance(error, KeyboardInterrupt):

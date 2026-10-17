@@ -1,0 +1,8 @@
+claim_id = "7d03b21b4ff2472f92e05355b3537cb8"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "961f4fda1fd01e38908222c501ae21dd09418a0b"
+branch = "claude/issue-190-codex-login-3d-a-flug-besitz"
+scope = ["README.md", "src/agent_providers/claude/provider.py", "src/agent_providers/process.py", "tests/provider_test_support.py", "tests/test_claude_provider.py", "tests/test_process.py"]
+opened_commit = "7a9b0183a556d83d4812176fbfedd547dd35f88d"
+whole_reason = "The probe fix with the two start helpers its tests address it through, the tool-surface identity removal of the same check-then-act class, and the README paragraph that names the remaining caller-thread locks out of bound together settle #93's 3d row; E3 is a ten-line refactor in the same file."

@@ -1,0 +1,7 @@
+claim_id = "34a3e3daf50c40c2a0748f3f086ca12d"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "a05e300b8648d470551d821efcecdbf78cb680df"
+branch = "claude/issue-178-a1b-3s-abgeschirmte-ernte"
+scope = ["src/agent_providers/claude/provider.py", "tests/test_claude_provider.py"]
+opened_commit = "3b714bb9414b0c29740f4d57c46eb7d93ff0be4c"

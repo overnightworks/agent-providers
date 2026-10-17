@@ -33,14 +33,13 @@ from agent_providers.codex.protocol import (
     INFORMATIONAL_ITEM_TYPES,
     ITEM_EVENT_TYPES,
     CodexCliStreamFailure,
-    CodexLoginMirrorError,
     codex_child_process,
     codex_cli_failure_reason,
-    copy_codex_login_mirror,
     error_item_message,
     event_item,
     event_item_type,
     failed_turn_message,
+    install_codex_turn_login,
     parse_codex_line,
     run_reserved_codex_cli,
     top_level_error_message,
@@ -56,6 +55,7 @@ from agent_providers.errors import (
     raise_without_chain,
 )
 from agent_providers.process import (
+    AgentCliUnavailableError,
     CliLineChannel,
     CliRunOutcome,
     CliRunReason,
@@ -139,14 +139,16 @@ class CodexCliToolTransport:
         self._work_directory.mkdir(mode=0o700)
         self._codex_home.mkdir(mode=0o700)
         try:
-            copy_codex_login_mirror(self._codex_home)
-        except CodexLoginMirrorError:
+            install_codex_turn_login(self._codex_home)
+        except AgentCliUnavailableError:
             self._turn_directory.cleanup()
-            raise ProviderUnavailableError(
-                "codex",
-                "cli",
-                normalize_route_failure(SafeRouteReasonCode.CLI_AUTH_REJECTED),
-            ) from None
+            raise_without_chain(
+                ProviderUnavailableError(
+                    "codex",
+                    "cli",
+                    normalize_route_failure(SafeRouteReasonCode.CLI_AUTH_REJECTED),
+                )
+            )
         self._deadline = time.monotonic() + TURN_TIMEOUT_SECONDS
         self._thread_id: str | None = None
         self._round_index = 0

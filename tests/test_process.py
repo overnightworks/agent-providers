@@ -1698,17 +1698,21 @@ def _credential_home(tmp_path: Path) -> PrivateCredentialHome:
 
 @pytest.mark.parametrize("directory_mode", [0o500, 0o300, 0o100, 0o000])
 def test_private_credential_home_removes_a_read_only_directory_a_child_left(
-    tmp_path: Path, directory_mode: int,
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, directory_mode: int,
 ) -> None:
     home = _credential_home(tmp_path)
     child_directory = home.path / "child-made"
     child_directory.mkdir()
     (child_directory / "scratch.txt").write_text("scratch")
     child_directory.chmod(directory_mode)
+    descriptors_before = _descriptor_count()
+    caplog.set_level(logging.ERROR, logger=process.__name__)
 
     home.close()
 
     assert not home.path.exists()
+    assert caplog.records == []
+    assert _descriptor_count() == descriptors_before
 
 
 @pytest.fixture
@@ -1726,6 +1730,7 @@ def outside(tmp_path: Path) -> Iterator[Path]:
 
 
 _WIDE_TREE_BREADTH = 200
+_DEEP_TREE_DEPTH = 300
 
 
 def _descriptor_count() -> int:
@@ -1811,42 +1816,56 @@ def test_private_credential_home_never_follows_an_inner_directory_swapped_for_a_
     after_acquisition = swap_kind == "after_acquisition"
     home = _credential_home(tmp_path)
     child_directory = home.path / "child-made"
-    swap = child_directory / "swap"
-    swap.mkdir(parents=True)
+    for name in ("first", "second"):
+        (child_directory / name).mkdir(parents=True)
+        (child_directory / name / "scratch.txt").write_text("scratch")
+        (child_directory / name).chmod(0o500)
     child_directory.chmod(0o500)
     outside_before = tree_snapshot(outside)
     descriptors_before = _descriptor_count()
     caplog.set_level(logging.ERROR, logger=process.__name__)
+    remove_tree = process.shutil.rmtree
     is_armed = _arm_after_the_first_removal_pass(monkeypatch, home.path)
     real_open, real_chmod = os.open, os.chmod
-    acquired_swap: list[int] = []
+    first_opened: list[Path] = []
+    acquired: list[int] = []
     swapped: list[bool] = []
 
     def swap_for_a_symlink() -> None:
         swapped.append(True)
+        [victim] = first_opened
         if after_acquisition:
-            swap.rename(swap.with_name("swap-moved"))
+            victim.rename(victim.with_name("moved-aside"))
         else:
-            swap.rmdir()
+            real_chmod(victim, 0o700)
+            remove_tree(victim)
         if swap_kind != "vanished":
-            swap.symlink_to(outside)
+            victim.symlink_to(outside)
 
     def open_(path, flags, *args, dir_fd=None, **options):
-        entry_is_swap = is_armed() and dir_fd is not None and path == swap.name
-        if entry_is_swap and not after_acquisition and not swapped:
+        names_a_child = (
+            is_armed()
+            and dir_fd is not None
+            and _resolved_inside(home.path, process._DESCRIPTOR_LINKS / str(dir_fd))
+            == child_directory
+        )
+        if names_a_child and not first_opened:
+            first_opened.append(child_directory / path)
+        entry_is_victim = names_a_child and child_directory / path == first_opened[0]
+        if entry_is_victim and not after_acquisition and not swapped:
             swap_for_a_symlink()
         descriptor = real_open(path, flags, *args, dir_fd=dir_fd, **options)
-        if entry_is_swap and not swapped:
-            acquired_swap.append(descriptor)
+        if entry_is_victim and not swapped:
+            acquired.append(descriptor)
         return descriptor
 
     def chmod(path, mode, **options):
-        if is_armed() and not swapped:
-            names_the_swap_path = Path(path).name == swap.name
-            names_the_acquired_swap = bool(acquired_swap) and Path(path) == (
-                process._DESCRIPTOR_LINKS / str(acquired_swap[-1])
+        if is_armed() and not swapped and first_opened:
+            names_the_victim_path = Path(path) == first_opened[0]
+            names_the_acquired_victim = bool(acquired) and Path(path) == (
+                process._DESCRIPTOR_LINKS / str(acquired[-1])
             )
-            if names_the_swap_path or (after_acquisition and names_the_acquired_swap):
+            if names_the_victim_path or (after_acquisition and names_the_acquired_victim):
                 swap_for_a_symlink()
         return real_chmod(path, mode, **options)
 
@@ -1950,7 +1969,7 @@ def _fail_the_repair_at(
     monkeypatch: pytest.MonkeyPatch, home_path: Path, step: str, error: BaseException,
 ) -> list[set[Path]]:
     is_armed = _arm_after_the_first_removal_pass(monkeypatch, home_path)
-    real_open, real_chmod = os.open, os.chmod
+    real_open, real_chmod, real_scandir = os.open, os.chmod, os.scandir
     held_at_fault: list[set[Path]] = []
 
     def is_descriptor_link(path) -> bool:
@@ -1974,12 +1993,18 @@ def _fail_the_repair_at(
             reach("chmod", _resolved_inside(home_path, path))
         return real_chmod(path, mode, **options)
 
+    def scandir(path=".", *args, **options):
+        if isinstance(path, int):
+            reach("scan", _resolved_inside(home_path, process._DESCRIPTOR_LINKS / str(path)))
+        return real_scandir(path, *args, **options)
+
     monkeypatch.setattr(os, "open", open_)
     monkeypatch.setattr(os, "chmod", chmod)
+    monkeypatch.setattr(os, "scandir", scandir)
     return held_at_fault
 
 
-@pytest.mark.parametrize("step", ["chmod", "listing", "child"])
+@pytest.mark.parametrize("step", ["chmod", "listing", "scan", "child"])
 @pytest.mark.parametrize(
     "error", [OSError(5, "io"), KeyboardInterrupt()], ids=["os_error", "interrupt"],
 )
@@ -2030,6 +2055,32 @@ def test_private_credential_home_with_more_subdirectories_than_descriptors_is_re
     soft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
     caplog.set_level(logging.ERROR, logger=process.__name__)
     lowered_limit = descriptors_before + _WIDE_TREE_BREADTH // 2
+    resource.setrlimit(resource.RLIMIT_NOFILE, (lowered_limit, hard_limit))
+    try:
+        home.close()
+    finally:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft_limit, hard_limit))
+
+    assert not home.path.exists()
+    assert caplog.records == []
+    assert _descriptor_count() == descriptors_before
+
+
+def test_private_credential_home_deeper_than_half_the_descriptor_limit_is_removed(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    home = _credential_home(tmp_path)
+    descriptors_before = _descriptor_count()
+    soft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
+    lowered_limit = descriptors_before + _DEEP_TREE_DEPTH * 5 // 3
+    deepest = home.path
+    for level in range(_DEEP_TREE_DEPTH):
+        deepest = deepest / "d"
+        deepest.mkdir()
+    deepest.joinpath("scratch.txt").write_text("scratch")
+    for directory in [deepest, *deepest.parents][: _DEEP_TREE_DEPTH + 1]:
+        directory.chmod(0o500)
+    caplog.set_level(logging.ERROR, logger=process.__name__)
     resource.setrlimit(resource.RLIMIT_NOFILE, (lowered_limit, hard_limit))
     try:
         home.close()

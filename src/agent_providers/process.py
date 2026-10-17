@@ -1501,20 +1501,25 @@ def _make_tree_removable(root: Path) -> None:
 
     Every directory is acquired without following a link and repaired on the
     acquired object. This needs Linux's O_PATH and a mounted /proc/self/fd.
-    Only the directories on the current path stay open, so the descriptors
-    in use grow with the tree's depth and not its width.
+    Each level on the current path keeps one open listing descriptor and the
+    names of its subdirectories, so the descriptors in use grow with the
+    tree's depth and not its width. Each descriptor is owned by an active
+    cleanup guard in the statement that receives it. An asynchronous
+    interruption between a descriptor's return and that assignment can still
+    leak it, which is the class the README's Interruptions paragraph covers:
+    the host ends the process.
     """
     acquisition_flags = _directory_flags("O_PATH", "O_NOFOLLOW", "O_DIRECTORY", "O_CLOEXEC")
     listing_flags = _directory_flags("O_DIRECTORY", "O_CLOEXEC") | os.O_RDONLY
     frames: list[_DirectoryFrame] = []
     try:
-        frames.append(_open_frame(os.open(root, acquisition_flags), listing_flags))
+        frames.append(_open_frame(str(root), None, acquisition_flags, listing_flags))
         while frames:
-            child = _next_subdirectory(frames[-1], acquisition_flags)
+            child = _next_subdirectory(frames[-1], acquisition_flags, listing_flags)
             if child is None:
                 frames.pop().close()
             else:
-                frames.append(_open_frame(child, listing_flags))
+                frames.append(child)
     finally:
         for frame in frames:
             frame.close()
@@ -1527,37 +1532,47 @@ def _directory_flags(*names: str) -> int:
     return functools.reduce(operator.or_, (getattr(os, name) for name in names))
 
 
-@dataclass(frozen=True)
+@dataclass
 class _DirectoryFrame:
     listing: int
-    entries: os._ScandirIterator[str]
+    unvisited_subdirectories: list[str]
 
     def close(self) -> None:
-        try:
-            self.entries.close()
-        finally:
-            os.close(self.listing)
+        os.close(self.listing)
 
 
-def _open_frame(handle: int, listing_flags: int) -> _DirectoryFrame:
+def _open_frame(
+    name: str, parent_listing: int | None, acquisition_flags: int, listing_flags: int,
+) -> _DirectoryFrame:
+    handle: int | None = None
+    listing: int | None = None
     try:
+        handle = os.open(name, acquisition_flags, dir_fd=parent_listing)
         link = _DESCRIPTOR_LINKS / str(handle)
         os.chmod(link, 0o700)
         listing = os.open(link, listing_flags)
-    finally:
-        os.close(handle)
-    try:
-        return _DirectoryFrame(listing, os.scandir(listing))
+        return _DirectoryFrame(listing, _subdirectory_names(listing))
     except BaseException:
-        os.close(listing)
+        if listing is not None:
+            os.close(listing)
         raise
+    finally:
+        if handle is not None:
+            os.close(handle)
 
 
-def _next_subdirectory(frame: _DirectoryFrame, acquisition_flags: int) -> int | None:
-    for entry in frame.entries:
-        if entry.is_dir(follow_symlinks=False):
-            with suppress(NotADirectoryError, FileNotFoundError):
-                return os.open(entry.name, acquisition_flags, dir_fd=frame.listing)
+def _subdirectory_names(listing: int) -> list[str]:
+    with os.scandir(listing) as entries:
+        return [entry.name for entry in entries if entry.is_dir(follow_symlinks=False)]
+
+
+def _next_subdirectory(
+    frame: _DirectoryFrame, acquisition_flags: int, listing_flags: int,
+) -> _DirectoryFrame | None:
+    while frame.unvisited_subdirectories:
+        name = frame.unvisited_subdirectories.pop()
+        with suppress(NotADirectoryError, FileNotFoundError):
+            return _open_frame(name, frame.listing, acquisition_flags, listing_flags)
     return None
 
 

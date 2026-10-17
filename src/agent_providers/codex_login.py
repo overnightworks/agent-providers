@@ -54,6 +54,16 @@ def assess_codex_login(document: bytes) -> CodexLogin:
     return CodexLogin(CodexLoginVerdict.USABLE, _blanked_document(parsed, tokens))
 
 
+def blanked_copy(document: bytes) -> bytes | None:
+    """Return the login a child may hold: complete, but not renewable, or ``None``.
+
+    A child that refreshes would rotate the operator's real refresh token and
+    break the stored login, so every Codex child receives this copy instead of
+    the operator's file.
+    """
+    return assess_codex_login(document).blanked_document
+
+
 def _blanked_document(document: dict[str, object], tokens: dict[str, object]) -> bytes:
     return json.dumps(
         {

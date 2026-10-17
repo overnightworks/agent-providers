@@ -38,11 +38,14 @@ def read_secret_file(path: Path, subject: str) -> bytes:
     if shown != str(path):
         raise UnsoundSecretFile(f"{shown} {UNSHOWABLE_PATH}")
     try:
-        return _read_through_one_descriptor(path, subject)
+        read = _read_through_one_descriptor(path, subject)
     except OSError as error:
         raise UnsoundSecretFile(f"{shown} cannot be read: {error.strerror}") from error
     except UnsoundSecretFile as refusal:
         raise UnsoundSecretFile(f"{shown} {refusal}") from None
+    if isinstance(read, _ReadRefusal):
+        raise UnsoundSecretFile(f"{shown} {read.reason}")
+    return read
 
 
 def read_token_file(path: Path) -> str:
@@ -55,10 +58,14 @@ def read_token_file(path: Path) -> str:
 
 @dataclass(frozen=True)
 class _TokenRefusal:
+    """Returned, never raised: no content-bearing frame and no ``UnicodeDecodeError``
+    (whose ``.object`` holds the bytes) may sit in a refusal's chain."""
+
     reason: str
 
 
 def _token_or_refusal(contents: bytes) -> str | _TokenRefusal:
+    """The token, or a returned refusal; raising here would chain a frame holding the bytes."""
     try:
         text = contents.decode("utf-8")
     except UnicodeDecodeError:
@@ -70,12 +77,21 @@ def _token_or_refusal(contents: bytes) -> str | _TokenRefusal:
         return _TokenRefusal("holds more than one line; it must hold one token")
     if not token.isprintable():
         return _TokenRefusal("contains a control or non-printing character; a token must not")
+    if any(character.isspace() for character in token):
+        return _TokenRefusal("holds whitespace; a setup token holds none")
     if token.startswith(API_KEY_PREFIX):
         return _TokenRefusal("holds an API key; it must hold a subscription token from setup-token")
     return token
 
 
-def _read_through_one_descriptor(path: Path, subject: str) -> bytes:
+@dataclass(frozen=True)
+class _ReadRefusal:
+    """Returned, never raised: the reading frame holds file content and must not sit in a chain."""
+
+    reason: str
+
+
+def _read_through_one_descriptor(path: Path, subject: str) -> bytes | _ReadRefusal:
     descriptor = os.open(path, _OPEN_FLAGS)
     try:
         status = os.fstat(descriptor)
@@ -93,13 +109,15 @@ def _read_through_one_descriptor(path: Path, subject: str) -> bytes:
         os.close(descriptor)
 
 
-def _read_within_limit(descriptor: int) -> bytes:
+def _read_within_limit(descriptor: int) -> bytes | _ReadRefusal:
     chunks: list[bytes] = []
     remaining = MAX_SECRET_FILE_BYTES + 1
-    while remaining and (chunk := os.read(descriptor, remaining)):
-        chunks.append(chunk)
-        remaining -= len(chunk)
+    try:
+        while remaining and (chunk := os.read(descriptor, remaining)):
+            chunks.append(chunk)
+            remaining -= len(chunk)
+    except OSError as error:
+        return _ReadRefusal(f"cannot be read: {error.strerror}")
     if remaining == 0:
-        chunks.clear()
-        raise UnsoundSecretFile(f"is larger than {MAX_SECRET_FILE_BYTES} bytes")
+        return _ReadRefusal(f"is larger than {MAX_SECRET_FILE_BYTES} bytes")
     return b"".join(chunks)

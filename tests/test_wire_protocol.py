@@ -621,36 +621,25 @@ INTERRUPTED = {"type": "failed", "code": FailureCode.INTERRUPTED.value}
         ),
     ],
 )
-def test_a_cut_short_run_ends_by_the_effect_of_its_calls(
+def test_a_cut_short_run_ends_by_the_effect_of_its_calls_and_refuses_the_other_ending(
     calls: list[ToolEffect], expected: dict[str, str]
 ) -> None:
-    stream = RunStream()
-    stream.accept(started())
-    for seq, effect in enumerate(calls, start=1):
-        stream.accept(call(seq, f"call-{seq}", effect))
-
-    terminal = stream.cancellation_terminal()
-
-    assert terminal.model_dump(mode="json", include=set(expected)) == expected
-    assert stream.accept(terminal) is None
-    assert stream.close() is None
-
-
-@pytest.mark.parametrize(
-    "effect",
-    [ToolEffect.READ_ONLY, ToolEffect.SIDE_EFFECTING],
-)
-def test_the_ending_a_stream_hands_out_is_the_only_one_it_accepts(effect: ToolEffect) -> None:
-    def stream_with_call() -> RunStream:
+    def stream_with_calls() -> RunStream:
         stream = RunStream()
-        _accept_all(stream, [started(), call(1, "call-1", effect)])
+        stream.accept(started())
+        for seq, effect in enumerate(calls, start=1):
+            stream.accept(call(seq, f"call-{seq}", effect))
         return stream
 
-    due = stream_with_call().cancellation_terminal()
-    other = interrupted(2) if due.type == "cancelled" else cancelled(2)
+    stream = stream_with_calls()
+    terminal = stream.cancellation_terminal()
+    next_seq = len(calls) + 1
+    other = interrupted(next_seq) if terminal.type == "cancelled" else cancelled(next_seq)
 
-    assert stream_with_call().accept(due) is None
-    assert stream_with_call().accept(other) is not None
+    assert terminal.model_dump(mode="json", include=set(expected)) == expected
+    assert stream_with_calls().accept(other) is not None
+    assert stream.accept(terminal) is None
+    assert stream.close() is None
 
 
 @pytest.mark.parametrize(

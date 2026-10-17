@@ -94,6 +94,7 @@ class _Service:
     api: ScriptedRunner
     signed: list[str]
     pool: ThreadPoolExecutor
+    places: int
 
     def run(self, user: str | None = None, *, workload: str | None = None, **body: object):
         headers = run_headers(workload or MINT.workload(), user or MINT.user())
@@ -118,17 +119,18 @@ class _Service:
 
 
 @pytest.fixture
-def service(tmp_path, monkeypatch) -> Iterator[_Service]:
+def service(request, tmp_path, monkeypatch) -> Iterator[_Service]:
     held = HeldRunner()
     api = ScriptedRunner(FINAL)
     signed = record_signed_tokens(monkeypatch)
+    runs = getattr(request, "param", RunConfig(max_parallel_cli_runs=PLACES))
     config = capable_service_config(tmp_path, songmaker=TUNED_AT_THE_LIMIT).model_copy(
-        update={"runs": RunConfig(max_parallel_cli_runs=PLACES)}
+        update={"runs": runs}
     )
     app = create_app(config, runners=Runners(cli=held, api=api), fetch_key_set=MINT.fetch_key_set)
     with served(app) as base_url, ThreadPoolExecutor() as pool:
         try:
-            yield _Service(base_url, held, api, signed, pool)
+            yield _Service(base_url, held, api, signed, pool, runs.max_parallel_cli_runs)
         finally:
             held.proceed_all()
 
@@ -217,15 +219,21 @@ def test_a_failure_before_the_response_exists_releases_its_place(
     service.let_all_go(service.fill_the_places())
 
 
+@pytest.mark.parametrize(
+    "service",
+    [RunConfig(max_parallel_cli_runs=PLACES), RunConfig()],
+    ids=["two-places", "default-places"],
+    indirect=True,
+)
 def test_simultaneous_cli_requests_beyond_the_places_give_exactly_one_busy_answer_on_the_wire(
     service,
 ):
-    requests = [service.pool.submit(service.run) for _ in range(PLACES + 1)]
+    requests = [service.pool.submit(service.run) for _ in range(service.places + 1)]
     refused, admitted = wait(requests, WAIT_LIMIT_S, return_when=FIRST_COMPLETED)
 
     (busy,) = (request.result() for request in refused)
     assert_rejected(busy, RejectionCode.BUSY, 429)
-    assert len(admitted) == PLACES
+    assert len(admitted) == service.places
     service.held.proceed_all()
     for request in admitted:
         _assert_streamed_to_a_terminal(request.result(WAIT_LIMIT_S))

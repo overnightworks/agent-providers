@@ -204,7 +204,13 @@ def _with_key_set_url(url: str) -> str:
             id="signing-with-only-a-key-member",
         ),
         *[
-            pytest.param(_with_runs(setting), "runs", id=f"runs-{setting.replace(' ', '')}")
+            pytest.param(
+                _with_runs(setting),
+                "runs.max_parallel_cli_runs"
+                if setting.startswith("max_parallel_cli_runs")
+                else "runs",
+                id=f"runs-{setting.replace(' ', '')}",
+            )
             for setting in REFUSED_RUN_SETTINGS
         ],
     ],

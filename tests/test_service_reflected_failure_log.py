@@ -28,7 +28,10 @@ from mcp_app_fake import (
     TestAuthority,
     serving,
 )
-from service_support import failure_lines
+from service_support import (
+    failure_lines,
+    fake_app_authority,  # noqa: F401 - a fixture, requested by name
+)
 from uvicorn.logging import DefaultFormatter
 
 from agent_service.app_tools import UpstreamError, open_app_tools
@@ -39,11 +42,6 @@ TOKEN = CAPABILITY.token
 EVENT = "the app refused the run"
 UNREACHED_ORIGIN = "https://localhost:1"
 CLIENT_DEADLINE_SECONDS = 30
-
-
-@pytest.fixture(scope="session")
-def authority(tmp_path_factory: pytest.TempPathFactory) -> TestAuthority:
-    return TestAuthority(tmp_path_factory.mktemp("reflected-failure-ca"))
 
 
 @dataclass

@@ -119,8 +119,9 @@ def test_the_builder_answers_communicate_and_exposes_the_child_surface() -> None
 def test_the_builder_raises_the_communicate_error_it_was_given() -> None:
     child = a_claude_cli_child(communicate=asyncio.TimeoutError())
 
+    communicating = child.communicate(b"prompt")
     with pytest.raises(asyncio.TimeoutError):
-        asyncio.run(child.communicate(b"prompt"))
+        asyncio.run(communicating)
 
 
 def test_the_builder_runs_without_stdin_and_while_still_running() -> None:
@@ -133,8 +134,9 @@ def test_the_builder_runs_without_stdin_and_while_still_running() -> None:
 def test_the_builder_reader_refuses_a_line_beyond_the_limit_it_was_built_with() -> None:
     child = a_claude_cli_child(stream_lines=[b"x" * 11 + b"\n"], stdout_limit=10)
 
+    reading = child.stdout.readline()
     with pytest.raises(ValueError, match="exceed the limit"):
-        asyncio.run(child.stdout.readline())
+        asyncio.run(reading)
 
 
 @pytest.mark.parametrize("gated_call", ["communicate", "wait"])
@@ -220,8 +222,9 @@ def test_the_installer_fails_a_spawn_with_nothing_queued(
 ) -> None:
     spawns = install_claude_cli_children(monkeypatch)
 
+    spawning = provider.open_async_pipes(_a_child_to_start())
     with pytest.raises(pytest.fail.Exception, match="none queued"):
-        asyncio.run(provider.open_async_pipes(_a_child_to_start()))
+        asyncio.run(spawning)
 
     assert len(spawns.children) == 1
 

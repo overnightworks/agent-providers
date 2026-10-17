@@ -1505,10 +1505,10 @@ def _make_tree_removable(root: Path) -> None:
     names of its subdirectories, so the descriptors in use grow with the
     tree's depth and not its width. Each level's frame is on the stack before
     its listing descriptor is opened, so the stack's cleanup closes it from the
-    statement that receives it. An asynchronous interruption between a
-    descriptor's return from os.open and that assignment can still leak it,
-    which is the class the README's Interruptions paragraph covers: the host
-    ends the process.
+    statement that receives it. Cleanup is guaranteed for an exception raised
+    by any operation called here, whatever its class. An asynchronous
+    interruption between two statements is the host obligation the README's
+    Interruptions paragraph states, and no claim is made about it.
     """
     acquisition_flags = _directory_flags("O_PATH", "O_NOFOLLOW", "O_DIRECTORY", "O_CLOEXEC")
     listing_flags = _directory_flags("O_DIRECTORY", "O_CLOEXEC") | os.O_RDONLY

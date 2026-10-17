@@ -2044,32 +2044,36 @@ def test_private_credential_home_closes_every_handle_when_the_repair_fails_midwa
     assert not home.path.exists()
 
 
-def test_private_credential_home_closes_a_child_frame_interrupted_after_its_listing_is_assigned(
-    tmp_path: Path, outside: Path, monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    ("step", "child_is_skipped"),
+    [("child", True), ("chmod", False), ("listing", False), ("scan", False)],
+)
+def test_private_credential_home_skips_a_vanished_child_only_at_its_acquisition(
+    tmp_path: Path,
+    outside: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    step: str,
+    child_is_skipped: bool,
 ) -> None:
     home = _credential_home(tmp_path)
     _a_tree_needing_repair(home, outside)
-    interruption = KeyboardInterrupt()
-    is_armed = _arm_after_the_first_removal_pass(monkeypatch, home.path)
-    real_names = process._subdirectory_names
-    listings_seen: list[int] = []
-
-    def interrupt_the_second_listing(listing: int) -> list[str]:
-        if is_armed():
-            listings_seen.append(listing)
-            if len(listings_seen) == 2:
-                raise interruption
-        return real_names(listing)
-
-    monkeypatch.setattr(process, "_subdirectory_names", interrupt_the_second_listing)
+    if child_is_skipped:
+        for already_writable in (home.path / "a" / "b", home.path / "a" / "b" / "c"):
+            already_writable.chmod(0o700)
+    caplog.set_level(logging.ERROR, logger=process.__name__)
+    held_at_fault = _fail_the_repair_at(monkeypatch, home.path, step, FileNotFoundError(2, "gone"))
     descriptors_before = _descriptor_count()
 
-    with pytest.raises(KeyboardInterrupt) as raised:
-        home.close()
+    home.close()
 
-    assert raised.value is interruption
-    assert len(listings_seen) == 2
+    assert len(held_at_fault) == 1
     assert _descriptor_count() == descriptors_before
+    assert home.path.exists() is not child_is_skipped
+    assert [record.getMessage() for record in caplog.records] == (
+        [] if child_is_skipped
+        else ["private credential home removal failed (FileNotFoundError)"]
+    )
 
 
 def test_private_credential_home_with_more_subdirectories_than_descriptors_is_removed(

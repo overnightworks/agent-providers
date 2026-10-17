@@ -31,6 +31,7 @@ from mcp_app_fake import (
     serving,
 )
 from service_support import (
+    UNTOUCHED_LOGGER,
     LoggerState,
     fake_app_authority,  # noqa: F401 - a fixture, requested by name
     logging_state_snapshot,  # noqa: F401 - a fixture, requested by name
@@ -48,7 +49,6 @@ from agent_service.app_tools import (
 from agent_service.cli import (
     CLOSED_LOGGER_LEVEL,
     EXIT_BAD_CONFIG,
-    TRANSPORT_LOGGER_ROOTS,
     close_transport_loggers,
     main,
 )
@@ -57,7 +57,14 @@ CAPABILITY = capability_carrying("canary.capability.sig")
 CLIENT_DEADLINE_SECONDS = 30
 CHILD_DEADLINE_SECONDS = 60
 EVERY_LEVEL = (logging.DEBUG, logging.INFO, logging.WARNING, logging.ERROR, logging.CRITICAL)
+TRANSPORT_ROOTS = ("httpx", "httpcore")
 CLOSED_NAMES = ("httpx", "httpcore", "httpcore.http11", "httpcore.connection", "httpcore.proxy")
+EXISTING_CHILDREN_AT_DEBUG = (
+    "httpcore.connection",
+    "httpcore.http11",
+    "httpcore.proxy",
+    "httpcore.an_arbitrary_existing_child",
+)
 REFUSAL = FakeResponse(status=401, content_type=None)
 
 
@@ -71,9 +78,7 @@ class RecordingHandler(logging.Handler):
 
 
 @pytest.fixture
-def record_creation(
-    monkeypatch: pytest.MonkeyPatch, logging_state_restored: None
-) -> list[str]:
+def record_creation(monkeypatch: pytest.MonkeyPatch, logging_state_restored: None) -> list[str]:
     created: list[str] = []
     build_record = logging.getLogRecordFactory()
 
@@ -106,15 +111,17 @@ def calls_at_every_level(logger: logging.Logger) -> None:
 
 
 def on_the_transport_hierarchy(created: list[str]) -> list[str]:
-    return [name for name in created if name.startswith(TRANSPORT_LOGGER_ROOTS)]
+    return [name for name in created if name.startswith(TRANSPORT_ROOTS)]
 
 
-@pytest.mark.parametrize("name", CLOSED_NAMES)
+@pytest.mark.parametrize("name", [*CLOSED_NAMES, EXISTING_CHILDREN_AT_DEBUG[-1]])
 def test_a_closed_logger_creates_no_record_for_any_call_the_dependencies_make(
     record_creation, name
 ):
     logger = logging.getLogger(name)
     logging.getLogger().setLevel(logging.DEBUG)
+    for existing in EXISTING_CHILDREN_AT_DEBUG:
+        logging.getLogger(existing).setLevel(logging.DEBUG)
 
     close_transport_loggers()
     calls_at_every_level(logger)
@@ -133,17 +140,23 @@ def test_a_logger_made_after_the_closing_inherits_it(record_creation):
     assert record_creation == []
 
 
-@pytest.mark.parametrize("sink", ["handler-on-the-child", "last-resort"])
-def test_no_sink_receives_a_critical_call_on_a_closed_logger(record_creation, sink):
+def test_a_handler_on_a_closed_logger_receives_no_critical_call(record_creation):
     child = logging.getLogger("httpcore.http11")
-    root = logging.getLogger()
-    root.handlers[:] = []
     close_transport_loggers()
 
-    with recorded_on(child if sink == "handler-on-the-child" else root) as handler:
+    with recorded_on(child) as handler:
         child.critical("critical")
 
     assert handler.received == []
+
+
+def test_the_last_resort_receives_no_critical_call_on_a_closed_logger(record_creation):
+    child = logging.getLogger("httpcore.http11")
+    logging.getLogger().handlers[:] = []
+    close_transport_loggers()
+
+    child.critical("critical")
+
     assert logging.lastResort.received == []
 
 
@@ -157,6 +170,10 @@ def all_logger_states() -> dict[str, LoggerState]:
     return {"": LoggerState.of(logging.getLogger()), **states}
 
 
+def is_closed_by_the_closing(name: str) -> bool:
+    return name in TRANSPORT_ROOTS or name.startswith("httpcore.")
+
+
 def test_closing_twice_changes_only_the_levels_of_the_transport_loggers(logging_state_restored):
     before = all_logger_states()
     disable_before = logging.Logger.manager.disable
@@ -167,14 +184,17 @@ def test_closing_twice_changes_only_the_levels_of_the_transport_loggers(logging_
     twice = all_logger_states()
 
     assert once == twice
-    assert {
-        name: replace(state, level=before[name].level)
-        for name, state in once.items()
-        if name in before
-    } == before
-    assert {name for name in once if once[name].level == CLOSED_LOGGER_LEVEL} >= {
-        *TRANSPORT_LOGGER_ROOTS
+    assert {name: state for name, state in once.items() if not is_closed_by_the_closing(name)} == {
+        name: before.get(name, UNTOUCHED_LOGGER)
+        for name in once
+        if not is_closed_by_the_closing(name)
     }
+    closed = {name: state for name, state in once.items() if is_closed_by_the_closing(name)}
+    assert {name: replace(state, level=logging.NOTSET) for name, state in closed.items()} == {
+        name: replace(before.get(name, UNTOUCHED_LOGGER), level=logging.NOTSET) for name in closed
+    }
+    assert {state.level for state in closed.values()} == {CLOSED_LOGGER_LEVEL}
+    assert set(TRANSPORT_ROOTS) <= closed.keys()
     assert logging.Logger.manager.disable == disable_before
 
 
@@ -247,9 +267,9 @@ def test_a_refused_start_leaves_the_transport_loggers_untouched(tmp_path, reache
     assert main(arguments) == EXIT_BAD_CONFIG
 
     assert reached.levels == {}
-    assert [logging.getLogger(name).level for name in TRANSPORT_LOGGER_ROOTS] == [
-        logging.NOTSET
-    ] * len(TRANSPORT_LOGGER_ROOTS)
+    assert [logging.getLogger(name).level for name in TRANSPORT_ROOTS] == [logging.NOTSET] * len(
+        TRANSPORT_ROOTS
+    )
 
 
 def fresh_interpreter(script: str, *arguments: str) -> subprocess.CompletedProcess[str]:
@@ -285,8 +305,8 @@ def test_importing_the_service_modules_opens_no_transport_logger_level():
         """
     )
 
-    levels = json.loads(child.stdout)
     assert child.returncode == 0, child.stderr
+    levels = json.loads(child.stdout)
     assert "httpx" in levels
     assert set(levels.values()) == {logging.NOTSET}
 
@@ -295,9 +315,9 @@ def test_building_the_app_twice_leaves_the_transport_loggers_untouched(logging_s
     create_app(plain_service_config())
     create_app(plain_service_config())
 
-    assert [logging.getLogger(name).level for name in TRANSPORT_LOGGER_ROOTS] == [
-        logging.NOTSET
-    ] * len(TRANSPORT_LOGGER_ROOTS)
+    assert [logging.getLogger(name).level for name in TRANSPORT_ROOTS] == [logging.NOTSET] * len(
+        TRANSPORT_ROOTS
+    )
 
 
 CONFIGURED_AFTER_CLOSING = """
@@ -331,20 +351,28 @@ print(json.dumps({
     "levels": {name: logging.getLogger(name).level for name in NAMES},
     "disabled": {name: logging.getLogger(name).disabled for name in NAMES},
     "created": sorted(set(created)),
+    "uvicorn_error_level": logging.getLogger("uvicorn.error").level,
 }))
 sys.exit(1 if created else 0)
 """
 
 
 @pytest.mark.parametrize(
-    "steps",
-    ["uvicorn-config", "basic-config", "uvicorn-config+basic-config"],
+    ("steps", "uvicorn_error_level"),
+    [
+        ("uvicorn-config", logging.DEBUG),
+        ("basic-config", logging.NOTSET),
+        ("uvicorn-config+basic-config", logging.DEBUG),
+    ],
 )
-def test_uvicorns_configuration_and_a_forced_basic_config_leave_the_loggers_closed(steps):
+def test_uvicorns_configuration_and_a_forced_basic_config_leave_the_loggers_closed(
+    steps, uvicorn_error_level
+):
     child = fresh_interpreter(CONFIGURED_AFTER_CLOSING, steps)
 
-    report = json.loads(child.stdout)
     assert child.returncode == 0, child.stderr
+    report = json.loads(child.stdout)
+    assert report["uvicorn_error_level"] == uvicorn_error_level
     assert set(report["levels"].values()) == {CLOSED_LOGGER_LEVEL}
     assert not any(report["disabled"].values())
 
@@ -352,8 +380,8 @@ def test_uvicorns_configuration_and_a_forced_basic_config_leave_the_loggers_clos
 def test_an_explicit_dict_config_naming_httpx_reopens_only_that_logger():
     child = fresh_interpreter(CONFIGURED_AFTER_CLOSING, "dict-config")
 
-    report = json.loads(child.stdout)
     assert child.returncode == 1, child.stderr
+    report = json.loads(child.stdout)
     assert report["created"] == ["httpx"]
 
 

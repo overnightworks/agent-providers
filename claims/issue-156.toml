@@ -1,0 +1,8 @@
+claim_id = "eb6e97e5ee49422184d9c3a4cad8efd7"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "706a4cf4ebf927a197e1365a5c1cf79ef4231f5e"
+branch = "claude/issue-156-modellvorgabe-2-grok-codex-und-der-bild"
+scope = ["README.md", "src/agent_providers/claude/provider.py", "src/agent_providers/codex/image.py", "src/agent_providers/codex/protocol.py", "src/agent_providers/codex/transport.py", "src/agent_providers/dispatch.py", "src/agent_providers/errors.py", "src/agent_providers/grok/transport.py", "tests/provider_test_support.py", "tests/test_codex_cli_adapter.py", "tests/test_dispatch.py", "tests/test_grok_cli_adapter.py"]
+opened_commit = "a81d68ac68b52281fa48584a88f29ed6178932f7"
+whole_reason = "One public contract: a turn without a model on every CLI route and one owner of the empty-model refusal; the transports, the image turn, dispatch, the shared owner in errors.py, Claude's caller of it and the README rows cannot land apart."

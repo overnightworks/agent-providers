@@ -1,8 +1,0 @@
-claim_id = "77a1d0bedb83455c98d215a61238eb9c"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "b37a0639c2e028251fe08fef290c7d4bfe816a3a"
-branch = "claude/issue-68-capability-at-admission"
-scope = ["README.md", "docs/decisions/0001-agent-service.md", "packages/agent-service/src/agent_service/app.py", "packages/agent-service/src/agent_service/identity.py", "packages/agent-service/src/agent_service/run_records.py", "packages/agent-service/src/agent_service/runners.py", "tests/service_support.py", "tests/test_service_capability.py", "tests/test_service_entrance.py", "tests/test_service_run_events.py", "tests/test_service_run_recording.py"]
-opened_commit = "74710270371a015efbb9c50b4e023d84e1d78681"
-whole_reason = "Minting, the hand-over and the guard change one admission path and the one dataclass every runner receives; the token proofs and the documents only hold once both exist."

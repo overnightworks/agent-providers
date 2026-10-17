@@ -1435,9 +1435,11 @@ _HOME_ENTRYPOINTS = {
 
 @pytest.fixture
 def collection_only_when_forced():
+    was_enabled = gc.isenabled()
     gc.disable()
     yield
-    gc.enable()
+    if was_enabled:
+        gc.enable()
 
 
 @pytest.mark.parametrize(
@@ -1469,7 +1471,9 @@ def test_a_refused_home_removal_never_replaces_a_failed_calls_error(
         gc.collect()
     removal.lift()
     gc.collect()
-    process._sweep_failed_homes_at_exit()
+    if collected_while_refused:
+        assert all(home.exists() for home in removal.refused)
+        process._sweep_failed_homes_at_exit()
     assert not any(home.exists() for home in removal.refused)
 
 

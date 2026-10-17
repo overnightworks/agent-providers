@@ -375,13 +375,13 @@ def _route_offer(provider: str, route: ProviderRoute) -> _RouteOffer:
         method = _cli_setup_method_for(provider)
         if method is ProviderSetupMethod.CLAUDE_CLI:
             return _claude_cli_offer()
-        return _RouteOffer(tuple(_models_for_setup_method(provider, method, config)), None)
+        return _RouteOffer(tuple(_models_for_cli_setup_method(method)), None)
     key = _secret(_provider_api_credential(provider, config).secret)
     if not key:
         raise ProviderUnavailableError(
             provider, route.value, normalize_route_failure(SafeRouteReasonCode.API_KEY_NOT_SET),
         )
-    models = _models_for_setup_method(provider, ProviderSetupMethod.API_KEY, config)
+    models = _models_from_api(provider, key)
     return _RouteOffer(tuple(models), None)
 
 
@@ -402,26 +402,18 @@ def models_with_active_model(models: list[str], active_model: str | None) -> lis
     return catalog
 
 
-def _models_for_setup_method(
-    provider: str,
-    method: ProviderSetupMethod,
-    config: ProviderRuntimeConfig,
-) -> list[str]:
+def _models_for_cli_setup_method(method: ProviderSetupMethod) -> list[str]:
     if method is ProviderSetupMethod.GROK_CLI:
         return _list_grok_cli_models()
-    if method is ProviderSetupMethod.CODEX_CLI:
-        return _list_codex_cli_models()
-    if method is ProviderSetupMethod.CLAUDE_CLI:
-        raise ValueError("the Claude CLI listing carries a default label; use _claude_cli_offer")
+    return _list_codex_cli_models()
 
-    key = _secret(_provider_api_credential(provider, config).secret)
+
+def _models_from_api(provider: str, key: str) -> list[str]:
     if provider == ProviderName.GROK:
         return _list_grok_models(key)
     if provider == ProviderName.CODEX:
         return _list_openai_models(key)
-    if provider == ProviderName.CLAUDE:
-        return _list_claude_models(key)
-    raise ProviderUnavailableError(provider, _unknown_provider_message(provider))
+    return _list_claude_models(key)
 
 
 def provider_configuration(

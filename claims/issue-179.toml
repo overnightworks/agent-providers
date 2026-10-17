@@ -1,8 +1,0 @@
-claim_id = "6eb5cff8cf81429ea266d047eaeea128"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "a05e300b8648d470551d821efcecdbf78cb680df"
-branch = "claude/issue-179-a1b-10a1b-relay-lebenszyklus"
-scope = ["README.md", "packages/agent-service/src/agent_service/tool_relay.py", "tests/relay_support.py", "tests/test_service_tool_relay.py", "tests/test_service_tool_relay_lifecycle.py"]
-opened_commit = "08659847d36711e320fb60a578467b36bfcdf1cd"
-whole_reason = "One lifecycle: the cap, the deadlines on the run's clock and the bounded close share the acceptance callback and the tracked tasks in one module, proven by one new lifecycle test module with its helper additions, the clock argument and four small carried follow-ups in the request-path tests, and one README row; splitting them would leave a close that cannot see the cap's connections."

@@ -11,7 +11,6 @@ runtime and resets it after each test.
 
 from __future__ import annotations
 
-import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -58,7 +57,7 @@ _SAMPLE_RUNTIME = ProviderRuntimeConfig(
     claude_cli_auth_file=_SAMPLE_ROOT / "claude" / "credentials.json",
     grok_cli_auth_file=_SAMPLE_ROOT / "grok" / "auth.json",
     codex_cli_auth_file=_SAMPLE_ROOT / "codex" / "auth.json",
-    cli_working_directory_root=Path(tempfile.gettempdir()),
+    cli_working_directory_root=_SAMPLE_ROOT / "working-root",
     turns=_SAMPLE_TURNS,
 )
 

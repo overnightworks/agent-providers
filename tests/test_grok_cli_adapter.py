@@ -118,6 +118,21 @@ def test_grok_credential_home_is_removed_when_aclose_is_cancelled_while_queued()
     assert not any(home.exists() for home in homes)
 
 
+def test_grok_credential_home_is_a_direct_child_of_the_root_named_by_its_prefix() -> None:
+    root = current_config().cli_working_directory_root
+    before = set(root.iterdir())
+
+    transport = _transport()
+    [home] = set(root.iterdir()) - before
+    still_present_after_creation = home.is_dir()
+    asyncio.run(transport.aclose())
+
+    assert still_present_after_creation
+    assert home.parent == root
+    assert home.name.startswith(grok_cli_adapter.GROK_CLI_TURN_DIRECTORY_PREFIX)
+    assert not home.exists()
+
+
 def _tool_call_text() -> str:
     return (
         '<notes_tool_call>\n'

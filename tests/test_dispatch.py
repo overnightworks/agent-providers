@@ -7,7 +7,9 @@ import inspect
 import os
 import pkgutil
 import re
+import sys
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 from provider_test_support import (
@@ -17,15 +19,19 @@ from provider_test_support import (
     drive_turn,
     override_provider_runtime,
 )
+from pydantic import SecretStr
 
 import agent_providers
 from agent_providers import dispatch
 from agent_providers.catalog import ProviderRoute
+from agent_providers.claude import adapter as claude_adapter
+from agent_providers.claude.provider import ClaudeResponse
 from agent_providers.dispatch import ImageCapability, call_provider_once, image_capability
 from agent_providers.errors import (
     ProviderUnavailableError,
     SafeRouteReasonCode,
 )
+from agent_providers.events import FinalEvent
 
 
 def test_stream_turn_refuses_an_unknown_provider_before_any_route_runs(monkeypatch):
@@ -78,6 +84,120 @@ def test_call_provider_once_refuses_an_unknown_provider():
         call_provider_once(provider="bob", model="any-model", prompt="hi", timeout=1)
 
     assert refusal.value.reason.code is SafeRouteReasonCode.ROUTE_FAILED
+
+
+_PROVIDER_ROUTES = [
+    (provider, route)
+    for provider in ("claude", "grok", "codex")
+    for route in (ProviderRoute.CLI, ProviderRoute.API)
+]
+_ROUTES_WITHOUT_A_MODEL_DEFAULT = [
+    pair for pair in _PROVIDER_ROUTES if pair != ("claude", ProviderRoute.CLI)
+]
+
+
+@pytest.fixture
+def started_routes(monkeypatch) -> list[str]:
+    started: list[str] = []
+
+    def start_route(**arguments):
+        started.append(arguments["provider"])
+        raise AssertionError("no route may start")
+
+    monkeypatch.setattr(dispatch, "_stream_for_route", start_route)
+    return started
+
+
+@pytest.fixture
+def claude_cli_turn_models(monkeypatch) -> list[str | None]:
+    """The model each Claude CLI tool turn was started with."""
+    models: list[str | None] = []
+
+    async def finish_turn(*, model, **_arguments):
+        models.append(model)
+        yield FinalEvent(text="done")
+
+    monkeypatch.setattr(claude_adapter, "acall_claude_with_mcp_stream", finish_turn)
+    return models
+
+
+def _refusal_of(call) -> ProviderUnavailableError:
+    with pytest.raises(ProviderUnavailableError) as refusal:
+        call()
+    assert refusal.value.reason.code is SafeRouteReasonCode.ROUTE_FAILED
+    return refusal.value
+
+
+@pytest.mark.parametrize("chosen_model", ["opus", None])
+def test_stream_turn_passes_the_claude_model_only_when_one_is_chosen(
+    chosen_model, claude_cli_turn_models,
+):
+    turn = drive_turn("claude", model=chosen_model)
+
+    assert turn.error is None
+    assert [event.text for event in turn.events] == ["done"]
+    assert claude_cli_turn_models == [chosen_model]
+
+
+@pytest.mark.parametrize(
+    ("provider", "route", "model"),
+    [(provider, route, None) for provider, route in _ROUTES_WITHOUT_A_MODEL_DEFAULT]
+    + [(provider, route, "") for provider, route in _PROVIDER_ROUTES],
+)
+def test_stream_turn_refuses_a_model_that_runs_nothing(provider, route, model, started_routes):
+    turn = drive_turn(provider, route=route, model=model)
+
+    assert turn.error.reason.code is SafeRouteReasonCode.ROUTE_FAILED
+    assert turn.events == []
+    assert started_routes == []
+
+
+@pytest.fixture
+def one_shot_claude_calls(monkeypatch) -> list[dict]:
+    calls: list[dict] = []
+
+    def answer(prompt, **arguments):
+        calls.append(arguments)
+        return ClaudeResponse(text="answer")
+
+    monkeypatch.setattr(claude_adapter, "call_claude", answer)
+    return calls
+
+
+def test_one_shot_without_a_key_runs_the_claude_cli_default(one_shot_claude_calls):
+    answer = call_provider_once(provider="claude", model=None, prompt="hi", timeout=1)
+
+    assert answer == "answer"
+    assert [(call["api_key"], call["model"]) for call in one_shot_claude_calls] == [(None, None)]
+
+
+def test_one_shot_refuses_a_missing_model_on_claude_api_with_a_key(monkeypatch):
+    override_provider_runtime(anthropic_api_key=SecretStr("sk-test"))
+    sdk = MagicMock(APITimeoutError=Exception)
+    monkeypatch.setitem(sys.modules, "anthropic", sdk)
+
+    refusal = _refusal_of(
+        lambda: call_provider_once(provider="claude", model=None, prompt="hi", timeout=1),
+    )
+
+    assert refusal.route == "api"
+    sdk.Anthropic.assert_not_called()
+
+
+@pytest.mark.parametrize("provider", ["grok", "codex"])
+@pytest.mark.parametrize("model", [None, ""])
+def test_one_shot_refuses_a_model_that_runs_nothing_on_the_api(provider, model, monkeypatch):
+    monkeypatch.setattr(
+        dispatch, "_api_connection", lambda _provider: pytest.fail("no HTTP call may start"),
+    )
+
+    _refusal_of(lambda: call_provider_once(provider=provider, model=model, prompt="hi", timeout=1))
+
+
+def test_one_shot_refuses_an_empty_claude_model_before_any_child_runs(one_shot_claude_calls):
+    _refusal_of(lambda: call_provider_once(provider="claude", model="", prompt="hi", timeout=1))
+
+    assert one_shot_claude_calls == []
 
 
 def test_stream_turn_takes_only_keyword_arguments():

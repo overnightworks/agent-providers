@@ -167,13 +167,13 @@ def test_a_deployment_without_the_image_encoder_refuses_before_it_spawns(
 
 
 @pytest.fixture(autouse=True)
-def codex_login_mirror(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    mirror = tmp_path / "auth.json"
-    mirror.write_text(json.dumps(_A_CODEX_LOGIN))
-    override_provider_runtime(codex_cli_auth_file=mirror)
+def codex_login_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    source = tmp_path / "auth.json"
+    source.write_text(json.dumps(_A_CODEX_LOGIN))
+    override_provider_runtime(codex_cli_auth_file=source)
     process_pool = CodexProcessPool(maximum_processes=8, maximum_image_runs=1)
     use_codex_process_pool(monkeypatch, process_pool)
-    return mirror
+    return source
 
 
 def _outcome(
@@ -1580,7 +1580,7 @@ def test_a_deviating_transcript_raises_the_blocked_error_with_its_tokens(tmp_pat
     ),
     ids=("missing", "incomplete", "wrong-typed"),
 )
-def test_codex_public_adapters_reject_unusable_login_mirrors(
+def test_codex_public_adapters_reject_unusable_logins(
     tmp_path: Path,
     document: dict | None,
 ) -> None:
@@ -1815,10 +1815,10 @@ def _drive_the_image_turn(monkeypatch, copies, files) -> None:
     ids=("catalog", "login-status", "tool-turn", "image-turn"),
 )
 def test_no_codex_child_is_handed_the_operators_live_refresh_token(
-    monkeypatch, caplog, codex_login_mirror: Path, drive,
+    monkeypatch, caplog, codex_login_source: Path, drive,
 ) -> None:
-    codex_login_mirror.write_text(json.dumps(_OPERATORS_LIVE_LOGIN))
-    operators_file = codex_login_mirror.read_bytes()
+    codex_login_source.write_text(json.dumps(_OPERATORS_LIVE_LOGIN))
+    operators_file = codex_login_source.read_bytes()
     monkeypatch.setattr(process, "resolve_cli_binary", lambda _binary: Path("/usr/bin/codex"))
     clear_agent_cli_caches()
     caplog.set_level(logging.DEBUG)
@@ -1830,20 +1830,20 @@ def test_no_codex_child_is_handed_the_operators_live_refresh_token(
     (command, child_login), = copies
     assert json.loads(child_login)["tokens"]["refresh_token"] == ""
     assert json.loads(child_login)["tokens"]["access_token"] == CANARY_ACCESS_TOKEN
-    assert codex_login_mirror.read_bytes() == operators_file
+    assert codex_login_source.read_bytes() == operators_file
     assert _CANARY_REFRESH_TOKEN not in child_login
     assert not any(_CANARY_REFRESH_TOKEN.encode() in content for content in files)
     assert not any(_CANARY_REFRESH_TOKEN in argument for argument in command)
     assert _CANARY_REFRESH_TOKEN not in formatted_log_text(caplog.records)
 
 
-def _drive_the_image_path(_codex_login_mirror: Path) -> BaseException:
+def _drive_the_image_path(_codex_login_source: Path) -> BaseException:
     with pytest.raises(codex_image.CodexImageLoginError) as raised:
         codex_image.generate_codex_image("prompt", policy=AN_IMAGE_POLICY, deadline=10_000_000)
     return raised.value
 
 
-def _drive_the_probe_path(_codex_login_mirror: Path) -> BaseException:
+def _drive_the_probe_path(_codex_login_source: Path) -> BaseException:
     with pytest.raises(process.CodexLoginMirrorError) as raised:
         process.blank_codex_refresh_token(_MALFORMED_LOGIN_WITH_CANARY)
     return raised.value
@@ -1852,19 +1852,19 @@ def _drive_the_probe_path(_codex_login_mirror: Path) -> BaseException:
 _MALFORMED_LOGIN_WITH_CANARY = f'{{"refresh_token": "{_CANARY_REFRESH_TOKEN}", '.encode()
 
 
-def _drive_the_reader_with_an_oversize_source(codex_login_mirror: Path) -> BaseException:
-    codex_login_mirror.write_bytes(
+def _drive_the_reader_with_an_oversize_source(codex_login_source: Path) -> BaseException:
+    codex_login_source.write_bytes(
         _CANARY_REFRESH_TOKEN.encode() + b" " * (256 * 1024),
     )
     with pytest.raises(AgentCliUnavailableError) as raised:
-        process._read_credential_file(codex_login_mirror)
+        process._read_credential_file(codex_login_source)
     return raised.value
 
 
-def _drive_the_credential_seam(codex_login_mirror: Path) -> BaseException:
+def _drive_the_credential_seam(codex_login_source: Path) -> BaseException:
     with pytest.raises(process.CliCredentialNotConfiguredError) as raised:
         process.PrivateCredentialHome(
-            codex_login_mirror,
+            codex_login_source,
             Path("auth.json"),
             prefix="seam-",
             missing_credential_is_error=True,
@@ -1884,12 +1884,12 @@ def _drive_the_credential_seam(codex_login_mirror: Path) -> BaseException:
     ids=("probe", "image", "seam", "reader-oversize"),
 )
 def test_a_malformed_login_leaves_no_credential_content_in_the_error_chain(
-    monkeypatch, codex_login_mirror: Path, drive,
+    monkeypatch, codex_login_source: Path, drive,
 ) -> None:
-    codex_login_mirror.write_bytes(_MALFORMED_LOGIN_WITH_CANARY)
+    codex_login_source.write_bytes(_MALFORMED_LOGIN_WITH_CANARY)
     monkeypatch.setattr(process, "resolve_cli_binary", lambda _binary: Path("/usr/bin/codex"))
 
-    error = drive(codex_login_mirror)
+    error = drive(codex_login_source)
 
     chain = exception_chain(error)
     assert not any(
@@ -1899,16 +1899,16 @@ def test_a_malformed_login_leaves_no_credential_content_in_the_error_chain(
     assert not traceback_frames_hold(error, _CANARY_REFRESH_TOKEN)
 
 
-def _a_refused_symbolic_link(codex_login_mirror: Path) -> BaseException:
-    link = codex_login_mirror.with_name("link.json")
-    link.symlink_to(codex_login_mirror)
+def _a_refused_symbolic_link(codex_login_source: Path) -> BaseException:
+    link = codex_login_source.with_name("link.json")
+    link.symlink_to(codex_login_source)
     with pytest.raises(AgentCliUnavailableError) as raised:
         process._read_credential_file(link)
     return raised.value
 
 
-def _a_malformed_login_judged_usable_or_not(codex_login_mirror: Path) -> BaseException:
-    codex_login_mirror.write_bytes(_MALFORMED_LOGIN_WITH_CANARY)
+def _a_malformed_login_judged_usable_or_not(codex_login_source: Path) -> BaseException:
+    codex_login_source.write_bytes(_MALFORMED_LOGIN_WITH_CANARY)
     with pytest.raises(AgentCliUnavailableError) as raised:
         process.codex_cli_login_is_usable()
     return raised.value
@@ -1920,12 +1920,12 @@ def _a_malformed_login_judged_usable_or_not(codex_login_mirror: Path) -> BaseExc
     ids=("reader-symlink", "decider-malformed"),
 )
 def test_a_credential_refusal_carries_no_chain_inside_a_handler(
-    codex_login_mirror: Path, refuse,
+    codex_login_source: Path, refuse,
 ) -> None:
     try:
         raise RuntimeError("the caller's own failure")
     except RuntimeError:
-        refusal = refuse(codex_login_mirror)
+        refusal = refuse(codex_login_source)
 
     assert refusal.__cause__ is None
     assert refusal.__context__ is None
@@ -1941,9 +1941,9 @@ def test_a_credential_refusal_carries_no_chain_inside_a_handler(
     ids=("incomplete", "wrong-typed"),
 )
 def test_the_codex_catalog_probe_starts_without_an_unusable_login(
-    monkeypatch, codex_login_mirror: Path, document: dict,
+    monkeypatch, codex_login_source: Path, document: dict,
 ) -> None:
-    codex_login_mirror.write_text(json.dumps(document))
+    codex_login_source.write_text(json.dumps(document))
     monkeypatch.setattr(process, "resolve_cli_binary", lambda _binary: Path("/usr/bin/codex"))
     clear_agent_cli_caches()
     copies: list[tuple[tuple[str, ...], str]] = []

@@ -30,8 +30,16 @@ from provider_test_support import (
     FailingLogHandler,
     RaisingLogHandler,
     RunnerFailureWatch,
+    CREDENTIAL_FILE_BOUND_BYTES,
+    DESTINATION_FAULTS,
     a_codex_login,
+    a_credential_destination_that_fails,
+    a_dangling_symlink,
+    a_directory,
     a_fifo,
+    a_path_through_a_regular_file,
+    a_symlink_to_a_login,
+    a_usable_login_over_the_bound,
     call_within_deadline,
     exception_chain,
     fail_to_start_the_runner_thread,
@@ -43,7 +51,8 @@ from provider_test_support import (
 
 from agent_providers import process
 from agent_providers.codex.pool import CodexProcessKind, CodexProcessPool
-from agent_providers.codex_login import assess_codex_login
+from agent_providers.codex.protocol import install_codex_turn_login
+from agent_providers.codex_login import _blanked_document, assess_codex_login, blanked_copy
 from agent_providers.config import current_config
 from agent_providers.constants import (
     CLAUDE_CLI_AUTH_METHOD_FIELD,
@@ -1255,6 +1264,7 @@ def test_private_credential_home_keeps_its_copy_until_the_last_reap(tmp_path: Pa
     assert copy.read_text() == _CATALOG_AUTH_PAYLOAD
     assert stat.S_IMODE(home.path.stat().st_mode) == 0o700
     assert stat.S_IMODE(copy.stat().st_mode) == 0o400
+    assert stat.S_IMODE(copy.parent.stat().st_mode) == 0o700
     assert source.read_text() == _CATALOG_AUTH_PAYLOAD
 
     reservation.on_reaped(123, True)
@@ -1357,7 +1367,7 @@ def test_an_unusable_login_is_an_error_where_a_missing_credential_is(tmp_path: P
             Path("auth.json"),
             prefix="private-home-",
             missing_credential_is_error=True,
-            credential_copy=process.blank_codex_refresh_token,
+            credential_copy=blanked_copy,
         )
 
     assert not list(tmp_path.glob("private-home-*"))
@@ -1388,6 +1398,185 @@ def test_private_credential_home_forgets_a_failed_setup_it_removed(
     gc.collect()
 
     assert reused_name.exists()
+
+
+_A_RAW_CREDENTIAL_CANARY = "synthetic-credential-canary"
+
+
+def _install_a_copy(
+    source: Path, destination: Path, *, copy=None, missing_credential_is_error: bool = True,
+) -> None:
+    process.install_credential_file(
+        source,
+        destination,
+        mode=0o400,
+        credential_copy=copy,
+        missing_credential_is_error=missing_credential_is_error,
+    )
+
+
+@pytest.mark.parametrize(
+    ("missing_credential_is_error", "refused"), ((True, True), (False, False)),
+    ids=("an-error", "a-logged-out-probe"),
+)
+def test_an_unusable_copy_follows_missing_credential_is_error(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    missing_credential_is_error: bool, refused: bool,
+) -> None:
+    source = tmp_path / "source.json"
+    source.write_text("{}")
+    destination = tmp_path / "copy.json"
+    caplog.set_level(logging.WARNING, logger=process.__name__)
+
+    def install() -> None:
+        _install_a_copy(
+            source, destination, copy=lambda _document: None,
+            missing_credential_is_error=missing_credential_is_error,
+        )
+
+    if refused:
+        with pytest.raises(CliCredentialNotConfiguredError) as raised:
+            install()
+        assert str(raised.value) == "configured CLI credential is unusable"
+        assert raised.value.__cause__ is None
+        assert raised.value.__context__ is None
+    else:
+        install()
+        assert "is not a usable login" in caplog.text
+    assert not destination.exists()
+
+
+def _a_live_symlink(directory: Path) -> Path:
+    (directory / "target").write_text("the target")
+    link = directory / "copy.json"
+    link.symlink_to(directory / "target")
+    return link
+
+
+def _a_symlink_to_nothing(directory: Path) -> Path:
+    link = directory / "copy.json"
+    link.symlink_to(directory / "target")
+    return link
+
+
+def _a_regular_file(directory: Path) -> Path:
+    path = directory / "copy.json"
+    path.write_text("the existing file")
+    return path
+
+
+@pytest.mark.parametrize(
+    "plant", (_a_regular_file, _a_live_symlink, _a_symlink_to_nothing),
+    ids=("regular-file", "live-symlink", "dangling-symlink"),
+)
+def test_the_credential_writer_never_replaces_a_file(tmp_path: Path, plant) -> None:
+    source = tmp_path / "source.json"
+    source.write_text(_A_RAW_CREDENTIAL_CANARY)
+    planted = plant(tmp_path)
+    kept = planted.read_text() if planted.exists() else None
+
+    with pytest.raises(AgentCliUnavailableError) as raised:
+        _install_a_copy(source, planted)
+
+    assert str(raised.value) == "could not prepare the private CLI credential copy"
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+    assert str(planted) not in _exception_chain_text(raised.value)
+    assert (planted.read_text() if planted.exists() else None) == kept
+    assert not (tmp_path / "target").exists() or (tmp_path / "target").read_text() == "the target"
+
+
+@pytest.mark.parametrize("fault", DESTINATION_FAULTS)
+def test_a_failed_credential_copy_keeps_no_credential_in_its_error(
+    tmp_path: Path, fault: str,
+) -> None:
+    source = tmp_path / "source.json"
+    source.write_text(_A_RAW_CREDENTIAL_CANARY)
+    open_descriptors = len(os.listdir("/proc/self/fd"))
+
+    with a_credential_destination_that_fails(fault):
+        with pytest.raises(AgentCliUnavailableError) as raised:
+            PrivateCredentialHome(
+                source,
+                Path(".claude/.credentials.json"),
+                prefix="private-home-",
+                missing_credential_is_error=True,
+            )
+
+    assert str(raised.value) == "could not prepare the private CLI credential copy"
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+    assert not traceback_frames_hold(raised.value, _A_RAW_CREDENTIAL_CANARY)
+    assert not list(tmp_path.glob("private-home-*"))
+    assert len(os.listdir("/proc/self/fd")) == open_descriptors
+
+
+def _fail_the_home_chmod(monkeypatch: pytest.MonkeyPatch, source: Path) -> None:
+    def refuse(*_arguments) -> None:
+        raise OSError(errno.EIO, "synthetic chmod failure")
+
+    monkeypatch.setattr(process.os, "chmod", refuse)
+
+
+def _fail_mkdtemp(monkeypatch: pytest.MonkeyPatch, source: Path) -> None:
+    def refuse(**_arguments) -> str:
+        raise OSError(errno.EIO, "synthetic mkdtemp failure")
+
+    monkeypatch.setattr(process.tempfile, "mkdtemp", refuse)
+
+
+def _remove_the_source(monkeypatch: pytest.MonkeyPatch, source: Path) -> None:
+    source.unlink()
+
+
+@pytest.mark.parametrize(
+    ("prepare", "detail"),
+    (
+        (_fail_the_home_chmod, "could not prepare the private CLI credential copy"),
+        (_fail_mkdtemp, "could not create a private CLI home"),
+        (_remove_the_source, "configured CLI credential is missing"),
+    ),
+    ids=("home-chmod", "mkdtemp", "missing-credential"),
+)
+def test_a_private_home_refusal_inside_a_handler_carries_no_chain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prepare, detail: str,
+) -> None:
+    source = tmp_path / "source.json"
+    source.write_text(_A_RAW_CREDENTIAL_CANARY)
+    prepare(monkeypatch, source)
+
+    try:
+        raise RuntimeError("the caller's own failure")
+    except RuntimeError:
+        with pytest.raises(AgentCliUnavailableError) as raised:
+            PrivateCredentialHome(
+                source,
+                Path(".claude/.credentials.json"),
+                prefix="private-home-",
+                missing_credential_is_error=True,
+            )
+
+    assert str(raised.value) == detail
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+    assert not list(tmp_path.glob("private-home-*"))
+
+
+def test_the_frame_check_reads_credential_views() -> None:
+    def hold_in_a_view(payload: bytes) -> None:
+        view = memoryview(payload)
+        del payload
+        raise RuntimeError(len(view))
+
+    def hold_in_a_buffer(payload: bytes) -> None:
+        buffer = bytearray(payload)
+        del payload
+        raise RuntimeError(len(buffer))
+
+    for hold in (hold_in_a_view, hold_in_a_buffer):
+        with pytest.raises(RuntimeError) as raised:
+            hold(_A_RAW_CREDENTIAL_CANARY.encode())
+        assert traceback_frames_hold(raised.value, _A_RAW_CREDENTIAL_CANARY)
 
 
 def test_private_credential_home_reports_a_failed_copy_without_its_path(
@@ -2401,51 +2590,17 @@ def test_the_grok_probe_hands_its_child_the_login_byte_for_byte(tmp_path, monkey
     assert copies == [auth_file.read_bytes()]
 
 
-_CREDENTIAL_BOUND = 256 * 1024
-
-
-def _a_directory(directory: Path) -> Path:
-    path = directory / "source"
-    path.mkdir()
-    return path
-
-
-def _a_symlink_to_a_login(directory: Path) -> Path:
-    target = directory / "target"
-    target.write_text(json.dumps(_A_COMPLETE_CODEX_LOGIN))
-    link = directory / "source"
-    link.symlink_to(target)
-    return link
-
-
-def _a_dangling_symlink(directory: Path) -> Path:
-    link = directory / "source"
-    link.symlink_to(directory / "gone")
-    return link
-
-
-def _a_file_over_the_bound(directory: Path) -> Path:
-    path = directory / "source"
-    path.write_bytes(b"x" * (_CREDENTIAL_BOUND + 1))
-    return path
-
-
-def _a_path_through_a_regular_file(directory: Path) -> Path:
-    (directory / "file").write_text("{}")
-    return directory / "file" / "auth.json"
-
-
 _NOT_A_PLAIN_FILE = [
     pytest.param(a_fifo, "CLI credential is not a regular file", id="fifo"),
-    pytest.param(_a_directory, "CLI credential is not a regular file", id="directory"),
+    pytest.param(a_directory, "CLI credential is not a regular file", id="directory"),
     pytest.param(lambda _: Path("/dev/null"), "CLI credential is not a regular file", id="device"),
-    pytest.param(_a_symlink_to_a_login, "CLI credential is a symbolic link", id="symlink"),
-    pytest.param(_a_dangling_symlink, "CLI credential is a symbolic link", id="dangling-symlink"),
+    pytest.param(a_symlink_to_a_login, "CLI credential is a symbolic link", id="symlink"),
+    pytest.param(a_dangling_symlink, "CLI credential is a symbolic link", id="dangling-symlink"),
     pytest.param(
-        _a_file_over_the_bound, "CLI credentials exceed the copy bound", id="over-the-bound",
+        a_usable_login_over_the_bound, "CLI credentials exceed the copy bound", id="over-the-bound",
     ),
     pytest.param(
-        _a_path_through_a_regular_file, "could not read CLI credentials", id="enotdir",
+        a_path_through_a_regular_file, "could not read CLI credentials", id="enotdir",
     ),
 ]
 
@@ -2523,7 +2678,7 @@ def test_the_credential_reader_reads_the_opened_file_not_the_path_after_the_open
     assert process._read_credential_file(source) == b"the opened file"
 
 
-@pytest.mark.parametrize("size", (0, _CREDENTIAL_BOUND), ids=("empty", "exactly-the-bound"))
+@pytest.mark.parametrize("size", (0, CREDENTIAL_FILE_BOUND_BYTES), ids=("empty", "exactly-the-bound"))
 def test_the_credential_reader_returns_a_plain_file_within_the_bound(
     tmp_path: Path, size: int,
 ) -> None:
@@ -2567,8 +2722,13 @@ def _enter_through_a_private_credential_home(tmp_path: Path) -> str:
         Path(".codex/auth.json"),
         prefix="private-home-",
         missing_credential_is_error=True,
-        credential_copy=process.blank_codex_refresh_token,
+        credential_copy=blanked_copy,
     )
+    return "installed"
+
+
+def _enter_through_the_codex_turn_login(tmp_path: Path) -> str:
+    install_codex_turn_login(Path(tempfile.mkdtemp(dir=tmp_path)))
     return "installed"
 
 
@@ -2579,7 +2739,10 @@ _CREDENTIAL_HANDLING_CODE = frozenset(
         process._read_regular_file,
         process._read_within_bound,
         process._install_credential,
-        process.blank_codex_refresh_token,
+        process._write_new_credential_file,
+        process._write_credential,
+        blanked_copy,
+        _blanked_document,
         process._codex_login_in_the_mirror_is_usable,
         assess_codex_login,
     )
@@ -2643,6 +2806,7 @@ _LOGIN_SCENARIOS = {
         {
             _enter_through_the_login_decider: True,
             _enter_through_a_private_credential_home: "installed",
+            _enter_through_the_codex_turn_login: "installed",
         },
     ),
     "malformed": (
@@ -2651,6 +2815,7 @@ _LOGIN_SCENARIOS = {
         {
             _enter_through_the_login_decider: AgentCliUnavailableError,
             _enter_through_a_private_credential_home: CliCredentialNotConfiguredError,
+            _enter_through_the_codex_turn_login: CliCredentialNotConfiguredError,
         },
     ),
     "incomplete": (
@@ -2659,6 +2824,7 @@ _LOGIN_SCENARIOS = {
         {
             _enter_through_the_login_decider: False,
             _enter_through_a_private_credential_home: CliCredentialNotConfiguredError,
+            _enter_through_the_codex_turn_login: CliCredentialNotConfiguredError,
         },
     ),
     "read-fails-mid-way": (
@@ -2667,6 +2833,7 @@ _LOGIN_SCENARIOS = {
         {
             _enter_through_the_login_decider: AgentCliUnavailableError,
             _enter_through_a_private_credential_home: AgentCliUnavailableError,
+            _enter_through_the_codex_turn_login: AgentCliUnavailableError,
         },
     ),
 }
@@ -2683,14 +2850,18 @@ def store_codex_login(tmp_path: Path, document: bytes) -> None:
     override_provider_runtime(codex_cli_auth_file=auth_file, cli_working_directory_root=tmp_path)
 
 
-_BOTH_ENTRY_POINTS = pytest.mark.parametrize(
+_EVERY_ENTRY_POINT = pytest.mark.parametrize(
     "enter",
-    (_enter_through_the_login_decider, _enter_through_a_private_credential_home),
-    ids=("login-decider", "private-credential-home"),
+    (
+        _enter_through_the_login_decider,
+        _enter_through_a_private_credential_home,
+        _enter_through_the_codex_turn_login,
+    ),
+    ids=("login-decider", "private-credential-home", "codex-turn-login"),
 )
 
 
-@_BOTH_ENTRY_POINTS
+@_EVERY_ENTRY_POINT
 @pytest.mark.usefixtures("a_stored_codex_login")
 def test_a_decoder_failure_propagates_unchanged_holding_no_credential_bytes(
     tmp_path: Path, enter,
@@ -2727,7 +2898,7 @@ _INSIDE_A_HANDLER = pytest.mark.parametrize(
 )
 
 
-@_BOTH_ENTRY_POINTS
+@_EVERY_ENTRY_POINT
 @_INSIDE_A_HANDLER
 @pytest.mark.parametrize("scenario", _LOGIN_SCENARIOS)
 def test_an_interruption_at_any_line_propagates_holding_no_credential_bytes(
@@ -2777,7 +2948,7 @@ def test_an_interruption_at_any_line_propagates_holding_no_credential_bytes(
         assert ending == expected_ending
 
 
-@_BOTH_ENTRY_POINTS
+@_EVERY_ENTRY_POINT
 @_INSIDE_A_HANDLER
 def test_a_memory_error_inside_the_malformed_handler_holds_no_credential_bytes(
     tmp_path: Path, enter, inside_a_handler: bool,

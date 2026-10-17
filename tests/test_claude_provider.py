@@ -3992,7 +3992,12 @@ REAPER_CHECKPOINTS = 5
 MOST_SHIELD_CALLS_OF_ONE_REAP = 3
 
 
-def test_stream_reap_does_not_spin_under_anyio_level_cancellation(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    "also_cancelled_directly", [False, True], ids=["scope_only", "scope_and_task_cancel"],
+)
+def test_stream_reap_does_not_spin_under_anyio_level_cancellation(
+    monkeypatch, also_cancelled_directly,
+) -> None:
     """An ASGI cancellation scope must let the delayed reap make progress.
 
     The old asyncio.shield retry loop was immediately cancelled again by
@@ -4016,6 +4021,7 @@ def test_stream_reap_does_not_spin_under_anyio_level_cancellation(monkeypatch) -
         reaper_finished = anyio.Event()
         close_finished = anyio.Event()
         reap_calls = 0
+        closing: list[asyncio.Task] = []
 
         async def fake_reap(_proc) -> bool:
             nonlocal reap_calls
@@ -4031,6 +4037,7 @@ def test_stream_reap_does_not_spin_under_anyio_level_cancellation(monkeypatch) -
 
         async def close_after_cancellation() -> None:
             process = a_claude_cli_child(returncode=None)
+            closing.append(asyncio.current_task())
             with pytest.raises(asyncio.CancelledError):
                 await provider._reap_behind_shield(process)
             close_finished.set()
@@ -4039,6 +4046,8 @@ def test_stream_reap_does_not_spin_under_anyio_level_cancellation(monkeypatch) -
             task_group.start_soon(close_after_cancellation)
             await reaper_started.wait()
             task_group.cancel_scope.cancel()
+            if also_cancelled_directly:
+                closing[0].cancel()
             with anyio.CancelScope(shield=True), anyio.fail_after(ONE_SHOT_TEST_BOUND_SECONDS):
                 finish_reaper.set()
                 await reaper_finished.wait()

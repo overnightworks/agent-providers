@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import stat
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -101,16 +103,12 @@ def test_a_cli_section_without_a_profile_serves_after_probing_the_program(
     assert probe_log.read_text() == "--version\n"
 
 
-def test_an_installation_with_neither_profile_nor_cli_section_serves_and_probes_nothing(
-    tmp_path, served, probe_log
-):
-    _logged_program(tmp_path, probe_log)
+def test_an_installation_with_neither_profile_nor_cli_section_serves(tmp_path, served):
     text = NO_PROFILE.replace(CLI_SECTION, "")
 
     assert main(["--config", str(_written(tmp_path, text))]) == 0
 
     assert len(served) == 1
-    assert not probe_log.exists()
 
 
 def test_the_probe_runs_in_a_private_home_with_no_provider_token_and_no_login(
@@ -120,12 +118,7 @@ def test_the_probe_runs_in_a_private_home_with_no_provider_token_and_no_login(
     (parent_home / ".claude").mkdir(parents=True)
     (parent_home / ".claude" / ".credentials.json").write_text("login-marker")
     monkeypatch.setenv("HOME", str(parent_home))
-    for variable in (
-        "ANTHROPIC_API_KEY",
-        "CLAUDE_CODE_OAUTH_TOKEN",
-        "XAI_API_KEY",
-        "OPENAI_API_KEY",
-    ):
+    for variable in PROVIDER_TOKEN_VARIABLES:
         monkeypatch.setenv(variable, "token-marker")
     inspecting = tmp_path / "inspection"
     inspecting.mkdir()
@@ -170,6 +163,8 @@ def test_a_program_reporting_another_version_refuses_the_start_naming_both(
             f"{PRINTS_THE_PIN}banner\n", f"printed {PRINTS_THE_PIN.strip()}", id="two-lines"
         ),
         pytest.param("", "printed nothing", id="empty"),
+        pytest.param("   \n", "printed    ", id="only-spaces"),
+        pytest.param("\nhello\n", "printed ", id="blank-first-line"),
         pytest.param("x" * 100 + "\n", "printed " + "x" * 60, id="long-line-cut"),
     ],
 )
@@ -214,8 +209,9 @@ def test_a_program_that_never_finishes_is_stopped_and_refuses_the_start(
     refusal = _refused_on_one_line(_config_file_naming(tmp_path, program), capsys)
 
     assert refusal == _no_version_line(program, "probe did not complete")
+    pid = int((tmp_path / "pid").read_text())
     with pytest.raises(ProcessLookupError):
-        os.kill(int((tmp_path / "pid").read_text()), 0)
+        os.kill(pid, 0)
 
 
 def test_output_beyond_the_runner_limit_refuses_the_start_as_incomplete(tmp_path, capsys, served):
@@ -224,6 +220,59 @@ def test_output_beyond_the_runner_limit_refuses_the_start_as_incomplete(tmp_path
     refusal = _refused_on_one_line(_config_file_naming(tmp_path, program), capsys)
 
     assert refusal == _no_version_line(program, "probe did not complete")
+
+
+def test_valid_output_with_stderr_beyond_the_runner_limit_still_refuses_as_incomplete(
+    tmp_path, capsys, served
+):
+    program = _script(
+        tmp_path, f"printf '{PRINTS_THE_PIN}'; head -c 70000 /dev/zero | tr '\\0' x >&2"
+    )
+
+    refusal = _refused_on_one_line(_config_file_naming(tmp_path, program), capsys)
+
+    assert refusal == _no_version_line(program, "probe did not complete")
+    assert served == []
+
+
+def test_a_binary_path_holding_a_newline_is_refused_on_one_line_with_the_newline_escaped(
+    tmp_path, capsys, served
+):
+    program = tmp_path / "line\nbreak" / "claude"
+
+    refusal = _refused_on_one_line(_config_file_naming(tmp_path, program), capsys)
+
+    assert refusal == (
+        f"cli.claude_version: {str(program).replace(chr(10), '\\n')} did not print a version"
+        f" (probe could not start or its start deadline expired);"
+        f" the pinned version is {PINNED_CLAUDE_VERSION}"
+    )
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        pytest.param(FileNotFoundError(errno.ENOENT, "no temporary directory"), id="missing"),
+        pytest.param(PermissionError(errno.EACCES, "not writable"), id="permission-denied"),
+        pytest.param(OSError(errno.ENOSPC, "no space left on device"), id="disk-full"),
+    ],
+)
+def test_a_private_home_that_cannot_be_made_refuses_the_start_as_unstarted(
+    tmp_path, capsys, served, monkeypatch, failure
+):
+    program = _printing(tmp_path, PRINTS_THE_PIN)
+
+    def cannot_make_a_directory(*_arguments, **_keywords):
+        raise failure
+
+    monkeypatch.setattr(tempfile, "mkdtemp", cannot_make_a_directory)
+
+    refusal = _refused_on_one_line(_config_file_naming(tmp_path, program), capsys)
+
+    assert refusal == _no_version_line(
+        program, "probe could not start or its start deadline expired"
+    )
+    assert served == []
 
 
 @pytest.mark.parametrize(
@@ -242,6 +291,7 @@ def test_output_beyond_the_runner_limit_refuses_the_start_as_incomplete(tmp_path
         pytest.param("2.1.302-beta (Claude Code)\n", None, id="prerelease"),
         pytest.param("banner\n2.1.302 (Claude Code)\n", None, id="banner-line"),
         pytest.param("", None, id="empty"),
+        pytest.param("2.1.30٢ (Claude Code)\n", None, id="non-ascii-digit"),
     ],
 )
 def test_only_the_exact_version_line_is_parsed(stdout, version):

@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 import uvicorn
+from provider_test_support import fake_cli_executable
 from pydantic import ValidationError
 from service_support import (
     CALLED_PLAINLY_OR_FROM_AN_ACTIVE_HANDLER,
@@ -93,6 +94,17 @@ def _written(tmp_path: Path, text: str) -> Path:
     path = tmp_path / "agent-service.toml"
     path.write_text(text, encoding="utf-8")
     return path
+
+
+def test_loading_a_file_does_not_run_the_program_its_cli_section_names(tmp_path):
+    probe_log = tmp_path / "probe-starts"
+    program = fake_cli_executable(tmp_path, {("--version",): "any"}, calls_log=probe_log)
+    binary_line = f"claude_binary = {json.dumps(str(program))}"
+    text = VALID_CONFIG.replace(CLI_SECTION, cli_section(binary_line, CLAUDE_VERSION_LINE))
+
+    load_config(_written(tmp_path, text))
+
+    assert not probe_log.exists()
 
 
 def test_a_valid_file_loads_with_the_documented_defaults(tmp_path):
@@ -876,6 +888,11 @@ PROFILE_RULE_REFUSALS = [
         WITHOUT_TOKEN_FILE,
         "profiles.claude-main.token_file: required for a claude profile",
         id="claude-without-a-token-file",
+    ),
+    pytest.param(
+        WITHOUT_TOKEN_FILE.replace(CLI_SECTION, ""),
+        "profiles.claude-main.token_file: required for a claude profile",
+        id="claude-without-a-token-file-nor-cli-section",
     ),
     pytest.param(
         _with_profile_of("codex"),

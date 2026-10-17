@@ -13,7 +13,7 @@ from agent_providers.process import CliRun, run_catalog_cli
 from agent_providers.spawn import ChildProcess, closed_environment
 from agent_service.secret_file import shown_text
 
-VERSION_PATTERN: Final = r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+VERSION_PATTERN: Final = re.compile(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)", re.ASCII)
 VERSION_OUTPUT_SUFFIX: Final = " (Claude Code)"
 SHOWN_OUTPUT_CHARACTERS: Final = 60
 MALFORMED_PIN: Final = (
@@ -27,7 +27,7 @@ class ClaudeVersionRefused(ValueError):
 
 
 def _pin_in_grammar(value: object) -> str:
-    if not isinstance(value, str) or re.fullmatch(VERSION_PATTERN, value) is None:
+    if not isinstance(value, str) or VERSION_PATTERN.fullmatch(value) is None:
         raise ValueError(MALFORMED_PIN)
     return value
 
@@ -41,47 +41,52 @@ def parse_version_output(stdout: str) -> str | None:
     if not text.endswith(VERSION_OUTPUT_SUFFIX):
         return None
     version = text.removesuffix(VERSION_OUTPUT_SUFFIX)
-    return version if re.fullmatch(VERSION_PATTERN, version) else None
+    return version if VERSION_PATTERN.fullmatch(version) else None
 
 
-def _why_no_version(run: CliRun | None) -> str:
+def _unusable_run(run: CliRun | None) -> str | None:
+    """Why the run cannot have printed a version, or ``None`` when its output is worth parsing."""
     if run is None:
         return "probe could not start or its start deadline expired"
     if not run.complete:
         return "probe did not complete"
     if run.returncode != 0:
         return f"exit status {run.returncode}"
-    if not run.stdout.strip():
+    return None
+
+
+def _what_was_printed(stdout: str) -> str:
+    if not stdout:
         return "printed nothing"
-    first_line = run.stdout.splitlines()[0]
+    first_line = stdout.splitlines()[0]
     return f"printed {shown_text(first_line[:SHOWN_OUTPUT_CHARACTERS])}"
 
 
 def _probe(binary: Path) -> CliRun | None:
-    with tempfile.TemporaryDirectory(prefix="agent-service-claude-version-") as home:
+    try:
+        home = tempfile.TemporaryDirectory(prefix="agent-service-claude-version-")
+    except OSError:
+        return None
+    with home:
         child = ChildProcess(
             binary=binary,
             arguments=("--version",),
-            environment=closed_environment(Path(home)),
-            working_directory=Path(home),
+            environment=closed_environment(Path(home.name)),
+            working_directory=Path(home.name),
         )
         return run_catalog_cli(child)
-
-
-def _version_printed_by(run: CliRun | None) -> str | None:
-    if run is None or not run.complete or run.returncode != 0:
-        return None
-    return parse_version_output(run.stdout)
 
 
 def require_pinned_version(binary: Path, pinned: str) -> None:
     """Run ``binary --version`` in a throwaway home and refuse unless it reports ``pinned``."""
     run = _probe(binary)
-    reported = _version_printed_by(run)
     shown_binary = shown_text(str(binary))
+    reason = _unusable_run(run)
+    reported = parse_version_output(run.stdout) if run is not None and reason is None else None
     if reported is None:
+        why = reason or _what_was_printed(run.stdout)
         raise ClaudeVersionRefused(
-            f"cli.claude_version: {shown_binary} did not print a version ({_why_no_version(run)});"
+            f"cli.claude_version: {shown_binary} did not print a version ({why});"
             f" the pinned version is {pinned}"
         )
     if reported != pinned:

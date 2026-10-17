@@ -107,7 +107,7 @@ def test_a_stop_report_is_consumed_by_a_call_that_cannot_reap(
     with monkeypatch.context() as patch, caplog.at_level(logging.WARNING, logger=SPAWN_LOGGER):
         patch.setattr(os, "waitid", model)
         started = leaders.start()
-        model.await_calls(5)
+        model.await_calls(5, "waitid")
 
         assert [call.options for call in model.calls] == [
             OBSERVE_EXIT,

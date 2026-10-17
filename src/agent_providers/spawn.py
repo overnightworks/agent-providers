@@ -370,6 +370,14 @@ def _consume_stop_report(pid: int) -> tuple[int, int] | None:
     return reported.si_code, reported.si_status
 
 
+def _reap_exited(pid: int) -> tuple[int, int]:
+    return os.waitpid(pid, os.WNOHANG)
+
+
+def _lifecycle_lock() -> threading.Lock:
+    return threading.Lock()
+
+
 class AnchoredLeader:
     """A leader that only this handle observes; its exit leaves an unreaped zombie.
 
@@ -385,6 +393,17 @@ class AnchoredLeader:
     Dropping a handle that is still RUNNING or EXITED is a caller defect: CPython
     then reaps the leader as an ordinary child.
 
+    ``release()`` is the one final reap. It reaps only a leader whose exit the
+    watcher already published (EXITED), never a running or stopped one, so no
+    wait of the watcher can follow the reap: the watcher calls the kernel only
+    while RUNNING and its commit is its last call. The exit is published by the
+    commit and announced by ``on_exit`` after it, so ``release()`` is admitted
+    from the commit on, including from inside ``on_exit``. The reap and the
+    commit that follows it happen under the lifecycle lock, so concurrent
+    releases reap once. RELEASED writes the reaped code into ``Popen.returncode``
+    and a loss writes the sentinel, both through the one lock-held write, so a
+    destroyed handle reaps nothing.
+
     ``done_with_pid`` is a conservative certificate. True certifies that the
     handle is RELEASED or LOST and its watcher ended, so it will never act on its
     pid again. False certifies nothing: it never waits, so a held lifecycle lock
@@ -395,7 +414,7 @@ class AnchoredLeader:
         self.pid = popen.pid
         self._popen = popen
         self._on_exit = on_exit
-        self._lock = threading.Lock()
+        self._lock = _lifecycle_lock()
         self._status = LEADER_STARTED
         self._stop_warned = False
         self._watcher = threading.Thread(
@@ -448,12 +467,35 @@ class AnchoredLeader:
             self.pid,
         )
 
+    def release(self) -> None:
+        with self._lock:
+            if not admit_release(self._status.state):
+                return
+            if self._status.state is AnchorState.RUNNING:
+                raise AnchorStateError("the leader's exit is not published; it cannot be released")
+            try:
+                event: LeaderEvent = reap_outcome(*_reap_exited(self.pid))
+            except ChildProcessError:
+                event = LeaderGone()
+            self._apply(event)
+            if isinstance(event, LeaderNotReaped):
+                raise AnchorStateError("the kernel did not reap the exited leader")
+            if isinstance(event, LeaderGone):
+                raise ChildIdentityLost("the leader was reaped elsewhere; nothing is left")
+
+    def _apply(self, event: LeaderEvent) -> LeaderTransition:
+        transition = advance(self._status, event)
+        state = transition.status.state
+        if state is AnchorState.LOST:
+            self._popen.returncode = _IDENTITY_LOST
+        elif state is AnchorState.RELEASED:
+            self._popen.returncode = transition.status.returncode
+        self._status = transition.status
+        return transition
+
     def _commit(self, event: LeaderEvent) -> None:
         with self._lock:
-            transition = advance(self._status, event)
-            if transition.status.state is AnchorState.LOST:
-                self._popen.returncode = _IDENTITY_LOST
-            self._status = transition.status
+            transition = self._apply(event)
         if transition.announces:
             self._announce()
 

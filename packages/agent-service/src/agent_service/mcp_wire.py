@@ -89,8 +89,6 @@ class _Model(BaseModel):
         strict=True,
         extra="forbid",
         alias_generator=to_camel,
-        validate_by_name=True,
-        validate_by_alias=True,
     )
 
 
@@ -167,7 +165,7 @@ def parse_message(body: bytes) -> JsonRpcMessage:
     if not isinstance(document, dict) or document.pop("jsonrpc", None) != _JSON_RPC_VERSION:
         _refuse(WireRefusal.NOT_A_MESSAGE)
     try:
-        return _model_of(document).model_validate(document, by_name=False)
+        return _model_of(document).model_validate(document)
     except ValidationError:
         _refuse(WireRefusal.NOT_A_MESSAGE)
 
@@ -247,7 +245,7 @@ def read_payload[Payload: _Model](
     payload_type: type[Payload], payload: Mapping[str, Any] | None
 ) -> Payload:
     try:
-        return payload_type.model_validate({} if payload is None else dict(payload), by_name=False)
+        return payload_type.model_validate({} if payload is None else dict(payload))
     except ValidationError:
         _refuse(WireRefusal.INVALID_PAYLOAD)
 
@@ -276,7 +274,7 @@ class _InitializeResult(_Model):
 
     @classmethod
     def negotiated(cls, requested: str) -> Self:
-        return cls(protocol_version=negotiate_protocol_version(requested))
+        return cls.model_validate({"protocolVersion": negotiate_protocol_version(requested)})
 
 
 def initialize_response(request_id: RequestId, requested_version: str) -> JsonRpcResponse:

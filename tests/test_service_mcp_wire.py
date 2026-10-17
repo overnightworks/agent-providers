@@ -254,12 +254,16 @@ def test_a_number_that_overflows_to_infinity_is_not_accepted_as_a_message() -> N
         (ListToolsResult, {"tools": [{"name": "echo", "input_schema": {}}]}),
         (CallToolParams, {"name": "echo", "arguments": {"a": float("inf")}}),
         (ListToolsParams, {"cursor": "\ud800"}),
+        (InitializeParams, {"protocolVersion": "\ud800"}),
+        (ListToolsResult, {"tools": [{"name": "e", "inputSchema": {"a": float("inf")}}]}),
     ],
     ids=[
         "snake-case protocol version",
         "snake-case input schema",
         "infinite argument",
         "surrogate",
+        "surrogate protocol version",
+        "infinite input schema",
     ],
 )
 def test_a_payload_member_read_by_its_python_name_or_not_json_is_refused(

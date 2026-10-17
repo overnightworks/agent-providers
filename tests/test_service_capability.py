@@ -49,10 +49,10 @@ from service_support import (
     tool_names_with_the_last_of_length,
     with_placeholder_run_id,
 )
+from webauth.https_client import KeySetFetchError
 from webauth.jwt_verification import (
     MAX_TOKEN_CHARACTERS,
     JwtVerifier,
-    KeySetFetchError,
     Rejected,
     RejectionReason,
     VerifiedClaims,

@@ -13,10 +13,12 @@ import json
 import logging
 import time
 import tracemalloc
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
+from typing import Any
 
 import anyio
 import httpx
+import jwt
 import pytest
 from fastapi import FastAPI
 from service_support import (
@@ -36,7 +38,8 @@ from service_support import (
     served,
     service_config,
 )
-from webauth.jwt_verification import KEY_SET_REFRESH_COOLDOWN_SECONDS, KeySetFetchError
+from webauth.https_client import KeySetFetchError
+from webauth.jwt_verification import KEY_SET_REFRESH_COOLDOWN_SECONDS
 
 from agent_client.wire import Failed, FailureCode, RejectionCode, RunRejection
 from agent_providers.events import AssistantTextEvent, FinalEvent
@@ -195,6 +198,49 @@ def test_a_token_with_an_unknown_kid_answers_by_whether_the_key_set_can_be_refre
         response = post_run(base_url, run_headers(forged.workload(), MINT.user()))
 
     assert_rejected(response, code, status)
+
+
+class KidlessMint(TokenMint):
+    """Signs tokens without a ``kid``; its key set holds ``other_signing_keys`` more keys."""
+
+    def __init__(self, other_signing_keys: int) -> None:
+        super().__init__()
+        self._other_signing_keys = other_signing_keys
+
+    def key_set(self) -> dict[str, Any]:
+        others = [
+            TokenMint(key_id=f"other-{number}").key_set()["keys"][0]
+            for number in range(self._other_signing_keys)
+        ]
+        return {"keys": [*super().key_set()["keys"], *others]}
+
+    def token(self, claims: Mapping[str, object]) -> str:
+        return jwt.encode(dict(claims), self._key, algorithm="RS256")
+
+
+@pytest.mark.parametrize(
+    ("other_signing_keys", "admitted"),
+    [
+        pytest.param(0, True, id="sole-rs256-key"),
+        pytest.param(1, False, id="two-rs256-keys"),
+    ],
+)
+def test_a_token_without_a_kid_is_admitted_only_against_a_sole_rs256_key(
+    other_signing_keys, admitted
+):
+    mint = KidlessMint(other_signing_keys)
+    app = create_app(
+        service_config(),
+        runners=Runners(cli=ScriptedRunner(CLI_SCRIPT), api=ScriptedRunner(API_SCRIPT)),
+        fetch_key_set=mint.fetch_key_set,
+    )
+    with served(app) as base_url:
+        response = post_run(base_url, run_headers(mint.workload(), mint.user()))
+
+    if admitted:
+        assert _admitted_events(response) == ["run_started", "assistant_text", "succeeded"]
+    else:
+        assert_rejected(response, RejectionCode.UNAUTHORIZED, 401)
 
 
 def test_one_key_set_fetch_serves_every_request_of_the_process():

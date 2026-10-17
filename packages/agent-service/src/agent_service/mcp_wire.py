@@ -202,11 +202,15 @@ def require_acknowledgement(status: int, body: bytes) -> None:
         _refuse(WireRefusal.NOT_ACKNOWLEDGED)
 
 
-def read_answer(content_type: str | None, body: bytes) -> Reply:
-    """The answer to a request: only ``application/json``, never an event stream."""
+def require_json_answer(content_type: str | None) -> None:
+    """The answer to a request is only ``application/json``, never an event stream."""
     media_type = (content_type or "").split(";", 1)[0].strip().lower()
     if media_type != JSON_MEDIA_TYPE:
         _refuse(WireRefusal.NOT_JSON_ANSWER)
+
+
+def read_answer(content_type: str | None, body: bytes) -> Reply:
+    require_json_answer(content_type)
     message = parse_message(body)
     if not isinstance(message, JsonRpcResponse | JsonRpcError):
         _refuse(WireRefusal.UNEXPECTED_MESSAGE)

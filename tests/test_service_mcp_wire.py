@@ -38,6 +38,7 @@ from agent_service.mcp_wire import (
     read_tool_outcome,
     request_headers,
     require_acknowledgement,
+    require_json_answer,
     require_session_id,
     require_supported_version,
 )
@@ -371,8 +372,10 @@ def test_only_an_application_json_answer_is_accepted(
 
     if accepted:
         assert isinstance(read_answer(content_type, body), JsonRpcResponse)
+        assert require_json_answer(content_type) is None
     else:
         assert refusal_of(read_answer, content_type, body).refusal is WireRefusal.NOT_JSON_ANSWER
+        assert refusal_of(require_json_answer, content_type).refusal is WireRefusal.NOT_JSON_ANSWER
 
 
 def test_an_answer_that_is_a_request_is_refused() -> None:

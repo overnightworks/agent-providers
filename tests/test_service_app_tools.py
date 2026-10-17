@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import socket
 import ssl
 import threading
-from collections.abc import Awaitable, Callable, Iterator
-from contextlib import ExitStack
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from contextlib import ExitStack, closing
 from dataclasses import replace
 from typing import Any
 
@@ -21,8 +22,10 @@ import pytest
 from mcp_app_fake import (
     ACKNOWLEDGED,
     CERTIFICATE_HOST,
+    DROPPED,
     WAIT_SECONDS,
     FakeResponse,
+    Fate,
     McpAppFake,
     RecordedRequest,
     ScriptedApp,
@@ -35,11 +38,16 @@ from mcp_app_fake import (
 )
 
 from agent_client.wire import MAX_EVENT_BYTES
+from agent_service import app_tools
 from agent_service.app_tools import (
     AppToolsSession,
     ProtocolFailure,
+    UpstreamCallLost,
+    UpstreamError,
     UpstreamProtocolError,
+    UpstreamRedirected,
     UpstreamRefused,
+    UpstreamUnreachable,
     open_app_tools,
 )
 from agent_service.mcp_wire import NON_TEXT_BLOCK_MESSAGE, WireRefusal
@@ -47,6 +55,10 @@ from agent_service.mcp_wire import NON_TEXT_BLOCK_MESSAGE, WireRefusal
 CAPABILITY = "capability-for-this-run"
 VERSION = "2025-11-25"
 CLIENT_DEADLINE_SECONDS = 30
+CANARY_HEADER = "canary-response-header"
+CANARY_BODY = "canary-response-body"
+SHORT_IO_SECONDS = 0.3
+STALL_DEADLINE_SECONDS = 5
 
 
 @pytest.fixture(scope="session")
@@ -67,8 +79,11 @@ def serve(authority: TestAuthority) -> Iterator[Callable[..., McpAppFake]]:
         def start(
             responder: Callable[[RecordedRequest], FakeResponse] | None = None,
             served_credentials: TlsCredentials = credentials,
+            keep_alive: bool = False,
         ) -> McpAppFake:
-            return stack.enter_context(serving(responder or ScriptedApp(), served_credentials))
+            return stack.enter_context(
+                serving(responder or ScriptedApp(), served_credentials, keep_alive=keep_alive)
+            )
 
         yield start
 
@@ -138,6 +153,30 @@ def withheld(response: FakeResponse) -> FakeResponse:
 def json_reply(request: RecordedRequest, **members: Any) -> FakeResponse:
     reply = {"jsonrpc": "2.0", "id": request.message["id"], **members}
     return FakeResponse(body=json.dumps(reply).encode())
+
+
+def assert_closed(error: BaseException) -> None:
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    visible = f"{error!s} {error!r} {error.args!r} {vars(error)!r}"
+    for canary in (CAPABILITY, CANARY_HEADER, CANARY_BODY):
+        assert canary not in visible
+    carried = [*error.args, *vars(error).values()]
+    assert not any(type(value).__module__.startswith("httpx") for value in carried)
+
+
+def failure_of[Outcome](
+    expected: type[UpstreamError], action: Callable[[], Outcome]
+) -> UpstreamError:
+    with pytest.raises(expected) as raised:
+        action()
+    assert_closed(raised.value)
+    return raised.value
+
+
+def assert_only_posts(fake: McpAppFake) -> None:
+    assert {request.method for request in fake.requests} <= {"POST"}
+    assert all("last-event-id" not in request.headers for request in fake.requests)
 
 
 def listing_of_size(request: RecordedRequest, size: int) -> FakeResponse:
@@ -272,19 +311,22 @@ def test_an_oversized_answer_is_refused_before_its_withheld_tail_arrives(serve, 
         list_tool_names(fake, context)
 
     assert refused.value.reason == WireRefusal.TOO_LARGE
-    assert not fake.tail_released.is_set()
 
 
+@pytest.mark.parametrize("content_type", ["application/json", "text/event-stream"])
 @pytest.mark.parametrize("encoding", ["gzip", "br", "identity, gzip"])
-def test_a_content_encoded_answer_is_refused_before_its_body_is_read(serve, context, encoding):
-    encoded = withheld(FakeResponse(body=b"{}", headers={"Content-Encoding": encoding}))
+def test_a_content_encoded_answer_is_refused_before_its_body_is_read(
+    serve, context, encoding, content_type
+):
+    encoded = withheld(
+        FakeResponse(content_type=content_type, body=b"{}", headers={"Content-Encoding": encoding})
+    )
     fake = serve(answering("tools/list", encoded))
 
     with pytest.raises(UpstreamProtocolError) as refused:
         list_tool_names(fake, context)
 
     assert refused.value.reason == ProtocolFailure.CONTENT_ENCODING
-    assert not fake.tail_released.is_set()
 
 
 def test_an_identity_encoded_answer_is_accepted(serve, context):
@@ -426,18 +468,39 @@ def test_a_server_answering_initialize_with_another_version_gets_no_further_requ
         FakeResponse(status=202, content_type=None, body=b"x"),
         FakeResponse(status=204, content_type=None),
         FakeResponse(status=200, content_type=None),
+        withheld(FakeResponse(content_type="text/event-stream", body=b"data: {}\n\n")),
+        withheld(FakeResponse(body=b"{}", headers={"Content-Encoding": "gzip"})),
     ],
-    ids=["200-json", "202-with-body", "204", "200-empty"],
+    ids=["200-json", "202-with-body", "204", "200-empty", "200-event-stream-withheld", "200-gzip"],
 )
 def test_a_notification_answered_by_anything_but_an_empty_202_is_a_protocol_error(
     serve, context, response
 ):
     fake = serve(answering("notifications/initialized", response))
 
-    with pytest.raises(UpstreamProtocolError) as refused:
-        list_tool_names(fake, context)
+    refused = failure_of(UpstreamProtocolError, lambda: list_tool_names(fake, context))
 
-    assert refused.value.reason == WireRefusal.NOT_ACKNOWLEDGED
+    assert refused.reason == WireRefusal.NOT_ACKNOWLEDGED
+    assert_only_posts(fake)
+    assert fake.requests[-1].rpc_method == "notifications/initialized"
+
+
+def test_an_empty_202_marked_with_a_content_encoding_is_refused(serve, context):
+    gzip_acknowledgement = replace(ACKNOWLEDGED, headers={"Content-Encoding": "gzip"})
+    fake = serve(answering("notifications/initialized", gzip_acknowledgement))
+
+    refused = failure_of(UpstreamProtocolError, lambda: list_tool_names(fake, context))
+
+    assert refused.reason == ProtocolFailure.CONTENT_ENCODING
+
+
+def test_an_event_stream_answer_to_a_request_is_refused_before_its_open_stream_ends(serve, context):
+    stream = withheld(FakeResponse(content_type="text/event-stream", body=b"data: {}\n\n"))
+    fake = serve(answering("tools/list", stream))
+
+    refused = failure_of(UpstreamProtocolError, lambda: list_tool_names(fake, context))
+
+    assert refused.reason == WireRefusal.NOT_JSON_ANSWER
 
 
 def test_an_empty_202_acknowledges_the_notification(serve, context):
@@ -446,15 +509,50 @@ def test_an_empty_202_acknowledges_the_notification(serve, context):
     assert list_tool_names(fake, context) == ["echo"]
 
 
-@pytest.mark.parametrize("rpc_method", ["initialize", "notifications/initialized", "tools/list"])
-@pytest.mark.parametrize("status", [401, 307])
-def test_a_non_2xx_status_is_a_refusal_carrying_only_the_status(serve, context, rpc_method, status):
-    fake = serve(answering(rpc_method, FakeResponse(status=status, content_type=None)))
+HANDSHAKE_AND_LISTING = ["initialize", "notifications/initialized", "tools/list"]
 
-    with pytest.raises(UpstreamRefused) as refused:
-        list_tool_names(fake, context)
 
-    assert refused.value.status == status
+@pytest.mark.parametrize("rpc_method", HANDSHAKE_AND_LISTING)
+def test_a_non_2xx_status_is_a_refusal_carrying_only_the_status(serve, context, rpc_method):
+    fake = serve(answering(rpc_method, FakeResponse(status=401, content_type=None)))
+
+    refused = failure_of(UpstreamRefused, lambda: list_tool_names(fake, context))
+
+    assert refused.status == 401
+
+
+@pytest.mark.parametrize("rpc_method", HANDSHAKE_AND_LISTING)
+@pytest.mark.parametrize("status", [300, 302, 304, 307, 308])
+@pytest.mark.parametrize("target_kind", ["other-origin", "unparseable"])
+def test_any_3xx_is_a_redirect_whose_cross_origin_target_is_never_asked(
+    serve, context, rpc_method, status, target_kind
+):
+    target = serve()
+    unparseable = "https://[::1"
+    location = {
+        "Location": f"{target.origin}/mcp" if target_kind == "other-origin" else unparseable
+    }
+    redirect = FakeResponse(status, None, CANARY_BODY.encode(), location)
+    fake = serve(answering(rpc_method, withheld(redirect)))
+
+    refused = failure_of(UpstreamRedirected, lambda: list_tool_names(fake, context))
+
+    assert refused.status == status
+    assert target.requests == []
+    assert target.accepted_connections == 0
+    assert requests_for(fake, rpc_method) == [fake.requests[-1]]
+
+
+def test_a_same_origin_redirect_is_not_followed(serve, context):
+    def back_to_itself(_request: RecordedRequest) -> FakeResponse:
+        return FakeResponse(307, None, headers={"Location": f"{fake.origin}/mcp"})
+
+    fake = serve(ScriptedApp(overrides={"tools/list": back_to_itself}))
+
+    refused = failure_of(UpstreamRedirected, lambda: list_tool_names(fake, context))
+
+    assert refused.status == 307
+    assert len(requests_for(fake, "tools/list")) == 1
 
 
 @pytest.mark.parametrize(
@@ -475,7 +573,6 @@ def test_a_request_answered_with_a_2xx_other_than_200_is_refused_before_its_body
         list_tool_names(fake, context)
 
     assert refused.value.reason == ProtocolFailure.UNEXPECTED_STATUS
-    assert not fake.tail_released.is_set()
 
 
 def test_a_refused_status_wins_over_an_encoded_body_that_is_still_withheld(serve, context):
@@ -488,7 +585,6 @@ def test_a_refused_status_wins_over_an_encoded_body_that_is_still_withheld(serve
         list_tool_names(fake, context)
 
     assert refused.value.status == 401
-    assert not fake.tail_released.is_set()
 
 
 def test_an_issued_session_id_is_echoed_on_every_later_request(serve, context):
@@ -540,7 +636,283 @@ def test_a_context_that_does_not_verify_the_app_never_reaches_it(serve, authorit
         fake = serve(served_credentials=authority.credentials_for("other.test"))
         untrusting = context
 
-    with pytest.raises(httpx.ConnectError):
-        list_tool_names(fake, untrusting)
+    failure_of(UpstreamUnreachable, lambda: list_tool_names(fake, untrusting))
 
     assert fake.requests == []
+    assert fake.accepted_connections == 1
+
+
+def test_an_origin_nothing_listens_on_is_unreachable(context):
+    with closing(socket.socket()) as unused:
+        unused.bind(("127.0.0.1", 0))
+        origin = f"https://{CERTIFICATE_HOST}:{unused.getsockname()[1]}"
+
+    async def connect() -> None:
+        async with asyncio.timeout(STALL_DEADLINE_SECONDS):
+            async with open_app_tools(origin, CAPABILITY, context):
+                pass
+
+    failure_of(UpstreamUnreachable, lambda: asyncio.run(connect()))
+
+
+def test_a_listener_that_never_accepts_stalls_the_tls_handshake_until_the_connect_deadline(
+    monkeypatch, context, opened_clients
+):
+    monkeypatch.setattr(app_tools, "UPSTREAM_IO_SECONDS", SHORT_IO_SECONDS)
+
+    async def connect(origin: str) -> None:
+        async with asyncio.timeout(STALL_DEADLINE_SECONDS):
+            async with open_app_tools(origin, CAPABILITY, context):
+                pass
+
+    with closing(socket.socket()) as silent:
+        silent.bind(("127.0.0.1", 0))
+        silent.listen(1)
+        origin = f"https://{CERTIFICATE_HOST}:{silent.getsockname()[1]}"
+        failure_of(UpstreamUnreachable, lambda: asyncio.run(connect(origin)))
+
+    assert all(client.is_closed for client in opened_clients.clients)
+
+
+def test_the_client_is_built_without_redirects_environment_or_a_read_deadline(
+    serve, context, opened_clients
+):
+    list_tool_names(serve(), context)
+
+    (client,) = opened_clients.clients
+    io = app_tools.UPSTREAM_IO_SECONDS
+    assert client.follow_redirects is False
+    assert client.trust_env is False
+    assert client.timeout == httpx.Timeout(connect=io, read=None, write=io, pool=io)
+
+
+@pytest.mark.parametrize("session_id", [None, "session-1"])
+def test_a_full_conversation_sends_only_posts(serve, context, session_id):
+    pages = [tool_listing(["a"], "page-1"), tool_listing(["b"])]
+    fake = serve(ScriptedApp(pages=pages, session_id=session_id))
+
+    list_then_call_echo(fake, context)
+
+    assert [request.rpc_method for request in fake.requests] == [
+        "initialize",
+        "notifications/initialized",
+        "tools/list",
+        "tools/list",
+        "tools/call",
+    ]
+    assert_only_posts(fake)
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        FakeResponse(status=307, content_type=None),
+        withheld(FakeResponse(content_type="text/event-stream", body=b"data: {}\n\n")),
+    ],
+    ids=["redirect", "event-stream"],
+)
+def test_nothing_is_sent_after_a_refused_listing(serve, context, refusal):
+    fake = serve(answering("tools/list", refusal))
+
+    failure_of(UpstreamError, lambda: list_tool_names(fake, context))
+
+    assert_only_posts(fake)
+    assert fake.requests[-1].rpc_method == "tools/list"
+
+
+@pytest.mark.parametrize(
+    ("rpc_method", "action"),
+    [("initialize", list_tool_names), ("tools/call", call_echo)],
+)
+def test_a_500_is_a_refusal_whose_body_is_never_read(serve, context, rpc_method, action):
+    error = FakeResponse(500, None, CANARY_BODY.encode(), {"X-Canary": CANARY_HEADER})
+    fake = serve(answering(rpc_method, withheld(error)))
+
+    refused = failure_of(UpstreamRefused, lambda: action(fake, context))
+
+    assert refused.status == 500
+
+
+LOST_PARTS = [
+    FakeResponse(body=b'{"jsonrpc": "2.0", ', held_back=b"x" * 64, fate=Fate.CUT_MID_BODY),
+    DROPPED,
+]
+
+
+@pytest.mark.parametrize("lost", LOST_PARTS, ids=["cut-mid-body", "dropped"])
+@pytest.mark.parametrize(
+    ("rpc_method", "action"), [("tools/call", call_echo), ("tools/list", list_tool_names)]
+)
+def test_a_connection_lost_after_the_request_ends_the_call_without_a_second_post(
+    serve, context, opened_clients, rpc_method, action, lost
+):
+    executions: list[RecordedRequest] = []
+
+    def execute_then_lose(request: RecordedRequest) -> FakeResponse:
+        executions.append(request)
+        return lost
+
+    fake = serve(ScriptedApp(overrides={rpc_method: execute_then_lose}))
+
+    failure_of(UpstreamCallLost, lambda: action(fake, context))
+
+    assert len(executions) == 1
+    assert len(requests_for(fake, rpc_method)) == 1
+    assert fake.requests[-1].rpc_method == rpc_method
+    assert all(client.is_closed for client in opened_clients.clients)
+
+
+def test_a_call_lost_on_a_reused_connection_is_not_sent_again(serve, context):
+    executions: list[RecordedRequest] = []
+
+    def execute_then_lose(request: RecordedRequest) -> FakeResponse:
+        executions.append(request)
+        return DROPPED
+
+    fake = serve(ScriptedApp(overrides={"tools/call": execute_then_lose}), keep_alive=True)
+
+    failure_of(UpstreamCallLost, lambda: call_echo(fake, context))
+
+    assert fake.accepted_connections == 1
+    assert len({request.connection for request in fake.requests}) == 1
+    assert len(executions) == 1
+    assert fake.requests[-1].rpc_method == "tools/call"
+
+
+class BrokenStream(httpx.AsyncByteStream):
+    def __init__(self, failure: httpx.HTTPError | None, during_body: bool) -> None:
+        self._failure = failure
+        self._during_body = during_body
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        if self._failure is not None and self._during_body:
+            raise self._failure
+        yield b""
+
+    async def aclose(self) -> None:
+        if self._failure is not None and not self._during_body:
+            raise self._failure
+
+
+class FailingTransport(httpx.AsyncBaseTransport):
+    def __init__(self, failure: httpx.HTTPError, phase: str) -> None:
+        self._failure = failure
+        self._phase = phase
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        if self._phase == "before-headers":
+            raise self._failure
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "application/json"},
+            stream=BrokenStream(self._failure, during_body=self._phase == "during-body"),
+        )
+
+
+class FutureTransportFailure(httpx.HTTPError):
+    pass
+
+
+NEVER_SENT = [httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout]
+POSSIBLY_PROCESSED = [
+    httpx.ReadError,
+    httpx.ReadTimeout,
+    httpx.WriteError,
+    httpx.WriteTimeout,
+    httpx.CloseError,
+    httpx.RemoteProtocolError,
+    httpx.LocalProtocolError,
+    httpx.ProxyError,
+    httpx.UnsupportedProtocol,
+    httpx.DecodingError,
+    httpx.TooManyRedirects,
+    httpx.HTTPStatusError,
+    FutureTransportFailure,
+]
+
+
+def failure_carrying_the_request(failure_type: type[httpx.HTTPError]) -> httpx.HTTPError:
+    request = httpx.Request(
+        "POST", "https://localhost/mcp", headers={"Authorization": f"Bearer {CAPABILITY}"}
+    )
+    if failure_type is httpx.HTTPStatusError:
+        response = httpx.Response(500, text=CANARY_BODY, request=request)
+        failure = httpx.HTTPStatusError(CANARY_BODY, request=request, response=response)
+    elif failure_type is FutureTransportFailure:
+        failure = FutureTransportFailure(CANARY_BODY)
+        failure.request = request
+    else:
+        failure = failure_type(CANARY_BODY, request=request)
+    failure.__cause__ = ValueError(CANARY_HEADER)
+    return failure
+
+
+@pytest.mark.parametrize("phase", ["before-headers", "during-body", "while-closing"])
+@pytest.mark.parametrize(
+    ("failure_type", "mapped"),
+    [(kind, UpstreamUnreachable) for kind in NEVER_SENT]
+    + [(kind, UpstreamCallLost) for kind in POSSIBLY_PROCESSED],
+)
+def test_every_httpx_failure_leaves_as_one_closed_error_by_whether_bytes_may_have_been_sent(
+    monkeypatch, context, failure_type, mapped, phase
+):
+    transport = FailingTransport(failure_carrying_the_request(failure_type), phase)
+    monkeypatch.setattr(httpx, "AsyncHTTPTransport", lambda **_: transport)
+
+    async def connect() -> None:
+        async with open_app_tools("https://localhost:1", CAPABILITY, context):
+            pass
+
+    error = failure_of(UpstreamError, lambda: asyncio.run(connect()))
+
+    assert type(error) is mapped
+
+
+class ClosingFailsTransport(httpx.AsyncBaseTransport):
+    def __init__(self, status: int, headers: dict[str, str]) -> None:
+        self._status = status
+        self._headers = headers
+        self.close_attempts = 0
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        transport = self
+
+        class FailingClose(httpx.AsyncByteStream):
+            async def __aiter__(self) -> AsyncIterator[bytes]:
+                yield b""
+
+            async def aclose(self) -> None:
+                transport.close_attempts += 1
+                raise failure_carrying_the_request(httpx.CloseError)
+
+        return httpx.Response(self._status, headers=self._headers, stream=FailingClose())
+
+
+@pytest.mark.parametrize(
+    ("status", "headers", "refusal"),
+    [
+        (307, {"Location": "https://[::1"}, UpstreamRedirected),
+        (401, {}, UpstreamRefused),
+        (201, {}, UpstreamProtocolError),
+        (200, {"Content-Type": "text/event-stream"}, UpstreamProtocolError),
+        (
+            200,
+            {"Content-Type": "application/json", "Content-Encoding": "gzip"},
+            UpstreamProtocolError,
+        ),
+    ],
+    ids=["redirect", "refused-status", "unexpected-2xx", "event-stream", "content-encoding"],
+)
+def test_an_established_refusal_wins_over_a_failure_to_close_the_refused_response(
+    monkeypatch, context, status, headers, refusal
+):
+    transport = ClosingFailsTransport(status, headers)
+    monkeypatch.setattr(httpx, "AsyncHTTPTransport", lambda **_: transport)
+
+    async def connect() -> None:
+        async with open_app_tools("https://localhost:1", CAPABILITY, context):
+            pass
+
+    failure_of(refusal, lambda: asyncio.run(connect()))
+
+    assert transport.close_attempts >= 1

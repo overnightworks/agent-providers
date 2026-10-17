@@ -39,7 +39,24 @@ jobs:
             exit 1
           fi
 
+      - name: Point a breaking release at its migration section
+        id: notice
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          notice=""
+          if grep -qxF "## Migrating to ${version}" README.md; then
+            anchor="migrating-to-${version//./}"
+            notice="**Breaking release.** Read [Migrating to ${version}](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/README.md#${anchor}) before you bump your pin."
+          fi
+          echo "notice=${notice}" >> "$GITHUB_OUTPUT"
+
       - name: Publish the release with the wheels the check admitted
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/*.whl --title "$GITHUB_REF_NAME" --generate-notes
+          NOTICE: ${{ steps.notice.outputs.notice }}
+        run: |
+          notes=()
+          if [ -n "$NOTICE" ]; then
+            notes=(--notes "$NOTICE")
+          fi
+          gh release create "$GITHUB_REF_NAME" dist/*.whl --title "$GITHUB_REF_NAME" --generate-notes "${notes[@]}"

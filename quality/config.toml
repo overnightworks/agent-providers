@@ -1,5 +1,5 @@
 [gate]
-mandatory_jobs = ["checks", "keycloak-token-shapes"]
+mandatory_jobs = ["checks", "keycloak-token-shapes", "dependency-floors"]
 
 [secrets]
 allow = [

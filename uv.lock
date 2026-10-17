@@ -709,18 +709,18 @@ wheels = [
 
 [[package]]
 name = "overnightworks-agent-client"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "packages/agent-client" }
 dependencies = [
     { name = "pydantic" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "pydantic", specifier = ">=2,<3" }]
+requires-dist = [{ name = "pydantic", specifier = ">=2.7,<3" }]
 
 [[package]]
 name = "overnightworks-agent-providers"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "anyio" },
@@ -748,19 +748,19 @@ requires-dist = [
     { name = "anthropic", marker = "extra == 'api'", specifier = ">=0.26,<2" },
     { name = "anyio", specifier = ">=4,<5" },
     { name = "httpx", specifier = ">=0.27,<1" },
-    { name = "import-linter", marker = "extra == 'dev'", specifier = ">=2,<3" },
+    { name = "import-linter", marker = "extra == 'dev'", specifier = ">=2.15,<3" },
     { name = "overnightworks-agent-client", editable = "packages/agent-client" },
     { name = "pillow", marker = "extra == 'image'", specifier = ">=12.3,<13" },
-    { name = "pydantic", specifier = ">=2,<3" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7,<10" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5,<8" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4,<1" },
+    { name = "pydantic", specifier = ">=2.7,<3" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.1,<10" },
+    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=7.1,<8" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.17,<1" },
 ]
 provides-extras = ["api", "image", "dev"]
 
 [[package]]
 name = "overnightworks-agent-service"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "packages/agent-service" }
 dependencies = [
     { name = "anyio" },
@@ -781,13 +781,13 @@ dependencies = [
 requires-dist = [
     { name = "anyio", specifier = ">=4,<5" },
     { name = "cryptography", specifier = ">=50.0.2" },
-    { name = "fastapi", specifier = ">=0.115,<1" },
+    { name = "fastapi", specifier = ">=0.133,<1" },
     { name = "h11", specifier = ">=0.16,<1" },
     { name = "httpx", specifier = ">=0.27,<1" },
     { name = "overnightworks-agent-client", editable = "packages/agent-client" },
     { name = "overnightworks-agent-providers", editable = "." },
     { name = "overnightworks-webauth", extras = ["jwt"], url = "https://github.com/overnightworks/webauth/releases/download/v0.13.0/overnightworks_webauth-0.13.0-py3-none-any.whl" },
-    { name = "pydantic", specifier = ">=2,<3" },
+    { name = "pydantic", specifier = ">=2.7,<3" },
     { name = "pyjwt", extras = ["crypto"], specifier = ">=2.15.1,<3" },
     { name = "starlette", specifier = ">=1,<2" },
     { name = "uvicorn", specifier = ">=0.30,<1" },

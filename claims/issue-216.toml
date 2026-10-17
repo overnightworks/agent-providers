@@ -1,0 +1,7 @@
+claim_id = "3f20724d8f1e4fe8ad7cd430cc782633"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "42b16a6391e62d50176cb930161bbe120a0ea928"
+branch = "claude/issue-216-tool-calls-live"
+scope = ["docs/decisions/0001-agent-service.md"]
+opened_commit = "9f8e8ad0e75b9c3f189ecd3959bc737e272fb0c4"

@@ -928,35 +928,45 @@ cells below are scratch scripts on `127.0.0.1` inside the same unshared network.
 **Driver.** `python3 -I drive.py DELAY -- /opt/claude ARGS` (`DELAY` is 0.5 unless
 a cell says otherwise; `WAIT` is the seconds to wait after the write, default 5;
 `END=term` sends `SIGTERM` instead of closing stdin). Each output line is printed
-with its time since the start:
+with its time since the start; the message line also carries `wall`, the driver's
+`time.time()` at the write, which the MCP server's own `time.time()` log is
+compared with. The file, verbatim:
 
 ```python
-import sys, json, subprocess, time, threading, os
-delay = float(sys.argv[1]); cmd = sys.argv[sys.argv.index('--') + 1:]
-t0 = time.monotonic()
-p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-def pump(stream, tag):
-    for line in stream: print(f"{time.monotonic()-t0:8.3f} {tag} {line.rstrip()[:4000]}", flush=True)
-th = [threading.Thread(target=pump, args=(p.stdout, 'out')), threading.Thread(target=pump, args=(p.stderr, 'err'))]
+import sys, json, subprocess, time, threading
+delay=float(sys.argv[1]); cmd=sys.argv[sys.argv.index('--')+1:]
+t0=time.monotonic()
+p=subprocess.Popen(cmd,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+def pump(stream,tag):
+    for line in stream: print(f"{time.monotonic()-t0:8.3f} {tag} {line.rstrip()[:4000]}",flush=True)
+th=[threading.Thread(target=pump,args=(p.stdout,'out')),threading.Thread(target=pump,args=(p.stderr,'err'))]
 [t.start() for t in th]
 time.sleep(delay)
-p.stdin.write(json.dumps({"type": "user", "message": {"role": "user", "content": "hello"}}) + "\n"); p.stdin.flush()
-print(f"{time.monotonic()-t0:8.3f} --- user message written", flush=True)
-try: p.wait(timeout=float(os.environ.get('WAIT', '5')))
+msg=json.dumps({"type":"user","message":{"role":"user","content":"hello"}})
+tw=time.monotonic()-t0
+p.stdin.write(msg+"\n"); p.stdin.flush()
+print(f"{tw:8.3f} --- user message written wall={time.time():.3f}",flush=True)
+try: p.wait(timeout=float(__import__('os').environ.get('WAIT','5')))
 except subprocess.TimeoutExpired:
-    if os.environ.get("END") == "term": p.terminate()
-    else: p.stdin.close()
+    if __import__("os").environ.get("END")=="term":
+        print(f"{time.monotonic()-t0:8.3f} --- still running; SIGTERM with stdin open",flush=True); p.terminate()
+    else:
+        print(f"{time.monotonic()-t0:8.3f} --- still running; closing stdin",flush=True); p.stdin.close()
     try: p.wait(timeout=20)
-    except subprocess.TimeoutExpired: p.kill()
+    except subprocess.TimeoutExpired: p.kill(); print("--- killed")
 [t.join() for t in th]
 print(f"{time.monotonic()-t0:8.3f} --- exit {p.returncode}")
 ```
 
 Inside the sandbox the file lists of the home, the working directory and
 `/tmp` (`find ... -printf '%y %s %P\n'`) were taken before and after the run and
-diffed. The traces are the driver run under `strace -f -qq -s 200` with
-`-e trace=connect,sendto,sendmsg,sendmmsg` (A1b-0a c6) or `-e trace=execve`
-(A1b-0c c7), and `-o` a file in scratch.
+diffed. The traces wrap the driver, verbatim from the harness scripts (`$S` is the scratch
+directory, `$OUT` the cell's output directory):
+
+```text
+strace -f -qq -s 200 -e trace=connect,sendto,sendmsg,sendmmsg -o $OUT/strace.txt python3 -I $S/drive.py $delay -- /opt/claude "$@"   # A1b-0a c6
+strace -f -qq -e trace=execve -o $OUT/execve.txt python3 -I $S/drive.py 0.5 -- /opt/claude -p --input-format stream-json --output-format stream-json --verbose --mcp-config $HOME/mcp.json "$@" > $OUT/run.txt 2>&1   # A1b-0c c7
+```
 
 #### A1b-0a flags and stream, no login
 
@@ -1050,12 +1060,12 @@ login), by whether `.claude/projects/<cwd>/memory/` existed afterwards:
 So the only flag measured to suppress `memory/` is `--system-prompt-file`; the
 three flags `--tools "" --strict-mcp-config --setting-sources ""` do not, with or
 without `--no-session-persistence`. The other entries of the list above were
-created in every row. Why `--system-prompt-file` suppresses it is not measured. A control
+created in every row (the re-runs listed only the home, so `/tmp/cc-socks-<uid>`
+was not observed in those rows). Why `--system-prompt-file` suppresses it is not measured. A control
 without the flag (the A1b-0c runs) did write
 `.claude/projects/<cwd>/<session-uuid>.jsonl` although the run was unauthenticated.
 
-**c6 Telemetry switches.** Same run, `--no-session-persistence`, under `strace -f -e
-trace=connect,sendto,sendmsg,sendmmsg`. The network was unshared, so every
+**c6 Telemetry switches.** Same run, `--no-session-persistence`, under the c6 `strace` command of the harness. The network was unshared, so every
 connection failed, but the lookups show the hosts:
 
 | `DISABLE_TELEMETRY` | `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | Hosts looked up | `telemetry/1p_failed_events.*.json` | `.claude.json` |
@@ -1096,19 +1106,53 @@ file (A1d conditions). Not measured: other managed locations (macOS, Windows,
 
 The fake Streamable HTTP server is a Python `http.server` script
 (`ThreadingHTTPServer`, HTTP/1.1) on `127.0.0.1:18765` inside the unshared
-network, started inside the sandbox before the CLI. It logs the time, method,
-path, headers and JSON body of every request. Its response definitions, by
-mode (the default mode is the plain run):
+network, started inside the sandbox before the CLI. It logs the wall time, the
+time since its start, method, path, headers (the `Authorization` value reduced to
+its length and whether it equals the expected dummy bearer) and JSON body of every
+request. The whole script, verbatim (`mode` is its first argument; the default mode
+is the plain run):
 
-| Request | Response |
-|---|---|
-| `POST` with a JSON-RPC `id`, method `initialize` | 200 `application/json` `{"jsonrpc":"2.0","id":<id>,"result":{"protocolVersion":<the requested one, or the mode's>,"capabilities":{"tools":{}},"serverInfo":{"name":"fake-mcp","version":"0"}}}`; in the session mode also header `Mcp-Session-Id: sess-0c-1` |
-| `POST` `tools/list` | 200 `{"result":{"tools":[{"name":"echo","description":"echo","inputSchema":{"type":"object","properties":{}}}]}}` |
-| `POST` `ping` | 200 `{"result":{}}` |
-| `POST` any other method with an `id` (so `server/discover`) | 200 `{"jsonrpc":"2.0","id":<id>,"error":{"code":-32601,"message":"method not found"}}` |
-| `POST` without an `id` (notifications) | 202, empty body |
-| `GET` | 405, `Allow: POST`, empty body |
-| `DELETE` | 405, empty body (200 in the session mode) |
+```python
+import sys, json, time, threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+mode, port, logpath = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+EXPECTED = "Bearer dummy-0c-token"; T0 = time.monotonic(); lock = threading.Lock()
+def log(rec):
+    with lock, open(logpath, "a") as f: f.write(json.dumps(rec) + "\n")
+class H(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    def log_message(self, *a): pass
+    def _record(self, body):
+        hdrs = {}
+        for k, v in self.headers.items():
+            hdrs[k] = f"<len={len(v)} matches_expected={v == EXPECTED}>" if k.lower() == "authorization" else v
+        log({"wall": round(time.time(), 3), "t": round(time.monotonic() - T0, 3), "method": self.command, "path": self.path, "headers": hdrs, "body": body})
+    def _send(self, code, obj=None, extra=None):
+        data = b"" if obj is None else json.dumps(obj).encode()
+        self.send_response(code)
+        if obj is not None: self.send_header("Content-Type", "application/json")
+        for k, v in (extra or {}).items(): self.send_header(k, v)
+        self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
+    def do_POST(self):
+        raw = self.rfile.read(int(self.headers.get("Content-Length", 0)) or 0).decode()
+        try: body = json.loads(raw)
+        except Exception: body = raw
+        self._record(body)
+        if mode == "401": return self._send(401, {"error": "unauthorized"}, {"WWW-Authenticate": 'Bearer realm="fake"'})
+        if mode in ("d400", "d404") and isinstance(body, dict) and body.get("method") == "server/discover": return self._send(400 if mode == "d400" else 404, {"error": "unsupported"})
+        if not isinstance(body, dict) or "id" not in body: return self._send(202)
+        m = body.get("method"); extra = {"Mcp-Session-Id": "sess-0c-1"} if (mode == "session" and m == "initialize") else None; pv = mode[3:] if mode.startswith("pv:") else None
+        if m == "initialize":
+            res = {"protocolVersion": pv or body["params"]["protocolVersion"], "capabilities": {"tools": {}}, "serverInfo": {"name": "fake-mcp", "version": "0"}}
+        elif m == "tools/list":
+            res = {"tools": [{"name": "echo", "description": "echo", "inputSchema": {"type": "object", "properties": {}}}]}
+        elif m == "ping": res = {}
+        else: return self._send(200, {"jsonrpc": "2.0", "id": body["id"], "error": {"code": -32601, "message": "method not found"}})
+        self._send(200, {"jsonrpc": "2.0", "id": body["id"], "result": res}, extra)
+    def do_GET(self): self._record(None); self._send(405, None, {"Allow": "POST"})
+    def do_DELETE(self): self._record(None); self._send(200 if mode == "session" else 405, None)
+ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()
+```
 
 Mode variants: `401` answers every `POST` with 401, body `{"error":"unauthorized"}` and
 `WWW-Authenticate: Bearer realm="fake"`; `d400` and `d404` answer `server/discover`
@@ -1117,7 +1161,8 @@ with 400 or 404 and body `{"error":"unsupported"}`; `pv:<version>` answers
 `ARGS` also carries `--mcp-config F` where `F` is
 `{"mcpServers":{"fake":{"type":"http","url":"http://127.0.0.1:18765/mcp","headers":{"Authorization":"Bearer dummy-0c-token"}}}}`;
 the stdio control uses `{"mcpServers":{"fake":{"type":"stdio","command":"/usr/bin/sleep","args":["31"]}}}`.
-Times are relative to the stdin write of the first message.
+Times in the request-order table are relative to the stdin write of the first
+message: the server's `wall` (its `time.time()`) minus the driver's `wall=`.
 
 Request order at the server, identical in every run that connected (three
 plain runs and the variants with an `Mcp-Session-Id`, a 400 or a 404 answer to
@@ -1166,7 +1211,7 @@ CLI still contacts a configured MCP server and calls `tools/list`.
   the CLI sends requests 1 and 2 only, no retry, and init reports the server
   `failed` (22 tools). No further request was seen, so no OAuth flow ran
   against this server.
-- **c7 No stdio process.** `strace -f -e trace=execve` on the HTTP run shows only
+- **c7 No stdio process.** The `execve` trace of the harness on the HTTP run shows only
   the CLI's own children: `rg` (the CLI re-executing itself), `git`, `sh -c
   "uname -s ..."` and `uname`. A control run with
   `{"type":"stdio","command":"/usr/bin/sleep","args":["31"]}` shows an extra
@@ -1190,10 +1235,29 @@ CLI still contacts a configured MCP server and calls `tools/list`.
 **c1 and c2 Hosts of an unauthenticated `-p` run.** `HTTPS_PROXY` and
 `HTTP_PROXY` point at a scratch proxy on `127.0.0.1:18766` inside the unshared
 network that records the request line and answers every `CONNECT` with 403.
-The proxy is a socket server that reads up to the end of the request headers,
-appends `{"wall":<time>,"request_line":"<first line>"}` to its log and replies
-`HTTP/1.1 403 Forbidden`, `Content-Length: 0`, `Connection: close`. The sandbox
-sets `HTTPS_PROXY`, `HTTP_PROXY` and their lower-case forms to
+The proxy script, verbatim:
+
+```python
+import socket, threading, sys, time, json
+port, logpath = int(sys.argv[1]), sys.argv[2]
+lock = threading.Lock()
+def serve(c):
+    try:
+        data = b""
+        while b"\r\n\r\n" not in data and len(data) < 65536:
+            chunk = c.recv(4096)
+            if not chunk: break
+            data += chunk
+        first = data.split(b"\r\n", 1)[0].decode("latin1")
+        with lock, open(logpath, "a") as f: f.write(json.dumps({"wall": round(time.time(), 3), "request_line": first}) + "\n")
+        c.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+    finally: c.close()
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(("127.0.0.1", port)); s.listen(50)
+while True:
+    c, _ = s.accept(); threading.Thread(target=serve, args=(c,), daemon=True).start()
+```
+
+The sandbox sets `HTTPS_PROXY`, `HTTP_PROXY` and their lower-case forms to
 `http://127.0.0.1:18766`.
 `ARGS` is the default plus `--no-session-persistence`. The run ends with the same
 unauthenticated result as A1b-0a in all four cases.
@@ -1261,8 +1325,8 @@ attempt either, so this measurement does not show the updater acting; it shows
 that with the switch set nothing changed. The updater's own behaviour with a
 network and a newer release is not measured. The host's `versions/` directory
 itself holds five versions (2.1.296, 2.1.299 to 2.1.302); whether a self-updating
-install keeps old binaries in general is not measured. The image pins the file
-and sets the switch.
+install keeps old binaries in general is not measured. The image is to pin the file
+and set the switch (A1d conditions).
 
 ## H8 atelier-2
 

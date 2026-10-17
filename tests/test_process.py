@@ -2737,6 +2737,7 @@ def test_an_interruption_at_any_line_propagates_holding_no_credential_bytes(
     store_codex_login(tmp_path, document)
     open_descriptors = len(os.listdir("/proc/self/fd"))
     interrupted_lines = 0
+    tracer_found_at_entry = sys.gettrace()
 
     def enter_interrupted_at(position: int, handled: BaseException | None):
         with around_the_read():
@@ -2748,7 +2749,7 @@ def test_an_interruption_at_any_line_propagates_holding_no_credential_bytes(
             except Exception as refusal:
                 return None, refusal, handled
             finally:
-                sys.settrace(None)
+                sys.settrace(tracer_found_at_entry)
 
     position = 1
     while True:
@@ -2767,6 +2768,7 @@ def test_an_interruption_at_any_line_propagates_holding_no_credential_bytes(
         position += 1
 
     assert interrupted_lines > 5
+    assert sys.gettrace() is tracer_found_at_entry
     expected_ending = endings[enter]
     if isinstance(expected_ending, type):
         assert type(failure) is expected_ending, (ending, failure)

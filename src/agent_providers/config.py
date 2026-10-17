@@ -1,7 +1,7 @@
 """The runtime configuration a host application injects into the provider layer.
 
 The provider layer runs Claude, Grok and Codex on someone else's machine: its
-binaries, credential mirrors, mounted resource directories, chat model, API
+binaries, credential mirrors, mounted resource directories, API
 keys and the MCP server a turn attaches are deployment facts the host
 owns, not values this package may guess. It therefore reads them from one
 frozen value the host installs once per process via :func:`configure`, instead
@@ -72,7 +72,6 @@ class TurnRuntimeConfig(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    claude_chat_model: str
     codex_code_mode_host_binary: Path
     codex_resources_directory: Path
 

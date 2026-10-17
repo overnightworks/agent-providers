@@ -1,0 +1,7 @@
+claim_id = "954ddf5d697d4e968d496d91fb47f9a2"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "c4561148e0a4919affbf25166aa74382f99f3468"
+branch = "fix/zombie-anchor-bound"
+scope = ["tests/test_zombie_anchor.py"]
+opened_commit = "d03321e622c0b6b11a8daadee529b2ddc69ad5c8"

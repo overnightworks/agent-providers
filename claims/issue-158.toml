@@ -1,0 +1,8 @@
+claim_id = "a29c457155f3446b8503e268ebd0337b"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "b0dfc7fbf889bb7ee7edbeba1fa9b529bd4e5bd9"
+branch = "claude/issue-158-a1b-10a1a-relay-kopfpruefungen"
+scope = ["README.md", "packages/agent-service/pyproject.toml", "packages/agent-service/src/agent_service/tool_relay.py", "tests/relay_support.py", "tests/test_service_tool_relay.py", "uv.lock"]
+opened_commit = "00a22ce1fa92f2a97f1a24adcd94b3374cb9b46b"
+whole_reason = "One listener with its head gates: the module, its h11 declaration with two lock lines, the shared raw test client, its 39 cases and the README row only make sense together."

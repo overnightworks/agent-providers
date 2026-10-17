@@ -14,21 +14,20 @@ from pathlib import Path
 from typing import Final
 
 from agent_providers.codex.pool import CodexProcessReservation, get_codex_process_pool
-from agent_providers.codex_login import blanked_copy
 from agent_providers.config import current_config
 from agent_providers.errors import SafeRouteReasonCode
 from agent_providers.process import (
     AgentCliUnavailableError,
     CliRunOutcome,
     CliRunReason,
-    install_credential_file,
+    CodexLoginMirrorError,
+    blank_codex_refresh_token,
     resolve_cli_binary,
     run_cli_bounded,
 )
 from agent_providers.spawn import ChildProcess, closed_environment
 
 CODEX_CLI_LINE_CHANNEL_CAPACITY: Final = 64
-CODEX_TURN_LOGIN_MODE: Final = 0o600
 CODEX_CLI_TURN_OUTPUT_READ_LIMIT_BYTES: Final = 4 * 1024 * 1024
 
 _AUTH_FAILURE_MARKERS: Final = ("401", "unauthorized", "unauthenticated")
@@ -127,15 +126,17 @@ def run_reserved_codex_cli(
     return outcome
 
 
-def install_codex_turn_login(codex_home: Path) -> None:
-    """Install the operator's Codex login, refresh token blanked, in one empty private home."""
-    install_credential_file(
-        current_config().codex_cli_auth_file,
-        codex_home / "auth.json",
-        mode=CODEX_TURN_LOGIN_MODE,
-        credential_copy=blanked_copy,
-        missing_credential_is_error=True,
-    )
+def copy_codex_login_mirror(codex_home: Path) -> None:
+    """Install the operator's Codex login, refresh token blanked, in one private home."""
+    try:
+        source = current_config().codex_cli_auth_file
+        if not source.is_file():
+            raise CodexLoginMirrorError()
+        target = codex_home / "auth.json"
+        target.write_bytes(blank_codex_refresh_token(source.read_bytes()))
+        target.chmod(0o600)
+    except OSError as exc:
+        raise CodexLoginMirrorError() from exc
 
 
 def parse_codex_line(line: bytes) -> tuple[str, dict[str, object]]:

@@ -108,7 +108,7 @@ def load_signing_key(path: Path) -> SigningKey:
 
 
 def _read_key_file(path: Path) -> bytes:
-    descriptor = os.open(path, _OPEN_FLAGS)  # NOSONAR The operator names this file.
+    descriptor = os.open(path, _OPEN_FLAGS)
     try:
         status = os.fstat(descriptor)
         if not stat.S_ISREG(status.st_mode):

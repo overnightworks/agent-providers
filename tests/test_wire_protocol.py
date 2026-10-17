@@ -621,17 +621,23 @@ INTERRUPTED = {"type": "failed", "code": FailureCode.INTERRUPTED.value}
         ),
     ],
 )
-def test_a_cut_short_run_ends_by_the_effect_of_its_calls(
+def test_a_cut_short_run_ends_by_the_effect_of_its_calls_and_refuses_the_other_ending(
     calls: list[ToolEffect], expected: dict[str, str]
 ) -> None:
-    stream = RunStream()
-    stream.accept(started())
-    for seq, effect in enumerate(calls, start=1):
-        stream.accept(call(seq, f"call-{seq}", effect))
+    def stream_with_calls() -> RunStream:
+        stream = RunStream()
+        stream.accept(started())
+        for seq, effect in enumerate(calls, start=1):
+            stream.accept(call(seq, f"call-{seq}", effect))
+        return stream
 
+    stream = stream_with_calls()
     terminal = stream.cancellation_terminal()
+    next_seq = len(calls) + 1
+    other = interrupted(next_seq) if terminal.type == "cancelled" else cancelled(next_seq)
 
     assert terminal.model_dump(mode="json", include=set(expected)) == expected
+    assert stream_with_calls().accept(other) is not None
     assert stream.accept(terminal) is None
     assert stream.close() is None
 

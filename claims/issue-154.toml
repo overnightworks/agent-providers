@@ -1,7 +1,0 @@
-claim_id = "c59500523a894ba28b1135b1de20c9a7"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "5d5cecd6c44555658aca039a91dc2b0f13238e98"
-branch = "claude/issue-154-a1b-3p1a-lebenszyklus-des-leaders-reine"
-scope = ["src/agent_providers/spawn.py", "tests/test_anchor_lifecycle.py"]
-opened_commit = "eb9bb0855d2d29dd0131c2c7dd9eabd8d2b392ab"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import gc
 import json
 import logging
@@ -49,6 +50,8 @@ from provider_test_support import (
     call_within_deadline,
     drive_turn,
     exception_chain,
+    fail_mkdtemp,
+    fail_the_home_chmod,
     fail_to_start_the_runner_thread,
     formatted_log_text,
     live_frames_holding,
@@ -80,6 +83,11 @@ from agent_providers.process import (
     CliRunOutcome,
     CliRunReason,
     clear_agent_cli_caches,
+)
+from agent_providers.sandbox.paths import (
+    CODEX_HOME_DIRECTORY_NAME,
+    CODEX_IMAGE_TURN_DIRECTORY_PREFIX,
+    CODEX_TOOL_TURN_DIRECTORY_PREFIX,
 )
 from agent_providers.text_tool_protocol import TextToolRejectionRule
 from agent_providers.tool_loop import (
@@ -352,6 +360,7 @@ def test_codex_tool_transport_uses_an_empty_private_work_directory_on_resume(mon
         assert work_directory != codex_home
         assert work_directory.stat().st_mode & 0o777 == 0o700
         assert list(work_directory.iterdir()) == []
+        assert (codex_home / "auth.json").is_file()
         prompts.append(kwargs["stdin_payload"])
         for line in next(rounds):
             assert kwargs["stdout_line_channel"]._send(line)
@@ -1600,7 +1609,8 @@ def test_codex_public_adapters_reject_unusable_logins(
     auth_file = tmp_path / "invalid-auth.json"
     if document is not None:
         auth_file.write_text(json.dumps(document))
-    override_provider_runtime(codex_cli_auth_file=auth_file)
+    turns = _an_empty_working_root(tmp_path)
+    override_provider_runtime(codex_cli_auth_file=auth_file, cli_working_directory_root=turns)
 
     with pytest.raises(codex_image.CodexImageLoginError):
         codex_image.generate_codex_image("prompt", policy=AN_IMAGE_POLICY, deadline=10_000_000)
@@ -1608,6 +1618,7 @@ def test_codex_public_adapters_reject_unusable_logins(
         _transport()
 
     assert raised.value.reason.code is SafeRouteReasonCode.CLI_AUTH_REJECTED
+    assert list(turns.iterdir()) == []
 
 
 @CALLER_CONTEXTS
@@ -2031,30 +2042,184 @@ def _the_image_turn_is_started(monkeypatch, seen: list) -> None:
     codex_image.generate_codex_image("prompt", policy=AN_IMAGE_POLICY, deadline=10_000_000)
 
 
+@dataclass(frozen=True)
+class _SeenHome:
+    name: str
+    login_mode: int
+    login_bytes: bytes
+    directory_modes: dict[str, int]
+
+
 def _stating_runner(seen: list, runner) -> object:
     def run_cli_bounded(child, **kwargs):
-        login = Path(child.environment["CODEX_HOME"]) / "auth.json"
-        seen.append((stat.S_IMODE(login.stat().st_mode), login.read_bytes()))
+        codex_home = Path(child.environment["CODEX_HOME"])
+        login = codex_home / "auth.json"
+        home = codex_home.parent
+        seen.append(_SeenHome(
+            name=home.name,
+            login_mode=stat.S_IMODE(login.stat().st_mode),
+            login_bytes=login.read_bytes(),
+            directory_modes={
+                relative: stat.S_IMODE((home / relative).stat().st_mode)
+                for relative in (".", *(entry.name for entry in home.iterdir()))
+            },
+        ))
         return runner(child, **kwargs)
 
     return run_cli_bounded
 
 
 @pytest.mark.parametrize(
-    "start_the_turn", (_the_tool_turn_is_started, _the_image_turn_is_started),
+    ("start_the_turn", "prefix"),
+    (
+        (_the_tool_turn_is_started, CODEX_TOOL_TURN_DIRECTORY_PREFIX),
+        (_the_image_turn_is_started, CODEX_IMAGE_TURN_DIRECTORY_PREFIX),
+    ),
     ids=("tool-turn", "image-turn"),
 )
 def test_the_codex_turn_copy_is_private_writable_and_blanked(
-    monkeypatch, codex_login_source: Path, start_the_turn,
+    monkeypatch, codex_login_source: Path, start_the_turn, prefix: str,
 ) -> None:
-    seen: list[tuple[int, bytes]] = []
+    seen: list[_SeenHome] = []
 
     start_the_turn(monkeypatch, seen)
 
-    [(mode, copy)] = seen
-    assert mode == 0o600
-    assert copy == blanked_copy(codex_login_source.read_bytes())
-    assert json.loads(copy)["tokens"]["refresh_token"] == ""
+    [home] = seen
+    assert home.login_mode == 0o600
+    assert home.login_bytes == blanked_copy(codex_login_source.read_bytes())
+    assert json.loads(home.login_bytes)["tokens"]["refresh_token"] == ""
+    assert home.name.startswith(prefix)
+    assert home.directory_modes == {
+        ".": 0o700, "work": 0o700, CODEX_HOME_DIRECTORY_NAME: 0o700,
+    }
+
+
+def _an_empty_working_root(tmp_path: Path) -> Path:
+    turns = tmp_path / "turns"
+    turns.mkdir()
+    override_provider_runtime(cli_working_directory_root=turns)
+    return turns
+
+
+def _fail_the_work_directory(monkeypatch: pytest.MonkeyPatch, source: Path) -> None:
+    make_directory = Path.mkdir
+
+    def refuse_the_work_directory(directory: Path, *arguments, **keywords) -> None:
+        if directory.name == "work":
+            raise OSError(errno.ENOSPC, "synthetic work directory failure")
+        make_directory(directory, *arguments, **keywords)
+
+    monkeypatch.setattr(Path, "mkdir", refuse_the_work_directory)
+
+
+def _the_tool_turn_is_started_bare() -> None:
+    _transport()
+
+
+def _the_image_turn_is_started_bare() -> None:
+    _generate_image()
+
+
+def _assert_the_tool_turn_found_the_cli_unavailable(refusal: BaseException) -> None:
+    assert isinstance(refusal, ProviderUnavailableError)
+    assert refusal.reason.code is SafeRouteReasonCode.CLI_BINARY_UNAVAILABLE
+    assert str(refusal) == "CLI is unavailable."
+
+
+def _assert_the_image_turn_could_not_make_its_home(refusal: BaseException) -> None:
+    assert type(refusal) is codex_image.CodexImageCliError
+    assert str(refusal) == "could not create a private CLI home"
+
+
+@CALLER_CONTEXTS
+@pytest.mark.parametrize(
+    "make_the_home_fail",
+    (fail_mkdtemp, fail_the_home_chmod, _fail_the_work_directory),
+    ids=("mkdtemp", "home-chmod", "work-directory"),
+)
+@pytest.mark.parametrize(
+    ("start_the_turn", "assert_the_refusal"),
+    (
+        (_the_tool_turn_is_started_bare, _assert_the_tool_turn_found_the_cli_unavailable),
+        (_the_image_turn_is_started_bare, _assert_the_image_turn_could_not_make_its_home),
+    ),
+    ids=("tool-turn", "image-turn"),
+)
+def test_a_codex_turn_home_that_cannot_be_made_is_cli_unavailable_never_a_login_refusal(
+    tmp_path: Path, monkeypatch, codex_login_source: Path, make_the_home_fail,
+    start_the_turn, assert_the_refusal, while_the_caller_handles_an_exception,
+) -> None:
+    turns = _an_empty_working_root(tmp_path)
+    make_the_home_fail(monkeypatch, codex_login_source)
+
+    if while_the_caller_handles_an_exception:
+        try:
+            raise RuntimeError("the caller's own failure")
+        except RuntimeError:
+            refusal = _refusal_of(start_the_turn)
+    else:
+        refusal = _refusal_of(start_the_turn)
+
+    assert_the_refusal(refusal)
+    assert refusal.__cause__ is None
+    assert refusal.__context__ is None
+    assert list(turns.iterdir()) == []
+
+
+def _refusal_of(start_the_turn) -> BaseException:
+    with pytest.raises(Exception) as raised:
+        start_the_turn()
+    return raised.value
+
+
+class _RemovalThatFailsOnce:
+    """Refuses both removal tries of the next home's first removal attempt."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._remove_tree = process.shutil.rmtree
+        self._refusals_left = 2
+        monkeypatch.setattr(process.shutil, "rmtree", self._rmtree)
+
+    def _rmtree(self, path) -> None:
+        if self._refusals_left:
+            self._refusals_left -= 1
+            raise PermissionError(errno.EACCES, "denied", "secret-looking-name")
+        self._remove_tree(path)
+
+
+def _the_tool_turn_is_closed_and_its_home_stays_owned(turns: Path) -> None:
+    transport = _transport()
+
+    asyncio.run(transport.aclose())
+
+    assert len(list(turns.iterdir())) == 1
+    del transport
+
+
+def _the_image_turn_returns_its_png(turns: Path) -> None:
+    assert _generate_image().startswith(b"\x89PNG")
+
+
+@pytest.mark.parametrize(
+    "run_the_turn",
+    (_the_tool_turn_is_closed_and_its_home_stays_owned, _the_image_turn_returns_its_png),
+    ids=("tool-turn", "image-turn"),
+)
+def test_a_failed_codex_home_removal_never_changes_the_turn(
+    tmp_path: Path, monkeypatch, caplog, run_the_turn,
+) -> None:
+    turns = _an_empty_working_root(tmp_path)
+    monkeypatch.setattr(codex_protocol, "run_cli_bounded", _generated_png_runner())
+    _RemovalThatFailsOnce(monkeypatch)
+    caplog.set_level(logging.ERROR, logger=process.__name__)
+
+    run_the_turn(turns)
+
+    [record] = caplog.records
+    assert record.levelno == logging.ERROR
+    assert record.getMessage() == "private credential home removal failed (PermissionError)"
+    gc.collect()
+    assert list(turns.iterdir()) == []
 
 
 def _a_login_through_a_dev_null_device(_directory: Path) -> Path:

@@ -43,6 +43,8 @@ from provider_test_support import (
     a_usable_login_over_the_bound,
     call_within_deadline,
     exception_chain,
+    fail_mkdtemp,
+    fail_the_home_chmod,
     fail_to_start_the_runner_thread,
     override_provider_runtime,
     pool_callbacks,
@@ -52,7 +54,7 @@ from provider_test_support import (
 
 from agent_providers import process
 from agent_providers.codex.pool import CodexProcessKind, CodexProcessPool
-from agent_providers.codex.protocol import install_codex_turn_login
+from agent_providers.codex.protocol import create_codex_turn_home
 from agent_providers.codex_login import _blanked_document, assess_codex_login, blanked_copy
 from agent_providers.config import current_config
 from agent_providers.constants import (
@@ -72,6 +74,7 @@ from agent_providers.process import (
     CliRunOutcome,
     CliRunReason,
     PrivateCredentialHome,
+    PrivateHomeNotCreatedError,
     _run_credentialed_catalog_cli,
     claude_cli_login,
     clear_agent_cli_caches,
@@ -84,6 +87,7 @@ from agent_providers.process import (
     run_claude_catalog_cli,
     run_cli_bounded,
 )
+from agent_providers.sandbox.paths import CODEX_TOOL_TURN_DIRECTORY_PREFIX
 from agent_providers.spawn import INHERITED_MACHINE_VARIABLES, ChildProcess
 
 GROK_LOGGED_OUT = """You are not authenticated.
@@ -1693,35 +1697,33 @@ def test_a_failed_credential_copy_keeps_no_credential_in_its_error(
     assert [len(closes) for closes in destination_closes] == [1]
 
 
-def _fail_the_home_chmod(monkeypatch: pytest.MonkeyPatch, source: Path) -> None:
-    def refuse(*_arguments) -> None:
-        raise OSError(errno.EIO, "synthetic chmod failure")
-
-    monkeypatch.setattr(process.os, "chmod", refuse)
-
-
-def _fail_mkdtemp(monkeypatch: pytest.MonkeyPatch, source: Path) -> None:
-    def refuse(**_arguments) -> str:
-        raise OSError(errno.EIO, "synthetic mkdtemp failure")
-
-    monkeypatch.setattr(process.tempfile, "mkdtemp", refuse)
-
-
 def _remove_the_source(monkeypatch: pytest.MonkeyPatch, source: Path) -> None:
     source.unlink()
 
 
 @pytest.mark.parametrize(
-    ("prepare", "detail"),
+    ("prepare", "error_class", "detail"),
     (
-        (_fail_the_home_chmod, "could not prepare the private CLI credential copy"),
-        (_fail_mkdtemp, "could not create a private CLI home"),
-        (_remove_the_source, "configured CLI credential is missing"),
+        (
+            fail_the_home_chmod,
+            PrivateHomeNotCreatedError,
+            "could not prepare the private CLI credential copy",
+        ),
+        (fail_mkdtemp, PrivateHomeNotCreatedError, "could not create a private CLI home"),
+        (
+            _remove_the_source,
+            CliCredentialNotConfiguredError,
+            "configured CLI credential is missing",
+        ),
     ),
     ids=("home-chmod", "mkdtemp", "missing-credential"),
 )
 def test_a_private_home_refusal_inside_a_handler_carries_no_chain(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prepare, detail: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepare,
+    error_class: type[Exception],
+    detail: str,
 ) -> None:
     source = tmp_path / "source.json"
     source.write_text(_A_RAW_CREDENTIAL_CANARY)
@@ -1730,7 +1732,7 @@ def test_a_private_home_refusal_inside_a_handler_carries_no_chain(
     try:
         raise RuntimeError("the caller's own failure")
     except RuntimeError:
-        with pytest.raises(AgentCliUnavailableError) as raised:
+        with pytest.raises(error_class) as raised:
             PrivateCredentialHome(
                 source,
                 Path(".claude/.credentials.json"),
@@ -1738,6 +1740,7 @@ def test_a_private_home_refusal_inside_a_handler_carries_no_chain(
                 missing_credential_is_error=True,
             )
 
+    assert type(raised.value) is error_class
     assert str(raised.value) == detail
     assert raised.value.__cause__ is None
     assert raised.value.__context__ is None
@@ -3424,8 +3427,13 @@ def _enter_through_a_private_credential_home(tmp_path: Path) -> str:
     return "installed"
 
 
-def _enter_through_the_codex_turn_login(tmp_path: Path) -> str:
-    install_codex_turn_login(Path(tempfile.mkdtemp(dir=tmp_path)))
+def _private_homes_under(root: Path) -> list[Path]:
+    prefixes = ("private-home-", CODEX_TOOL_TURN_DIRECTORY_PREFIX)
+    return [entry for entry in root.iterdir() if entry.name.startswith(prefixes)]
+
+
+def _enter_through_a_codex_turn_home(tmp_path: Path) -> str:
+    create_codex_turn_home(CODEX_TOOL_TURN_DIRECTORY_PREFIX).close()
     return "installed"
 
 
@@ -3503,7 +3511,7 @@ _LOGIN_SCENARIOS = {
         {
             _enter_through_the_login_decider: True,
             _enter_through_a_private_credential_home: "installed",
-            _enter_through_the_codex_turn_login: "installed",
+            _enter_through_a_codex_turn_home: "installed",
         },
     ),
     "malformed": (
@@ -3512,7 +3520,7 @@ _LOGIN_SCENARIOS = {
         {
             _enter_through_the_login_decider: AgentCliUnavailableError,
             _enter_through_a_private_credential_home: CliCredentialNotConfiguredError,
-            _enter_through_the_codex_turn_login: CliCredentialNotConfiguredError,
+            _enter_through_a_codex_turn_home: CliCredentialNotConfiguredError,
         },
     ),
     "incomplete": (
@@ -3521,7 +3529,7 @@ _LOGIN_SCENARIOS = {
         {
             _enter_through_the_login_decider: False,
             _enter_through_a_private_credential_home: CliCredentialNotConfiguredError,
-            _enter_through_the_codex_turn_login: CliCredentialNotConfiguredError,
+            _enter_through_a_codex_turn_home: CliCredentialNotConfiguredError,
         },
     ),
     "read-fails-mid-way": (
@@ -3530,7 +3538,7 @@ _LOGIN_SCENARIOS = {
         {
             _enter_through_the_login_decider: AgentCliUnavailableError,
             _enter_through_a_private_credential_home: AgentCliUnavailableError,
-            _enter_through_the_codex_turn_login: AgentCliUnavailableError,
+            _enter_through_a_codex_turn_home: AgentCliUnavailableError,
         },
     ),
 }
@@ -3552,9 +3560,9 @@ _EVERY_ENTRY_POINT = pytest.mark.parametrize(
     (
         _enter_through_the_login_decider,
         _enter_through_a_private_credential_home,
-        _enter_through_the_codex_turn_login,
+        _enter_through_a_codex_turn_home,
     ),
-    ids=("login-decider", "private-credential-home", "codex-turn-login"),
+    ids=("login-decider", "private-credential-home", "codex-turn-home"),
 )
 
 
@@ -3632,6 +3640,7 @@ def test_an_interruption_at_any_line_propagates_holding_no_credential_bytes(
         _assert_nothing_reachable_holds_the_credential(
             failure, handled_by_the_caller=handled,
         )
+        assert not _private_homes_under(tmp_path)
         interrupted_lines += 1
         position += 1
 
@@ -3672,6 +3681,25 @@ def test_a_memory_error_inside_the_malformed_handler_holds_no_credential_bytes(
 
     _assert_nothing_reachable_holds_the_credential(failure, handled_by_the_caller=handled)
     assert len(os.listdir("/proc/self/fd")) == open_descriptors
+
+
+@pytest.mark.usefixtures("a_stored_codex_login")
+def test_an_interrupted_codex_turn_home_layout_removes_the_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    make_directory = Path.mkdir
+
+    def interrupt_the_work_directory(directory: Path, *arguments, **keywords) -> None:
+        if directory.name == "work":
+            raise KeyboardInterrupt
+        make_directory(directory, *arguments, **keywords)
+
+    monkeypatch.setattr(Path, "mkdir", interrupt_the_work_directory)
+
+    with pytest.raises(KeyboardInterrupt):
+        create_codex_turn_home(CODEX_TOOL_TURN_DIRECTORY_PREFIX)
+
+    assert not _private_homes_under(tmp_path)
 
 
 def _enter_a_private_home_copying_with(credential_copy) -> None:

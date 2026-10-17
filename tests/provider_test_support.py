@@ -708,6 +708,20 @@ def exception_chain(error: BaseException) -> list[BaseException]:
     return chain
 
 
+def fail_the_home_chmod(monkeypatch: pytest.MonkeyPatch, source: Path) -> None:
+    def refuse(*_arguments) -> None:
+        raise OSError(errno.EIO, "synthetic chmod failure")
+
+    monkeypatch.setattr(process.os, "chmod", refuse)
+
+
+def fail_mkdtemp(monkeypatch: pytest.MonkeyPatch, source: Path) -> None:
+    def refuse(**_arguments) -> str:
+        raise OSError(errno.EIO, "synthetic mkdtemp failure")
+
+    monkeypatch.setattr(process.tempfile, "mkdtemp", refuse)
+
+
 def _shown(value: object) -> str:
     if isinstance(value, memoryview | bytearray):
         value = bytes(value)

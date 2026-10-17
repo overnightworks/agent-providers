@@ -68,6 +68,10 @@ class CliCredentialNotConfiguredError(AgentCliUnavailableError):
     """Raised when a turn cannot copy its configured credential source."""
 
 
+class PrivateHomeNotCreatedError(AgentCliUnavailableError):
+    """Raised when a private CLI home could not be created or made private."""
+
+
 class CliProbeBudgetExceeded(AgentCliUnavailableError):
     """Raised when one caller outwaits a still-running cached probe."""
 
@@ -1225,6 +1229,7 @@ class PrivateCredentialHome:
         prefix: str,
         missing_credential_is_error: bool,
         credential_copy: CredentialCopy | None = None,
+        mode: int = _PRIVATE_HOME_COPY_MODE,
     ) -> None:
         registry_key = object()
         created: str | None = None
@@ -1234,7 +1239,9 @@ class PrivateCredentialHome:
                     prefix=prefix, dir=current_config().cli_working_directory_root,
                 )
             except OSError:
-                raise_without_chain(AgentCliUnavailableError("could not create a private CLI home"))
+                raise_without_chain(
+                    PrivateHomeNotCreatedError("could not create a private CLI home")
+                )
             self._finalizer = _live_home_finalizers[registry_key] = weakref.finalize(
                 self, _remove_abandoned_tree, Path(created), os.getpid(), registry_key,
             )
@@ -1247,11 +1254,11 @@ class PrivateCredentialHome:
             try:
                 os.chmod(self._home, 0o700)
             except OSError:
-                raise_without_chain(AgentCliUnavailableError(_CREDENTIAL_COPY_FAILED_DETAIL))
+                raise_without_chain(PrivateHomeNotCreatedError(_CREDENTIAL_COPY_FAILED_DETAIL))
             install_credential_file(
                 auth_file,
                 self._home / relative_destination,
-                mode=_PRIVATE_HOME_COPY_MODE,
+                mode=mode,
                 credential_copy=credential_copy,
                 missing_credential_is_error=missing_credential_is_error,
             )

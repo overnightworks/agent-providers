@@ -148,7 +148,12 @@ reap; a grandchild that outlives that child is not waited for, and the
 synchronous call's timeout kills only the direct child. A process group that
 survives SIGKILL for 60 s is logged once, and its reservation and home stay held
 until the process exits, when the exit sweep removes the home. A catalog home
-lasts for its bounded probe. Removal never changes a call's outcome: a home that cannot be
+lasts for its bounded probe. Each Codex turn also uses a fresh private home below
+`cli_working_directory_root`, with its blanked login copy at mode 0600; the image
+turn's home goes when the turn returns, the tool turn's at `aclose`, under the same
+removal rules. Unlike the Claude and Grok homes, which stay until their direct child
+has exited, the Codex homes do not yet wait for their child; #93 slice 3b-2 makes
+them wait and rewrites this sentence. Removal never changes a call's outcome: a home that cannot be
 removed is logged by error class alone, without its path. Removal is tried at
 `close()`, then by the finalizer, then by one exit-time sweep; after that the copy
 stays under the host's root, logged at error level. A direct overwrite of the copy fails, while a CLI can create and
@@ -274,6 +279,7 @@ A host migrates at its pin bump to 0.3.0; both configuration models refuse unkno
 | The tool messages `Co-Writer tool failed.`, `Co-Writer tool response was invalid.`, `Co-Writer tool-call limit was reached.` | `Tool failed.`, `Tool response was invalid.`, `Tool-call limit was reached.` | Map the `code` for product wording. `Tool response was invalid.` is also the `str()` of `TextToolCallRejectedError`. The other twelve messages are unchanged. |
 | The catalog error `Unknown co-writer provider '<name>'` | `Unknown provider '<name>'` | Update any text match; the exception types are unchanged. |
 | `ToolProtocolMarkup()` defaults `songmaker` / `Songmaker`; `ToolCatalog.markup` optional | Both fields and `ToolCatalog.markup` required | Declare `markup=ToolProtocolMarkup(tag_namespace="songmaker", product_name="Songmaker")`; the rendered prompt stays byte-identical. |
+| A Codex turn whose private home cannot be created or made private (`mkdtemp`, the home `chmod` or the `work` `mkdir` raises `OSError`) | Raised unchained: `ProviderUnavailableError` with `CLI_BINARY_UNAVAILABLE` ("CLI is unavailable.") on the tool turn; `CodexImageCliError("could not create a private CLI home")` on the image turn | A full or unwritable `cli_working_directory_root` now reaches the host's CLI-failure path instead of its unexpected-error path. The message holds no path. Songmaker shows it as `JOB_ERROR_COVER_IMAGE_CLI_FAILED` (`src/songmaker_cli/jobs/_runtime.py:111-116`, `:139`). |
 
 ## Sandbox
 

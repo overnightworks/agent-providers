@@ -45,6 +45,7 @@ from provider_test_support import (
     exception_chain,
     fail_mkdtemp,
     fail_the_home_chmod,
+    fail_the_work_directory,
     fail_to_start_the_runner_thread,
     override_provider_runtime,
     pool_callbacks,
@@ -3440,6 +3441,7 @@ def _enter_through_a_codex_turn_home(tmp_path: Path) -> str:
 _CREDENTIAL_HANDLING_CODE = frozenset(
     function.__code__
     for function in (
+        create_codex_turn_home,
         process._read_credential_file,
         process._read_regular_file,
         process._read_within_bound,
@@ -3684,22 +3686,28 @@ def test_a_memory_error_inside_the_malformed_handler_holds_no_credential_bytes(
 
 
 @pytest.mark.usefixtures("a_stored_codex_login")
-def test_an_interrupted_codex_turn_home_layout_removes_the_home(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    ("fault", "refusal"),
+    (
+        (KeyboardInterrupt(), KeyboardInterrupt),
+        (OSError(errno.ENOSPC, "synthetic"), PrivateHomeNotCreatedError),
+    ),
+    ids=("interruption", "oserror"),
+)
+def test_a_failed_codex_turn_home_layout_removes_the_home_and_leaves_no_chain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: BaseException,
+    refusal: type[BaseException],
 ) -> None:
-    make_directory = Path.mkdir
+    fail_the_work_directory(monkeypatch, fault)
 
-    def interrupt_the_work_directory(directory: Path, *arguments, **keywords) -> None:
-        if directory.name == "work":
-            raise KeyboardInterrupt
-        make_directory(directory, *arguments, **keywords)
-
-    monkeypatch.setattr(Path, "mkdir", interrupt_the_work_directory)
-
-    with pytest.raises(KeyboardInterrupt):
+    with pytest.raises(refusal) as raised:
         create_codex_turn_home(CODEX_TOOL_TURN_DIRECTORY_PREFIX)
 
     assert not _private_homes_under(tmp_path)
+    if refusal is PrivateHomeNotCreatedError:
+        assert str(raised.value) == "could not create a private CLI home"
+        assert raised.value.__cause__ is None
+        assert raised.value.__context__ is None
 
 
 def _enter_a_private_home_copying_with(credential_copy) -> None:

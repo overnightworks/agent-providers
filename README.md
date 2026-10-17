@@ -156,7 +156,7 @@ has exited, the Codex homes do not yet wait for their child; #93 slice 3b-2 make
 them wait and rewrites this sentence. Removal never changes a call's outcome: a home that cannot be
 removed is logged by error class alone, without its path. Removal is tried at
 `close()`, then by the finalizer, then by one exit-time sweep; after that the copy
-stays under the host's root, logged at error level. A direct overwrite of the copy fails, while a CLI can create and
+stays under the host's root, logged at error level. A direct overwrite of a 0400 copy fails, while a CLI can create and
 rename a replacement in its disposable directory; that renewal vanishes at
 cleanup. This is not evidence that a CLI refreshes credentials in practice.
 

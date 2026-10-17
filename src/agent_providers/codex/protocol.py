@@ -141,13 +141,13 @@ def create_codex_turn_home(prefix: str) -> PrivateCredentialHome:
     )
     try:
         (home.path / "work").mkdir(mode=0o700)
+        return home
     except OSError:
         home.close()
         raise_without_chain(PrivateHomeNotCreatedError("could not create a private CLI home"))
     except BaseException:  # NOSONAR(S5754) closes the home, re-raises
         home.close()
         raise
-    return home
 
 
 def parse_codex_line(line: bytes) -> tuple[str, dict[str, object]]:

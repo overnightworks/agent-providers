@@ -722,6 +722,23 @@ def fail_mkdtemp(monkeypatch: pytest.MonkeyPatch, source: Path) -> None:
     monkeypatch.setattr(process.tempfile, "mkdtemp", refuse)
 
 
+def fail_the_directory_named(
+    monkeypatch: pytest.MonkeyPatch, name: str, error: BaseException,
+) -> None:
+    make_directory = Path.mkdir
+
+    def refuse(directory: Path, *arguments, **keywords) -> None:
+        if directory.name == name:
+            raise error
+        make_directory(directory, *arguments, **keywords)
+
+    monkeypatch.setattr(Path, "mkdir", refuse)
+
+
+def fail_the_work_directory(monkeypatch: pytest.MonkeyPatch, error: BaseException) -> None:
+    fail_the_directory_named(monkeypatch, "work", error)
+
+
 def _shown(value: object) -> str:
     if isinstance(value, memoryview | bytearray):
         value = bytes(value)

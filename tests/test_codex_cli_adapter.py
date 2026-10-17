@@ -51,7 +51,9 @@ from provider_test_support import (
     drive_turn,
     exception_chain,
     fail_mkdtemp,
+    fail_the_directory_named,
     fail_the_home_chmod,
+    fail_the_work_directory,
     fail_to_start_the_runner_thread,
     formatted_log_text,
     live_frames_holding,
@@ -1610,7 +1612,7 @@ def test_codex_public_adapters_reject_unusable_logins(
     if document is not None:
         auth_file.write_text(json.dumps(document))
     turns = _an_empty_working_root(tmp_path)
-    override_provider_runtime(codex_cli_auth_file=auth_file, cli_working_directory_root=turns)
+    override_provider_runtime(codex_cli_auth_file=auth_file)
 
     with pytest.raises(codex_image.CodexImageLoginError):
         codex_image.generate_codex_image("prompt", policy=AN_IMAGE_POLICY, deadline=10_000_000)
@@ -2102,14 +2104,14 @@ def _an_empty_working_root(tmp_path: Path) -> Path:
 
 
 def _fail_the_work_directory(monkeypatch: pytest.MonkeyPatch, source: Path) -> None:
-    make_directory = Path.mkdir
+    fail_the_work_directory(monkeypatch, OSError(errno.ENOSPC, "synthetic work directory failure"))
 
-    def refuse_the_work_directory(directory: Path, *arguments, **keywords) -> None:
-        if directory.name == "work":
-            raise OSError(errno.ENOSPC, "synthetic work directory failure")
-        make_directory(directory, *arguments, **keywords)
 
-    monkeypatch.setattr(Path, "mkdir", refuse_the_work_directory)
+def _fail_the_codex_home_directory(monkeypatch: pytest.MonkeyPatch, source: Path) -> None:
+    fail_the_directory_named(
+        monkeypatch, CODEX_HOME_DIRECTORY_NAME,
+        OSError(errno.ENOSPC, "synthetic codex home directory failure"),
+    )
 
 
 def _the_tool_turn_is_started_bare() -> None:
@@ -2131,34 +2133,44 @@ def _assert_the_image_turn_could_not_make_its_home(refusal: BaseException) -> No
     assert str(refusal) == "could not create a private CLI home"
 
 
+def _assert_the_tool_turn_found_the_login_rejected(refusal: BaseException) -> None:
+    assert isinstance(refusal, ProviderUnavailableError)
+    assert refusal.reason.code is SafeRouteReasonCode.CLI_AUTH_REJECTED
+
+
+def _assert_the_image_turn_found_the_login_rejected(refusal: BaseException) -> None:
+    assert type(refusal) is codex_image.CodexImageLoginError
+
+
 @CALLER_CONTEXTS
 @pytest.mark.parametrize(
-    "make_the_home_fail",
-    (fail_mkdtemp, fail_the_home_chmod, _fail_the_work_directory),
-    ids=("mkdtemp", "home-chmod", "work-directory"),
-)
-@pytest.mark.parametrize(
-    ("start_the_turn", "assert_the_refusal"),
+    ("make_the_home_fail", "turns_and_refusals"),
     (
-        (_the_tool_turn_is_started_bare, _assert_the_tool_turn_found_the_cli_unavailable),
-        (_the_image_turn_is_started_bare, _assert_the_image_turn_could_not_make_its_home),
+        (fail_mkdtemp, "cannot-be-made"),
+        (fail_the_home_chmod, "cannot-be-made"),
+        (_fail_the_work_directory, "cannot-be-made"),
+        (_fail_the_codex_home_directory, "login"),
     ),
-    ids=("tool-turn", "image-turn"),
+    ids=("mkdtemp", "home-chmod", "work-directory", "codex-home-directory"),
 )
-def test_a_codex_turn_home_that_cannot_be_made_is_cli_unavailable_never_a_login_refusal(
+@pytest.mark.parametrize("turn", ("tool-turn", "image-turn"))
+def test_a_codex_turn_home_that_fails_is_refused_unchained_and_leaves_nothing(
     tmp_path: Path, monkeypatch, codex_login_source: Path, make_the_home_fail,
-    start_the_turn, assert_the_refusal, while_the_caller_handles_an_exception,
+    turns_and_refusals: str, turn: str, while_the_caller_handles_an_exception,
 ) -> None:
     turns = _an_empty_working_root(tmp_path)
     make_the_home_fail(monkeypatch, codex_login_source)
+    start_the_turn, expected_class, assert_the_refusal = _EXPECTED_REFUSALS[
+        (turn, turns_and_refusals)
+    ]
 
     if while_the_caller_handles_an_exception:
         try:
             raise RuntimeError("the caller's own failure")
         except RuntimeError:
-            refusal = _refusal_of(start_the_turn)
+            refusal = _refusal_of(start_the_turn, expected_class)
     else:
-        refusal = _refusal_of(start_the_turn)
+        refusal = _refusal_of(start_the_turn, expected_class)
 
     assert_the_refusal(refusal)
     assert refusal.__cause__ is None
@@ -2166,8 +2178,28 @@ def test_a_codex_turn_home_that_cannot_be_made_is_cli_unavailable_never_a_login_
     assert list(turns.iterdir()) == []
 
 
-def _refusal_of(start_the_turn) -> BaseException:
-    with pytest.raises(Exception) as raised:
+_EXPECTED_REFUSALS = {
+    ("tool-turn", "cannot-be-made"): (
+        _the_tool_turn_is_started_bare, ProviderUnavailableError,
+        _assert_the_tool_turn_found_the_cli_unavailable,
+    ),
+    ("image-turn", "cannot-be-made"): (
+        _the_image_turn_is_started_bare, codex_image.CodexImageCliError,
+        _assert_the_image_turn_could_not_make_its_home,
+    ),
+    ("tool-turn", "login"): (
+        _the_tool_turn_is_started_bare, ProviderUnavailableError,
+        _assert_the_tool_turn_found_the_login_rejected,
+    ),
+    ("image-turn", "login"): (
+        _the_image_turn_is_started_bare, codex_image.CodexImageLoginError,
+        _assert_the_image_turn_found_the_login_rejected,
+    ),
+}
+
+
+def _refusal_of(start_the_turn, expected_class: type[BaseException]) -> BaseException:
+    with pytest.raises(expected_class) as raised:
         start_the_turn()
     return raised.value
 

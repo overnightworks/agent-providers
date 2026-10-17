@@ -364,7 +364,7 @@ def _wait_for_exit(pid: int) -> tuple[int, int]:
 
 
 def _consume_stop_report(pid: int) -> tuple[int, int] | None:
-    reported = os.waitid(os.P_PID, pid, os.WSTOPPED | os.WNOHANG)
+    reported: os.waitid_result | None = os.waitid(os.P_PID, pid, os.WSTOPPED | os.WNOHANG)
     if reported is None:
         return None
     return reported.si_code, reported.si_status

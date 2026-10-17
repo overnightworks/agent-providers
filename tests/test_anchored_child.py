@@ -181,14 +181,16 @@ def test_a_missing_binary_raises_unchanged_and_starts_no_watcher(
 ) -> None:
     threads_before = set(threading.enumerate())
     descriptors_before = set(os.listdir("/proc/self/fd"))
+    missing = leaders.describe(tmp_path / "missing-binary")
+    on_exit = ExitProbe()
 
     with pytest.raises(FileNotFoundError):
         spawn.start_anchored_leader(
-            leaders.describe(tmp_path / "missing-binary"),
+            missing,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            on_exit=ExitProbe(),
+            on_exit=on_exit,
         )
 
     assert set(threading.enumerate()) == threads_before

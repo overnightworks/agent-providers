@@ -1497,8 +1497,11 @@ def test_a_failed_credential_copy_keeps_no_credential_in_its_error(
     source.write_text(_A_RAW_CREDENTIAL_CANARY)
     open_descriptors = len(os.listdir("/proc/self/fd"))
 
+    destination_closes: list[list[int]] = []
+
     def install_failing() -> AgentCliUnavailableError:
-        with a_credential_destination_that_fails(fault):
+        with a_credential_destination_that_fails(fault) as closes:
+            destination_closes.append(closes)
             with pytest.raises(AgentCliUnavailableError) as raised:
                 PrivateCredentialHome(
                     source,
@@ -1522,6 +1525,7 @@ def test_a_failed_credential_copy_keeps_no_credential_in_its_error(
     assert not traceback_frames_hold(refusal, _A_RAW_CREDENTIAL_CANARY)
     assert not list(tmp_path.glob("private-home-*"))
     assert len(os.listdir("/proc/self/fd")) == open_descriptors
+    assert [len(closes) for closes in destination_closes] == [1]
 
 
 def _fail_the_home_chmod(monkeypatch: pytest.MonkeyPatch, source: Path) -> None:
@@ -1576,20 +1580,21 @@ def test_a_private_home_refusal_inside_a_handler_carries_no_chain(
 
 
 def test_the_frame_check_reads_credential_views() -> None:
-    def hold_in_a_view(payload: bytes) -> None:
+    def hold_in_a_view() -> None:
+        payload = _A_RAW_CREDENTIAL_CANARY.encode()
         view = memoryview(payload)
         del payload
         raise RuntimeError(len(view))
 
-    def hold_in_a_buffer(payload: bytes) -> None:
+    def hold_in_a_buffer() -> None:
+        payload = _A_RAW_CREDENTIAL_CANARY.encode()
         buffer = bytearray(payload)
         del payload
         raise RuntimeError(len(buffer))
 
-    canary = _A_RAW_CREDENTIAL_CANARY.encode()
     for hold in (hold_in_a_view, hold_in_a_buffer):
         with pytest.raises(RuntimeError) as raised:
-            hold(canary)
+            hold()
         assert traceback_frames_hold(raised.value, _A_RAW_CREDENTIAL_CANARY)
 
 

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import gc
 import json
 import logging
 import os
@@ -25,6 +26,7 @@ import stat
 import tempfile
 import threading
 import traceback
+import types
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -126,18 +128,22 @@ DESTINATION_FAULTS: Final = ("write", "fchmod", "close", "close-after-failed-wri
 
 
 @contextmanager
-def a_credential_destination_that_fails(fault: str) -> Iterator[None]:
+def a_credential_destination_that_fails(fault: str) -> Iterator[list[int]]:
     """Fail one call on the descriptor of the file a credential copy is created in.
 
     The destination is the descriptor ``os.open`` returns for an ``O_CREAT``
     open; every other descriptor passes through. A failing ``os.close`` closes
-    the descriptor for real before it raises, as Linux does.
+    the descriptor for real before it raises, as Linux does. It yields every
+    close made on a destination descriptor, so a test can assert exactly one.
     """
     destinations: set[int] = set()
+    closed_destinations: set[int] = set()
+    closes_of_destinations: list[int] = []
     real_open, real_write, real_fchmod, real_close = os.open, os.write, os.fchmod, os.close
 
     def open_destination(path, flags, *arguments, **keywords):
         descriptor = real_open(path, flags, *arguments, **keywords)
+        closed_destinations.discard(descriptor)
         if flags & os.O_CREAT:
             destinations.add(descriptor)
         return descriptor
@@ -154,7 +160,11 @@ def a_credential_destination_that_fails(fault: str) -> Iterator[None]:
 
     def close(descriptor):
         was_destination = descriptor in destinations
+        if was_destination or descriptor in closed_destinations:
+            closes_of_destinations.append(descriptor)
         destinations.discard(descriptor)
+        if was_destination:
+            closed_destinations.add(descriptor)
         real_close(descriptor)
         if was_destination and fault in ("close", "close-after-failed-write"):
             raise OSError(errno.EIO, "synthetic close failure")
@@ -165,7 +175,7 @@ def a_credential_destination_that_fails(fault: str) -> Iterator[None]:
         patch.object(os, "fchmod", fchmod),
         patch.object(os, "close", close),
     ):
-        yield
+        yield closes_of_destinations
 
 
 def a_path_through_a_regular_file(directory: Path) -> Path:
@@ -716,6 +726,15 @@ def traceback_frames_hold(error: BaseException, text: str) -> bool:
                     return True
             frame_holder = frame_holder.tb_next
     return False
+
+def live_frames_holding(text: str) -> list[types.FrameType]:
+    return [
+        item
+        for item in gc.get_objects()
+        if isinstance(item, types.FrameType)
+        and any(text in _shown(value) for value in item.f_locals.values())
+    ]
+
 
 A_RUNNER_FAILURE_CANARY: Final = "runner-failure-canary-7c1d"
 ANOTHER_RUNNER_FAILURE_CANARY: Final = "second-runner-failure-canary-2e8b"

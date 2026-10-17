@@ -1631,7 +1631,7 @@ def _write_credential(descriptor: int, payload: bytes) -> None:
     while view:
         written = os.write(descriptor, view)
         if written < 1:
-            raise OSError("catalog credential copy made no progress")
+            raise OSError("credential copy made no progress")
         view = view[written:]
 
 

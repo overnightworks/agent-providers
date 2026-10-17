@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import logging
 import os
@@ -50,6 +51,7 @@ from provider_test_support import (
     exception_chain,
     fail_to_start_the_runner_thread,
     formatted_log_text,
+    live_frames_holding,
     override_provider_runtime,
     override_turn_runtime,
     shell_child,
@@ -2111,10 +2113,25 @@ def test_codex_turns_refuse_a_login_that_is_not_a_plain_file(
 def test_a_failed_turn_copy_keeps_no_credential_in_its_error(
     tmp_path: Path, monkeypatch, codex_login_source: Path, turn,
 ) -> None:
+    turns = tmp_path / "turns"
+    turns.mkdir()
+    override_provider_runtime(
+        codex_cli_auth_file=codex_login_source, cli_working_directory_root=turns,
+    )
+    children: list = []
+    monkeypatch.setattr(
+        codex_protocol, "run_cli_bounded", _runner([], _outcome(), children),
+    )
     open_descriptors = len(os.listdir("/proc/self/fd"))
 
-    with a_credential_destination_that_fails("write"):
-        refusal = turn()
+    gc.collect()
+    gc.disable()
+    try:
+        with a_credential_destination_that_fails("write"):
+            refusal = turn()
+        frames_left_holding_it = live_frames_holding(CANARY_ACCESS_TOKEN)
+    finally:
+        gc.enable()
 
     assert refusal.__cause__ is None
     assert refusal.__context__ is None
@@ -2123,4 +2140,7 @@ def test_a_failed_turn_copy_keeps_no_credential_in_its_error(
         CANARY_ACCESS_TOKEN in "".join(traceback.format_exception(link))
         for link in exception_chain(refusal)
     )
+    assert not frames_left_holding_it
+    assert children == []
+    assert list(turns.iterdir()) == []
     assert len(os.listdir("/proc/self/fd")) == open_descriptors

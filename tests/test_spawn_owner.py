@@ -32,12 +32,17 @@ from __future__ import annotations
 import ast
 import asyncio
 import os
+import select
 import sys
+import threading
+import time
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
+from anchored_kernel import WATCHER_THREAD_PREFIX
+from anchored_support import TEST_WAIT_SECONDS, ChildCleanup
 
 from agent_providers import spawn
 from agent_providers.spawn import (
@@ -47,6 +52,7 @@ from agent_providers.spawn import (
     open_async_pipes,
     open_pipes,
     run_capturing,
+    start_anchored_leader,
 )
 
 REPOSITORY_ROOT = Path(spawn.__file__).parents[2]
@@ -463,15 +469,7 @@ def _stdout_of_open_async_pipes(child: ChildProcess) -> str:
     return asyncio.run(run())
 
 
-@pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="needs /proc/self/fd")
-@pytest.mark.parametrize(
-    "stdout_of",
-    [_stdout_of_run_capturing, _stdout_of_open_pipes, _stdout_of_open_async_pipes],
-    ids=["run_capturing", "open_pipes", "open_async_pipes"],
-)
-def test_a_child_inherits_no_descriptor_the_parent_holds_open(
-    tmp_path: Path, stdout_of: Callable[[ChildProcess], str],
-) -> None:
+def _run_descriptor_probe(tmp_path: Path, stdout_of: Callable[[ChildProcess], str]) -> None:
     probe = (
         "import os, sys\n"
         "print(os.path.exists(f'/proc/self/fd/{sys.argv[1]}'))\n"
@@ -492,6 +490,77 @@ def test_a_child_inherits_no_descriptor_the_parent_holds_open(
         os.close(write_end)
 
     assert output.strip() == "False"
+
+
+needs_proc_fd = pytest.mark.skipif(
+    not Path("/proc/self/fd").is_dir(), reason="needs /proc/self/fd"
+)
+
+
+@needs_proc_fd
+@pytest.mark.parametrize(
+    "stdout_of",
+    [_stdout_of_run_capturing, _stdout_of_open_pipes, _stdout_of_open_async_pipes],
+    ids=["run_capturing", "open_pipes", "open_async_pipes"],
+)
+def test_a_child_inherits_no_descriptor_the_parent_holds_open(
+    tmp_path: Path, stdout_of: Callable[[ChildProcess], str],
+) -> None:
+    _run_descriptor_probe(tmp_path, stdout_of)
+
+
+def _read_until_eof_within_bound(descriptor: int) -> str:
+    deadline = time.monotonic() + TEST_WAIT_SECONDS
+    chunks: list[bytes] = []
+    while True:
+        remaining = deadline - time.monotonic()
+        assert remaining > 0, "the child kept stdout open past the bound"
+        if not select.select([descriptor], [], [], remaining)[0]:
+            continue
+        chunk = os.read(descriptor, 4096)
+        if not chunk:
+            return b"".join(chunks).decode()
+        chunks.append(chunk)
+
+
+def _join_watcher_within_bound(pid: int) -> None:
+    name = f"{WATCHER_THREAD_PREFIX}{pid}"
+    watcher = next((t for t in threading.enumerate() if t.name == name), None)
+    if watcher is not None:
+        watcher.join(TEST_WAIT_SECONDS)
+        assert not watcher.is_alive(), "the watcher did not end within the bound"
+
+
+@needs_proc_fd
+def test_an_anchored_leader_inherits_no_descriptor_the_parent_holds_open(
+    tmp_path: Path, child_cleanup: ChildCleanup,
+) -> None:
+    def stdout_of_anchored_leader(child: ChildProcess) -> str:
+        output_read, output_write = os.pipe()
+        nothing = os.open(os.devnull, os.O_RDWR)
+        try:
+            captured = child_cleanup.capture(
+                lambda: start_anchored_leader(
+                    child,
+                    stdin=nothing,
+                    stdout=output_write,
+                    stderr=nothing,
+                    on_exit=lambda: None,
+                )
+            )
+            os.close(output_write)
+            output_write = -1
+            output = _read_until_eof_within_bound(output_read)
+            (owned,) = captured.children
+            _join_watcher_within_bound(owned.pid)
+            del captured
+            return output
+        finally:
+            for descriptor in (nothing, output_read, output_write):
+                if descriptor >= 0:
+                    os.close(descriptor)
+
+    _run_descriptor_probe(tmp_path, stdout_of_anchored_leader)
 
 
 @pytest.mark.parametrize(

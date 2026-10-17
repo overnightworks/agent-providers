@@ -4,6 +4,7 @@ import asyncio
 import hmac
 import logging
 import secrets
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from itertools import count
@@ -14,7 +15,30 @@ import h11
 from agent_client.capability import MCP_ENDPOINT_PATH
 from agent_client.wire import MAX_EVENT_BYTES
 from agent_providers.errors import raise_without_chain
-from agent_service.mcp_wire import HttpAnswer
+from agent_service.capability import Capability
+from agent_service.mcp_wire import (
+    ACKNOWLEDGEMENT,
+    CallToolParams,
+    HttpAnswer,
+    InitializeParams,
+    JsonRpcError,
+    JsonRpcErrorCode,
+    JsonRpcNotification,
+    JsonRpcRequest,
+    JsonRpcResponse,
+    McpMethod,
+    McpWireError,
+    Reply,
+    RequestId,
+    ToolDefinition,
+    answer_for,
+    error_response,
+    initialize_response,
+    parse_message,
+    protocol_header_status,
+    read_payload,
+    tools_list_response,
+)
 from agent_service.run_liveness import RunClock, log_failure
 
 log = logging.getLogger(__name__)
@@ -385,3 +409,106 @@ class Relay:
 
 def _ready_for_next_cycle(connection: h11.Connection) -> bool:
     return connection.our_state is h11.DONE and connection.their_state is h11.DONE
+
+
+class ToolCalls(Protocol):
+    async def call(self, request_id: RequestId, params: CallToolParams) -> Reply:
+        """Answer one parsed ``tools/call``; it must let ``asyncio.CancelledError`` propagate."""
+        ...
+
+
+class CapabilityReflected(Exception):
+    """A body bound for the CLI carried the run's capability; the message names no content."""
+
+    def __init__(self) -> None:
+        super().__init__("a body to the CLI carried the run's capability")
+
+
+class RepeatedToolOffer(Exception):
+    """The app offered one allowed tool more than once; the message names no tool."""
+
+    def __init__(self) -> None:
+        super().__init__("an allowed tool was offered more than once")
+
+
+def _narrowed_to(
+    allowed: Sequence[str], offered: Sequence[ToolDefinition]
+) -> tuple[ToolDefinition, ...]:
+    permitted = frozenset(allowed)
+    kept = [tool for tool in offered if tool.name in permitted]
+    if len({tool.name for tool in kept}) != len(kept):
+        raise_without_chain(RepeatedToolOffer())
+    return tuple(kept)
+
+
+class McpRelayOwner:
+    """Answers the CLI's MCP messages and lets no body carrying the capability out.
+
+    Every answer leaves through ``_cleared_for_cli``. A hit refuses the owner for good.
+    """
+
+    def __init__(
+        self, capability: Capability, offered: Sequence[ToolDefinition], calls: ToolCalls
+    ) -> None:
+        self._capability = capability
+        self._narrowed = _narrowed_to(capability.claims.tools, offered)
+        self._calls = calls
+        self._refused = False
+
+    async def answer(self, request: RelayRequest) -> HttpAnswer:
+        self._require_not_refused()
+        return self._cleared_for_cli(await self._respond(request))
+
+    def _require_not_refused(self) -> None:
+        if self._refused:
+            raise_without_chain(CapabilityReflected())
+
+    def _cleared_for_cli(self, answer: HttpAnswer) -> HttpAnswer:
+        self._require_not_refused()
+        if self._capability.appears_in(answer.body):
+            self._refused = True
+            raise_without_chain(CapabilityReflected())
+        return answer
+
+    async def _respond(self, request: RelayRequest) -> HttpAnswer:
+        try:
+            message = parse_message(request.body)
+        except McpWireError:
+            return _empty(HTTPStatus.BAD_REQUEST)
+        if isinstance(message, JsonRpcResponse | JsonRpcError):
+            return _empty(HTTPStatus.BAD_REQUEST)
+        if message.method != McpMethod.INITIALIZE and (
+            protocol_header_status(request.protocol_version) is not HTTPStatus.OK
+        ):
+            return _empty(HTTPStatus.BAD_REQUEST)
+        if isinstance(message, JsonRpcNotification):
+            return ACKNOWLEDGEMENT
+        return answer_for(await self._reply_to(message))
+
+    async def _reply_to(self, request: JsonRpcRequest) -> Reply:
+        match request.method:
+            case McpMethod.INITIALIZE:
+                return self._initialized(request)
+            case McpMethod.PING:
+                return JsonRpcResponse(id=request.id, result={})
+            case McpMethod.TOOLS_LIST:
+                return tools_list_response(request.id, self._narrowed)
+            case McpMethod.TOOLS_CALL:
+                return await self._called(request)
+            case _:
+                return error_response(request.id, JsonRpcErrorCode.METHOD_NOT_FOUND)
+
+    @staticmethod
+    def _initialized(request: JsonRpcRequest) -> Reply:
+        try:
+            params = read_payload(InitializeParams, request.params)
+        except McpWireError:
+            return error_response(request.id, JsonRpcErrorCode.INVALID_PARAMS)
+        return initialize_response(request.id, params.protocol_version)
+
+    async def _called(self, request: JsonRpcRequest) -> Reply:
+        try:
+            params = read_payload(CallToolParams, request.params)
+        except McpWireError:
+            return error_response(request.id, JsonRpcErrorCode.INVALID_PARAMS)
+        return await self._calls.call(request.id, params)

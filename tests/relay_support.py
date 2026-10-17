@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import contextvars
 import gc
+import json
 import re
 import socket
 import struct
@@ -9,15 +10,26 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
 from http import HTTPStatus
+from typing import Any
 from urllib.parse import urlsplit
 
 import h11
+import pytest
 from mcp_app_fake import WAIT_SECONDS
 from service_support import StepClock, SteppedLoop
 
-from agent_service.mcp_wire import JSON_MEDIA_TYPE, HttpAnswer
+from agent_client.wire import JsonObject
+from agent_service.mcp_wire import (
+    JSON_MEDIA_TYPE,
+    PROTOCOL_VERSION_HEADER,
+    CallToolParams,
+    HttpAnswer,
+    JsonRpcResponse,
+    Reply,
+    RequestId,
+)
 from agent_service.run_liveness import LoopClock, RunClock
-from agent_service.tool_relay import LOOPBACK_HOST, Relay, RelayRequest
+from agent_service.tool_relay import LOOPBACK_HOST, Relay, RelayOwner, RelayRequest
 
 RUN_ID = "run-under-test"
 _READ_BYTES = 65_536
@@ -72,6 +84,40 @@ class ScriptedOwner:
     async def wait_entered(self) -> None:
         async with asyncio.timeout(WAIT_SECONDS):
             await self.entered.wait()
+
+
+class ScriptedCalls:
+    """A fake of the ``ToolCalls`` port: records calls, can gate, and records a cancellation."""
+
+    def __init__(self, replies: Sequence[Reply] = (), *, gated: bool = False) -> None:
+        self.calls: list[tuple[RequestId, CallToolParams]] = []
+        self.entered = asyncio.Event()
+        self.cancelled = False
+        self._replies = list(replies)
+        self._gate = asyncio.Event()
+        if not gated:
+            self.release()
+
+    def release(self) -> None:
+        self._gate.set()
+
+    async def call(self, request_id: RequestId, params: CallToolParams) -> Reply:
+        self.calls.append((request_id, params))
+        self.entered.set()
+        try:
+            await self._gate.wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        return self._replies.pop(0) if self._replies else clean_reply(request_id)
+
+    async def wait_entered(self) -> None:
+        async with asyncio.timeout(WAIT_SECONDS):
+            await self.entered.wait()
+
+
+def clean_reply(request_id: RequestId) -> JsonRpcResponse:
+    return JsonRpcResponse(id=request_id, result={"content": [{"type": "text", "text": "done"}]})
 
 
 class SuppressingOwner(ScriptedOwner):
@@ -165,6 +211,34 @@ def port_of(relay: Relay) -> int:
     return port
 
 
+class RelayWrites:
+    """Records what each socket send hands to the kernel, so no delivery order hides it."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._writes: list[tuple[Any, bytes]] = []
+        monkeypatch.setattr(socket.socket, "send", self._recorded("send", lambda data: data))
+        monkeypatch.setattr(socket.socket, "sendall", self._recorded("sendall", lambda data: data))
+        monkeypatch.setattr(
+            socket.socket, "sendmsg", self._recorded("sendmsg", lambda buffers: b"".join(buffers))
+        )
+
+    def _recorded(self, method: str, joined: Callable[[Any], bytes]) -> Callable[..., Any]:
+        original = getattr(socket.socket, method)
+
+        def recording(sock: socket.socket, data: Any, *rest: Any) -> Any:
+            peer = sock.getpeername()
+            data = list(data) if method == "sendmsg" else data
+            sent = original(sock, data, *rest)
+            offered = bytes(joined(data))
+            self._writes.append((peer, offered if method == "sendall" else offered[:sent]))
+            return sent
+
+        return recording
+
+    def to(self, client: "RawClient") -> bytes:
+        return b"".join(data for peer, data in self._writes if peer == client.address)
+
+
 class RawClient:
     def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self._reader = reader
@@ -194,6 +268,14 @@ class RawClient:
     def _prime(parser: h11.Connection) -> None:
         parser.send(_CLIENT_REQUEST)
         parser.send(h11.EndOfMessage())
+
+    @property
+    def received_bytes(self) -> int:
+        return self._received
+
+    @property
+    def address(self) -> Any:
+        return self._writer.get_extra_info("sockname")
 
     async def send(self, raw: bytes) -> None:
         self._writer.write(raw)
@@ -271,6 +353,24 @@ def blocking_connect(port: int) -> socket.socket:
 
 def post(relay: Relay, body: bytes = b"") -> bytes:
     return RequestHead.standard(relay, len(body)).encode() + body
+
+
+def json_rpc(
+    method: str, request_id: RequestId | None = None, params: JsonObject | None = None
+) -> bytes:
+    message: dict[str, object] = {"jsonrpc": "2.0", "method": method}
+    if request_id is not None:
+        message["id"] = request_id
+    if params is not None:
+        message["params"] = params
+    return json.dumps(message).encode()
+
+
+def post_message(relay: Relay, body: bytes, protocol_version: str | None = None) -> bytes:
+    head = RequestHead.standard(relay, len(body)).with_field("Content-Type", JSON_MEDIA_TYPE)
+    if protocol_version is not None:
+        head = head.with_field(PROTOCOL_VERSION_HEADER, protocol_version)
+    return head.encode() + body
 
 
 def chunked_head(relay: Relay) -> RequestHead:
@@ -384,9 +484,10 @@ class HoldingSteppedLoop(SteppedLoop):
 def drive(
     scenario: Callable[[Relay], Awaitable[None]],
     run_id: str = RUN_ID,
-    owner: ScriptedOwner | None = None,
+    owner: RelayOwner | None = None,
     clock: RunClock | None = None,
     loop_factory: Callable[[], asyncio.AbstractEventLoop] | None = None,
+    calls: ScriptedCalls | None = None,
 ) -> None:
     async def main() -> None:
         scripted = owner or ScriptedOwner()
@@ -395,7 +496,9 @@ def drive(
             async with asyncio.timeout(WAIT_SECONDS * 3):
                 await scenario(relay)
         finally:
-            scripted.release()
+            for gate in (scripted, calls):
+                if isinstance(gate, ScriptedOwner | ScriptedCalls):
+                    gate.release()
             loop = asyncio.get_running_loop()
             if isinstance(loop, HoldingSteppedLoop):
                 loop.release_acceptance()

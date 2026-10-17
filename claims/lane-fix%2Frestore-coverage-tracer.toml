@@ -1,7 +1,0 @@
-claim_id = "c1a25c2e83f9487d85618bb202ad9795"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "8d48ad458e5cbf987a6a6bf18081ea2a695b222d"
-branch = "fix/restore-coverage-tracer"
-scope = ["tests/test_process.py"]
-opened_commit = "7c29f74a9f235fe10c2e4d9572342612d4b4ccda"

@@ -35,6 +35,7 @@ flowchart LR
     subgraph internal["Internal network only"]
         Svc["Agent service<br/>verify user + app, policy (purpose table, /ki-abo, owner binding), route"]
         CLI["CLI route<br/>isolated claude -p, one profile"]
+        Relay["per-run relay (loopback)"]
         API["API route<br/>service tool loop"]
     end
     LLM["LiteLLM (edge)<br/>upstream keys, budgets, aliases"]
@@ -47,7 +48,8 @@ flowchart LR
     Svc --> API
     API -- "LiteLLM alias<br/>(per-app virtual key)" --> LLM
     LLM --> Up
-    CLI -- "capability token" --> MCP
+    CLI -- "tool calls, no capability" --> Relay
+    Relay -- "capability token" --> MCP
     API -- "capability token" --> MCP
     Svc -- "SSE events, GET /runs/{id}" --> App
 ```
@@ -510,7 +512,9 @@ SDK's default would have to be defeated.
 `Last-Event-ID` (`streamable_http.py:511-514`). No parameter disables it.
 
 **c3 The automatic GET stream.** After `initialized`, 2.3.0 opens a GET stream with
-its own reconnect (`streamable_http.py:224-273`). No parameter disables it. A hook
+its own reconnect (`streamable_http.py:224-273`). The inspected SDK's
+`handle_get_stream` returns immediately without a session ID, so the automatic
+GET applies only when a session ID exists. No parameter disables it. A hook
 failure inside a request task ends the whole transport task group.
 
 **c4 Logger names and what each logs.**
@@ -529,15 +533,17 @@ failure inside a request task ends the whole transport task group.
 
 **c5 The added dependencies.**
 
-- `mcp` 2.3.0 adds `mcp-types`, `opentelemetry-api`, `sse-starlette` and
-  `jsonschema` (fact 12 of #115). Its `httpx2` is locked only through the core's
+- `mcp` 2.3.0 adds four dependencies that are not locked: `mcp-types`,
+  `jsonschema`, `sse-starlette` and `python-multipart`. Fact 12 of #115 named
+  `opentelemetry-api` where `python-multipart` belongs. Its `httpx2` is locked only through the core's
   optional `api` extra (`anthropic`, `pyproject.toml:17-18`), not as a service
   dependency. 1.30.0 needs `httpx<1`, `httpx-sse` and `pydantic-settings`.
-- PyPI metadata of 2.3.0 (17.10.2026) lists, besides those: `anyio`, `httpx2`,
-  `pyjwt[crypto]`, `python-multipart`, `starlette`, `typing-inspection`, `uvicorn`,
+- PyPI metadata of 2.3.0 (17.10.2026) lists, besides those: `opentelemetry-api`,
+  `anyio`, `httpx2`, `pyjwt[crypto]`, `starlette`, `typing-inspection`, `uvicorn`,
   `pydantic` and `typing-extensions`. At `9b78f3a`, `uv.lock` has no package named
-  `jsonschema`, `python-multipart`, `sse-starlette` or `mcp`; `opentelemetry-api`
-  and the others named here are locked already.
+  `mcp-types`, `jsonschema`, `python-multipart`, `sse-starlette` or `mcp`;
+  `opentelemetry-api` (through FastAPI) and the others named here are locked
+  already.
 - The core already installs `httpx` 0.28.1 (`pyproject.toml:13`), with `httpcore`
   1.0.9 and `h11` 0.16.0 below it (`uv.lock`). The service imports none of them
   and declares none (`packages/agent-service/pyproject.toml:9-20`).
@@ -546,9 +552,11 @@ failure inside a request task ends the whole transport task group.
 `pydantic>=2.12.0` and `typing-extensions>=4.13.0`, with Python `>=3.10`; it
 lists no other dependency, so by its metadata it installs alone. `mcp` 2.3.0
 pins it with `mcp-types==2.3.0`. Whether it imports alone was not executed.
-Decision: not taken. Its metadata shows it is usable alone, but it supplies only
-message types for a profile of about seven messages, and the pin ties it to
-`mcp` 2.3.0's release.
+Decision: not taken. The pin inside `mcp` does not constrain a consumer that
+installs `mcp-types` alone, and its published metadata supports standalone use:
+envelope types, per-version validators and a protocol-version registry. HD1's own
+client needs about seven messages, and a dependency for them is not worth its
+maintenance.
 
 **c7 What the pinned CLI needs from the relay** (section "A1b-0c the CLI as an
 MCP client, no login", cells c1 to c9, claude 2.1.302).
@@ -563,7 +571,8 @@ MCP client, no login", cells c1 to c9, claude 2.1.302).
   body with 400 or 404.
 - `initialize` carries `protocolVersion` `2025-11-25`. If the server answers
   `2025-06-18` or `2025-03-26`, the CLI sends that version afterwards; with an
-  unknown version it stops and init reports the server `failed`.
+  unknown version (measured: `1999-01-01`) it stops and init reports the server
+  `failed`.
 - A plain `application/json` answer is accepted (`Accept: application/json,
   text/event-stream` on `POST`). A 202 with an empty body for
   `notifications/initialized` is accepted.
@@ -573,8 +582,8 @@ MCP client, no login", cells c1 to c9, claude 2.1.302).
 - After a 401 on every `POST` it stops after requests 1 and 2 and init reports
   `failed`.
 - An HTTP server config starts no process, and no `DELETE` and no
-  `notifications/cancelled` arrives at the end of the session, so the relay cannot
-  learn the session ended from the CLI.
+  `notifications/cancelled` arrives at the end of the session, so in the measured cases
+  (EOF on stdin, `SIGTERM`) the relay cannot learn the session ended from the CLI.
 
 **c8 The decision: HD1.** The service speaks a small JSON-only MCP profile itself,
 with no MCP SDK dependency.
@@ -583,9 +592,11 @@ with no MCP SDK dependency.
   `initialized`, `tools/list` and `tools/call`. Towards the CLI, the same plus
   `ping` and `cancelled`.
 - *Why not the SDK.* SDK 2.3.0 would need four of its behaviours defeated (c1 to
-  c4: its redirects, its SSE resumption, its GET stream and its logging) and it
+  c4: its redirects, its SSE resumption, its GET stream and its logging; the GET
+  stream applies only when a session ID exists, and HD1 allows a profile without one) and it
   would bring four new dependencies (c5). The relay's measured needs (c7) are met
-  by plain POST with JSON answers.
+  by plain POST with JSON answers, a 405 answer to the `GET`, and a JSON-RPC error
+  with status 200, or a 400 or 404, to `server/discover`.
 - *What it is built on.* The client uses `httpx`, the stack the core already
   installs. The service declares it directly with the core's range, because it
   imports it; `httpx2` would be a second HTTP stack that reaches the service only

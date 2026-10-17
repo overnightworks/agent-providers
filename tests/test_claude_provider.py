@@ -22,10 +22,12 @@ import pytest
 from provider_test_support import (
     A_RUNNER_FAILURE_CANARY,
     CLAUDE_MODEL_CATALOG_STDOUT,
+    DESTINATION_FAULTS,
     MCP_TOOL_NAMES,
     SAMPLE_TOOL_CATALOG,
     SECRET_ENV_KEYS,
     RunnerFailureWatch,
+    a_credential_destination_that_fails,
     assert_private_credential_child,
     drive_turn,
     fail_to_start_the_runner_thread,
@@ -4430,10 +4432,12 @@ def _a_claude_binary_missing_at(site: str, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(provider, "_unlink_quiet", lambda _path: None)
     if site == "acall-cli":
         return lambda: asyncio.run(_acall_cli("hello"))
+    if site == "mcp":
+        return lambda: asyncio.run(provider.acall_claude_with_mcp("hi", user_id="u-1"))
     return lambda: asyncio.run(acall_claude_with_mcp_stream(prompt="hi", user_id="u-1").__anext__())
 
 
-@pytest.mark.parametrize("site", ("require", "acall-cli", "mcp-stream"))
+@pytest.mark.parametrize("site", ("require", "acall-cli", "mcp", "mcp-stream"))
 def test_a_missing_claude_binary_raises_cli_unavailable(
     site: str, _no_tool_gate_open, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -4499,6 +4503,18 @@ def test_the_claude_private_home_raises_only_the_claude_family(
 
     assert not isinstance(raised.value, process.AgentCliUnavailableError)
     assert isinstance(raised.value.__cause__, process.AgentCliUnavailableError)
+
+
+@pytest.mark.parametrize("fault", DESTINATION_FAULTS)
+def test_a_credential_copy_that_cannot_be_written_raises_cli_unavailable(fault: str) -> None:
+    with a_credential_destination_that_fails(fault):
+        with pytest.raises(UnavailableError) as raised:
+            provider._claude_private_home()
+
+    assert type(raised.value) is CliUnavailableError
+    assert str(raised.value) == CLAUDE_CLI_UNAVAILABLE_DETAIL
+    assert isinstance(raised.value.__cause__, process.CliEnvironmentUnavailableError)
+    assert raised.value.__cause__.cause is process.CliEnvironmentCause.CREDENTIAL_COPY_NOT_WRITTEN
 
 
 def _probe_failing_with(error_class, message: str, alive: list[weakref.ref]):

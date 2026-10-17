@@ -161,9 +161,9 @@ def test_close_ends_idle_and_mid_head_connections_and_refuses_the_old_port() -> 
         get = standard(relay).replace_method("GET").encode()
         await mid_head.send(get + b"POST /mcp HTTP/1.1\r\nHost:")
         assert (await mid_head.answer()).status == HTTPStatus.METHOD_NOT_ALLOWED
-        await yield_until(lambda: len(relay_tasks()) == 2)
-        numbers = connection_numbers(relay_tasks())
-        assert len(set(numbers)) == 2
+        await yield_until(lambda: len(connection_numbers(relay_tasks())) == 2)
+        assert len(relay_tasks()) == 3
+        assert len(set(connection_numbers(relay_tasks()))) == 2
 
         await close_bounded(relay)
 

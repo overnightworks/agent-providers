@@ -308,7 +308,16 @@ def body_split_before_its_last_bytes(relay: Relay) -> tuple[bytes, bytes]:
     return partial_length_body(relay), b"x" * 97
 
 
-async def let_the_server_read_the_last_bytes_first(turns: int) -> None:
+def malformed_head_split(relay: Relay) -> tuple[bytes, bytes]:
+    request = post(relay, b"{}")
+    return request[:10], b"\x00" + request[10:]
+
+
+def invalid_chunk_framing_split(relay: Relay) -> tuple[bytes, bytes]:
+    return chunked_head(relay).encode(), b"zz\r\nabc\r\n"
+
+
+async def yield_turns(turns: int) -> None:
     for _ in range(turns):
         await asyncio.sleep(0)
 
@@ -321,6 +330,8 @@ async def let_the_server_read_the_last_bytes_first(turns: int) -> None:
     [
         pytest.param(head_split_before_its_last_bytes, HEAD_RECEIVE_SECONDS, id="head"),
         pytest.param(body_split_before_its_last_bytes, BODY_RECEIVE_SECONDS, id="body"),
+        pytest.param(malformed_head_split, HEAD_RECEIVE_SECONDS, id="malformed-head"),
+        pytest.param(invalid_chunk_framing_split, BODY_RECEIVE_SECONDS, id="invalid-chunk"),
     ],
 )
 def test_a_request_completed_in_the_turn_its_deadline_passes_never_reaches_the_owner(
@@ -335,8 +346,28 @@ def test_a_request_completed_in_the_turn_its_deadline_passes_never_reaches_the_o
         deadline = clock.now + window
         await parked_at(clock, deadline)
         await client.send(last)
-        await let_the_server_read_the_last_bytes_first(turns_before_the_clock_moves)
+        await yield_turns(turns_before_the_clock_moves)
         clock.advance_to(deadline)
+        assert await client.delivery() is Delivery.ABSENT
+        assert owner.requests == []
+
+    drive_stepped(scenario, owner)
+
+
+@pytest.mark.parametrize("turns_of_timer_cleanup", [3, 4, 5, 6])
+def test_the_body_deadline_counts_from_the_parsed_head_whatever_the_timer_cleanup_takes(
+    turns_of_timer_cleanup: int,
+) -> None:
+    owner = ScriptedOwner()
+
+    async def scenario(relay: Relay, clock: StepClock) -> None:
+        client = await RawClient.connect(port_of(relay))
+        await client.send(partial_length_body(relay)[: -len(b"abc")])
+        await yield_turns(turns_of_timer_cleanup)
+        clock.advance_to(BODY_RECEIVE_SECONDS + 1)
+        await yield_turns(turns_of_timer_cleanup)
+        clock.advance_to(2 * BODY_RECEIVE_SECONDS)
+        await client.send(b"x" * 100)
         assert await client.delivery() is Delivery.ABSENT
         assert owner.requests == []
 
@@ -431,7 +462,7 @@ def test_a_task_ending_mid_budget_does_not_renew_the_close_deadline() -> None:
         closing = asyncio.create_task(relay.close())
         deadline = clock.now + RELAY_CLOSE_SECONDS
         await parked_at(clock, deadline)
-        clock.advance_to(deadline / 2)
+        clock.advance(RELAY_CLOSE_SECONDS / 2)
         owner.release()
         await yield_until(lambda: connection_numbers(relay_tasks()) == [])
         await parked_at(clock, deadline)

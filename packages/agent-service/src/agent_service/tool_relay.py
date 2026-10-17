@@ -112,11 +112,15 @@ class _ReceiveDeadline:
     def expired(self) -> bool:
         return self._instant is not None and self._clock() >= self._instant
 
+    def arm(self) -> float:
+        if self._instant is None:
+            self._instant = self._clock() + self._seconds
+        return self._instant
+
     def start(self) -> None:
         if self._timer is None:
-            self._instant = self._clock() + self._seconds
             self._timer = asyncio.get_running_loop().create_task(
-                self._abort_at(self._instant), name=self._task_name
+                self._abort_at(self.arm()), name=self._task_name
             )
 
     async def stop(self) -> None:
@@ -235,8 +239,12 @@ class Relay:
         self, connection: h11.Connection, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> bool:
         try:
+            body_deadline = self._receive_deadline(BODY_RECEIVE_SECONDS, writer, "body")
             request = await self._read_head(
-                connection, reader, self._receive_deadline(HEAD_RECEIVE_SECONDS, writer, "head")
+                connection,
+                reader,
+                self._receive_deadline(HEAD_RECEIVE_SECONDS, writer, "head"),
+                body_deadline,
             )
             if request is None:
                 return False
@@ -244,9 +252,7 @@ class Relay:
                 return await self._refuse(connection, writer, request, status)
             if _declared_length(request) > MAX_EVENT_BYTES:
                 raise _Refusal(HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
-            body = await self._read_body(
-                connection, reader, self._receive_deadline(BODY_RECEIVE_SECONDS, writer, "body")
-            )
+            body = await self._read_body(connection, reader, body_deadline)
         except _Refusal as refusal:
             await self._answer(connection, writer, _empty(refusal.status), closing=True)
             return False
@@ -290,26 +296,33 @@ class Relay:
     async def _next_event(
         self, connection: h11.Connection, reader: asyncio.StreamReader, deadline: _ReceiveDeadline
     ) -> h11.Event | type[h11.NEED_DATA] | None:
-        while True:
+        while not deadline.expired:
             try:
                 event = connection.next_event()
             except h11.RemoteProtocolError as refusal:
                 raise _Refusal(HTTPStatus(refusal.error_status_hint)) from None
             if event is not h11.NEED_DATA:
-                return None if deadline.expired else event
+                return event
             chunk = await reader.read(RECEIVE_CHUNK_BYTES)
             if not chunk:
                 return None
             deadline.start()
             connection.receive_data(chunk)
+        return None
 
     async def _read_head(
-        self, connection: h11.Connection, reader: asyncio.StreamReader, deadline: _ReceiveDeadline
+        self,
+        connection: h11.Connection,
+        reader: asyncio.StreamReader,
+        deadline: _ReceiveDeadline,
+        body_deadline: _ReceiveDeadline,
     ) -> h11.Request | None:
         if connection.trailing_data[0]:
             deadline.start()
         try:
             event = await self._next_event(connection, reader, deadline)
+            if isinstance(event, h11.Request):
+                body_deadline.arm()
         finally:
             await deadline.stop()
         return event if isinstance(event, h11.Request) else None

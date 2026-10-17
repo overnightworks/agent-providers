@@ -1379,7 +1379,9 @@ def _stray_only_at_the_clock(step: _Step) -> BaseException:
     ("failing", "breaks"),
     [
         pytest.param(
-            frozenset({_Step.RECORD_END}), _cancelled_after_passing_a_step, id="record_end"
+            frozenset({_Step.RECORD_END}),
+            _cancelled_after_passing_a_step,
+            id="record_end",
         ),
         pytest.param(
             frozenset({_Step.DISCONNECT_REPORT, _Step.RECORD_END}),
@@ -1408,7 +1410,7 @@ async def test_a_propagated_stray_cancellation_keeps_no_frame_of_the_step_it_lef
     del drive, records, closer
     gc.collect()
 
-    assert propagated is not None
+    assert type(propagated) is RunStepCancelled
     assert not _reaches_a_frame_of(propagated, _a_step_cancelled_unasked)
 
 

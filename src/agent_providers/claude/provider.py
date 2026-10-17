@@ -808,8 +808,8 @@ def _cli_arguments(
 
 
 def _mcp_tool_prefix(server_name: str) -> str:
-    """The CLI namespaces an MCP tool as ``mcp__<server>__<tool>``; a spec
-    carries the bare names its server registers."""
+    """The CLI namespaces an MCP tool as ``mcp__<server>__<tool>``; the server
+    registers the bare tool names."""
     return f"mcp__{server_name}__"
 
 

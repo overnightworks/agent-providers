@@ -12,7 +12,7 @@ from pydantic import SecretStr
 from agent_client.wire import TurnMessage, TurnRole
 from agent_providers.claude.provider import ClaudeRun
 from agent_providers.config import reset_config
-from agent_providers.spawn import ChildProcessSpecificationError
+from agent_providers.spawn import INHERITED_MACHINE_VARIABLES, ChildProcessSpecificationError
 
 CANARY_MARKER = "canary-" + uuid.uuid4().hex
 CANARY_TOKEN = "sk-ant-oat01-" + CANARY_MARKER
@@ -24,6 +24,23 @@ HISTORY = (
     TurnMessage(role=TurnRole.ASSISTANT, text="b"),
     TurnMessage(role=TurnRole.USER, text="c"),
 )
+
+
+HISTORY_STDIN_LINE = (
+    json.dumps(
+        {
+            "type": "user",
+            "message": {"role": "user", "content": "User: a\n\nAssistant: b\n\nUser: c"},
+        }
+    ).encode()
+    + b"\n"
+)
+
+
+@pytest.fixture
+def no_ambient_machine_variables(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in INHERITED_MACHINE_VARIABLES:
+        monkeypatch.delenv(name, raising=False)
 
 
 def a_run(tmp_path: Path, **overrides: object) -> ClaudeRun:
@@ -107,10 +124,8 @@ def test_the_token_is_in_no_argument_and_not_in_stdin(tmp_path: Path, relay: boo
 
 
 def test_the_environment_is_the_closed_one_plus_the_token_and_the_switches(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_ambient_machine_variables: None
 ) -> None:
-    for name in ("HOME", "PATH", "HTTPS_PROXY", "LANG"):
-        monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("HOME", OPERATOR_HOME)
     monkeypatch.setenv("PATH", "/usr/bin")
     monkeypatch.setenv("HTTPS_PROXY", "http://proxy:3128")
@@ -142,7 +157,7 @@ def test_a_run_builds_with_no_runtime_configuration_installed(tmp_path: Path) ->
     run = a_run(tmp_path)
 
     assert run.child().arguments == expected_arguments(tmp_path)
-    assert run.stdin_message().endswith(b"\n")
+    assert run.stdin_message() == HISTORY_STDIN_LINE
 
 
 def test_the_token_and_the_history_stay_out_of_every_repr(tmp_path: Path) -> None:
@@ -195,17 +210,7 @@ def test_fewer_than_one_tool_call_is_refused(tmp_path: Path, tool_calls: int) ->
 
 
 def test_the_history_is_one_transcript_line_in_order(tmp_path: Path) -> None:
-    expected = (
-        json.dumps(
-            {
-                "type": "user",
-                "message": {"role": "user", "content": "User: a\n\nAssistant: b\n\nUser: c"},
-            }
-        ).encode()
-        + b"\n"
-    )
-
-    assert a_run(tmp_path).stdin_message() == expected
+    assert a_run(tmp_path).stdin_message() == HISTORY_STDIN_LINE
 
 
 def test_the_system_text_is_in_neither_the_arguments_nor_the_stdin(tmp_path: Path) -> None:

@@ -1,8 +1,0 @@
-claim_id = "34a5672abfd0460cbdb0920890a6bb59"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "ea4e37cef009002d0d1714e26bcffcde16ea71a0"
-branch = "claude/issue-120-claude-stream-blocks"
-scope = ["README.md", "src/agent_providers/claude/adapter.py", "src/agent_providers/claude/provider.py", "tests/test_claude_adapter.py", "tests/test_claude_provider.py", "tests/test_claude_provider_streaming.py"]
-opened_commit = "767e76c0982968984ddb3a73c480a9472a5a70cd"
-whole_reason = "One rule, an error result never ends as a success, in its one decider for the stream and the non-stream Claude turn, plus the adapter branch that reports a refused login honestly; each test module pins its own layer."

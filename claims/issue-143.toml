@@ -1,0 +1,8 @@
+claim_id = "ea9316cc46a2444e9697655a5fdadac5"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "0fd92e1a42387826310692e38d02750f17291dbe"
+branch = "claude/issue-143-a1b-9b1-upstream-client-discovery-und-au"
+scope = [".github/workflows/ci.yml", "AGENTS.md", "README.md", "packages/agent-service/pyproject.toml", "packages/agent-service/src/agent_service/app_tools.py", "packages/agent-service/src/agent_service/mcp_wire.py", "tests/mcp_app_fake.py", "tests/test_service_app_tools.py", "tests/wheel_smoke/app_tools_discovery.py", "uv.lock"]
+opened_commit = "ed0896109e09ce9073135caad9f4a64e55e383ed"
+whole_reason = "One upstream client slice: the module, its dependency and lock line, its fake and tests, and the CI smoke that proves the installed wheels; the files only make sense together and each is a few lines apart from the module and its tests. The TLS fixture dominates the work."

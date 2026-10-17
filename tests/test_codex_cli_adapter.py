@@ -5,12 +5,17 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import shlex
+import signal
 import threading
 import time
 import traceback
 from collections.abc import Callable
+from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 from PIL import Image
@@ -22,6 +27,8 @@ from provider_test_support import (
     DEEPLY_NESTED_JSON,
     SAMPLE_TOOL_CATALOG,
     CallerCanaryError,
+    FailingLogHandler,
+    RaisingLogHandler,
     RunnerFailureWatch,
     a_call_nested_too_deeply_to_decode,
     a_call_to_an_undeclared_tool_carrying,
@@ -30,9 +37,11 @@ from provider_test_support import (
     assert_the_canary_reaches_only_the_host,
     drive_turn,
     exception_chain,
+    fail_to_start_the_runner_thread,
     formatted_log_text,
     override_provider_runtime,
     override_turn_runtime,
+    shell_child,
     traceback_frames_hold,
     use_codex_process_pool,
 )
@@ -247,6 +256,7 @@ def _image_runner(
             create_artifacts(codex_home)
         kwargs["on_spawned"](1)
         kwargs["on_reaped"](1, False)
+        kwargs["stdout_line_channel"]._close(outcome)
         return outcome
 
     return run_cli_bounded
@@ -622,6 +632,7 @@ def _generated_png_runner() -> object:
         outcome = _outcome(stdout=_MEASURED_STREAM)
         kwargs["on_spawned"](1)
         kwargs["on_reaped"](1, False)
+        kwargs["stdout_line_channel"]._close(outcome)
         return outcome
 
     return run_cli_bounded
@@ -874,14 +885,26 @@ def _streaming_runner(events: _StreamedEvents, state: dict[str, bool]):
         state["aborted"] = abort_observed.wait(timeout=1)
         kwargs["on_reaped"](2468, False)
         state["reaped"] = True
-        return _outcome(stdout=b"".join(map(_stdout_line, streamed)).decode())
+        outcome = _outcome(stdout=b"".join(map(_stdout_line, streamed)).decode())
+        channel._close(outcome)
+        return outcome
 
     return run_cli_bounded
 
 
-def _generate_cover(prompt: str = "prompt") -> bytes:
+_DEFAULT_COVER_SECONDS = 30
+
+
+def _generate_cover(
+    prompt: str = "prompt",
+    deadline: float | None = None,
+    abort_signal: threading.Event | None = None,
+) -> bytes:
     return codex_image.generate_codex_image(
-        prompt, policy=A_COVER_POLICY, deadline=10_000_000,
+        prompt,
+        policy=A_COVER_POLICY,
+        deadline=time.monotonic() + _DEFAULT_COVER_SECONDS if deadline is None else deadline,
+        abort_signal=abort_signal,
     )
 
 
@@ -895,6 +918,380 @@ def _warnings(caplog) -> list[str]:
 
 def _types_line(tokens: tuple[str, ...]) -> str:
     return "types=[" + ", ".join(tokens) + "]"
+
+
+_TURN_SECONDS = 0.3
+_HANG_BOUND_SECONDS = 20
+_ALLOWANCE_SECONDS = 0.5
+_TINY_GRACE_SECONDS = 0.01
+
+
+@dataclass(frozen=True)
+class _CoverTurn:
+    value: bytes | None
+    error: BaseException | None
+    elapsed: float
+
+
+@dataclass(frozen=True)
+class _ImageTurnFrame:
+    process_pool: CodexProcessPool
+    working_root: Path
+    watch: RunnerFailureWatch
+    caplog: pytest.LogCaptureFixture
+
+    def drive(
+        self,
+        seconds: float,
+        *,
+        prompt: str = "prompt",
+        abort_signal: threading.Event | None = None,
+    ) -> _CoverTurn:
+        started_at = time.monotonic()
+        deadline = started_at + seconds
+        results: list[_CoverTurn] = []
+
+        def run() -> None:
+            value, error = None, None
+            try:
+                value = _generate_cover(prompt, deadline, abort_signal)
+            except BaseException as raised:
+                error = raised
+            results.append(_CoverTurn(value, error, time.monotonic() - started_at))
+
+        turn = threading.Thread(target=run, daemon=True)
+        turn.start()
+        turn.join(timeout=_HANG_BOUND_SECONDS)
+        assert not turn.is_alive(), "the image turn hung"
+        return results[0]
+
+    def assert_ended(
+        self,
+        turn: _CoverTurn,
+        *,
+        runner_steps: tuple[str, ...] = (),
+        reservations: int = 0,
+    ) -> None:
+        assert self.watch.reported_steps() == list(runner_steps)
+        assert self.process_pool.image_reservation_count() == reservations
+        assert list(self.working_root.iterdir()) == []
+        self.watch.assert_nothing_leaked(*(error for error in (turn.error,) if error))
+
+
+@pytest.fixture
+def image_turn(monkeypatch, caplog, capfd, tmp_path) -> _ImageTurnFrame:
+    process_pool = CodexProcessPool(maximum_processes=8, maximum_image_runs=1)
+    use_codex_process_pool(monkeypatch, process_pool)
+    working_root = tmp_path / "turn-homes"
+    working_root.mkdir()
+    override_provider_runtime(cli_working_directory_root=working_root)
+    return _ImageTurnFrame(
+        process_pool, working_root, RunnerFailureWatch(monkeypatch, caplog, capfd), caplog,
+    )
+
+
+def _the_child_plays(monkeypatch, script: str) -> None:
+    played = shell_child("-c", script)
+    monkeypatch.setattr(codex_image, "codex_child_process", lambda *_arguments, **_keywords: played)
+
+
+def _the_child_prints_then_sleeps(monkeypatch, events: list[dict]) -> None:
+    _the_child_plays(monkeypatch, f"printf %s {shlex.quote(_jsonl(events))}; exec sleep 10")
+
+
+def _settle_within_a_few_hundredths(monkeypatch) -> None:
+    monkeypatch.setattr(process, "CLI_TERMINATION_GRACE_SECONDS", _TINY_GRACE_SECONDS)
+    monkeypatch.setattr(process, "CLI_PROBE_CALLER_TIMEOUT_MARGIN_SECONDS", _TINY_GRACE_SECONDS)
+
+
+def _record_channels(monkeypatch) -> list[process.CliLineChannel]:
+    channels: list[process.CliLineChannel] = []
+
+    def build(maximum_lines: int) -> process.CliLineChannel:
+        channels.append(process.CliLineChannel(maximum_lines))
+        return channels[-1]
+
+    monkeypatch.setattr(codex_image, "CliLineChannel", build)
+    return channels
+
+
+@pytest.mark.parametrize(
+    "spawn_error",
+    (OSError(A_RUNNER_FAILURE_CANARY), BaseException(A_RUNNER_FAILURE_CANARY)),
+    ids=("os-error", "base-exception"),
+)
+def test_a_failed_spawn_ends_the_image_turn_with_a_cli_error(
+    monkeypatch, image_turn, spawn_error: BaseException,
+) -> None:
+    monkeypatch.setattr(process, "open_pipes", Mock(side_effect=spawn_error))
+    _the_child_plays(monkeypatch, ":")
+
+    turn = image_turn.drive(_TURN_SECONDS)
+
+    assert type(turn.error) is codex_image.CodexImageCliError
+    image_turn.assert_ended(turn)
+
+
+def test_a_channel_that_cannot_publish_is_ended_by_the_consumers_own_settle_instant(
+    monkeypatch, image_turn,
+) -> None:
+    _settle_within_a_few_hundredths(monkeypatch)
+    monkeypatch.setattr(
+        process.CliLineChannel, "_close", Mock(side_effect=RuntimeError(A_RUNNER_FAILURE_CANARY)),
+    )
+    _the_child_plays(monkeypatch, ":")
+
+    turn = image_turn.drive(_TURN_SECONDS)
+
+    assert type(turn.error) is codex_image.CodexImageTimeoutError
+    settle_instant = process.cli_settle_deadline(_TURN_SECONDS)
+    assert settle_instant <= turn.elapsed <= settle_instant + _ALLOWANCE_SECONDS
+    image_turn.assert_ended(turn, runner_steps=("close RuntimeError",))
+
+
+def test_a_channel_whose_publication_blocks_is_ended_by_the_consumers_own_settle_instant(
+    monkeypatch, image_turn,
+) -> None:
+    _settle_within_a_few_hundredths(monkeypatch)
+    channels = _record_channels(monkeypatch)
+    release_publication = threading.Event()
+    real_close = process.CliLineChannel._close
+
+    def close_once_released(channel, outcome):
+        release_publication.wait(timeout=_HANG_BOUND_SECONDS)
+        return real_close(channel, outcome)
+
+    monkeypatch.setattr(process.CliLineChannel, "_close", close_once_released)
+    _the_child_plays(monkeypatch, ":")
+    try:
+        turn = image_turn.drive(_TURN_SECONDS)
+    finally:
+        release_publication.set()
+
+    assert type(turn.error) is codex_image.CodexImageTimeoutError
+    settle_instant = process.cli_settle_deadline(_TURN_SECONDS)
+    assert settle_instant <= turn.elapsed <= settle_instant + _ALLOWANCE_SECONDS
+    image_turn.assert_ended(turn)
+    held = channels[0].receive(timeout=0)
+    assert isinstance(held, CliRunOutcome)
+    assert held.reason is CliRunReason.CLEANUP_OVERRAN
+
+
+def test_a_runner_thread_that_cannot_start_reports_by_class_through_a_failing_log_handler(
+    monkeypatch, image_turn, capfd,
+) -> None:
+    fail_to_start_the_runner_thread(monkeypatch, SystemExit(A_RUNNER_FAILURE_CANARY))
+    handler = FailingLogHandler()
+    library_logger = logging.getLogger("agent_providers")
+    library_logger.addHandler(handler)
+    _the_child_plays(monkeypatch, ":")
+    try:
+        turn = image_turn.drive(_TURN_SECONDS)
+        image_turn.watch.wait_for_the_runner_threads_to_end()
+    finally:
+        library_logger.removeHandler(handler)
+
+    assert type(turn.error) is codex_image.CodexImageCliError
+    assert len(handler.handled_records) == 2
+    image_turn.assert_ended(turn, runner_steps=("start SystemExit", "run SystemExit"))
+
+
+def test_a_failed_runner_whose_outcome_cannot_be_published_leaks_nothing_through_the_thread(
+    monkeypatch, image_turn,
+) -> None:
+    _settle_within_a_few_hundredths(monkeypatch)
+    fail_to_start_the_runner_thread(monkeypatch, SystemExit(A_RUNNER_FAILURE_CANARY))
+    monkeypatch.setattr(
+        process.CliLineChannel, "_close", Mock(side_effect=RuntimeError(A_RUNNER_FAILURE_CANARY)),
+    )
+    _the_child_plays(monkeypatch, ":")
+
+    turn = image_turn.drive(_TURN_SECONDS)
+
+    assert type(turn.error) is codex_image.CodexImageTimeoutError
+    image_turn.watch.wait_for_the_runner_threads_to_end()
+    image_turn.assert_ended(
+        turn,
+        runner_steps=(
+            "start SystemExit", "close RuntimeError", "run SystemExit", "publish RuntimeError",
+        ),
+    )
+
+
+def test_a_failed_runner_whose_report_raises_leaks_nothing_through_the_thread(
+    monkeypatch, image_turn,
+) -> None:
+    monkeypatch.setattr(
+        codex_protocol, "run_cli_bounded", Mock(side_effect=OSError(A_RUNNER_FAILURE_CANARY)),
+    )
+    handler = RaisingLogHandler([RuntimeError(A_RUNNER_FAILURE_CANARY)])
+    process_logger = logging.getLogger("agent_providers.process")
+    process_logger.addHandler(handler)
+    try:
+        turn = image_turn.drive(_TURN_SECONDS)
+        image_turn.watch.wait_for_the_runner_threads_to_end()
+    finally:
+        process_logger.removeHandler(handler)
+
+    assert type(turn.error) is codex_image.CodexImageCliError
+    image_turn.watch.assert_nothing_leaked(turn.error)
+
+
+@pytest.mark.parametrize(
+    "runner_error",
+    (OSError, BaseException, KeyboardInterrupt, SystemExit),
+    ids=("os-error", "base-exception", "keyboard-interrupt", "system-exit"),
+)
+def test_a_runner_that_raises_ends_the_image_turn_and_names_only_its_class(
+    monkeypatch, image_turn, runner_error: type[BaseException],
+) -> None:
+    monkeypatch.setattr(
+        codex_protocol, "run_cli_bounded", Mock(side_effect=runner_error(A_RUNNER_FAILURE_CANARY)),
+    )
+
+    turn = image_turn.drive(_TURN_SECONDS)
+
+    assert type(turn.error) is codex_image.CodexImageCliError
+    assert turn.elapsed < 1
+    image_turn.assert_ended(turn, runner_steps=(f"run {runner_error.__name__}",))
+
+
+def test_an_image_thread_that_cannot_start_abandons_its_reservation_and_raises_unchained(
+    monkeypatch, image_turn,
+) -> None:
+    fail_to_start_the_runner_thread(
+        monkeypatch, RuntimeError(A_RUNNER_FAILURE_CANARY), codex_image._run_codex_image_runner,
+    )
+
+    turn = image_turn.drive(_TURN_SECONDS)
+
+    assert type(turn.error) is codex_image.CodexImageCliError
+    assert turn.error.__cause__ is None
+    assert turn.error.__context__ is None
+    image_turn.assert_ended(turn)
+
+
+@pytest.mark.parametrize(
+    "control_flow",
+    (SystemExit(A_RUNNER_FAILURE_CANARY), KeyboardInterrupt(A_RUNNER_FAILURE_CANARY)),
+    ids=("system-exit", "keyboard-interrupt"),
+)
+def test_control_flow_from_an_image_thread_that_cannot_start_passes_after_abandoning_its_slot(
+    monkeypatch, image_turn, control_flow: BaseException,
+) -> None:
+    fail_to_start_the_runner_thread(monkeypatch, control_flow, codex_image._run_codex_image_runner)
+
+    turn = image_turn.drive(_TURN_SECONDS)
+
+    assert turn.error is control_flow
+    assert image_turn.process_pool.image_reservation_count() == 0
+    image_turn.watch.assert_nothing_leaked()
+
+
+def test_a_blocked_turn_returns_by_the_settle_instant_with_its_child_reaped(
+    monkeypatch, image_turn,
+) -> None:
+    _the_child_prints_then_sleeps(
+        monkeypatch, [*_THREAD_OPENING, _item_event("item.started", "command_execution")],
+    )
+
+    turn = image_turn.drive(_HANG_BOUND_SECONDS)
+    reservations_at_return = image_turn.process_pool.image_reservation_count()
+
+    assert reservations_at_return == 0
+    assert type(turn.error) is codex_image.ImageToolBlockedError
+    assert turn.elapsed < process.cli_settle_deadline(0)
+    assert [warning.split(" code=")[0] for warning in _warnings(image_turn.caplog)] == [
+        "Codex image tool rejected route=cli",
+    ]
+    image_turn.assert_ended(turn)
+
+
+def test_an_abort_signal_set_after_the_first_line_ends_the_turn_early(
+    monkeypatch, image_turn,
+) -> None:
+    abort_signal = threading.Event()
+    real_accept = codex_image._CodexImageEventGate.accept
+
+    def accept_then_abort(gate, line: bytes) -> None:
+        real_accept(gate, line)
+        abort_signal.set()
+
+    monkeypatch.setattr(codex_image._CodexImageEventGate, "accept", accept_then_abort)
+    _the_child_prints_then_sleeps(monkeypatch, _THREAD_OPENING[:1])
+
+    turn = image_turn.drive(_HANG_BOUND_SECONDS, abort_signal=abort_signal)
+
+    assert type(turn.error) is codex_image.CodexImageCliError
+    assert turn.elapsed < process.cli_settle_deadline(0)
+    image_turn.assert_ended(turn)
+
+
+def test_a_generated_image_is_returned_with_no_reservation_and_no_report(
+    monkeypatch, image_turn,
+) -> None:
+    monkeypatch.setattr(codex_protocol, "run_cli_bounded", _generated_png_runner())
+
+    turn = image_turn.drive(_TURN_SECONDS)
+
+    assert turn.error is None
+    assert turn.value is not None
+    assert turn.value.startswith(b"\x89PNG")
+    image_turn.assert_ended(turn)
+
+
+def test_a_child_that_outlasts_a_short_deadline_ends_the_turn_by_the_settle_instant(
+    monkeypatch, image_turn,
+) -> None:
+    _the_child_plays(monkeypatch, "exec sleep 10")
+
+    turn = image_turn.drive(_TURN_SECONDS)
+    reservations_at_return = image_turn.process_pool.image_reservation_count()
+
+    assert reservations_at_return == 0
+    assert type(turn.error) is codex_image.CodexImageTimeoutError
+    assert turn.elapsed <= process.cli_settle_deadline(_TURN_SECONDS) + _ALLOWANCE_SECONDS
+    image_turn.assert_ended(turn)
+
+
+def test_a_zombie_child_ends_the_turn_while_its_reservation_waits_for_the_background_reap(
+    monkeypatch, image_turn,
+) -> None:
+    release_background_reap = threading.Event()
+    real_background_reap = process._reap_in_background
+
+    def reap_once_released(child, on_reaped) -> None:
+        release_background_reap.wait(timeout=_HANG_BOUND_SECONDS)
+        os.killpg(child.pid, signal.SIGKILL)
+        real_background_reap(child, on_reaped)
+
+    monkeypatch.setattr(process, "_reap_process_group", lambda _child: True)
+    monkeypatch.setattr(process, "_reap_in_background", reap_once_released)
+    _the_child_plays(monkeypatch, "exec sleep 10")
+    try:
+        turn = image_turn.drive(_TURN_SECONDS)
+        held_at_return = image_turn.process_pool.image_reservation_count()
+    finally:
+        release_background_reap.set()
+
+    assert type(turn.error) is codex_image.CodexImageTimeoutError
+    assert held_at_return == 1
+    image_turn.assert_ended(turn)
+
+
+def test_a_prompt_that_cannot_be_encoded_is_refused_before_anything_is_reserved(
+    monkeypatch, image_turn,
+) -> None:
+    runner = Mock(side_effect=AssertionError("no runner may start"))
+    monkeypatch.setattr(codex_protocol, "run_cli_bounded", runner)
+    only_image_slot = image_turn.process_pool.reserve(CodexProcessKind.IMAGE)
+
+    turn = image_turn.drive(_TURN_SECONDS, prompt="a lone surrogate \ud800")
+
+    assert type(turn.error) is codex_image.CodexImageCliError
+    runner.assert_not_called()
+    image_turn.assert_ended(turn, reservations=1)
+    image_turn.process_pool.abandon_unspawned(only_image_slot)
 
 
 _WITH_IMAGE_GEN_ITEMS = [

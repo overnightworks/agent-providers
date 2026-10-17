@@ -233,7 +233,7 @@ class _BoundedRunState:
         return recorded
 
 
-class _StepFailures:
+class StepFailures:
     """The steps of a run that raised, kept by name and exception class only."""
 
     def __init__(self) -> None:
@@ -541,7 +541,7 @@ def run_cli_bounded(
     )
     state = _BoundedRunState()
     worker = threading.Thread(target=_run_cli_bounded, args=(state, child, request), daemon=True)
-    failures = _StepFailures()
+    failures = StepFailures()
     with failures.contained("start"):
         worker.start()
     if failures.failed("start"):
@@ -559,7 +559,7 @@ def run_cli_bounded(
 def _settle_unstarted_run(
     state: _BoundedRunState,
     request: _CliRunRequest,
-    failures: _StepFailures,
+    failures: StepFailures,
 ) -> CliRunOutcome:
     start_failure = failures.error_raised_by("start")
     with failures.contained("on_spawn_failed"):
@@ -585,7 +585,7 @@ def _settle_from_caller(
     request: _CliRunRequest,
     outcome: CliRunOutcome,
 ) -> CliRunOutcome:
-    failures = _StepFailures()
+    failures = StepFailures()
     settled = _settle(state, request.stdout_line_channel, outcome, failures)
     failures.report()
     failures.raise_control_flow()
@@ -596,7 +596,7 @@ def _settle(
     state: _BoundedRunState,
     channel: CliLineChannel | None,
     outcome: CliRunOutcome,
-    failures: _StepFailures,
+    failures: StepFailures,
 ) -> CliRunOutcome:
     if channel is not None:
         with failures.contained("close"):
@@ -639,7 +639,7 @@ def _run_cli_bounded(
     child: ChildProcess,
     request: _CliRunRequest,
 ) -> None:
-    failures = _StepFailures()
+    failures = StepFailures()
     started, prompt_file_path = _start_bounded_cli(child, request, failures)
     background_reap_process: PipedProcess | None = None
     if isinstance(started, CliRunOutcome):
@@ -660,7 +660,7 @@ def _run_cli_bounded(
 def _start_bounded_cli(
     child: ChildProcess,
     request: _CliRunRequest,
-    failures: _StepFailures,
+    failures: StepFailures,
 ) -> tuple[PipedProcess | CliRunOutcome, str | None]:
     prompt_file_path: str | None = None
     with failures.contained("spawn", reported=False):
@@ -692,7 +692,7 @@ def _spawn_failure_outcome(error: BaseException) -> CliRunOutcome:
 def _exchange_after_spawn(
     process: PipedProcess,
     request: _CliRunRequest,
-    failures: _StepFailures,
+    failures: StepFailures,
 ) -> _CliOutput:
     output = _CliOutput(
         bytearray(),
@@ -721,7 +721,7 @@ def _reaped_outcome(
     process: PipedProcess,
     output: _CliOutput,
     on_reaped: Callable[[int, bool], None] | None,
-    failures: _StepFailures,
+    failures: StepFailures,
 ) -> tuple[CliRunOutcome, bool]:
     became_zombie = _reap_or_hand_off(process, failures)
     if not became_zombie:
@@ -741,7 +741,7 @@ def _reaped_outcome(
     return outcome, became_zombie
 
 
-def _reap_or_hand_off(process: PipedProcess, failures: _StepFailures) -> bool:
+def _reap_or_hand_off(process: PipedProcess, failures: StepFailures) -> bool:
     """Reap the group; a reap that raises is handed to the background reap."""
     with failures.contained("reap"):
         return _reap_process_group(process)
@@ -757,7 +757,7 @@ def _reap_or_hand_off(process: PipedProcess, failures: _StepFailures) -> bool:
 def _outcome_after_prompt_file_cleanup(
     prompt_file_path: str | None,
     outcome: CliRunOutcome,
-    failures: _StepFailures,
+    failures: StepFailures,
 ) -> CliRunOutcome:
     if prompt_file_path is None:
         return outcome
@@ -1654,7 +1654,7 @@ def _reap_in_background(
     process: PipedProcess,
     on_reaped: Callable[[int, bool], None] | None,
 ) -> None:
-    failures = _StepFailures()
+    failures = StepFailures()
     with failures.contained("background reap of agent CLI process group"):
         while _process_group_exists(process.pid):
             process.poll()

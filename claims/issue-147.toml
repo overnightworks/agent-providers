@@ -1,7 +1,0 @@
-claim_id = "0e5dd29e766b4547a83be01e7817d312"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "d954fad1a5c92d83e23ebc153953776fbabafacb"
-branch = "claude/issue-147-a1b-0b1-setup-token-gemessen-angenommen"
-scope = ["docs/decisions/0001-agent-service.md"]
-opened_commit = "1111dbc8824419a58d8a7f7c18378976fb63e1ff"

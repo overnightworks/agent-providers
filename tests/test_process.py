@@ -25,13 +25,13 @@ import pytest
 from provider_test_support import (
     A_RUNNER_FAILURE_CANARY,
     ANOTHER_RUNNER_FAILURE_CANARY,
+    CREDENTIAL_FILE_BOUND_BYTES,
+    DESTINATION_FAULTS,
     GROK_LOGGED_IN,
     SECRET_ENV_KEYS,
     FailingLogHandler,
     RaisingLogHandler,
     RunnerFailureWatch,
-    CREDENTIAL_FILE_BOUND_BYTES,
-    DESTINATION_FAULTS,
     a_codex_login,
     a_credential_destination_that_fails,
     a_dangling_symlink,
@@ -2678,7 +2678,9 @@ def test_the_credential_reader_reads_the_opened_file_not_the_path_after_the_open
     assert process._read_credential_file(source) == b"the opened file"
 
 
-@pytest.mark.parametrize("size", (0, CREDENTIAL_FILE_BOUND_BYTES), ids=("empty", "exactly-the-bound"))
+@pytest.mark.parametrize(
+    "size", (0, CREDENTIAL_FILE_BOUND_BYTES), ids=("empty", "exactly-the-bound"),
+)
 def test_the_credential_reader_returns_a_plain_file_within_the_bound(
     tmp_path: Path, size: int,
 ) -> None:

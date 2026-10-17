@@ -85,6 +85,11 @@ class CodexTurnHome:
     codex_home: Path
 
 
+def codex_model_arguments(model: str | None) -> tuple[str, ...]:
+    """The ``--model`` pair for a chosen model; none for the CLI's own default."""
+    return () if model is None else ("--model", model)
+
+
 def codex_child_process(arguments: tuple[str, ...], turn_home: CodexTurnHome) -> ChildProcess:
     """Describe one Codex child around this turn's own private directories.
 

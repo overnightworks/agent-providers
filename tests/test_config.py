@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 from provider_test_support import CALLER_CONTEXTS, override_provider_runtime
+from pydantic import ValidationError
 
 from agent_providers.catalog import (
     ProviderRoute,
@@ -23,6 +24,7 @@ from agent_providers.config import (
     ProviderRuntimeAlreadyConfiguredError,
     ProviderRuntimeConfig,
     ProviderRuntimeNotConfiguredError,
+    TurnRuntimeConfig,
     TurnRuntimeNotConfiguredError,
     WorkingRootNotPrivateError,
     WorkingRootViolation,
@@ -62,6 +64,16 @@ def test_a_turn_under_a_catalog_only_configuration_fails_loudly(tmp_path: Path) 
 
     with pytest.raises(TurnRuntimeNotConfiguredError, match="catalog only"):
         current_turn_config()
+
+
+def test_turn_config_refuses_the_removed_chat_model() -> None:
+    sample_fields = current_turn_config().model_dump()
+
+    with pytest.raises(ValidationError) as refused:
+        TurnRuntimeConfig(**sample_fields, claude_chat_model="claude-opus-4-6")
+
+    assert [error["type"] for error in refused.value.errors()] == ["extra_forbidden"]
+    assert refused.value.errors()[0]["loc"] == ("claude_chat_model",)
 
 
 THE_ROOT_NAME = "canary-root-5d1e"

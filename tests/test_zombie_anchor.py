@@ -369,6 +369,7 @@ def test_a_failed_witness_duplication_leaves_no_zombie_and_no_open_pidfd(
     own_cell = Cell(tmp_path, session_anchor)
     pidfds_before = open_pidfds()
     children_before = child_pids()
+    anchor = own_cell.anchor()
 
     def exhausted(descriptor: int) -> int:
         raise OSError(errno.EMFILE, os.strerror(errno.EMFILE))
@@ -376,7 +377,7 @@ def test_a_failed_witness_duplication_leaves_no_zombie_and_no_open_pidfd(
     with monkeypatch.context() as exhausting:
         exhausting.setattr(os, "dup", exhausted)
         with pytest.raises(OSError, match="Too many open files"):
-            own_cell.start_child(own_cell.anchor())
+            own_cell.start_child(anchor)
     own_cell.close()
     session_anchor.finalize()
 

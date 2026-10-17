@@ -1,0 +1,8 @@
+claim_id = "f11304b05a5145c5bafe6596a669de23"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "13c0a4417f7d1c8dcfa7200a02382170fe5b66e7"
+branch = "claude/issue-128-private-working-root"
+scope = [".github/workflows/ci.yml", "AGENTS.md", "README.md", "src/agent_providers/config.py", "src/agent_providers/grok/transport.py", "src/agent_providers/sandbox/paths.py", "tests/conftest.py", "tests/test_catalog.py", "tests/test_codex_cli_adapter.py", "tests/test_config.py", "tests/test_grok_cli_adapter.py", "tests/test_process.py"]
+opened_commit = "165a7215f6021c6bacc785bcfdf171641ad73362"
+whole_reason = "One deployment contract: the private-root rule, the neutral names below that root and the guard that keeps them neutral land together; the five suite roots and the catalog test must turn private in the change that starts refusing them, and the guard's src pathspec can only land with the change that removes the last five src hits."

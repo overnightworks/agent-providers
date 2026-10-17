@@ -1,8 +1,0 @@
-claim_id = "d0d68a4b306a4bbe81e8bb85afe13b78"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "0b1c404425deec59a1281940933d84e46dead668"
-branch = "claude/issue-182-webauth-0-15"
-scope = ["docs/decisions/0001-agent-service.md", "packages/agent-service/pyproject.toml", "packages/agent-service/src/agent_service/app.py", "pyproject.toml", "tests/keycloak/requirements.in", "tests/keycloak/requirements.txt", "tests/service_support.py", "tests/test_service_admission.py", "tests/test_service_capability.py", "tests/test_service_entrance.py", "tests/test_service_keycloak.py", "tests/test_service_run_status.py", "uv.lock"]
-opened_commit = "228f022f00a23abadd90228fc7b6e779e340ffd9"
-whole_reason = "One dependency move: the pin, both locks, every import of the two moved names and the ADR sentence that names the old version must change together, because the old imports fail at 0.15.0 and the new ones fail at 0.13.0."

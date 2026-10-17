@@ -267,8 +267,9 @@ def test_closing_an_idle_relay_returns_and_refuses_the_old_port() -> None:  # L1
         (idle,) = await connect_idle(relay, 1)
         await close_bounded(relay)
         assert await idle.at_eof()
+        old_port = port_of(relay)
         with pytest.raises(ConnectionRefusedError):
-            await RawClient.connect(port_of(relay))
+            await RawClient.connect(old_port)
 
     drive_stepped(scenario)
 
@@ -299,8 +300,9 @@ def test_a_close_the_owner_outlasts_raises_the_incomplete_outcome_and_keeps_the_
         for text in (str(outcome), repr(outcome)):
             assert relay.access.secret not in text
             assert RUN_ID not in text
+        old_port = port_of(relay)
         with pytest.raises(ConnectionRefusedError):
-            await RawClient.connect(port_of(relay))
+            await RawClient.connect(old_port)
         assert len(connection_numbers(relay_tasks())) == 1
         assert len(relay_tasks()) == 1
 

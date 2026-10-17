@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from agent_client.capability import MCP_ENDPOINT_PATH
-from agent_client.wire import MAX_EVENT_BYTES
+from agent_client.wire import MAX_EVENT_BYTES, MAX_TOOL_INPUT_DEPTH
 from agent_service.mcp_wire import (
     ACKNOWLEDGEMENT,
     NON_TEXT_BLOCK_MESSAGE,
@@ -53,6 +53,13 @@ def body_of(document: object) -> bytes:
     return json.dumps(document).encode()
 
 
+def nested_in_an_array(depth: int) -> Any:
+    value: Any = 0
+    for _ in range(depth):
+        value = [value]
+    return value
+
+
 def refusal_of(action: Any, *arguments: Any) -> McpWireError:
     with pytest.raises(McpWireError) as caught:
         action(*arguments)
@@ -91,6 +98,21 @@ def test_a_message_parses_to_its_kind_and_encodes_to_the_same_document(
         {"jsonrpc": "2.0", "id": 1, "method": "ping", "extra": 1},
         {"jsonrpc": "2.0", "id": 1},
         {"jsonrpc": "2.0", "id": 1, "result": []},
+        {"id": 1, "method": "ping"},
+        {"id": 1, "result": {}},
+        {"jsonrpc": 2.0, "id": 1, "method": "ping"},
+        {"jsonrpc": "2.0", "id": 1.5, "method": "ping"},
+        {"jsonrpc": "2.0", "id": 1, "result": {}, "error": ERROR["error"]},
+        {"jsonrpc": "2.0", "id": 1, "method": "ping", "params": None},
+        {"jsonrpc": "2.0", "id": 1, "result": {"n": "\ud800"}},
+        {"jsonrpc": "2.0", "id": "\ud800", "method": "ping"},
+        {"jsonrpc": "2.0", "id": 1, "method": "\ud800"},
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "ping",
+            "params": {"p": nested_in_an_array(MAX_TOOL_INPUT_DEPTH)},
+        },
         "ping",
         3,
     ],
@@ -100,6 +122,16 @@ def test_a_message_parses_to_its_kind_and_encodes_to_the_same_document(
         "extra member",
         "no method",
         "result not object",
+        "no jsonrpc request",
+        "no jsonrpc response",
+        "jsonrpc not text",
+        "float id",
+        "result and error",
+        "null params",
+        "lone surrogate in result",
+        "lone surrogate in id",
+        "lone surrogate in method",
+        "params too deep",
         "text",
         "number",
     ],
@@ -204,7 +236,55 @@ def test_a_tool_result_without_content_is_refused_without_echo() -> None:
     refusal = refusal_of(read_tool_outcome, {"isError": SECRET})
 
     assert refusal.refusal is WireRefusal.INVALID_PAYLOAD
-    assert SECRET not in str(refusal)
+    assert SECRET not in str(refusal) + repr(refusal)
+    assert refusal.__cause__ is None
+    assert refusal.__context__ is None
+
+
+def test_a_number_that_overflows_to_infinity_is_not_accepted_as_a_message() -> None:
+    body = b'{"jsonrpc":"2.0","id":1,"method":"ping","params":{"n":1e999}}'
+
+    assert refusal_of(parse_message, body).refusal is WireRefusal.NOT_A_MESSAGE
+
+
+@pytest.mark.parametrize(
+    ("payload_type", "payload"),
+    [
+        (InitializeParams, {"protocol_version": "2025-11-25"}),
+        (ListToolsResult, {"tools": [{"name": "echo", "input_schema": {}}]}),
+        (CallToolParams, {"name": "echo", "arguments": {"a": float("inf")}}),
+        (ListToolsParams, {"cursor": "\ud800"}),
+    ],
+    ids=[
+        "snake-case protocol version",
+        "snake-case input schema",
+        "infinite argument",
+        "surrogate",
+    ],
+)
+def test_a_payload_member_read_by_its_python_name_or_not_json_is_refused(
+    payload_type: type, payload: dict[str, Any]
+) -> None:
+    assert refusal_of(read_payload, payload_type, payload).refusal is WireRefusal.INVALID_PAYLOAD
+
+
+@pytest.mark.parametrize(
+    "block",
+    [{"type": "text", "text": 5}, {"type": "text"}, {"type": "text", "text": "\ud800"}],
+    ids=["number text", "no text", "surrogate text"],
+)
+def test_a_malformed_text_block_is_refused_not_read_as_another_kind(block: dict[str, Any]) -> None:
+    refusal = refusal_of(read_tool_outcome, {"content": [block]})
+
+    assert refusal.refusal is WireRefusal.INVALID_PAYLOAD
+
+
+def test_members_sent_under_their_python_names_are_not_read() -> None:
+    page = read_payload(ListToolsResult, {"tools": [], "next_cursor": "c2"})
+    outcome = read_tool_outcome({"content": [{"type": "text", "text": "x"}], "is_error": True})
+
+    assert page.next_cursor is None
+    assert outcome == ToolOutcome("x", False)
 
 
 @pytest.mark.parametrize(
@@ -214,8 +294,19 @@ def test_a_tool_result_without_content_is_refused_without_echo() -> None:
         f'{{"jsonrpc": "2.0", "id": NaN, "method": "{SECRET}"}}'.encode(),
         b"\xff\xfe" + SECRET.encode(),
         b"",
+        b'{"jsonrpc":"1.0","jsonrpc":"2.0","id":1,"method":"ping"}',
+        b'{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"a":{"b":1,"b":2}}}',
+        b"[" * 20000,
     ],
-    ids=["truncated", "non-json constant", "not utf-8", "empty"],
+    ids=[
+        "truncated",
+        "non-json constant",
+        "not utf-8",
+        "empty",
+        "duplicate member",
+        "nested duplicate member",
+        "too deep to decode",
+    ],
 )
 def test_malformed_json_gives_a_closed_error_that_echoes_nothing(body: bytes) -> None:
     refusal = refusal_of(parse_message, body)
@@ -233,6 +324,9 @@ def test_a_body_over_the_event_bound_is_refused_and_one_at_the_bound_is_read() -
     assert len(at_bound) == MAX_EVENT_BYTES
     assert isinstance(parse_message(at_bound), JsonRpcNotification)
     assert refusal_of(parse_message, at_bound + b" ").refusal is WireRefusal.TOO_LARGE
+    assert (
+        refusal_of(parse_message, b"\xff" * (MAX_EVENT_BYTES + 1)).refusal is WireRefusal.TOO_LARGE
+    )
 
 
 @pytest.mark.parametrize(
@@ -301,7 +395,9 @@ def test_a_notification_is_answered_with_202_and_no_body() -> None:
     require_acknowledgement(202, b"")
 
 
-@pytest.mark.parametrize(("status", "body"), [(200, b""), (202, b"{}"), (204, b""), (400, b"")])
+@pytest.mark.parametrize(
+    ("status", "body"), [(200, b""), (202, b"{}"), (202, b" "), (204, b""), (400, b"")]
+)
 def test_a_notification_answer_other_than_202_with_an_empty_body_is_refused(
     status: int, body: bytes
 ) -> None:

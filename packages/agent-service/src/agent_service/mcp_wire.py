@@ -21,21 +21,21 @@ from enum import StrEnum
 from http import HTTPStatus
 from typing import Annotated, Any, Final, Literal, NoReturn, Self
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, ValidationError
 from pydantic.alias_generators import to_camel
 
-from agent_client.wire import MAX_EVENT_BYTES, UnicodeText, refuse_non_json_constant
+from agent_client.wire import MAX_EVENT_BYTES, JsonObject, UnicodeText, refuse_non_json_constant
 from agent_providers.errors import raise_without_chain
 
 JSON_MEDIA_TYPE: Final = "application/json"
 EVENT_STREAM_MEDIA_TYPE: Final = "text/event-stream"
 PROTOCOL_VERSION_HEADER: Final = "MCP-Protocol-Version"
-ASSUMED_PROTOCOL_VERSION: Final = "2025-03-26"
-SERVER_NAME: Final = "agent-service"
-SERVER_VERSION: Final = "1"
-JSON_RPC_VERSION: Final = "2.0"
+_ASSUMED_PROTOCOL_VERSION: Final = "2025-03-26"
+_SERVER_NAME: Final = "agent-service"
+_SERVER_VERSION: Final = "1"
+_JSON_RPC_VERSION: Final = "2.0"
 NON_TEXT_BLOCK_MESSAGE: Final = "the tool returned content that is not text"
-TEXT_BLOCK_SEPARATOR: Final = "\n"
+_TEXT_BLOCK_SEPARATOR: Final = "\n"
 
 
 class ProtocolVersion(StrEnum):
@@ -45,7 +45,7 @@ class ProtocolVersion(StrEnum):
 
 
 SUPPORTED_PROTOCOL_VERSIONS: Final = frozenset(ProtocolVersion)
-LATEST_PROTOCOL_VERSION: Final = ProtocolVersion.V2025_11_25
+_LATEST_PROTOCOL_VERSION: Final = ProtocolVersion.V2025_11_25
 
 
 class McpMethod(StrEnum):
@@ -85,7 +85,12 @@ def _refuse(refusal: WireRefusal) -> NoReturn:
 
 class _Model(BaseModel):
     model_config = ConfigDict(
-        frozen=True, strict=True, extra="forbid", alias_generator=to_camel, populate_by_name=True
+        frozen=True,
+        strict=True,
+        extra="forbid",
+        alias_generator=to_camel,
+        validate_by_name=True,
+        validate_by_alias=True,
     )
 
 
@@ -95,26 +100,23 @@ class _Tolerant(_Model):
     model_config = ConfigDict(extra="ignore")
 
 
-type RequestId = int | str
+type RequestId = int | UnicodeText
 
 
 class JsonRpcRequest(_Model):
-    jsonrpc: Literal["2.0"] = JSON_RPC_VERSION
     id: RequestId
-    method: str
-    params: dict[str, Any] | None = None
+    method: UnicodeText
+    params: JsonObject = Field(default_factory=dict)
 
 
 class JsonRpcNotification(_Model):
-    jsonrpc: Literal["2.0"] = JSON_RPC_VERSION
-    method: str
-    params: dict[str, Any] | None = None
+    method: UnicodeText
+    params: JsonObject = Field(default_factory=dict)
 
 
 class JsonRpcResponse(_Model):
-    jsonrpc: Literal["2.0"] = JSON_RPC_VERSION
     id: RequestId
-    result: dict[str, Any]
+    result: JsonObject
 
 
 class JsonRpcErrorBody(_Model):
@@ -123,14 +125,20 @@ class JsonRpcErrorBody(_Model):
 
 
 class JsonRpcError(_Model):
-    jsonrpc: Literal["2.0"] = JSON_RPC_VERSION
     id: RequestId | None
     error: JsonRpcErrorBody
 
 
 type JsonRpcMessage = JsonRpcRequest | JsonRpcNotification | JsonRpcResponse | JsonRpcError
-type JsonArray[Item] = Annotated[tuple[Item, ...], Field(strict=False)]
+type _JsonArray[Item] = Annotated[tuple[Item, ...], Field(strict=False)]
 type Reply = JsonRpcResponse | JsonRpcError
+
+
+def _object_without_duplicate_members(members: list[tuple[str, Any]]) -> dict[str, Any]:
+    document = dict(members)
+    if len(document) != len(members):
+        raise ValueError("an object repeats a member")
+    return document
 
 
 def _model_of(document: dict[str, Any]) -> type[JsonRpcMessage]:
@@ -147,22 +155,26 @@ def parse_message(body: bytes) -> JsonRpcMessage:
     if len(body) > MAX_EVENT_BYTES:
         _refuse(WireRefusal.TOO_LARGE)
     try:
-        document = json.loads(body.decode("utf-8"), parse_constant=refuse_non_json_constant)
+        document = json.loads(
+            body.decode("utf-8"),
+            parse_constant=refuse_non_json_constant,
+            object_pairs_hook=_object_without_duplicate_members,
+        )
     except (ValueError, RecursionError):
         _refuse(WireRefusal.MALFORMED_JSON)
     if isinstance(document, list):
         _refuse(WireRefusal.BATCH)
-    if not isinstance(document, dict):
+    if not isinstance(document, dict) or document.pop("jsonrpc", None) != _JSON_RPC_VERSION:
         _refuse(WireRefusal.NOT_A_MESSAGE)
     try:
-        return _model_of(document).model_validate(document)
+        return _model_of(document).model_validate(document, by_name=False)
     except ValidationError:
         _refuse(WireRefusal.NOT_A_MESSAGE)
 
 
 def encode_message(message: JsonRpcMessage) -> bytes:
     members = message.model_dump(mode="json", by_alias=True, exclude_unset=True)
-    return json.dumps({"jsonrpc": JSON_RPC_VERSION, **members}).encode("utf-8")
+    return json.dumps({"jsonrpc": _JSON_RPC_VERSION, **members}).encode("utf-8")
 
 
 @dataclass(frozen=True)
@@ -183,7 +195,7 @@ def answer_for(reply: Reply | None) -> HttpAnswer:
 
 
 def require_acknowledgement(status: int, body: bytes) -> None:
-    if status != HTTPStatus.ACCEPTED or body:
+    if (status, body) != (ACKNOWLEDGEMENT.status, ACKNOWLEDGEMENT.body):
         _refuse(WireRefusal.NOT_ACKNOWLEDGED)
 
 
@@ -202,7 +214,7 @@ def negotiate_protocol_version(requested: str) -> ProtocolVersion:
     """A requested version inside the set is kept; any other gets the latest one."""
     if requested in SUPPORTED_PROTOCOL_VERSIONS:
         return ProtocolVersion(requested)
-    return LATEST_PROTOCOL_VERSION
+    return _LATEST_PROTOCOL_VERSION
 
 
 def require_supported_version(offered: str) -> ProtocolVersion:
@@ -214,7 +226,7 @@ def require_supported_version(offered: str) -> ProtocolVersion:
 
 def protocol_header_status(header_value: str | None) -> HTTPStatus:
     """The relay's decision for a request after ``initialize``; an absent header is not a pass."""
-    effective = ASSUMED_PROTOCOL_VERSION if header_value is None else header_value
+    effective = _ASSUMED_PROTOCOL_VERSION if header_value is None else header_value
     if effective in SUPPORTED_PROTOCOL_VERSIONS:
         return HTTPStatus.OK
     return HTTPStatus.BAD_REQUEST
@@ -235,32 +247,32 @@ def read_payload[Payload: _Model](
     payload_type: type[Payload], payload: Mapping[str, Any] | None
 ) -> Payload:
     try:
-        return payload_type.model_validate({} if payload is None else dict(payload))
+        return payload_type.model_validate({} if payload is None else dict(payload), by_name=False)
     except ValidationError:
         _refuse(WireRefusal.INVALID_PAYLOAD)
 
 
 class InitializeParams(_Tolerant):
-    protocol_version: str
+    protocol_version: UnicodeText
 
 
-class ServerInfo(_Model):
-    name: str = SERVER_NAME
-    version: str = SERVER_VERSION
+class _ServerInfo(_Model):
+    name: str = _SERVER_NAME
+    version: str = _SERVER_VERSION
 
 
-class ToolsCapability(_Model):
+class _ToolsCapability(_Model):
     list_changed: bool = False
 
 
-class ServerCapabilities(_Model):
-    tools: ToolsCapability = ToolsCapability()
+class _ServerCapabilities(_Model):
+    tools: _ToolsCapability = _ToolsCapability()
 
 
-class InitializeResult(_Model):
+class _InitializeResult(_Model):
     protocol_version: ProtocolVersion
-    capabilities: ServerCapabilities = ServerCapabilities()
-    server_info: ServerInfo = ServerInfo()
+    capabilities: _ServerCapabilities = _ServerCapabilities()
+    server_info: _ServerInfo = _ServerInfo()
 
     @classmethod
     def negotiated(cls, requested: str) -> Self:
@@ -268,41 +280,47 @@ class InitializeResult(_Model):
 
 
 def initialize_response(request_id: RequestId, requested_version: str) -> JsonRpcResponse:
-    result = InitializeResult.negotiated(requested_version)
+    result = _InitializeResult.negotiated(requested_version)
     return JsonRpcResponse(id=request_id, result=result.model_dump(mode="json", by_alias=True))
 
 
 class ListToolsParams(_Tolerant):
-    cursor: str | None = None
+    cursor: UnicodeText | None = None
 
 
 class ToolDefinition(_Tolerant):
     name: UnicodeText
     description: UnicodeText | None = None
-    input_schema: dict[str, Any]
+    input_schema: JsonObject
 
 
 class ListToolsResult(_Tolerant):
-    tools: JsonArray[ToolDefinition]
-    next_cursor: str | None = None
+    tools: _JsonArray[ToolDefinition]
+    next_cursor: UnicodeText | None = None
 
 
 class CallToolParams(_Tolerant):
     name: UnicodeText
-    arguments: dict[str, Any] = Field(default_factory=dict)
+    arguments: JsonObject = Field(default_factory=dict)
 
 
-class TextBlock(_Tolerant):
+class _TextBlock(_Tolerant):
     type: Literal["text"]
     text: UnicodeText
 
 
-class OtherBlock(_Tolerant):
-    type: str
+def _refuse_text_type(block_type: str) -> str:
+    if block_type == "text":
+        raise ValueError("a text block that is malformed is not a block of another type")
+    return block_type
 
 
-class CallToolResult(_Tolerant):
-    content: JsonArray[Annotated[TextBlock | OtherBlock, Field(union_mode="left_to_right")]]
+class _OtherBlock(_Tolerant):
+    type: Annotated[UnicodeText, AfterValidator(_refuse_text_type)]
+
+
+class _CallToolResult(_Tolerant):
+    content: _JsonArray[Annotated[_TextBlock | _OtherBlock, Field(union_mode="left_to_right")]]
     is_error: bool = False
 
 
@@ -314,8 +332,8 @@ class ToolOutcome:
 
 def read_tool_outcome(result: Mapping[str, Any]) -> ToolOutcome:
     """What a model is shown of a ``tools/call`` result: its text blocks, joined."""
-    called = read_payload(CallToolResult, result)
-    if not all(isinstance(block, TextBlock) for block in called.content):
+    called = read_payload(_CallToolResult, result)
+    if not all(isinstance(block, _TextBlock) for block in called.content):
         return ToolOutcome(NON_TEXT_BLOCK_MESSAGE, is_error=True)
-    texts = (block.text for block in called.content if isinstance(block, TextBlock))
-    return ToolOutcome(TEXT_BLOCK_SEPARATOR.join(texts), called.is_error)
+    texts = (block.text for block in called.content if isinstance(block, _TextBlock))
+    return ToolOutcome(_TEXT_BLOCK_SEPARATOR.join(texts), called.is_error)

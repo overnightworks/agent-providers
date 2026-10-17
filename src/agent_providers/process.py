@@ -604,13 +604,15 @@ def run_cli_bounded(
     worker = ClaimedStartThread(
         target=_run_cli_bounded, args=(state, child, request), daemon=True
     )
-    failures = StepFailures()
-    with failures.contained("start"):
+    start_failure: BaseException | None = None
+    try:
         worker.start()
-    if failures.failed("start"):
+    except BaseException as error:
         if not worker.take_start_claim():
-            raise failures.error_raised_by("start")
-        return _settle_unstarted_run(state, request, failures)
+            raise
+        start_failure = error
+    if start_failure is not None:
+        return _settle_unstarted_run(state, request, start_failure)
     if state.completed.wait(timeout=max(request.deadline - time.monotonic(), 0)):
         return _recorded_outcome(state)
     if not state.started.is_set():
@@ -624,9 +626,11 @@ def run_cli_bounded(
 def _settle_unstarted_run(
     state: _BoundedRunState,
     request: _CliRunRequest,
-    failures: StepFailures,
+    start_failure: BaseException,
 ) -> CliRunOutcome:
-    start_failure = failures.error_raised_by("start")
+    failures = StepFailures()
+    with failures.contained("start"):
+        raise start_failure
     with failures.contained("on_spawn_failed"):
         _notify_spawn_failed(request.on_spawn_failed)
     outcome = _settle(

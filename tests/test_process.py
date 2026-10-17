@@ -4714,6 +4714,15 @@ def _returned_or_raised(call: Callable[[], object]) -> object:
         return raised
 
 
+def _returned_or_raised_within_bound(call: Callable[[], object]) -> object:
+    results: list[object] = []
+    caller = threading.Thread(target=lambda: results.append(_returned_or_raised(call)), daemon=True)
+    caller.start()
+    caller.join(timeout=5)
+    assert not caller.is_alive(), "the call never returned"
+    return results[0]
+
+
 def _with_recorded_calls(callbacks: dict) -> tuple[dict, list[str]]:
     calls: list[str] = []
 
@@ -4773,6 +4782,7 @@ def test_a_start_that_raises_while_the_worker_waits_leaves_the_runner_the_owner(
 
     if propagates:
         assert result is error
+        assert (error.__context__, error.__cause__) == (None, None)
     else:
         assert isinstance(result, CliRunOutcome)
         assert result.reason is CliRunReason.SPAWN_FAILED
@@ -4802,11 +4812,12 @@ def test_a_start_that_raises_after_the_worker_claimed_leaves_the_worker_the_owne
     start_then_raise(monkeypatch, error, thread_claims_first=True)
     channel = CliLineChannel(maximum_lines=1)
 
-    result = _returned_or_raised(
+    result = _returned_or_raised_within_bound(
         lambda: _run_pooled(":", callbacks, stdout_line_channel=channel)
     )
 
     assert result is error
+    assert (error.__context__, error.__cause__) == (None, None)
     published = channel.receive(timeout=5)
     assert isinstance(published, CliRunOutcome)
     assert published.reason is CliRunReason.COMPLETE
@@ -4818,7 +4829,9 @@ def test_a_start_that_raises_after_the_worker_claimed_leaves_the_worker_the_owne
 
 def test_a_start_claim_is_taken_once_and_never_waits() -> None:
     target_calls: list[str] = []
-    thread = ClaimedStartThread(target=lambda: target_calls.append("ran"))
+    thread = ClaimedStartThread(
+        target=lambda: target_calls.append("ran"), daemon=True
+    )
 
     first = thread.take_start_claim()
     second: list[bool] = []
@@ -4847,8 +4860,10 @@ def test_the_start_injector_raises_its_error_after_the_thread_already_ended(monk
     error = KeyboardInterrupt()
     start_then_raise(monkeypatch, error, nothing, thread_claims_first=True)
 
+    thread = ClaimedStartThread(target=nothing, daemon=True)
+
     with pytest.raises(KeyboardInterrupt) as raised:
-        ClaimedStartThread(target=nothing).start()
+        thread.start()
 
     assert raised.value is error
 
@@ -4901,7 +4916,9 @@ class _GivenToAThread:
 @pytest.mark.parametrize("starter_claimed_first", [False, True], ids=["won", "lost"])
 def test_a_finished_claimed_thread_keeps_nothing_it_was_given(starter_claimed_first) -> None:
     given = _GivenToAThread()
-    thread = ClaimedStartThread(target=lambda argument: None, args=(given,))
+    thread = ClaimedStartThread(
+        target=lambda argument: None, args=(given,), daemon=True
+    )
     if starter_claimed_first:
         thread.take_start_claim()
     reference = weakref.ref(given)

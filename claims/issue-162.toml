@@ -1,0 +1,8 @@
+claim_id = "a1c0d1b0f28445abaf14f4a6b9cf38ef"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "706a4cf4ebf927a197e1365a5c1cf79ef4231f5e"
+branch = "claude/issue-162-a1b-9c1-capability-als-objekt"
+scope = ["README.md", "packages/agent-service/src/agent_service/app_tools.py", "tests/capability_support.py", "tests/test_service_app_tools.py", "tests/wheel_smoke/app_tools_discovery.py"]
+opened_commit = "06fed36a591ed530414da7b2525f04aa56577ae6"
+whole_reason = "One signature change with its one private Auth, the client-exit mapping beside the existing close helper, and the tests and wheel smoke that call the changed signature; no part can land alone without leaving a str token or a broken caller."

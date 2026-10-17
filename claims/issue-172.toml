@@ -1,0 +1,8 @@
+claim_id = "5eec34408c6448efb78bfb2245fb6747"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "461735858fc240c30451826259042415aca67954"
+branch = "claude/issue-172-a1b-10a1c-relay-koerper-besitzer"
+scope = ["README.md", "packages/agent-service/src/agent_service/tool_relay.py", "tests/relay_support.py", "tests/test_service_tool_relay.py"]
+opened_commit = "0c1f973646bc136dd3e27bc78f53a7eb63b958bf"
+whole_reason = "One body path: the owner port, the size and framing rows and keep-alive after an answer are one branch of the module's request loop, proven by the request-path test module that already pins the stand-in it replaces, with the scripted owner beside the raw client and one README row."

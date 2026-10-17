@@ -26,7 +26,16 @@ jobs:
         env:
           HOST_VOCABULARY: 'co-?writer|cowriter|song|lyric|cover[ _-]?image|album|musician|judge([^a-z]|$)|\b(bpm|key_scale|audio_duration|tempo|set_tempo|verse|chorus|rhyme|vers)\b'
         run: |
-          hits=$(git grep -n -i -E "$HOST_VOCABULARY" -- packages tests docs | grep -v -E -f .github/host-vocabulary-allowed.txt || true)
+          allowed=.github/host-vocabulary-allowed.txt
+          if grep -n -x '' "$allowed"; then
+            echo "$allowed has an empty line, which would allow every hit"
+            exit 1
+          fi
+          matches=$(git grep -n -i -E "$HOST_VOCABULARY" -- packages tests docs) || [ $? -eq 1 ]
+          hits=
+          if [ -n "$matches" ]; then
+            hits=$(printf '%s\n' "$matches" | grep -v -E -f "$allowed") || [ $? -eq 1 ]
+          fi
           if [ -n "$hits" ]; then
             printf '%s\n' "$hits"
             exit 1

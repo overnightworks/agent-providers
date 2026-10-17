@@ -22,6 +22,7 @@ from PIL import Image
 from provider_test_support import (
     A_CALLER_CANARY,
     A_RUNNER_FAILURE_CANARY,
+    A_TOOL_FAILURE_MESSAGE,
     CALLER_CONTEXTS,
     CANARY_ACCESS_TOKEN,
     DEEPLY_NESTED_JSON,
@@ -77,7 +78,6 @@ from agent_providers.tool_loop import (
     stream_tool_loop,
 )
 
-A_TOOL_FAILURE_MESSAGE = "The sample tool failed."
 AN_IMAGE_POLICY = ImagePolicy(
     maximum_source_bytes=8 * 1024 * 1024,
     maximum_pixels=20_000_000,
@@ -1812,7 +1812,7 @@ def _drive_the_image_turn(monkeypatch, copies, files) -> None:
         _drive_the_tool_turn,
         _drive_the_image_turn,
     ),
-    ids=("catalog", "login-status", "tool turn", "image-turn"),
+    ids=("catalog", "login-status", "tool-turn", "image-turn"),
 )
 def test_no_codex_child_is_handed_the_operators_live_refresh_token(
     monkeypatch, caplog, codex_login_mirror: Path, drive,

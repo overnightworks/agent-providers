@@ -467,6 +467,7 @@ def grok_tool_round_lines(text: str, session_id: str = GROK_SESSION_ID) -> list[
 
 
 A_CANARY: Final = "canary-text-3f9c71"
+A_TOOL_FAILURE_MESSAGE: Final = "The sample tool failed."
 A_CALLER_CANARY: Final = "caller-canary-8b21e5"
 PROSE_BEFORE_THE_CALL: Final = "Looking that up.\n"
 DEEPLY_NESTED_JSON: Final = "[" * 100_000

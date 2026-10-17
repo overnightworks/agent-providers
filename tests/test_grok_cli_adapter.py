@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 from provider_test_support import (
     A_RUNNER_FAILURE_CANARY,
+    A_TOOL_FAILURE_MESSAGE,
     CALLER_CONTEXTS,
     DEEPLY_NESTED_JSON,
     GROK_SESSION_ID,
@@ -53,8 +54,6 @@ from agent_providers.tool_loop import (
     stream_tool_loop,
 )
 from agent_providers.tools import ToolCatalog, ToolProtocolMarkup
-
-A_TOOL_FAILURE_MESSAGE = "The sample tool failed."
 
 
 def _transport() -> grok_cli_adapter.GrokCliToolTransport:

@@ -4820,12 +4820,37 @@ def test_a_start_claim_is_taken_once_and_never_waits() -> None:
     target_calls: list[str] = []
     thread = ClaimedStartThread(target=lambda: target_calls.append("ran"))
 
-    first, second = thread.take_start_claim(), thread.take_start_claim()
+    first = thread.take_start_claim()
+    second: list[bool] = []
+    asker = threading.Thread(target=lambda: second.append(thread.take_start_claim()), daemon=True)
+    asker.start()
+    asker.join(timeout=5)
+    assert not asker.is_alive(), "the second claim waited"
     thread.start()
     thread.join(timeout=5)
 
-    assert (first, second) == (True, False)
+    assert (first, second) == (True, [False])
     assert target_calls == []
+
+
+def test_the_start_injector_raises_its_error_after_the_thread_already_ended(monkeypatch) -> None:
+    real_start = threading.Thread.start
+
+    def start_and_wait_for_the_end(worker: threading.Thread) -> None:
+        real_start(worker)
+        worker.join(timeout=5)
+
+    def nothing() -> None:
+        pass
+
+    monkeypatch.setattr(threading.Thread, "start", start_and_wait_for_the_end)
+    error = KeyboardInterrupt()
+    start_then_raise(monkeypatch, error, nothing, thread_claims_first=True)
+
+    with pytest.raises(KeyboardInterrupt) as raised:
+        ClaimedStartThread(target=nothing).start()
+
+    assert raised.value is error
 
 
 def test_an_interruption_inside_the_starters_claim_leaks_only_what_no_child_uses(

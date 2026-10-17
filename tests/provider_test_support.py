@@ -905,8 +905,9 @@ def start_then_raise(
         return won
 
     def start(worker: threading.Thread) -> None:
+        is_target = worker._target is target
         real_start(worker)
-        if worker._target is target:
+        if is_target:
             if thread_claims_first:
                 assert thread_has_claimed.wait(timeout=_START_CLAIM_WAIT_SECONDS), (
                     "the started thread never took its claim"

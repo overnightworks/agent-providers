@@ -1273,6 +1273,7 @@ def test_an_image_start_that_raises_leaves_one_owner(
     monkeypatch, image_turn, tmp_path, error, thread_claims_first, expected_error,
 ) -> None:
     runner_calls: list[str] = []
+    releases = _HomeReleases(monkeypatch)
 
     def run_reserved_codex_cli(*arguments, **keywords) -> None:
         runner_calls.append("ran")
@@ -1281,13 +1282,37 @@ def test_an_image_start_that_raises_leaves_one_owner(
     monkeypatch.setattr(codex_image, "run_reserved_codex_cli", run_reserved_codex_cli)
     child_may_exit = tmp_path / "child-may-exit"
     os.mkfifo(child_may_exit)
+    child_may_exit_writer = os.open(child_may_exit, os.O_RDWR)
     _the_child_plays(monkeypatch, f"read line < {shlex.quote(str(child_may_exit))}")
     gate = start_then_raise(
         monkeypatch, error, run_reserved_codex_cli, thread_claims_first=thread_claims_first,
     )
 
-    turn = image_turn.drive(_HANG_BOUND_SECONDS)
+    try:
+        turn = image_turn.drive(_HANG_BOUND_SECONDS)
+        _assert_one_owner_at_return(
+            turn, image_turn, error, expected_error, thread_claims_first=thread_claims_first,
+        )
+        os.write(child_may_exit_writer, b"go\n")
+        gate.set()
+        _join_the_start_threads()
+    finally:
+        os.close(child_may_exit_writer)
+    image_turn.assert_ended(turn)
+    assert runner_calls == (["ran"] if thread_claims_first else [])
+    assert releases.token_releases == 1
 
+
+def _join_the_start_threads() -> None:
+    for runner in threading.enumerate():
+        if isinstance(runner, process.ClaimedStartThread):
+            runner.join(timeout=_HANG_BOUND_SECONDS)
+            assert not runner.is_alive(), "a runner thread never ended"
+
+
+def _assert_one_owner_at_return(
+    turn, image_turn, error, expected_error, *, thread_claims_first: bool,
+) -> None:
     assert type(turn.error) is expected_error
     if expected_error is codex_image.CodexImageCliError:
         assert turn.error.__cause__ is None
@@ -1299,12 +1324,6 @@ def test_an_image_start_that_raises_leaves_one_owner(
         list(image_turn.working_root.iterdir()) != [],
     )
     assert at_return == ((1, True) if thread_claims_first else (0, False))
-    if thread_claims_first:
-        with child_may_exit.open("w") as writer:
-            writer.write("go\n")
-    gate.set()
-    image_turn.assert_ended(turn)
-    assert runner_calls == (["ran"] if thread_claims_first else [])
 
 
 def test_a_blocked_turn_returns_by_the_settle_instant_with_its_child_reaped(

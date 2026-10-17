@@ -719,23 +719,6 @@ def test_an_unsound_token_file_leaks_no_content_into_the_refusal_or_what_it_hold
     assert CANARY not in repr(held)
 
 
-@pytest.mark.parametrize(("arrange", "reason"), REFUSED_TOKEN_FILES)
-def test_an_unsound_token_file_leaks_no_content_into_what_a_handler_of_the_refusal_holds(
-    tmp_path, monkeypatch, arrange, reason
-):
-    config_file = _written(tmp_path, _token_config(arrange(tmp_path, monkeypatch)))
-
-    try:
-        load_config(config_file)
-    except ConfigError as refusal:
-        held = everything_a_refusal_holds(refusal)
-    else:
-        pytest.fail("the unsound token file was accepted")
-
-    assert not reaches_text(held, [CANARY])
-    assert CANARY not in repr(held)
-
-
 @pytest.mark.parametrize("token_file", ["secrets/claude.token", "~/.secrets/claude.token"])
 def test_a_relative_token_path_is_refused_naming_the_field(tmp_path, capsys, token_file):
     config_file = _written(tmp_path, _token_config(token_file))

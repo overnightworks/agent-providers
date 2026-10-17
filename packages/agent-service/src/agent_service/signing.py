@@ -55,19 +55,10 @@ class SigningKey:
 
     @classmethod
     def from_private_key(cls, private_key: object) -> SigningKey:
-        if not isinstance(private_key, rsa.RSAPrivateKey):
-            raise UnsoundSigningKey("is not an RSA key")
-        if private_key.key_size != SIGNING_KEY_BITS:
-            raise UnsoundSigningKey(
-                f"is an RSA key of {private_key.key_size} bits; it must have {SIGNING_KEY_BITS}"
-            )
-        exponent = private_key.public_key().public_numbers().e
-        if exponent != SIGNING_KEY_EXPONENT:
-            raise UnsoundSigningKey(
-                f"has public exponent {exponent}; it must be {SIGNING_KEY_EXPONENT}"
-            )
-        public_key = private_key.public_key()
-        return cls(key_id(public_key), public_key, private_key)
+        reason = _unsound_reason(private_key)
+        if reason is not None:
+            raise UnsoundSigningKey(reason)
+        return _signing_key_of(private_key)
 
     def sign(self, claims: Mapping[str, object], token_type: str) -> str:
         if not token_type:
@@ -83,31 +74,49 @@ class SigningKey:
 def load_signing_key(path: Path) -> SigningKey:
     """Reads the file through one descriptor and raises ``UnsoundSigningKey`` for any refusal."""
     try:
-        parsed = _parsed_private_key(read_secret_file(path, "key file"))
-        if not isinstance(parsed, _KeyRefusal):
-            return SigningKey.from_private_key(parsed)
+        outcome = _signing_key_in_pem(read_secret_file(path, "key file"))
     except UnsoundSecretFile as refusal:
         raise UnsoundSigningKey(str(refusal)) from None
-    except UnsoundSigningKey as refusal:
-        raise UnsoundSigningKey(f"{shown_text(str(path))} {refusal}") from None
-    raise UnsoundSigningKey(f"{shown_text(str(path))} {parsed.reason}")
+    if isinstance(outcome, _KeyRefusal):
+        raise UnsoundSigningKey(f"{shown_text(str(path))} {outcome.reason}")
+    return outcome
 
 
 @dataclass(frozen=True)
 class _KeyRefusal:
-    """Returned, never raised: the parsing frame holds the PEM and must not sit in a chain."""
+    """Returned, never raised: the frames that held the key are gone before anyone raises."""
 
     reason: str
 
 
-def _parsed_private_key(contents: bytes) -> object | _KeyRefusal:
+def _signing_key_in_pem(contents: bytes) -> SigningKey | _KeyRefusal:
     if contents.count(_PEM_BLOCK_START) > 1:
         return _KeyRefusal("holds more than one PEM block; it must hold exactly one")
     try:
-        return serialization.load_pem_private_key(contents, password=None)
+        parsed = serialization.load_pem_private_key(contents, password=None)
     except TypeError:
         return _KeyRefusal("is encrypted; it must be an unencrypted PEM")
     except UnsupportedAlgorithm:
         return _KeyRefusal("uses a key algorithm the service does not support")
     except ValueError:
         return _KeyRefusal("is not an unencrypted PEM private key")
+    reason = _unsound_reason(parsed)
+    if reason is not None:
+        return _KeyRefusal(reason)
+    return _signing_key_of(parsed)
+
+
+def _unsound_reason(private_key: object) -> str | None:
+    if not isinstance(private_key, rsa.RSAPrivateKey):
+        return "is not an RSA key"
+    if private_key.key_size != SIGNING_KEY_BITS:
+        return f"is an RSA key of {private_key.key_size} bits; it must have {SIGNING_KEY_BITS}"
+    exponent = private_key.public_key().public_numbers().e
+    if exponent != SIGNING_KEY_EXPONENT:
+        return f"has public exponent {exponent}; it must be {SIGNING_KEY_EXPONENT}"
+    return None
+
+
+def _signing_key_of(private_key: rsa.RSAPrivateKey) -> SigningKey:
+    public_key = private_key.public_key()
+    return SigningKey(key_id(public_key), public_key, private_key)

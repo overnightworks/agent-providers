@@ -21,13 +21,14 @@ from service_support import (
     everything_a_refusal_holds,
     generated_rsa_key,
     pem_of,
+    reaches_private_key,
     written_key_file,
 )
 from test_service_config import VALID_CONFIG, _written
 from webauth.jwt_verification import JwtVerifier, Rejected, RejectionReason, VerifiedClaims
 
 from agent_service.cli import EXIT_BAD_CONFIG, main
-from agent_service.config import ServiceConfig, load_config
+from agent_service.config import ConfigError, ServiceConfig, load_config
 from agent_service.signing import (
     EmptyTokenType,
     SigningKey,
@@ -283,27 +284,22 @@ REFUSED_BUT_REAL_KEYS = [
 
 
 @pytest.mark.parametrize("key", REFUSED_BUT_REAL_KEYS)
-def test_a_refused_real_key_leaks_no_key_material_into_what_the_refusal_or_its_handler_holds(
-    tmp_path, key
-):
+def test_a_refused_real_key_leaves_no_key_object_or_text_in_what_the_refusal_holds(tmp_path, key):
     key_file = tmp_path / "signing-key.pem"
     key_file.write_bytes(key())
     key_file.chmod(0o600)
     key_body = key_file.read_text().splitlines()[1]
+    config_file = _written(tmp_path, _config_text(str(key_file)))
 
-    with pytest.raises(UnsoundSigningKey) as refusal:
+    with pytest.raises(UnsoundSigningKey) as from_loading:
         load_signing_key(key_file)
-    held_by_the_refusal = repr(everything_a_refusal_holds(refusal.value))
+    with pytest.raises(ConfigError) as from_config:
+        load_config(config_file)
 
-    try:
-        load_signing_key(key_file)
-    except UnsoundSigningKey as handled:
-        held_by_the_handler = repr(everything_a_refusal_holds(handled))
-    else:
-        pytest.fail("the unsound key was accepted")
-
-    assert key_body not in held_by_the_refusal
-    assert key_body not in held_by_the_handler
+    for refusal in (from_loading.value, from_config.value):
+        held = everything_a_refusal_holds(refusal)
+        assert key_body not in repr(held)
+        assert not reaches_private_key(held)
 
 
 @pytest.mark.parametrize(("path", "shown"), CONTROL_PATHS_AS_SHOWN.items())

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import xml.etree.ElementTree as ElementTree
 from pathlib import Path
 
+import coverage
 import pytest
 from anchored_support import (
     IMPORT_ROOT_PRELUDE,
@@ -25,8 +27,18 @@ finalize) and the interpreter's own start adds one."""
 RUN_ONE_ROW = (
     IMPORT_ROOT_PRELUDE
     + """
+import json
 import pytest
-sys.exit(pytest.main([sys.argv[2], "-p", "no:cacheprovider", "-q", f"--junitxml={sys.argv[3]}"]))
+measurement = json.loads(sys.argv[4])
+if measurement is not None:
+    import coverage
+    session = coverage.Coverage(config_file=False, data_suffix=True, **measurement)
+    session.start()
+exit_code = pytest.main([sys.argv[2], "-p", "no:cacheprovider", "-q", f"--junitxml={sys.argv[3]}"])
+if measurement is not None:
+    session.stop()
+    session.save()
+sys.exit(exit_code)
 """
 )
 ROWS = (
@@ -37,6 +49,22 @@ ROWS = (
     "test_a_stop_report_at_the_rollback_reap_is_followed_by_the_exit_report",
 )
 UNPASSED_OUTCOMES = {"failure", "error", "skipped"}
+
+
+def outer_measurement() -> str:
+    """The outer run's coverage settings as JSON, or `null` when it is not measured: the closed
+    environment hides every coverage variable, and the parallel data file next to the outer one
+    is what pytest-cov combines into the report."""
+    outer = coverage.Coverage.current()
+    if outer is None:
+        return json.dumps(None)
+    return json.dumps(
+        {
+            "data_file": str(Path(outer.config.data_file).resolve()),
+            "source": [str(Path(source).resolve()) for source in outer.config.source or ()],
+            "branch": outer.config.branch,
+        }
+    )
 
 
 def reported_testcases(report: Path) -> list[tuple[str, bool]]:
@@ -63,6 +91,7 @@ def test_a_start_row_passes_in_its_own_interpreter(
                     absolute_import_roots(),
                     f"{CASES_MODULE}::{row}",
                     str(report),
+                    outer_measurement(),
                 ),
                 environment=closed_environment(tmp_path),
                 working_directory=tmp_path,

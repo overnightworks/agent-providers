@@ -850,28 +850,33 @@ def test_nothing_logged_over_an_admitted_run_the_refusals_and_the_guard_carries_
     _assert_no_token_in_any_log(caplog, signed)
 
 
-_TOKEN = "headerOne.payloadOne.signatureOne"
-_OTHER_TOKEN = "headerTwo.payloadTwo.signatureTwo"
+def _the_segment_in_json(token: str, _other: str) -> bytes:
+    return json.dumps({"text": f"echo {_segment_of(token)} end"}).encode()
 
 
 @pytest.mark.parametrize(
-    ("body", "appears"),
+    ("body_of", "appears"),
     [
-        pytest.param(_TOKEN.encode(), True, id="K1a-the-whole-token"),
+        pytest.param(lambda token, _other: token.encode(), True, id="K1a-the-whole-token"),
+        pytest.param(_the_segment_in_json, True, id="K1b-the-signature-segment-inside-other-bytes"),
         pytest.param(
-            b'{"text": "echo ' + _segment_of(_TOKEN).encode() + b' end"}',
-            True,
-            id="K1b-the-signature-segment-inside-other-bytes",
+            lambda _token, other: _segment_of(other).encode(),
+            False,
+            id="K1c-another-tokens-signature-segment",
         ),
         pytest.param(
-            _segment_of(_OTHER_TOKEN).encode(), False, id="K1c-another-tokens-signature-segment"
-        ),
-        pytest.param(
-            _TOKEN.rsplit(".", 1)[0].encode(), False, id="K1d-the-header-and-payload-alone"
+            lambda token, _other: token.rsplit(".", 1)[0].encode(),
+            False,
+            id="K1d-the-header-and-payload-alone",
         ),
     ],
 )
 def test_the_capability_appears_in_a_body_only_through_its_signature_segment(
-    body: bytes, appears: bool
+    tmp_path: Path, body_of: Callable[[str, str], bytes], appears: bool
 ) -> None:
-    assert capability_carrying(_TOKEN).appears_in(body) is appears
+    scope = _scope(tmp_path)
+    token = signed_capability(scope, _claims_of(scope)).token
+    other = signed_capability(scope, _claims_of(scope, now=NOW_IN_2026 + 100.0)).token
+    assert {"-", "_"} <= set(_segment_of(token))
+
+    assert capability_carrying(token).appears_in(body_of(token, other)) is appears

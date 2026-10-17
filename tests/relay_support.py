@@ -212,7 +212,7 @@ def port_of(relay: Relay) -> int:
 
 
 class RelayWrites:
-    """Records what each socket send hands to the kernel, synchronously, so no delivery order hides it."""
+    """Records what each socket send hands to the kernel, so no delivery order hides it."""
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._writes: list[tuple[Any, bytes]] = []

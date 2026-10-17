@@ -1,0 +1,7 @@
+claim_id = "cf5117d5a86f40a68fdf6e61d6372a02"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "5e3b12551f7c828567719278e7d9029082abc5e9"
+branch = "claude/issue-203-a1b-0b2-rundengrenze"
+scope = ["docs/decisions/0001-agent-service.md"]
+opened_commit = "a6a691b08b7b6975a89b6c2dfbdb7021984c1186"

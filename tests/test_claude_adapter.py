@@ -82,8 +82,9 @@ def test_claude_adapter_refuses_an_empty_model_before_any_child_or_client_exists
         ):
             pytest.fail("no event may be yielded")
 
+    turn = drive()
     with pytest.raises(ProviderUnavailableError) as refused:
-        asyncio.run(drive())
+        asyncio.run(turn)
 
     assert refused.value.reason.code is SafeRouteReasonCode.ROUTE_FAILED
 

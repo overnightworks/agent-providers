@@ -136,7 +136,7 @@ def _stream_for_route(
     *,
     provider: str,
     route: ProviderRoute,
-    model: str,
+    model: str | None,
     user_id: str,
     system: str,
     messages: list[dict[str, str]],

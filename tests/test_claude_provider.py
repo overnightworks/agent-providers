@@ -25,6 +25,7 @@ from provider_test_support import (
     SECRET_ENV_KEYS,
     RunnerFailureWatch,
     assert_private_credential_child,
+    drive_turn,
     fail_to_start_the_runner_thread,
     fake_cli_process,
     override_provider_runtime,
@@ -63,6 +64,7 @@ from agent_providers.config import McpServerSpec, current_config, current_turn_c
 from agent_providers.constants import (
     CLAUDE_CLI_COMPLETION_TIMEOUT_SECONDS,
 )
+from agent_providers.dispatch import call_provider_once
 from agent_providers.errors import ProviderUnavailableError, SafeRouteReasonCode
 from agent_providers.events import AssistantTextEvent, FinalEvent, StreamEvent
 from agent_providers.grok import transport as grok_transport
@@ -457,10 +459,26 @@ def test_one_shot_api_uses_its_remaining_budget_without_retries(
         )
 
     assert result.text == "completion text"
+    assert mock_client.messages.create.call_args.kwargs["model"] == "claude-sonnet-4-6"
     assert mock_client.with_options.call_args.kwargs == {
         "timeout": 9.5,
         "max_retries": 0,
     }
+
+
+def test_async_one_shot_api_sends_the_chosen_model() -> None:
+    async_client = MagicMock()
+    async_client.messages.create = AsyncMock(
+        return_value=MagicMock(content=[MagicMock(text="async completion")]),
+    )
+    sdk = MagicMock(APITimeoutError=Exception)
+    sdk.AsyncAnthropic.return_value = async_client
+
+    with patch.dict("sys.modules", {"anthropic": sdk}):
+        result = asyncio.run(acall_claude("hello", api_key="sk-test", model="claude-sonnet-4-6"))
+
+    assert result.text == "async completion"
+    assert async_client.messages.create.call_args.kwargs["model"] == "claude-sonnet-4-6"
 
 
 def test_one_shot_api_timeout_uses_the_shared_timeout_reason() -> None:
@@ -826,10 +844,19 @@ def spawned_claude_children(_no_tool_gate_open, monkeypatch: pytest.MonkeyPatch)
 
 
 @pytest.fixture
-def anthropic_client_factory() -> MagicMock:
+def anthropic_sdk() -> MagicMock:
     sdk = MagicMock(APITimeoutError=Exception)
     with patch.dict("sys.modules", {"anthropic": sdk}):
-        yield sdk.Anthropic
+        yield sdk
+
+
+def _assert_no_anthropic_client_built(sdk: MagicMock) -> None:
+    sdk.Anthropic.assert_not_called()
+    sdk.AsyncAnthropic.assert_not_called()
+
+
+def _answer_text(result: object) -> str:
+    return result[-1].text if isinstance(result, list) else result.text
 
 
 def _claude_entry_point(name: str, model: str | None, api_key: str | None = None) -> object:
@@ -852,8 +879,9 @@ _CLI_ENTRY_POINTS = [
 def test_claude_entry_points_run_the_cli_default_without_a_model(
     entry_point: str, spawned_claude_children: list,
 ) -> None:
-    _claude_entry_point(entry_point, None)
+    answer = _claude_entry_point(entry_point, None)
 
+    assert _answer_text(answer) == "ok"
     assert len(spawned_claude_children) == 1
     assert "--model" not in spawned_claude_children[0].arguments
 
@@ -862,10 +890,33 @@ def test_claude_entry_points_run_the_cli_default_without_a_model(
 def test_claude_entry_points_pass_a_chosen_model_to_the_cli(
     entry_point: str, spawned_claude_children: list,
 ) -> None:
-    _claude_entry_point(entry_point, "opus")
+    answer = _claude_entry_point(entry_point, "opus")
 
+    assert _answer_text(answer) == "ok"
     arguments = spawned_claude_children[0].arguments
     assert arguments[arguments.index("--model") + 1] == "opus"
+
+
+@pytest.mark.parametrize("entry_point", ["stream_turn", "call_provider_once"])
+@pytest.mark.parametrize("chosen_model", [None, "opus"])
+def test_dispatch_runs_claude_over_the_cli_with_the_model_only_when_chosen(
+    entry_point: str, chosen_model: str | None, spawned_claude_children: list,
+) -> None:
+    if entry_point == "call_provider_once":
+        answer = call_provider_once(
+            provider="claude", model=chosen_model, prompt="hi", timeout=5,
+        )
+    else:
+        turn = drive_turn("claude", model=chosen_model)
+        assert turn.error is None
+        answer = turn.events[-1].text
+
+    assert answer == "ok"
+    arguments = spawned_claude_children[0].arguments
+    if chosen_model is None:
+        assert "--model" not in arguments
+    else:
+        assert arguments[arguments.index("--model") + 1] == chosen_model
 
 
 def test_a_catalog_only_host_runs_a_one_shot_on_the_cli_default(
@@ -879,13 +930,15 @@ def test_a_catalog_only_host_runs_a_one_shot_on_the_cli_default(
 
 @pytest.mark.parametrize("entry_point", ["call_claude", "acall_claude"])
 def test_claude_api_branch_refuses_a_missing_model(
-    entry_point: str, spawned_claude_children: list, anthropic_client_factory: MagicMock,
+    entry_point: str, spawned_claude_children: list, anthropic_sdk: MagicMock,
 ) -> None:
     with pytest.raises(ProviderUnavailableError) as refused:
         _claude_entry_point(entry_point, None, api_key="sk-test")
 
-    assert (refused.value.route, refused.value.reason.code) == ("api", ROUTE_FAILED)
-    anthropic_client_factory.assert_not_called()
+    assert (refused.value.provider, refused.value.route, refused.value.reason.code) == (
+        "claude", "api", ROUTE_FAILED,
+    )
+    _assert_no_anthropic_client_built(anthropic_sdk)
     assert spawned_claude_children == []
 
 
@@ -905,13 +958,15 @@ def test_claude_entry_points_refuse_an_empty_model(
     api_key: str | None,
     route: str,
     spawned_claude_children: list,
-    anthropic_client_factory: MagicMock,
+    anthropic_sdk: MagicMock,
 ) -> None:
     with pytest.raises(ProviderUnavailableError) as refused:
         _claude_entry_point(entry_point, "", api_key=api_key)
 
-    assert (refused.value.route, refused.value.reason.code) == (route, ROUTE_FAILED)
-    anthropic_client_factory.assert_not_called()
+    assert (refused.value.provider, refused.value.route, refused.value.reason.code) == (
+        "claude", route, ROUTE_FAILED,
+    )
+    _assert_no_anthropic_client_built(anthropic_sdk)
     assert spawned_claude_children == []
 
 

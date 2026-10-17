@@ -600,7 +600,7 @@ def drive_turn(
     provider: str,
     *,
     route: ProviderRoute = ProviderRoute.CLI,
-    model: str | None = ...,
+    model: str | None | types.EllipsisType = ...,
     correlation_id: str | None = None,
     while_the_caller_handles_an_exception: bool = False,
 ) -> DrivenTurn:

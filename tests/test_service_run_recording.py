@@ -1468,11 +1468,13 @@ class _RunnerRaisingThisStray(GatedRunner):
 async def test_a_runner_cancelled_unasked_is_made_inert_once_its_close_is_logged():
     """Rule 14: the stray the runner's close met keeps neither its traceback nor its chain."""
     stray = asyncio.CancelledError(STRAY_CANCELLATION_CANARY)
+    stray.__cause__ = RuntimeError("its cause")
+    stray.__context__ = RuntimeError("its context")
     async with driven(_RunnerRaisingThisStray(stray), read=False) as drive:
         closer = asyncio.create_task(_closed_while_it_waits(drive))
         await asyncio.wait({closer})
 
-    assert stray.__traceback__ is None
+    assert (stray.__traceback__, stray.__cause__, stray.__context__) == (None, None, None)
 
 
 def _a_generator_suspended_after_catching_a_cancellation() -> Generator[None, None, None]:

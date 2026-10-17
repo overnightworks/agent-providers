@@ -48,7 +48,7 @@ from agent_service.capability import (
 from agent_service.secret_file import read_token_file, shown_text
 from agent_service.signing import SigningKey, load_signing_key
 
-NonEmptyText = Annotated[str, Field(min_length=1)]
+NonEmptyText = Annotated[str, Field(min_length=1, strict=True)]
 
 
 def _https_url_the_verifier_accepts(url: str) -> str:
@@ -158,10 +158,17 @@ class RunConfig(_Section):
         return self
 
 
+def _text_only(value: object) -> object:
+    """Refuses bytes and other lax forms of a name the relationship rules read as text."""
+    if not isinstance(value, str):
+        raise ValueError("must be text")
+    return value
+
+
 class ProfileConfig(_Section):
     """One subscription login the CLI route may run under."""
 
-    provider: Provider
+    provider: Annotated[Provider, BeforeValidator(_text_only)]
     token: Annotated[SecretStr, BeforeValidator(_token_in_file)] | None = Field(
         default=None, validation_alias="token_file"
     )
@@ -193,18 +200,27 @@ class AppConfig(_Section):
         return self.tools.get(tool_name, ToolEffect.SIDE_EFFECTING)
 
 
-def _named_tables(document: object, section: str) -> Iterator[tuple[str, Mapping[str, object]]]:
-    """The named tables of a section of the raw document; any other shape is left to the fields."""
+def _named_tables(
+    document: object, section: str, built_model: type[_Section]
+) -> Iterator[tuple[str, object]]:
+    """The named tables of a section, raw or already built; other shapes are left to the fields."""
     if not isinstance(document, Mapping) or not isinstance(document.get(section), Mapping):
         return
     for name, table in document[section].items():
-        if isinstance(name, str) and isinstance(table, Mapping):
+        if isinstance(name, str) and isinstance(table, Mapping | built_model):
             yield name, table
 
 
-def _raw_profiles(document: object) -> Iterator[tuple[str, Mapping[str, object], Provider | None]]:
-    for name, table in _named_tables(document, "profiles"):
-        provider = table.get("provider")
+def _value(table: object, key: str, field_name: str | None = None) -> object:
+    """What pydantic will see under ``key``: ``None`` is absent, in a mapping or a built model."""
+    if isinstance(table, Mapping):
+        return table.get(key)
+    return getattr(table, field_name or key)
+
+
+def _raw_profiles(document: object) -> Iterator[tuple[str, object, Provider | None]]:
+    for name, table in _named_tables(document, "profiles", ProfileConfig):
+        provider = _value(table, "provider")
         yield name, table, next((known for known in Provider if known == provider), None)
 
 
@@ -231,17 +247,17 @@ def _refuse_a_profile_for_a_provider_without_a_route(document: object) -> None:
 
 def _refuse_a_claude_profile_without_its_token_file(document: object) -> None:
     for name, table, provider in _raw_profiles(document):
-        if provider is Provider.CLAUDE and "token_file" not in table:
+        if provider is Provider.CLAUDE and _value(table, "token_file", "token") is None:
             raise ValueError(
                 f"profiles.{shown_text(name)}.token_file: required for a claude profile"
             )
 
 
 def _refuse_an_origin_without_signing(document: object) -> None:
-    if not isinstance(document, Mapping) or "signing" in document:
+    if not isinstance(document, Mapping) or document.get("signing") is not None:
         return
-    for app_name, app in _named_tables(document, "apps"):
-        if "mcp_origin" in app:
+    for app_name, app in _named_tables(document, "apps", AppConfig):
+        if _value(app, "mcp_origin") is not None:
             raise ValueError(
                 f"apps.{shown_text(app_name)}.mcp_origin: needs a [signing] section,"
                 " because the app's runs carry a signed capability"
@@ -249,9 +265,9 @@ def _refuse_an_origin_without_signing(document: object) -> None:
 
 
 def _refuse_tools_without_an_origin(document: object) -> None:
-    for app_name, app in _named_tables(document, "apps"):
-        tools = app.get("tools")
-        if isinstance(tools, Mapping) and tools and "mcp_origin" not in app:
+    for app_name, app in _named_tables(document, "apps", AppConfig):
+        tools = _value(app, "tools")
+        if isinstance(tools, Mapping) and tools and _value(app, "mcp_origin") is None:
             raise ValueError(
                 f"apps.{shown_text(app_name)}.mcp_origin: required because the app lists tools"
             )

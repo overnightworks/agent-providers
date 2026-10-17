@@ -6,11 +6,14 @@ import errno
 import json
 import os
 import stat
+import tomllib
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 import uvicorn
+from pydantic import ValidationError
 from service_support import (
     CALLED_PLAINLY_OR_FROM_AN_ACTIVE_HANDLER,
     LAST_TOOL_NAME_LENGTH_AT_THE_LIMIT,
@@ -28,7 +31,14 @@ from service_support import (
 from agent_client.tools import ToolEffect
 from agent_service import cli
 from agent_service.cli import EXIT_BAD_CONFIG, main
-from agent_service.config import ConfigError, Provider, load_config
+from agent_service.config import (
+    AppConfig,
+    ConfigError,
+    ProfileConfig,
+    Provider,
+    ServiceConfig,
+    load_config,
+)
 
 SONGMAKER_ORIGIN_LINE = 'mcp_origin = "https://songmaker.internal"\n'
 SIGNING_KEY_LINE = f"key_file = {json.dumps(str(process_signing_key_file()))}"
@@ -1055,3 +1065,120 @@ def test_a_second_signing_table_is_refused_as_a_duplicate_table(tmp_path, capsys
     text = VALID_CONFIG + f"\n{SIGNING_SECTION}"
 
     assert _refused_on_one_line(_written(tmp_path, text), capsys).startswith("not TOML")
+
+
+def _songmaker(**members: Any) -> AppConfig:
+    return AppConfig(workload_client="songmaker-test", purposes=("songmaker.cowriter",), **members)
+
+
+def _edited(edit: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
+    document = tomllib.loads(VALID_CONFIG)
+    edit(document)
+    return document
+
+
+def _profile_edit(**members: Any) -> Callable[[dict[str, Any]], None]:
+    return lambda document: document["profiles"]["claude-main"].update(members)
+
+
+def _app_edit(*, signing: bool = True, **members: Any) -> Callable[[dict[str, Any]], None]:
+    def edit(document: dict[str, Any]) -> None:
+        document["apps"]["songmaker"].update(members)
+        if not signing:
+            del document["signing"]
+
+    return edit
+
+
+def _profiles_edit(profiles: dict[Any, Any]) -> Callable[[dict[str, Any]], None]:
+    return lambda document: document.update(profiles=profiles)
+
+
+NO_ROUTE_REFUSAL = "has no subscription route yet; only claude can have a profile"
+TOOLS_WITHOUT_ORIGIN_REFUSAL = "apps.songmaker.mcp_origin: required because the app lists tools"
+UNIQUE_CLAUDE_PROFILE_REFUSAL = "claude already has profile"
+
+REFUSED_REPRESENTATIONS = [
+    pytest.param(
+        _profile_edit(token_file=None),
+        "profiles.claude-main.token_file: required for a claude profile",
+        id="token-file-none",
+    ),
+    pytest.param(
+        _profiles_edit({"claude-main": ProfileConfig(provider=Provider.CLAUDE)}),
+        "profiles.claude-main.token_file: required for a claude profile",
+        id="tokenless-claude-instance",
+    ),
+    pytest.param(
+        _profiles_edit({"codex-main": ProfileConfig(provider=Provider.CODEX)}),
+        NO_ROUTE_REFUSAL,
+        id="codex-instance",
+    ),
+    pytest.param(
+        _profiles_edit(
+            {"first": ProfileConfig(provider="claude"), "second": ProfileConfig(provider="claude")}
+        ),
+        UNIQUE_CLAUDE_PROFILE_REFUSAL,
+        id="two-claude-instances",
+    ),
+    pytest.param(
+        _profile_edit(provider=b"codex"), "profiles.claude-main.provider", id="bytes-provider"
+    ),
+    pytest.param(
+        _profiles_edit({b"p": {"provider": "codex"}}), "profiles", id="bytes-profile-name"
+    ),
+    pytest.param(
+        _app_edit(signing=False, mcp_origin=None),
+        TOOLS_WITHOUT_ORIGIN_REFUSAL,
+        id="tools-with-origin-none-and-signing-none",
+    ),
+    pytest.param(
+        lambda document: document.update(
+            signing=None, apps={"songmaker": _songmaker(tools={"read_song": "read_only"})}
+        ),
+        TOOLS_WITHOUT_ORIGIN_REFUSAL,
+        id="tools-without-origin-instance",
+    ),
+    pytest.param(
+        lambda document: document.update(
+            signing=None,
+            apps={"songmaker": _songmaker(mcp_origin="https://songmaker.internal")},
+        ),
+        ORIGIN_WITHOUT_SIGNING_REFUSAL,
+        id="origin-instance-with-signing-none",
+    ),
+    pytest.param(
+        lambda document: document.update(signing=None),
+        ORIGIN_WITHOUT_SIGNING_REFUSAL,
+        id="origin-with-signing-none",
+    ),
+]
+
+
+@pytest.mark.parametrize("inside_active_handler", CALLED_PLAINLY_OR_FROM_AN_ACTIVE_HANDLER)
+@pytest.mark.parametrize(("edit", "refusal"), REFUSED_REPRESENTATIONS)
+def test_every_representation_pydantic_accepts_of_a_refused_relationship_is_refused(
+    edit, refusal, inside_active_handler
+):
+    document = _edited(edit)
+
+    with pytest.raises(ValidationError) as refused:
+        called_from(lambda: ServiceConfig.model_validate(document), inside_active_handler)
+
+    held = everything_a_refusal_holds(refused.value)
+    assert refusal in str(refused.value)
+    assert not reaches_text(held, [PROCESS_TOKEN])
+    assert not reaches_private_key(held)
+
+
+def test_an_app_without_tools_may_name_no_origin_explicitly_and_needs_no_signing():
+    document = _edited(
+        lambda document: (
+            document.pop("signing"),
+            document["apps"]["songmaker"].update(tools={}, mcp_origin=None),
+        )
+    )
+
+    config = ServiceConfig.model_validate(document)
+
+    assert config.apps["songmaker"].mcp_origin is None

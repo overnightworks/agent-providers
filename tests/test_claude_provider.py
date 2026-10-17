@@ -1097,7 +1097,7 @@ def test_mcp_turn_refuses_a_healthy_turn_when_the_shared_process_pool_is_full(
     monkeypatch.setattr(provider, "_write_mcp_config", lambda _spec, _user_id: "unused")
     monkeypatch.setattr(provider, "_unlink_quiet", lambda _path: None)
     release = asyncio.Event()
-    started = [asyncio.Event() for _ in range(process_cap)]
+    started = [asyncio.Event() for _ in range(process_cap + 1)]
     processes: list[MagicMock] = []
     spawned: list[tuple[object, ...]] = []
 
@@ -1123,7 +1123,7 @@ def test_mcp_turn_refuses_a_healthy_turn_when_the_shared_process_pool_is_full(
 
     async def run_turns() -> None:
         running = []
-        for turn_started in started:
+        for turn_started in started[:process_cap]:
             running.append(
                 asyncio.create_task(provider.acall_claude_with_mcp("hi", user_id="u-1")),
             )
@@ -1137,12 +1137,11 @@ def test_mcp_turn_refuses_a_healthy_turn_when_the_shared_process_pool_is_full(
             await provider.acall_claude_with_mcp("hi", user_id="u-1")
         assert str(exc.value) == expected
         assert len(spawned) == process_cap
-        with provider._tool_surface_lock:
-            assert not provider._tool_surface_failures
-            assert not provider._tool_surface_verdicts
 
         release.set()
         assert [turn.text for turn in await asyncio.gather(*running)] == ["ok"] * process_cap
+        assert (await provider.acall_claude_with_mcp("hi", user_id="u-1")).text == "ok"
+        assert len(spawned) == process_cap + 1
 
     asyncio.run(run_turns())
 
@@ -3558,6 +3557,10 @@ def test_one_shot_deadline_keeps_and_caches_a_zombie_probe_failure(
 # ── #351 round 6, Finding 6: the reaper pool caps new probes too ─────
 
 
+def _a_process_group_that_is_gone(_pid: int, _signal: int) -> None:
+    raise ProcessLookupError
+
+
 @pytest.mark.parametrize("probe_kind", ("async", "sync"))
 def test_tool_surface_probe_refuses_to_start_when_the_zombie_pool_is_saturated(
     probe_kind: str,
@@ -3576,7 +3579,6 @@ def test_tool_surface_probe_refuses_to_start_when_the_zombie_pool_is_saturated(
         "Popen",
         lambda *_a, **_kw: spawned.append(1) or MagicMock(),
     )
-    _build, key = provider._tool_surface_key(provider._NO_TOOLS_EXPECTED)
 
     async def _run() -> None:
         reapers_started = [asyncio.Event(), asyncio.Event()]
@@ -3618,13 +3620,15 @@ def test_tool_surface_probe_refuses_to_start_when_the_zombie_pool_is_saturated(
             "Claude CLI process pool is at its concurrency limit (2); refusing to start another"
         )
         assert spawned == []
-        with provider._tool_surface_lock:
-            assert key not in provider._tool_surface_failures
-            assert key not in provider._tool_surface_verdicts
         release_reapers.set()
         with provider._zombie_registry_lock:
             tasks = list(provider._zombie_reap_tasks)
         await asyncio.gather(*tasks)
+
+        monkeypatch.setattr(provider.os, "killpg", _a_process_group_that_is_gone)
+        commands = _answer_with(monkeypatch, _init_line([]))
+        assert await refused_probe() == claude_binary
+        assert len(commands) == 1
 
     asyncio.run(_run())
 

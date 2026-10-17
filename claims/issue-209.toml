@@ -1,0 +1,8 @@
+claim_id = "1b4c826de9ff4558a95022c0c8b6a205"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "9eed62c1beb1e783928a3a1efca56eaa984b9beb"
+branch = "claude/issue-209-a1b-4a-lauf-spec"
+scope = ["README.md", "docs/decisions/0001-agent-service.md", "src/agent_providers/claude/provider.py", "src/agent_providers/spawn.py", "tests/test_claude_run.py", "tests/test_spawn_owner.py"]
+opened_commit = "97962a521901655e90ff8b3fc2fba8d2be744f4c"
+whole_reason = "One run spec: the argv, environment and stdin line of a subscription run live in the Claude command-line owner, the ChildProcess repr that would print its token belongs to the same secret boundary, and the ADR section is the measurement that lets c7's formula be promised; split, a token-bearing child would land with a repr that shows it, or the formula without its stated residual."

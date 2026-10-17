@@ -16,9 +16,9 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from enum import StrEnum
+from enum import IntEnum, StrEnum
 from http import HTTPStatus
 from typing import Annotated, Any, Final, Literal, NoReturn, Self, TypeVar
 
@@ -129,6 +129,17 @@ class JsonRpcErrorBody(_Model):
 class JsonRpcError(_Model):
     id: RequestId | None
     error: JsonRpcErrorBody
+
+
+class JsonRpcErrorCode(IntEnum):
+    METHOD_NOT_FOUND = -32601
+    INVALID_PARAMS = -32602
+
+
+_ERROR_MESSAGES: Final = {
+    JsonRpcErrorCode.METHOD_NOT_FOUND: "Method not found",
+    JsonRpcErrorCode.INVALID_PARAMS: "Invalid params",
+}
 
 
 type JsonRpcMessage = JsonRpcRequest | JsonRpcNotification | JsonRpcResponse | JsonRpcError
@@ -311,6 +322,17 @@ class ToolDefinition(_Tolerant):
 class ListToolsResult(_Tolerant):
     tools: _JsonArray[ToolDefinition]
     next_cursor: UnicodeText | None = None
+
+
+def error_response(request_id: RequestId, code: JsonRpcErrorCode) -> JsonRpcError:
+    return JsonRpcError(
+        id=request_id, error=JsonRpcErrorBody(code=code, message=_ERROR_MESSAGES[code])
+    )
+
+
+def tools_list_response(request_id: RequestId, tools: Sequence[ToolDefinition]) -> JsonRpcResponse:
+    written = [tool.model_dump(mode="json", by_alias=True, exclude_none=True) for tool in tools]
+    return JsonRpcResponse(id=request_id, result={"tools": written})
 
 
 class CallToolParams(_Tolerant):

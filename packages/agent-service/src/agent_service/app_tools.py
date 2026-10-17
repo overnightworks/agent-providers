@@ -314,14 +314,12 @@ async def _close_quietly(closable: httpx.Response | httpx.AsyncClient) -> None:
 
 
 class _BearerCapability(httpx.Auth):
-    """The one reader of the token: it is written into a request here and nowhere else."""
+    """The sole writer of the upstream ``Authorization`` header."""
 
     def __init__(self, capability: Capability) -> None:
         self._capability = capability
 
-    def auth_flow(
-        self, request: httpx.Request
-    ) -> Generator[httpx.Request, httpx.Response, None]:
+    def auth_flow(self, request: httpx.Request) -> Generator[httpx.Request, httpx.Response, None]:
         request.headers["Authorization"] = f"Bearer {self._capability.token}"
         yield request
 

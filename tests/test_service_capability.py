@@ -17,6 +17,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from capability_support import capability_carrying
 from jwt.algorithms import RSAAlgorithm
 from provider_test_support import formatted_log_text
 from service_support import (
@@ -847,3 +848,57 @@ def test_nothing_logged_over_an_admitted_run_the_refusals_and_the_guard_carries_
 
     assert len(signed) == 2
     _assert_no_token_in_any_log(caplog, signed)
+
+
+def _the_segment_in_json(token: str, _other: str) -> bytes:
+    return json.dumps({"text": f"echo {_segment_of(token)} end"}).encode()
+
+
+def _base64url(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def _constructed_token(signature_bytes: bytes) -> str:
+    header = _base64url(json.dumps({"alg": "RS256", "typ": "JWT"}).encode())
+    payload = _base64url(json.dumps({"sub": "constructed"}).encode())
+    return ".".join([header, payload, _base64url(signature_bytes)])
+
+
+_SIGNATURE_WITH_DASHES_AND_UNDERSCORES = bytes(range(256)) + bytes(range(128))
+_ANOTHER_SIGNATURE = bytes(reversed(_SIGNATURE_WITH_DASHES_AND_UNDERSCORES))
+
+
+@pytest.mark.parametrize(
+    ("body_of", "appears"),
+    [
+        pytest.param(lambda token, _other: token.encode(), True, id="K1a-the-whole-token"),
+        pytest.param(_the_segment_in_json, True, id="K1b-the-signature-segment-inside-other-bytes"),
+        pytest.param(
+            lambda _token, other: _segment_of(other).encode(),
+            False,
+            id="K1c-another-tokens-signature-segment",
+        ),
+        pytest.param(
+            lambda token, _other: token.rsplit(".", 1)[0].encode(),
+            False,
+            id="K1d-the-header-and-payload-alone",
+        ),
+    ],
+)
+def test_the_capability_appears_in_a_body_only_through_its_signature_segment(
+    body_of: Callable[[str, str], bytes], appears: bool
+) -> None:
+    token = _constructed_token(_SIGNATURE_WITH_DASHES_AND_UNDERSCORES)
+    other = _constructed_token(_ANOTHER_SIGNATURE)
+    assert {"-", "_"} <= set(_segment_of(token))
+
+    assert capability_carrying(token).appears_in(body_of(token, other)) is appears
+
+
+def test_a_really_signed_capability_is_found_by_its_signature_segment_in_json_output(
+    tmp_path: Path,
+) -> None:
+    scope = _scope(tmp_path)
+    token = signed_capability(scope, _claims_of(scope)).token
+
+    assert capability_carrying(token).appears_in(_the_segment_in_json(token, token))

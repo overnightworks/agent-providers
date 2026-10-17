@@ -18,6 +18,7 @@ from agent_service.mcp_wire import (
     InitializeParams,
     JsonRpcError,
     JsonRpcErrorBody,
+    JsonRpcErrorCode,
     JsonRpcNotification,
     JsonRpcRequest,
     JsonRpcResponse,
@@ -25,10 +26,12 @@ from agent_service.mcp_wire import (
     ListToolsResult,
     McpWireError,
     ProtocolVersion,
+    ToolDefinition,
     ToolOutcome,
     WireRefusal,
     answer_for,
     encode_message,
+    error_response,
     initialize_response,
     negotiate_protocol_version,
     parse_message,
@@ -41,6 +44,7 @@ from agent_service.mcp_wire import (
     require_json_answer,
     require_session_id,
     require_supported_version,
+    tools_list_response,
 )
 
 SECRET = "capability-token-must-not-leak"
@@ -442,3 +446,59 @@ def test_a_reply_is_answered_with_200_and_its_json() -> None:
         "id": 1,
         "error": {"code": -32601, "message": "method not found"},
     }
+
+
+@pytest.mark.parametrize(
+    ("request_id", "code", "expected"),
+    [
+        pytest.param(
+            8,
+            JsonRpcErrorCode.METHOD_NOT_FOUND,
+            {"jsonrpc": "2.0", "id": 8, "error": {"code": -32601, "message": "Method not found"}},
+            id="W1a-method-not-found",
+        ),
+        pytest.param(
+            "r1",
+            JsonRpcErrorCode.INVALID_PARAMS,
+            {"jsonrpc": "2.0", "id": "r1", "error": {"code": -32602, "message": "Invalid params"}},
+            id="W1b-invalid-params",
+        ),
+    ],
+)
+def test_an_error_response_writes_a_closed_message_and_echoes_only_the_id(
+    request_id: int | str, code: JsonRpcErrorCode, expected: dict[str, Any]
+) -> None:
+    assert encode_message(error_response(request_id, code)) == json.dumps(expected).encode()
+
+
+def test_a_tools_list_response_writes_kept_definitions_by_alias_without_a_null_description() -> (
+    None
+):
+    upstream = [
+        {
+            "name": "echo",
+            "description": "Say it back",
+            "inputSchema": {"type": "object", "properties": {"text": {"default": None}}},
+            "annotations": {"readOnlyHint": True},
+            "outputSchema": {"type": "object"},
+            "_meta": {"x": 1},
+        },
+        {"name": "ping", "description": None, "inputSchema": {"type": "object"}, "_meta": {}},
+    ]
+    tools = [read_payload(ToolDefinition, definition) for definition in upstream]
+    expected = {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "result": {
+            "tools": [
+                {
+                    "name": "echo",
+                    "description": "Say it back",
+                    "inputSchema": {"type": "object", "properties": {"text": {"default": None}}},
+                },
+                {"name": "ping", "inputSchema": {"type": "object"}},
+            ]
+        },
+    }
+
+    assert encode_message(tools_list_response(3, tools)) == json.dumps(expected).encode()

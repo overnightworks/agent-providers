@@ -1235,10 +1235,9 @@ class PrivateCredentialHome:
                 )
             except OSError:
                 raise_without_chain(AgentCliUnavailableError("could not create a private CLI home"))
-            self._finalizer = weakref.finalize(
+            self._finalizer = _live_home_finalizers[registry_key] = weakref.finalize(
                 self, _remove_abandoned_tree, Path(created), os.getpid(), registry_key,
             )
-            _live_home_finalizers[registry_key] = self._finalizer
             self._registry_key = registry_key
             self._home = Path(created)
             self._reservation_tokens: set[_PrivateCredentialHomeReservation] = set()
@@ -1289,9 +1288,9 @@ class PrivateCredentialHome:
             return
         try:
             if not self._cleaned and _remove_private_tree(self._home):
-                self._cleaned = True
-                self._finalizer.detach()
                 _live_home_finalizers.pop(self._registry_key, None)
+                self._finalizer.detach()
+                self._cleaned = True
         finally:
             self._removal_claim.release()
 
@@ -1662,9 +1661,9 @@ def _reap_in_background(
             process.poll()
             time.sleep(_BACKGROUND_REAP_POLL_SECONDS)
     if outlived_bound:
-        log.error("agent CLI process group %s outlived its background reap", process.pid)
         if on_reaped is not None:
             _reap_callbacks_held_until_exit.append(on_reaped)
+        log.error("agent CLI process group %s outlived its background reap", process.pid)
     else:
         with failures.contained("on_reaped"):
             _notify_reaped(on_reaped, process.pid, became_zombie=True)

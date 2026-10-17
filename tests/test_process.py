@@ -15,7 +15,7 @@ import tempfile
 import threading
 import time
 import types
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1023,6 +1023,22 @@ def a_background_reap_over_a_group_that_never_dies(monkeypatch):
     return held
 
 
+def _reap_in_background_on_a_bounded_thread(child, on_reaped) -> BaseException | None:
+    raised: list[BaseException] = []
+
+    def reap() -> None:
+        try:
+            process._reap_in_background(child, on_reaped)
+        except BaseException as error:  # noqa: BLE001 - handed to the asserting test
+            raised.append(error)
+
+    reaper = threading.Thread(target=reap)
+    reaper.start()
+    reaper.join(timeout=_A_SHORT_REAP_BOUND_SECONDS + _REAP_BOUND_SLACK_SECONDS)
+    assert not reaper.is_alive()
+    return raised[0] if raised else None
+
+
 def test_a_background_reap_ends_at_its_bound_and_keeps_what_it_holds(
     tmp_path: Path, a_background_reap_over_a_group_that_never_dies, caplog,
 ) -> None:
@@ -1042,7 +1058,7 @@ def test_a_background_reap_ends_at_its_bound_and_keeps_what_it_holds(
     caplog.set_level(logging.ERROR, logger=process.__name__)
     started = time.monotonic()
 
-    process._reap_in_background(child, on_reaped)
+    assert _reap_in_background_on_a_bounded_thread(child, on_reaped) is None
 
     assert time.monotonic() - started < _A_SHORT_REAP_BOUND_SECONDS + _REAP_BOUND_SLACK_SECONDS
     [record] = caplog.records
@@ -1058,6 +1074,34 @@ def test_a_background_reap_ends_at_its_bound_and_keeps_what_it_holds(
     held[-1](child.pid, True)
     assert process_pool.reservation_count() == 0
     assert not home.path.exists()
+
+
+class _FailingLogHandler(logging.Handler):
+    def emit(self, record: logging.LogRecord) -> None:
+        raise OSError("log sink is gone")
+
+
+def test_a_home_stays_held_when_logging_fails_at_the_reap_bound(
+    tmp_path: Path, a_background_reap_over_a_group_that_never_dies, monkeypatch,
+) -> None:
+    held = a_background_reap_over_a_group_that_never_dies
+    monkeypatch.setattr(process.log, "handlers", [_FailingLogHandler()])
+    monkeypatch.setattr(process.log, "propagate", False)
+    home = _build_home(_a_source_login(tmp_path))
+    home_path = home.path
+    child = _a_session_leader(":")
+
+    failure = _reap_in_background_on_a_bounded_thread(child, home.reserve().on_reaped)
+    child.communicate()
+    home.close()
+    del home
+    gc.collect()
+
+    assert isinstance(failure, OSError)
+    assert len(held) == 1
+    assert home_path.exists()
+    held.clear()
+    gc.collect()
 
 
 _REAP_OUTLIVED_IN_A_SUBPROCESS_SCRIPT = """
@@ -1967,17 +2011,19 @@ def test_private_credential_home_survives_the_exit_of_a_forked_child(tmp_path: P
     assert completed.stdout.split() == ["True", "False"]
 
 
+_RESERVE_CODE_OF_A_HOME = (
+    PrivateCredentialHome.reserve,
+    PrivateCredentialHome._remove_if_unused,
+    process._remove_private_tree,
+)
 _HOME_CODES = {
     "construction": (
         PrivateCredentialHome.__init__,
         process._discard_failed_home,
         process._remove_private_tree,
     ),
-    "reserve": (
-        PrivateCredentialHome.reserve,
-        PrivateCredentialHome._remove_if_unused,
-        process._remove_private_tree,
-    ),
+    "reserve": _RESERVE_CODE_OF_A_HOME,
+    "refused reserve": _RESERVE_CODE_OF_A_HOME,
     "release": (
         process._PrivateCredentialHomeReservation.release,
         PrivateCredentialHome._release,
@@ -1994,12 +2040,41 @@ _HOME_CODES = {
         process._remove_private_tree,
     ),
 }
-_HOME_OPERATION_ARRANGEMENTS = {
-    "construction": lambda source: lambda: _build_home(source),
-    "reserve": lambda source: _build_home(source).reserve,
-    "release": lambda source: _a_closing_home_holding_a_reservation(source).release,
-    "close": lambda source: _build_home(source).close,
-    "removal attempt": lambda source: _build_home(source).close,
+
+
+@dataclass(frozen=True)
+class _HomeRun:
+    operation: Callable[[], object]
+    settle_after_an_interruption: Callable[[], None] | None
+
+
+def _closing_a_home(source: Path) -> _HomeRun:
+    home = _build_home(source)
+    return _HomeRun(home.close, home.close)
+
+
+def _reserving_from_a_home(source: Path) -> _HomeRun:
+    home = _build_home(source)
+    return _HomeRun(home.reserve, home.close)
+
+
+def _reserving_from_a_closing_home(source: Path) -> _HomeRun:
+    home = _a_closing_home_whose_removal_failed(source)
+    return _HomeRun(home.reserve, home.close)
+
+
+def _releasing_the_last_reservation(source: Path) -> _HomeRun:
+    reservation = _a_closing_home_holding_a_reservation(source)
+    return _HomeRun(reservation.release, reservation.release)
+
+
+_HOME_RUNS = {
+    "construction": lambda source: _HomeRun(lambda: _build_home(source), None),
+    "reserve": _reserving_from_a_home,
+    "refused reserve": _reserving_from_a_closing_home,
+    "release": _releasing_the_last_reservation,
+    "close": _closing_a_home,
+    "removal attempt": _closing_a_home,
 }
 
 
@@ -2022,6 +2097,13 @@ def _build_home(source: Path) -> PrivateCredentialHome:
     )
 
 
+def _a_closing_home_whose_removal_failed(source: Path) -> PrivateCredentialHome:
+    home = _build_home(source)
+    with patch.object(process.shutil, "rmtree", side_effect=PermissionError):
+        home.close()
+    return home
+
+
 def _a_closing_home_holding_a_reservation(source: Path):
     home = _build_home(source)
     reservation = home.reserve()
@@ -2032,16 +2114,42 @@ def _a_closing_home_holding_a_reservation(source: Path):
 def _interrupted_by_a_keyboard_interrupt_at(position: int, codes: frozenset, operation) -> bool:
     tracer_found_at_entry = sys.gettrace()
     gc.disable()
-    sys.settrace(_interrupt_at_line(position, codes))
+    sys.settrace(_interrupt_at_every_line(position, codes))
     try:
         completed_with = operation()
     except KeyboardInterrupt:
         return True
+    except RuntimeError:
+        return False
     finally:
         sys.settrace(tracer_found_at_entry)
         gc.enable()
     del completed_with
     return False
+
+
+def _interrupt_at_every_line(position: int, codes: frozenset):
+    seen_lines = 0
+
+    def on_line(frame, event, argument):
+        nonlocal seen_lines
+        if event == "line":
+            seen_lines += 1
+            if seen_lines == position:
+                raise KeyboardInterrupt
+        return on_line
+
+    def on_call(frame, event, argument):
+        return on_line if frame.f_code in codes else None
+
+    return on_call
+
+
+def _finishes_within_a_second(operation: Callable[[], object]) -> None:
+    worker = threading.Thread(target=operation, daemon=True)
+    worker.start()
+    worker.join(timeout=1)
+    assert not worker.is_alive(), "the interrupted home blocked"
 
 
 def _a_fresh_home_is_used_and_removed_by_another_thread(source: Path) -> None:
@@ -2065,34 +2173,77 @@ def test_an_interruption_at_any_line_of_a_private_home_never_blocks_the_next(
     tmp_path: Path, operation: str,
 ) -> None:
     source = _a_source_login(tmp_path)
+    gc.collect()
+    registered_before = len(process._live_home_finalizers)
     position = 1
     while True:
-        run = _HOME_OPERATION_ARRANGEMENTS[operation](source)
+        run = _HOME_RUNS[operation](source)
         interrupted = _interrupted_by_a_keyboard_interrupt_at(
-            position, _home_code(operation), run,
+            position, _home_code(operation), run.operation,
         )
-        del run
         if not interrupted:
             break
+        if run.settle_after_an_interruption is not None:
+            _finishes_within_a_second(run.settle_after_an_interruption)
         _a_fresh_home_is_used_and_removed_by_another_thread(source)
+        del run
         gc.collect()
         assert not list(tmp_path.glob("private-home-*")), f"line event {position}"
+        assert len(process._live_home_finalizers) == registered_before, f"line event {position}"
         position += 1
     assert position > 1
 
 
+def test_an_interrupted_construction_removes_its_home_once_and_forgets_it(tmp_path: Path) -> None:
+    source = _a_source_login(tmp_path)
+    gc.collect()
+    registered_before = len(process._live_home_finalizers)
+    real_remove = process._remove_private_tree
+    removals_of_a_gone_tree = 0
+
+    def remove_and_note_a_gone_tree(root: Path) -> bool:
+        nonlocal removals_of_a_gone_tree
+        removals_of_a_gone_tree += not os.path.lexists(root)
+        return real_remove(root)
+
+    position = 1
+    with patch.object(process, "_remove_private_tree", remove_and_note_a_gone_tree):
+        while _interrupted_by_a_keyboard_interrupt_at(
+            position, _code_of(PrivateCredentialHome.__init__), lambda: _build_home(source),
+        ):
+            gc.collect()
+            assert not list(tmp_path.glob("private-home-*")), f"line event {position}"
+            assert len(process._live_home_finalizers) == registered_before, f"line event {position}"
+            position += 1
+
+    assert position > 1
+    assert removals_of_a_gone_tree == 0
+
+
 class _LedgerOfRemovals:
-    def __init__(self, home: PrivateCredentialHome) -> None:
+    """Counts removals and keeps the reservations it handed out that are not yet released."""
+
+    def __init__(self) -> None:
         self.removals = 0
         self.tokens_held_at_a_removal: list[bool] = []
+        self._unreleased: set = set()
         real_remove = process._remove_private_tree
 
         def remove_and_record(root: Path) -> bool:
             self.removals += 1
-            self.tokens_held_at_a_removal.append(bool(home._reservation_tokens))
+            self.tokens_held_at_a_removal.append(bool(self._unreleased))
             return real_remove(root)
 
         self._patch = patch.object(process, "_remove_private_tree", remove_and_record)
+
+    def reserve_from(self, home: PrivateCredentialHome):
+        token = home.reserve()
+        self._unreleased.add(token)
+        return token
+
+    def release(self, token) -> None:
+        self._unreleased.discard(token)
+        token.release()
 
     def __enter__(self) -> _LedgerOfRemovals:
         self._patch.start()
@@ -2117,7 +2268,7 @@ class _ThreadedOperation:
         self.paused = False
         self.outcome = None
         self.refusal: RuntimeError | None = None
-        self._thread = threading.Thread(target=self._run)
+        self._thread = threading.Thread(target=self._run, daemon=True)
 
     def start(self) -> None:
         self._thread.start()
@@ -2162,13 +2313,13 @@ _RELEASING_CODE = _code_of(*_HOME_CODES["release"])
 
 
 def _run_interleaved_at_every_line(
-    source: Path, *, paused_code: frozenset, operations_of, outcome_holds,
+    source: Path, *, paused_code: frozenset, operations_of, outcome_holds, build_home=_build_home,
 ) -> None:
     position = 1
     while True:
-        home = _build_home(source)
-        with _LedgerOfRemovals(home) as ledger:
-            paused_operation, other_operation = operations_of(home)
+        home = build_home(source)
+        with _LedgerOfRemovals() as ledger:
+            paused_operation, other_operation = operations_of(home, ledger)
             paused = _ThreadedOperation(
                 paused_operation, pause_in=paused_code, at_line=position,
             )
@@ -2186,25 +2337,33 @@ def _run_interleaved_at_every_line(
 def _assert_a_reservation_attempt_kept_or_refused_its_home(home, ledger, attempt) -> None:
     if attempt.refusal is not None:
         assert str(attempt.refusal) == "private credential home is closing"
-        assert not home._reservation_tokens
         assert ledger.removals == 1
     else:
         assert ledger.removals == 0
         assert home.path.exists()
-        attempt.outcome.release()
+        ledger.release(attempt.outcome)
         assert ledger.removals == 1
     assert not home.path.exists()
     assert ledger.tokens_held_at_a_removal == [False]
 
 
-@pytest.mark.parametrize("paused_operation", ("reserve", "close"))
+@pytest.mark.parametrize(
+    ("paused_operation", "build_home"),
+    (
+        ("reserve", _build_home),
+        ("close", _build_home),
+        ("reserve", _a_closing_home_whose_removal_failed),
+    ),
+    ids=("reserve", "close", "reserve-after-a-failed-removal"),
+)
 def test_reserve_and_close_interleaved_at_every_line_remove_a_home_once(
-    tmp_path: Path, paused_operation: str,
+    tmp_path: Path, paused_operation: str, build_home,
 ) -> None:
     reserving_is_paused = paused_operation == "reserve"
 
-    def operations_of(home):
-        return (home.reserve, home.close) if reserving_is_paused else (home.close, home.reserve)
+    def operations_of(home, ledger):
+        reserve = lambda: ledger.reserve_from(home)  # noqa: E731
+        return (reserve, home.close) if reserving_is_paused else (home.close, reserve)
 
     def outcome_holds(home, ledger, paused, other) -> None:
         reserving = paused if reserving_is_paused else other
@@ -2215,6 +2374,7 @@ def test_reserve_and_close_interleaved_at_every_line_remove_a_home_once(
         paused_code=_RESERVING_CODE if reserving_is_paused else _CLOSING_CODE,
         operations_of=operations_of,
         outcome_holds=outcome_holds,
+        build_home=build_home,
     )
 
 
@@ -2223,8 +2383,12 @@ def test_close_and_the_last_release_interleaved_at_every_line_remove_a_home_once
     tmp_path: Path, paused_operation: str,
 ) -> None:
     closing_is_paused = paused_operation == "close"
-    def operations_of(home):
-        release = home.reserve().release
+
+    def operations_of(home, ledger):
+        held = ledger.reserve_from(home)
+        if not closing_is_paused:
+            home.close()
+        release = lambda: ledger.release(held)  # noqa: E731
         return (home.close, release) if closing_is_paused else (release, home.close)
 
     def outcome_holds(home, ledger, _paused, _other) -> None:
@@ -2270,7 +2434,7 @@ def test_a_reservation_is_released_once(tmp_path: Path, callbacks: tuple[str, st
     other_reservation = home.reserve()
     reservation = home.reserve()
     home.close()
-    with _LedgerOfRemovals(home) as ledger:
+    with _LedgerOfRemovals() as ledger:
         getattr(reservation, callbacks[0])(*_CALLBACK_ARGUMENTS[callbacks[0]])
         getattr(reservation, callbacks[1])(*_CALLBACK_ARGUMENTS[callbacks[1]])
 
@@ -2288,6 +2452,7 @@ def test_the_home_registry_forgets_every_closed_or_collected_home(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = _a_source_login(tmp_path)
+    gc.collect()
     registered_before = len(process._live_home_finalizers)
     closed = [_build_home(source) for _ in range(10)]
     for home in closed:

@@ -158,7 +158,8 @@ body rules be fixed before the build.
   (default 120) and `max_duration_s` (default 600), which must satisfy
   heartbeat < stall <= idle < maximum, and the
   budget `max_tool_calls` (default 30) and `max_bytes` (default 4 MiB,
-  4194304), both positive integers outside that ordering;
+  4194304), and `max_parallel_cli_runs` (default 5), all positive integers
+  outside that ordering;
   `[profiles.<name>]` one profile per provider;
   `[purposes."<p>"]` an optional `cli_provider` and `api_alias`;
   `[apps.<app>]` its `workload_client`, its purposes, and its tools' effects,
@@ -891,11 +892,18 @@ Rules:
 unprivileged user, an empty private working directory, a strict per-run MCP
 config with an exact tool allowlist, restricted built-in tools, no session
 persistence, a finite max-turns, and a process-group kill and reap on cancel or
-timeout. Tokens never appear in argv, events or logs. Admission allows one
-active subscription run; a second request gets `429 Retry-After`. There is no
-queue.
+timeout. Tokens never appear in argv, events or logs. Admission allows a
+service-wide limit of parallel subscription runs (default 5, `[runs]
+max_parallel_cli_runs`, one limit for the whole service, not per profile or per registered app);
+a CLI run takes a lease on one place before its run id or any signature exists.
+Beyond the limit a request gets `429 busy` with `Retry-After: 10` at once. Refusals
+and API runs take nothing. The lease is released once the run has stopped, even if
+its record fails; a response that ends before its run began releases it too. Only a
+lease that still holds its place can free it. The limit lives in one process,
+because the service runs one replica with one worker (A1d). There is no queue and
+no fallback to the API route.
 
-**Consequence.** Subscription runs are strictly serial, and a busy service says
+**Consequence.** Subscription runs are bounded by that limit, and a full service says
 so instead of waiting.
 
 ### A1b measured: claude 2.1.302
@@ -1466,7 +1474,7 @@ settles the open points named here.
 | A1a3 Liveness and limits | agent-providers | Heartbeat, idle timeout, maximum duration, tool-call and byte limits, and slow clients. This row owns H6's limits. | — | A1a1 |
 | A1a4 Signing key and capability | agent-providers | An RS256 capability is minted at admission and handed to the runner, with one key, its `kid` and a documented rotation. The registry gains the MCP origin. | — | A1a1 |
 | A1a5 Job tickets | agent-providers | `POST /job-tickets` (own audience, at most 24 h), ticket runs and the `background` flag. The ticket binds `/ki-abo` and the app group (H12). | — | A1a4 |
-| A1b CLI runner | agent-providers | H7 isolation, and only the selected profile's login is visible to its run. One admission slot is taken, and a second run gets 429. Cancel and disconnect kill and reap the process group. The per-run MCP config carries the capability, and no token appears in argv or logs. | — | A1a1 |
+| A1b CLI runner | agent-providers | H7 isolation, and only the selected profile's login is visible to its run. The service-wide limit of parallel subscription runs (default 5) is taken, and a request beyond it gets 429 `busy` with `Retry-After`. Cancel and disconnect kill and reap the process group. The per-run MCP config carries the capability, and no token appears in argv or logs. | — | A1a1 |
 | A1m MCP helper | agent-providers | The `agent-client` Streamable HTTP MCP server helper verifies the capability (format from A1a4), denies redirects, validates Host/Origin, and refuses a bad audience, an expired capability, a wrong run or a tool off the allowlist. | — | A0b, A1a4 |
 | A1d Deployment | edge | A tagged service image is built from the agent-providers release. It runs in edge compose on an internal network with egress limited to the registered origins and LiteLLM. The profile config is code, each profile's login sits in its own volume from `~/.secrets`, and Keycloak has the `agent-service` audience plus the workload clients. A live smoke test with the operator's account reaches a terminal event. | — | A1b, A1m, edge#12 live |
 | A1s Songmaker co-writer moves | songmaker | The co-writer runs through the service with the operator's real login, and its tools work over MCP with ownership checks. The in-process co-writer route is removed, along with the local provider/model/route choice. | — | A1d, Songmaker on Keycloak (K12) |

@@ -774,7 +774,7 @@ ANOTHER_RUNNER_FAILURE_CANARY: Final = "second-runner-failure-canary-2e8b"
 RUNNER_STEP_FAILURE_PREFIX: Final = "agent CLI runner step failed: "
 
 
-_RUNNER_THREAD_TARGET_SUFFIXES: Final = ("(_run_cli_bounded)", "(_run_codex_image_runner)")
+_RUNNER_THREAD_TARGET_SUFFIXES: Final = ("(_run_cli_bounded)", "(run_reserved_codex_cli)")
 
 
 class RunnerFailureWatch:

@@ -43,7 +43,8 @@ It owns the machinery that is the same in every deployment:
 | `agent_providers.process` | `run_cli_bounded`: the bounded runner over a `ChildProcess` (start, stdin, first line, deadline, process-group cleanup); its line channel ends in exactly one outcome before the run returns, `cli_settle_deadline(deadline)` is the one instant by which every wait ends, and a failed step is reported by name and exception class only |
 | `agent_providers.images` | The `ImagePolicy` an image turn is held to |
 | `agent_providers.sandbox` | The directory-name prefix constants a host's kernel sandbox profile must permit |
-| `agent_service.app` | `POST /runs` and `GET /runs/{id}`: the order of checks, the typed rejections, the admitted run's event stream (`_RunResponse`, which closes the run whenever its response ends), and the run status that only the app and user that started a run may read; an admitted run of an app with an MCP origin hands its runner one capability, and an oversized one answers 422 `capability_too_large` before any runner, stream or record |
+| `agent_service.app` | `POST /runs` and `GET /runs/{id}`: the order of checks (a CLI run takes an admission place before anything is signed), the typed rejections, the admitted run's event stream (`_RunResponse`, which closes the run whenever its response ends), and the run status that only the app and user that started a run may read; an admitted run of an app with an MCP origin hands its runner one capability, and an oversized one answers 422 `capability_too_large` before any runner, stream or record |
+| `agent_service.admission` | The service's admission limit: at most N parallel subscription runs (default 5, from `[runs] max_parallel_cli_runs`); a CLI run takes a `Lease` before its run id or signature, one beyond the limit gets 429 `busy` with `Retry-After: 10` and never falls back to the API route; refusals and API runs take nothing, the run's stop releases its lease, as does a response that ends before its run began, and only a lease that still holds its place can free it |
 | `agent_service.identity` | The two-token check: the workload token bound to one registered app, the user token to one principal |
 | `agent_service.run_request` | The strict read of a `RunRequest` body: strict JSON, then its version, then its shape |
 | `agent_service.config` | The service's TOML: identity, listener, run pacing and limits, subscription profiles, purposes and apps, the optional `[signing] key_file` the signing key is read from, each app's optional https MCP origin (canonical, one per app, needing `[signing]`), and the startup preflight that measures every app's capability against 8,192 characters |
@@ -148,12 +149,13 @@ reap; a grandchild that outlives that child is not waited for, and the
 synchronous call's timeout kills only the direct child. A process group that
 survives SIGKILL for 60 s is logged once, and its reservation and home stay held
 until the process exits, when the exit sweep removes the home. A catalog home
-lasts for its bounded probe. Each Codex turn also uses a fresh private home below
-`cli_working_directory_root`, with its blanked login copy at mode 0600; the image
-turn's home goes when the turn returns, the tool turn's at `aclose`, under the same
-removal rules. Unlike the Claude and Grok homes, which stay until their direct child
-has exited, the Codex homes do not yet wait for their child; #93 slice 3b-2 makes
-them wait and rewrites this sentence. Removal never changes a call's outcome: a home that cannot be
+lasts for its bounded probe. Each Codex turn uses a fresh private home below
+`cli_working_directory_root`, with its blanked login copy at mode 0600. Removal is
+requested when the image turn returns or at the tool turn's `aclose`; like a Claude
+or Grok turn's home, the home remains until the turn's direct child has exited. A host
+test that replaces `codex.protocol.run_cli_bounded` must call `on_reaped` or
+`on_spawn_failed`, as the runner does, or the Codex turn home stays until it is
+collected. Removal never changes a call's outcome: a home that cannot be
 removed is logged by error class alone, without its path. Removal is tried at
 `close()`, then by the finalizer, then by one exit-time sweep; after that the copy
 stays under the host's root, logged at error level. A direct overwrite of a 0400 copy fails, while a CLI can create and
@@ -282,6 +284,7 @@ A host migrates at its pin bump to 0.3.0; both configuration models refuse unkno
 | A Codex turn whose private home cannot be created or made private (`mkdtemp`, the home `chmod` or the `work` `mkdir` raises `OSError`) | Raised unchained: `ProviderUnavailableError` with `CLI_BINARY_UNAVAILABLE` ("CLI is unavailable.") on the tool turn; `CodexImageCliError("could not create a private CLI home")` on the image turn | A full or unwritable `cli_working_directory_root` now reaches the host's CLI-failure path instead of its unexpected-error path. The message holds no path. Songmaker shows it as `JOB_ERROR_COVER_IMAGE_CLI_FAILED` (`src/songmaker_cli/jobs/_runtime.py:111-116`, `:139`). |
 | `dispatch.stream_turn` and `dispatch.call_provider_once` take a required `model` of type `str` | `dispatch.stream_turn` and `dispatch.call_provider_once` take a required `model` of type `str` or `None` | Map "nothing chosen" to `None`. `None` runs the Claude CLI's own default, and so does `call_provider_once` for Claude without an Anthropic key; every other route refuses it with `ROUTE_FAILED`, as before. `""` is still refused with `ROUTE_FAILED`. |
 | `claude.provider.call_claude`, `claude.provider.acall_claude`, `claude.provider.acall_claude_with_mcp`, `claude.provider.acall_claude_with_mcp_stream`, `claude.adapter.call_claude_once` and `claude.adapter.stream_claude_turn` with `model=None` ran the configured `turns.claude_chat_model` | `claude.provider.call_claude`, `claude.provider.acall_claude`, `claude.provider.acall_claude_with_mcp`, `claude.provider.acall_claude_with_mcp_stream`, `claude.adapter.call_claude_once` and `claude.adapter.stream_claude_turn` with `model=None` run the Claude CLI's own default; with an Anthropic key, `call_claude` and `acall_claude` refuse it with `ROUTE_FAILED` | Pass a model wherever you relied on the configured one, and always on the API. `model=""` is now refused with `ROUTE_FAILED` on each of them; it used to reach the CLI or the API. `call_claude` without a model no longer needs `turns`. |
+| `codex.protocol.run_reserved_codex_cli`, returning the run's outcome | `codex.protocol.run_reserved_codex_cli`, which now also takes the home reservation and the line channel and returns nothing | No known host calls it. It contains every exception, `KeyboardInterrupt` and `SystemExit` included, and publishes a failed outcome on the channel, so call it only on a runner thread, never on the main thread. |
 
 ## Sandbox
 

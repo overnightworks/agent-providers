@@ -31,13 +31,13 @@ from agent_providers.codex.protocol import (
     BLOCKED_ITEM_TYPES,
     CODEX_APPROVAL_POLICY_NEVER_CONFIG,
     CODEX_CLI_LINE_CHANNEL_CAPACITY,
-    CODEX_CLI_TURN_OUTPUT_READ_LIMIT_BYTES,
     CODEX_EMPTY_MCP_SERVERS_CONFIG,
     CODEX_ITEM_COMPLETED_EVENT,
     INFORMATIONAL_EVENT_TYPES,
     INFORMATIONAL_ITEM_TYPES,
     ITEM_EVENT_TYPES,
     CodexCliStreamFailure,
+    CodexTurnHome,
     codex_child_process,
     codex_cli_failure_reason,
     create_codex_turn_home,
@@ -45,6 +45,7 @@ from agent_providers.codex.protocol import (
     event_item_type,
     failed_turn_message,
     parse_codex_line,
+    release_turn_reservations,
     run_reserved_codex_cli,
     top_level_error_message,
 )
@@ -56,15 +57,12 @@ from agent_providers.process import (
     CliLineChannel,
     CliRunOutcome,
     CliRunReason,
+    PrivateCredentialHomeReservation,
     PrivateHomeNotCreatedError,
-    StepFailures,
     cli_settle_deadline,
     resolve_cli_binary,
 )
-from agent_providers.sandbox.paths import (
-    CODEX_HOME_DIRECTORY_NAME,
-    CODEX_IMAGE_TURN_DIRECTORY_PREFIX,
-)
+from agent_providers.sandbox.paths import CODEX_IMAGE_TURN_DIRECTORY_PREFIX
 from agent_providers.spawn import ChildProcess
 
 _IMAGE_ENCODER_PACKAGE: Final = "PIL"
@@ -207,29 +205,26 @@ def generate_codex_image(
     if not image_encoder_is_installed():
         raise CodexImageEncoderUnavailableError(_IMAGE_ENCODER_MISSING_DETAIL)
     try:
-        home = create_codex_turn_home(CODEX_IMAGE_TURN_DIRECTORY_PREFIX)
+        turn_home = create_codex_turn_home(CODEX_IMAGE_TURN_DIRECTORY_PREFIX)
     except PrivateHomeNotCreatedError:
         raise_without_chain(CodexImageCliError("could not create a private CLI home"))
     except AgentCliUnavailableError:
         raise_without_chain(CodexImageLoginError())
     try:
-        codex_home = home.path / CODEX_HOME_DIRECTORY_NAME
         try:
             outcome = _run_codex_image_cli(
                 prompt=prompt,
                 deadline=deadline,
-                turn_root=home.path,
-                codex_home=codex_home,
-                work_dir=home.path / "work",
+                turn_home=turn_home,
                 abort_signal=abort_signal,
                 model=model,
             )
             _raise_for_codex_image_outcome(outcome)
             observed = _validate_codex_image_events(
                 outcome.stdout,
-                codex_home=codex_home,
+                codex_home=turn_home.codex_home,
             )
-            artifact = _find_only_generated_png(codex_home)
+            artifact = _find_only_generated_png(turn_home.codex_home)
         except ImageToolBlockedError as exc:
             log.warning(
                 "Codex image tool rejected route=cli code=%s types=[%s]",
@@ -242,38 +237,37 @@ def generate_codex_image(
             raise
         return _normalize_generated_png(artifact, policy)
     finally:
-        home.close()
+        turn_home.home.close()
 
 
 def _run_codex_image_cli(
     *,
     prompt: str,
     deadline: float,
-    turn_root: Path,
-    codex_home: Path,
-    work_dir: Path,
+    turn_home: CodexTurnHome,
     abort_signal: threading.Event | None = None,
     model: str = "",
 ) -> CliRunOutcome:
     """Reap the CLI promptly when its streamed events leave the image gate."""
     channel = CliLineChannel(CODEX_CLI_LINE_CHANNEL_CAPACITY)
-    event_gate = _CodexImageEventGate(codex_home=codex_home)
+    event_gate = _CodexImageEventGate(codex_home=turn_home.codex_home)
     try:
-        child = codex_child_process(
-            _codex_image_arguments(model),
-            turn_root=turn_root.resolve(),
-            work_directory=work_dir.resolve(),
-            codex_home=codex_home.resolve(),
-        )
+        child = codex_child_process(_codex_image_arguments(model), turn_home)
     except AgentCliUnavailableError as exc:
         raise CodexImageCliError() from exc
     try:
         stdin_payload = prompt.encode("utf-8")
     except UnicodeEncodeError:
         raise CodexImageCliError() from None
-    reservation = get_codex_process_pool().reserve(CodexProcessKind.IMAGE)
+    home_reservation = turn_home.home.reserve()
+    try:
+        reservation = get_codex_process_pool().reserve(CodexProcessKind.IMAGE)
+    except BaseException:  # NOSONAR(S5754) the home token is released, re-raises
+        home_reservation.release()
+        raise
     _start_codex_image_runner(
         reservation=reservation,
+        home_reservation=home_reservation,
         child=child,
         stdin_payload=stdin_payload,
         deadline=deadline,
@@ -290,16 +284,16 @@ def _run_codex_image_cli(
 def _start_codex_image_runner(
     *,
     reservation: CodexProcessReservation,
+    home_reservation: PrivateCredentialHomeReservation,
     child: ChildProcess,
     stdin_payload: bytes,
     deadline: float,
     channel: CliLineChannel,
 ) -> None:
     runner = threading.Thread(
-        target=_run_codex_image_runner,
+        target=run_reserved_codex_cli,
+        args=(reservation, home_reservation, child),
         kwargs={
-            "reservation": reservation,
-            "child": child,
             "stdin_payload": stdin_payload,
             "deadline": deadline,
             "channel": channel,
@@ -308,11 +302,13 @@ def _start_codex_image_runner(
     )
     try:
         runner.start()
-    except BaseException as exc:  # NOSONAR(S5754) the reservation is abandoned first
+    except BaseException as exc:  # NOSONAR(S5754) the reservations are released first
         start_failure = exc
     else:
         return
-    get_codex_process_pool().abandon_unspawned(reservation)
+    release_turn_reservations(
+        home_reservation, lambda: get_codex_process_pool().abandon_unspawned(reservation)
+    )
     if not isinstance(start_failure, Exception):
         raise start_failure
     raise CodexImageCliError()
@@ -352,45 +348,6 @@ def _receive_within(channel: CliLineChannel, settle_by: float) -> bytes | CliRun
         return channel.receive(timeout=_CHANNEL_POLL_SECONDS, settle_by=settle_by)
     except TimeoutError:
         return None
-
-
-def _run_codex_image_runner(
-    *,
-    reservation: CodexProcessReservation,
-    child: ChildProcess,
-    stdin_payload: bytes,
-    deadline: float,
-    channel: CliLineChannel,
-) -> None:
-    """Publish a failed outcome when the one runner step raises, then name its class."""
-    failures = StepFailures()
-    with failures.contained("run"):
-        run_reserved_codex_cli(
-            reservation,
-            child,
-            stdin_payload=stdin_payload,
-            read="all",
-            deadline=deadline,
-            output_read_limit_bytes=CODEX_CLI_TURN_OUTPUT_READ_LIMIT_BYTES,
-            stdout_line_channel=channel,
-        )
-    if failures.failed("run"):
-        with failures.contained("publish"):
-            channel._close(_failed_runner_outcome())
-    failures.report()
-
-
-def _failed_runner_outcome() -> CliRunOutcome:
-    return CliRunOutcome(
-        started=False,
-        spawn_error=None,
-        returncode=None,
-        stdout="",
-        stderr="",
-        complete=False,
-        became_zombie=False,
-        reason=CliRunReason.IO_ERROR,
-    )
 
 
 def _codex_image_arguments(model: str) -> tuple[str, ...]:

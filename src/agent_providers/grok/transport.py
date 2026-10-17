@@ -36,8 +36,11 @@ from agent_providers.process import (
     CliLineChannel,
     CliRunOutcome,
     PrivateCredentialHome,
+    PrivateCredentialHomeReservation,
+    cli_settle_deadline,
     resolve_cli_binary,
     run_cli_bounded,
+    run_publishing_failures,
 )
 from agent_providers.spawn import ChildProcess, closed_environment
 from agent_providers.text_tool_protocol import (
@@ -164,17 +167,12 @@ class GrokCliToolTransport:
             self._home.close()
             raise
         runner = asyncio.create_task(asyncio.to_thread(
-            run_cli_bounded,
+            _run_grok_round,
             child,
-            stdin_payload=None,
-            read="all",
+            prompt=prompt,
             deadline=self._deadline,
-            output_read_limit_bytes=GROK_CLI_TURN_OUTPUT_READ_LIMIT_BYTES,
-            stdout_line_channel=channel,
-            prompt_file_bytes=prompt,
-            prompt_file_arg_index=_PROMPT_FILE_ARGUMENT_INDEX,
-            on_spawn_failed=home_reservation.on_spawn_failed,
-            on_reaped=home_reservation.on_reaped,
+            channel=channel,
+            home_reservation=home_reservation,
         ))
         parser = TextToolStreamParser(self._catalog)
         state = _GrokToolRoundState()
@@ -182,7 +180,9 @@ class GrokCliToolTransport:
         rejection: TextToolRejection | None = None
         try:
             while True:
-                item = await asyncio.to_thread(channel.receive)
+                item = await asyncio.to_thread(
+                    channel.receive, settle_by=cli_settle_deadline(self._deadline)
+                )
                 if isinstance(item, CliRunOutcome):
                     outcome = item
                     break
@@ -230,6 +230,31 @@ class GrokCliToolTransport:
         """Request cleanup after every current or background reaper finishes."""
         self._closed = True
         await asyncio.shield(asyncio.to_thread(self._home.close))
+
+
+def _run_grok_round(
+    child: ChildProcess,
+    *,
+    prompt: bytes,
+    deadline: float,
+    channel: CliLineChannel,
+    home_reservation: PrivateCredentialHomeReservation,
+) -> None:
+    run_publishing_failures(
+        channel,
+        lambda: run_cli_bounded(
+            child,
+            stdin_payload=None,
+            read="all",
+            deadline=deadline,
+            output_read_limit_bytes=GROK_CLI_TURN_OUTPUT_READ_LIMIT_BYTES,
+            stdout_line_channel=channel,
+            prompt_file_bytes=prompt,
+            prompt_file_arg_index=_PROMPT_FILE_ARGUMENT_INDEX,
+            on_spawn_failed=home_reservation.on_spawn_failed,
+            on_reaped=home_reservation.on_reaped,
+        ),
+    )
 
 
 def _refuse_a_multi_result_batch(message: InitialTurn | ToolResultBatch) -> None:

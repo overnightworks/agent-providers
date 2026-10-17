@@ -19,7 +19,11 @@ Three distributions ship from this repository, released together from one tag:
   `RunRequest` that starts a run and the events it streams.
 - `overnightworks-agent-service`, import package `agent_service` — the agent
   service, run as `agent-service --config PATH`. It builds on the other two and
-  nothing imports it.
+  nothing imports it. The service runs only on Linux, as an unprivileged
+  effective user, and makes itself non-dumpable at startup before it reads its
+  configuration; it refuses to start otherwise. The restriction names the
+  service only, not the client or the core. The image must run the service as a
+  non-root user; that user and `cap_drop: ALL` belong to A1d (#18).
 
 ## What it owns, and what it leaves to the host
 
@@ -48,6 +52,7 @@ It owns the machinery that is the same in every deployment:
 | `agent_service.identity` | The two-token check: the workload token bound to one registered app, the user token to one principal |
 | `agent_service.run_request` | The strict read of a `RunRequest` body: strict JSON, then its version, then its shape |
 | `agent_service.config` | The service's TOML: identity, listener, run pacing and limits, at most one subscription profile, only for Claude, with a required `token_file` read once at startup and never shown, the `[cli]` section (the absolute `claude_binary` and the exact `claude_version` it must report, required by a Claude profile), purposes and apps, the optional `[signing] key_file` the signing key is read from, each app's https MCP origin (canonical, one per app, needing `[signing]`, and required when the app lists tools), and the startup preflight that measures every app's capability against 8,192 characters |
+| `agent_service.process_hardening` | The first startup step: `harden_process` refuses a platform other than Linux and an effective uid 0, then makes the process non-dumpable (`PR_SET_DUMPABLE` 0) before the configuration is read, so a same-UID child cannot open the service's `/proc/<pid>/environ` or `mem`; any refusal is one line and exit 2 |
 | `agent_service.claude_version` | The pinned Claude version: the version grammar, the parser of `claude --version`, and the startup probe that spawns the program through the core's `ChildProcess` and bounded runner and refuses a start when it reports another version |
 | `agent_service.secret_file` | How the service reads a secret kept in a file: opened once, type, mode (nothing for group or others) and size (16 KiB) taken from that descriptor; refusals name the path and the reason, never the content. A profile token must be one printable line and not an `sk-ant-api` API key |
 | `agent_service.signing` | The service's one signing key: an RSA-3072 PEM (exponent 65537) read once at startup and never made by the service, refused when unsound; its `kid` is the RFC 7638 thumbprint, and `SigningKey.sign(claims, token_type)` writes a typed RS256 token. The key signs each admitted run's capability. Generation and rotation: see the A1a4 ruling in `docs/decisions/0001-agent-service.md` |

@@ -71,14 +71,27 @@ def _configure_agent_provider_runtime(tmp_path: Path):
     codex_auth = credentials / "codex.json"
     for auth_file in (claude_auth, grok_auth, codex_auth):
         auth_file.write_text("{}")
-    configure(_SAMPLE_RUNTIME.model_copy(update={
-        "claude_cli_auth_file": claude_auth,
-        "grok_cli_auth_file": grok_auth,
-        "codex_cli_auth_file": codex_auth,
-        "cli_working_directory_root": tmp_path,
-    }))
+    configure(
+        _SAMPLE_RUNTIME.model_copy(
+            update={
+                "claude_cli_auth_file": claude_auth,
+                "grok_cli_auth_file": grok_auth,
+                "codex_cli_auth_file": codex_auth,
+                "cli_working_directory_root": tmp_path,
+            }
+        )
+    )
     yield
     reset_config()
+
+
+@pytest.fixture(autouse=True)
+def _service_hardening_never_touches_the_kernel(monkeypatch):
+    """Run the real hardening policy as an unprivileged user over a no-op kernel call."""
+    import agent_service.process_hardening as hardening
+
+    monkeypatch.setattr(hardening, "set_not_dumpable", lambda: None)
+    monkeypatch.setattr(hardening, "effective_user_id", lambda: 1000)
 
 
 @pytest.fixture(autouse=True)

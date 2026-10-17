@@ -7,11 +7,14 @@ checked in a fixed order, and the first failure answers:
 1. the workload token, then the user token (``agent_service.identity``);
 2. the body's protocol version, then its shape (``agent_service.run_request``);
 3. whether the app may ask for the purpose;
-4. the route (``agent_service.routing``).
+4. the route (``agent_service.routing``);
+5. for an app with an MCP origin, whether the run's capability fits the 8,192
+   characters every verifier accepts (``capability_too_large``).
 
 An admitted run answers ``200 text/event-stream`` with its frames
 (``agent_service.run_events``), and its response closes those frames whenever it
-ends, however it ends. Every refusal is a typed ``RunRejection``
+ends, however it ends, and hands its runner one capability when its app has an MCP
+origin. Every refusal is a typed ``RunRejection``
 that is never cached. No answer echoes a token. A ``GET`` answers the run's
 ``RunStatus`` to its owner, and one ``not_found`` to everyone else: for an id
 nobody began, an expired or evicted run, another app's or user's run, and a
@@ -20,10 +23,12 @@ path segment that is not a run id's text form.
 
 from __future__ import annotations
 
+import logging
 import time
 import uuid
-from collections.abc import AsyncGenerator, Mapping
+from collections.abc import AsyncGenerator, Callable, Mapping
 from contextlib import aclosing
+from datetime import datetime
 from http import HTTPStatus
 from typing import Final
 from uuid import UUID
@@ -35,18 +40,26 @@ from webauth.jwt_verification import KeySetFetch, MonotonicClock, fetch_key_set_
 
 from agent_client.capability import MAX_CAPABILITY_CHARACTERS
 from agent_client.wire import PROTOCOL_VERSION, RejectionCode, RunRejection, RunRequest
+from agent_service.capability import (
+    Capability,
+    CapabilityTooLarge,
+    capability_claims,
+    signed_capability,
+)
 from agent_service.config import ServiceConfig
 from agent_service.identity import Caller, CallerCheck, build_verifier
 from agent_service.routing import NotEnabled, route
 from agent_service.run_events import run_frames
 from agent_service.run_liveness import LoopClock
-from agent_service.run_records import RunRecords
+from agent_service.run_records import RunRecords, utc_now
 from agent_service.run_request import MAX_REQUEST_BYTES, parse_run_request
 from agent_service.runners import AdmittedRun, Runners
 
 WORKLOAD_TOKEN_HEADER: Final = "Agent-Workload-Token"
 RETRY_UNAVAILABLE_AFTER_SECONDS: Final = 30
 _BEARER_SCHEME: Final = "bearer"
+
+_log = logging.getLogger(__name__)
 
 _STATUS: Final[Mapping[RejectionCode, HTTPStatus]] = {
     RejectionCode.NOT_ENABLED: HTTPStatus.FORBIDDEN,
@@ -82,10 +95,18 @@ def create_app(
     records: RunRecords | None = None,
     fetch_key_set: KeySetFetch = fetch_key_set_over_https,
     monotonic_clock: MonotonicClock = time.monotonic,
+    wall_clock: Callable[[], datetime] = utc_now,
 ) -> FastAPI:
+    """The service's ASGI app.
+
+    ``wall_clock`` (aware UTC) stamps each capability's issue and expiry and the
+    default run-record store. An injected ``records`` keeps its own clock, so the
+    two can differ; ``wall_clock`` never reaches the token verifier, which reads
+    webauth's own.
+    """
     callers = CallerCheck(build_verifier(config.identity, fetch_key_set, monotonic_clock), config)
     installed_runners = runners or Runners()
-    installed_records = records or RunRecords()
+    installed_records = records or RunRecords(wall_clock)
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
     @app.post("/runs")
@@ -97,7 +118,9 @@ def create_app(
         run_request = RejectionCode.INVALID_REQUEST if body is None else parse_run_request(body)
         if isinstance(run_request, RejectionCode):
             return rejection(run_request)
-        return _admitted(config, installed_runners, installed_records, caller, run_request)
+        return _admitted(
+            config, installed_runners, installed_records, wall_clock, caller, run_request
+        )
 
     @app.get("/runs/{run_id}")
     async def run_status(request: Request, run_id: str) -> Response:
@@ -142,6 +165,7 @@ def _admitted(
     config: ServiceConfig,
     runners: Runners,
     records: RunRecords,
+    wall_clock: Callable[[], datetime],
     caller: Caller,
     run_request: RunRequest,
 ) -> Response:
@@ -157,18 +181,53 @@ def _admitted(
     )
     if isinstance(served, NotEnabled):
         return rejection(RejectionCode.NOT_ENABLED)
+    run_id = uuid.uuid4()
+    try:
+        capability = _capability_of(config, caller, run_request, run_id, wall_clock)
+    except CapabilityTooLarge as too_large:
+        _log.warning(
+            "The capability of a run of app %s is %d characters; the limit is %d.",
+            caller.app,
+            too_large.length,
+            MAX_CAPABILITY_CHARACTERS,
+        )
+        return rejection(RejectionCode.CAPABILITY_TOO_LARGE)
     admitted = AdmittedRun(
-        run_id=uuid.uuid4(),
+        run_id=run_id,
         app=caller.app,
         principal=caller.principal,
         request=run_request,
         route=served,
+        capability=capability,
     )
     return _RunResponse(
         run_frames(
             admitted, runners.for_route(served), app_config, config.runs, LoopClock(), records
         )
     )
+
+
+def _capability_of(
+    config: ServiceConfig,
+    caller: Caller,
+    run_request: RunRequest,
+    run_id: UUID,
+    wall_clock: Callable[[], datetime],
+) -> Capability | None:
+    scope = config.capability_scope(caller.app)
+    if scope is None:
+        return None
+    claims = capability_claims(
+        scope,
+        run_id=run_id,
+        app=caller.app,
+        issuer=caller.principal.issuer,
+        subject=caller.principal.subject,
+        purpose=run_request.purpose,
+        now=wall_clock().timestamp(),
+        max_duration_s=config.runs.max_duration_s,
+    )
+    return signed_capability(scope, claims)
 
 
 def rejection(code: RejectionCode) -> Response:

@@ -12,6 +12,8 @@ import asyncio
 import functools
 import gc
 import json
+import logging
+import re
 import selectors
 import socket
 import threading
@@ -591,10 +593,34 @@ def alice_admitted_run(run_id: uuid.UUID) -> AdmittedRun:
         principal=ALICE,
         request=RunRequest.model_validate(run_body()),
         route=Cli("claude-main"),
+        capability=None,
     )
 
 
 QUIET = AssistantTextEvent(text="")
+
+
+FAILURE_LINE = re.compile(r"(?P<event>.+?): (?P<kind>\w+) at (?P<positions>.+)")
+POSITION = re.compile(r"[\w.]+\.py:\d+:[\w<>]+")
+
+
+def failure_lines(caplog: pytest.LogCaptureFixture) -> list[tuple[str, str, str]]:
+    """Each ERROR line as its event, its class and the function that raised.
+
+    Every line must be the event, the class and well-formed stack positions
+    alone, with nothing attached to the record.
+    """
+    lines = []
+    for record in caplog.records:
+        if record.levelno < logging.ERROR:
+            continue
+        assert record.exc_info is None
+        line = FAILURE_LINE.fullmatch(record.getMessage())
+        assert line is not None, record.getMessage()
+        positions = line["positions"].split(", ")
+        assert all(POSITION.fullmatch(position) for position in positions), positions
+        lines.append((line["event"], line["kind"], positions[-1].rsplit(":", 1)[1]))
+    return lines
 
 
 def in_loop(scenario: Callable[..., Coroutine[Any, Any, None]]) -> Callable[..., None]:

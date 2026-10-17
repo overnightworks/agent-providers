@@ -77,7 +77,7 @@ def _ending_of(event: TerminalEvent) -> _Ending:
             return _Ending(RunState.CANCELLED, None)
 
 
-def _utc_now() -> datetime:
+def utc_now() -> datetime:
     return datetime.now(UTC)
 
 
@@ -86,7 +86,7 @@ class RunRecords:
 
     def __init__(
         self,
-        now: Callable[[], datetime] = _utc_now,
+        now: Callable[[], datetime] = utc_now,
         *,
         retention: timedelta = RECORD_RETENTION,
         max_ended: int = MAX_ENDED_RECORDS,

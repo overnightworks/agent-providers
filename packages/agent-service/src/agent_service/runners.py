@@ -6,6 +6,11 @@ Each route has at most one runner. The CLI runner (slice A1b) and the API
 runner (A2b) are not built yet, so production installs none and a run on a
 route without a runner fails as ``provider_unavailable``.
 
+An admitted run of an app with an MCP origin carries its capability
+(``agent_service.capability``), minted at admission; a runner that sends it
+keeps it out of everything it yields and logs. ``run`` must not raise before it
+returns its generator; an async generator function satisfies this.
+
 A runner must end when its step is cancelled or its generator is closed, and
 its close must finish in bounded time: the service ends a silent or overlong
 run by cancelling the step and waiting for the close (``run_liveness``), and
@@ -21,6 +26,7 @@ from uuid import UUID
 
 from agent_client.wire import RunRequest
 from agent_providers.events import StreamEvent
+from agent_service.capability import Capability
 from agent_service.identity import Principal
 from agent_service.routing import Api, Cli, ServedRoute
 
@@ -32,6 +38,7 @@ class AdmittedRun:
     principal: Principal
     request: RunRequest
     route: ServedRoute
+    capability: Capability | None
 
 
 class Runner(Protocol):

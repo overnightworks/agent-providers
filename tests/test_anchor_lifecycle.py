@@ -105,8 +105,7 @@ def events_with(code: int) -> list[LeaderEvent]:
 
 
 def status_in(state: AnchorState, code: int) -> LeaderStatus:
-    carries_code = state in (EXITED, RELEASED)
-    return LeaderStatus(state, code if carries_code else None)
+    return LeaderStatus(state, None if state is RUNNING else code)
 
 
 def transition(state: AnchorState, returncode: int | None, announces: bool = False):

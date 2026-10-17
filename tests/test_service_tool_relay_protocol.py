@@ -288,8 +288,11 @@ def reflected_in_a_schema() -> list[ToolDefinition]:
     ],
 )
 def test_a_tool_list_carrying_the_capability_is_refused(offer: Any) -> None:
+    owner = owner_of(offer())
+    body = json_rpc("tools/list", 2)
+
     with pytest.raises(CapabilityReflected):
-        answered(owner_of(offer()), json_rpc("tools/list", 2))
+        answered(owner, body)
 
 
 @pytest.mark.parametrize(
@@ -325,8 +328,11 @@ def test_a_tool_reply_carrying_the_capability_is_refused(
 def test_a_locally_generated_reply_echoing_the_capability_as_its_id_is_refused(
     method: str, params: dict[str, Any] | None
 ) -> None:
+    owner = owner_of()
+    body = json_rpc(method, SEGMENT, params)
+
     with pytest.raises(CapabilityReflected):
-        answered(owner_of(), json_rpc(method, SEGMENT, params))
+        answered(owner, body)
 
 
 def test_a_dropped_definition_never_reaches_the_cli_even_when_it_carries_the_capability() -> None:

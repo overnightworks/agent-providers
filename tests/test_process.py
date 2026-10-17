@@ -2044,6 +2044,34 @@ def test_private_credential_home_closes_every_handle_when_the_repair_fails_midwa
     assert not home.path.exists()
 
 
+def test_private_credential_home_closes_a_child_frame_interrupted_after_its_listing_is_assigned(
+    tmp_path: Path, outside: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = _credential_home(tmp_path)
+    _a_tree_needing_repair(home, outside)
+    interruption = KeyboardInterrupt()
+    is_armed = _arm_after_the_first_removal_pass(monkeypatch, home.path)
+    real_names = process._subdirectory_names
+    listings_seen: list[int] = []
+
+    def interrupt_the_second_listing(listing: int) -> list[str]:
+        if is_armed():
+            listings_seen.append(listing)
+            if len(listings_seen) == 2:
+                raise interruption
+        return real_names(listing)
+
+    monkeypatch.setattr(process, "_subdirectory_names", interrupt_the_second_listing)
+    descriptors_before = _descriptor_count()
+
+    with pytest.raises(KeyboardInterrupt) as raised:
+        home.close()
+
+    assert raised.value is interruption
+    assert len(listings_seen) == 2
+    assert _descriptor_count() == descriptors_before
+
+
 def test_private_credential_home_with_more_subdirectories_than_descriptors_is_removed(
     tmp_path: Path, caplog: pytest.LogCaptureFixture,
 ) -> None:

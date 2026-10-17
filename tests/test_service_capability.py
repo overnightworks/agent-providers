@@ -17,6 +17,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from capability_support import capability_carrying
 from jwt.algorithms import RSAAlgorithm
 from provider_test_support import formatted_log_text
 from service_support import (
@@ -847,3 +848,30 @@ def test_nothing_logged_over_an_admitted_run_the_refusals_and_the_guard_carries_
 
     assert len(signed) == 2
     _assert_no_token_in_any_log(caplog, signed)
+
+
+_TOKEN = "headerOne.payloadOne.signatureOne"
+_OTHER_TOKEN = "headerTwo.payloadTwo.signatureTwo"
+
+
+@pytest.mark.parametrize(
+    ("body", "appears"),
+    [
+        pytest.param(_TOKEN.encode(), True, id="K1a-the-whole-token"),
+        pytest.param(
+            b'{"text": "echo ' + _segment_of(_TOKEN).encode() + b' end"}',
+            True,
+            id="K1b-the-signature-segment-inside-other-bytes",
+        ),
+        pytest.param(
+            _segment_of(_OTHER_TOKEN).encode(), False, id="K1c-another-tokens-signature-segment"
+        ),
+        pytest.param(
+            _TOKEN.rsplit(".", 1)[0].encode(), False, id="K1d-the-header-and-payload-alone"
+        ),
+    ],
+)
+def test_the_capability_appears_in_a_body_only_through_its_signature_segment(
+    body: bytes, appears: bool
+) -> None:
+    assert capability_carrying(_TOKEN).appears_in(body) is appears

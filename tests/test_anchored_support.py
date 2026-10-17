@@ -14,6 +14,7 @@ import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 import anchored_support
 import pytest
@@ -387,17 +388,25 @@ def test_leaving_the_cleanup_scope_by_an_exception_still_ends_children_and_close
     class TestBodyFailed(Exception):
         pass
 
+    started = SimpleNamespace()
+
+    def leave_scope_by_exception() -> None:
+        with child_cleanup_scope(anchor) as started.cleanup:
+            scripts = ScriptChildren(tmp_path, started.cleanup)
+            started.running = scripts.start()
+            deferring_start = scripts.start_then(lambda: FakeHandle(done_with_pid=False))
+            started.captured = started.cleanup.capture(deferring_start)
+            raise TestBodyFailed
+
     anchor = ZombieAnchor()
     try:
         before = open_descriptors()
         with pytest.raises(TestBodyFailed):
-            with child_cleanup_scope(anchor) as cleanup:
-                scripts = ScriptChildren(tmp_path, cleanup)
-                running = scripts.start()
-                deferring_start = scripts.start_then(lambda: FakeHandle(done_with_pid=False))
-                captured = cleanup.capture(deferring_start)
-                (deferred,) = captured.children
-                raise TestBodyFailed
+            leave_scope_by_exception()
+        running, captured, cleanup = (
+            vars(started).pop(name) for name in ("running", "captured", "cleanup")
+        )
+        (deferred,) = captured.children
 
         assert running.owned.resolved
         assert running.owned.popen.returncode == SIGKILLED

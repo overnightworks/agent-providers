@@ -16,8 +16,8 @@ def capability_carrying(token: str) -> Capability:
         sub=_RUN_ID,
         iat=_ISSUED_AT,
         exp=_ISSUED_AT + 600,
-        app="songmaker",
-        purpose="cowriter",
+        app="example-app",
+        purpose="assist",
         principal=CapabilityPrincipal(iss="https://issuer.example", sub="user-alice"),
         tools=("echo",),
     )

@@ -36,6 +36,7 @@ import select
 import sys
 import threading
 import time
+import uuid
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from typing import Any
@@ -409,6 +410,20 @@ def test_a_described_child_cannot_be_changed_through_its_environment(tmp_path: P
     )
     with pytest.raises(TypeError):
         child.environment["HOME"] = "/root"  # type: ignore[index]
+
+
+def test_a_described_child_does_not_show_its_environment_values_in_its_repr(
+    tmp_path: Path,
+) -> None:
+    marker = "environment-only-marker-" + uuid.uuid4().hex
+    child = ChildProcess(
+        binary=Path("/usr/bin/claude"),
+        arguments=("-p",),
+        environment={**closed_environment(tmp_path), "PROVIDER_SECRET": marker},
+        working_directory=tmp_path,
+    )
+    assert marker not in repr(child)
+    assert child.environment["PROVIDER_SECRET"] == marker
 
 
 def test_a_closed_environment_carries_no_secret_from_the_host(

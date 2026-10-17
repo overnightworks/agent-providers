@@ -394,7 +394,8 @@ def test_leaving_the_cleanup_scope_by_an_exception_still_ends_children_and_close
             with child_cleanup_scope(anchor) as cleanup:
                 scripts = ScriptChildren(tmp_path, cleanup)
                 running = scripts.start()
-                captured = cleanup.capture(scripts.start_then(lambda: FakeHandle(done_with_pid=False)))
+                deferring_start = scripts.start_then(lambda: FakeHandle(done_with_pid=False))
+                captured = cleanup.capture(deferring_start)
                 (deferred,) = captured.children
                 raise TestBodyFailed
 

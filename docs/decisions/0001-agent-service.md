@@ -892,7 +892,12 @@ unprivileged user, an empty private working directory, a strict per-run MCP
 config with an exact tool allowlist, restricted built-in tools, no session
 persistence, a finite max-turns, and a process-group kill and reap on cancel or
 timeout. Tokens never appear in argv, events or logs. Admission allows one
-active subscription run; a second request gets `429 Retry-After`. There is no
+active subscription run: the service holds one admission slot per app, and a CLI
+run takes a lease on it before its run id or any signature exists. A second request
+gets `429 busy` with `Retry-After: 10` at once. Refusals and API runs take nothing.
+The lease is released when the run is over (even if its record fails) or when its
+response ends, and only the lease that holds the slot can free it. The slot lives in
+one process, because the service runs one replica with one worker (A1d). There is no
 queue.
 
 **Consequence.** Subscription runs are strictly serial, and a busy service says

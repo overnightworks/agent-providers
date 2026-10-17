@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent_providers.claude import adapter as claude_adapter
+from agent_providers.claude import provider as claude_provider
 from agent_providers.claude.provider import CliLoginRefusedError, UnavailableError
 from agent_providers.errors import ProviderUnavailableError, SafeRouteReasonCode
 from agent_providers.events import AssistantTextEvent, StreamEvent
@@ -55,6 +56,36 @@ def test_closing_claude_adapter_stream_closes_provider_stream(monkeypatch) -> No
     asyncio.run(_close_stream())
 
     assert provider_stream.aclose_calls == 1
+
+
+@pytest.mark.parametrize("entry_point", ["stream_claude_turn", "call_claude_once"])
+def test_claude_adapter_refuses_an_empty_model_before_any_child_or_client_exists(
+    entry_point, monkeypatch,
+) -> None:
+    sdk = SimpleNamespace(Anthropic=lambda **_kwargs: pytest.fail("no client may be built"))
+    monkeypatch.setitem(sys.modules, "anthropic", sdk)
+    monkeypatch.setattr(
+        claude_provider, "run_capturing", lambda *_a, **_k: pytest.fail("no child may start"),
+    )
+    monkeypatch.setattr(
+        claude_provider,
+        "_spawn_reserved_async_cli_process",
+        lambda *_a, **_k: pytest.fail("no child may start"),
+    )
+
+    async def drive() -> None:
+        if entry_point == "call_claude_once":
+            claude_adapter.call_claude_once(model="", prompt="hi", timeout=1)
+            return
+        async for _event in claude_adapter.stream_claude_turn(
+            user_id="user-1", system="system", model="", messages=[],
+        ):
+            pytest.fail("no event may be yielded")
+
+    with pytest.raises(ProviderUnavailableError) as refused:
+        asyncio.run(drive())
+
+    assert refused.value.reason.code is SafeRouteReasonCode.ROUTE_FAILED
 
 
 class _SdkClientThatFails:

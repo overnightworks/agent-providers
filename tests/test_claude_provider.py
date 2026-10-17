@@ -63,11 +63,13 @@ from agent_providers.config import McpServerSpec, current_config, current_turn_c
 from agent_providers.constants import (
     CLAUDE_CLI_COMPLETION_TIMEOUT_SECONDS,
 )
-from agent_providers.errors import ProviderUnavailableError
+from agent_providers.errors import ProviderUnavailableError, SafeRouteReasonCode
 from agent_providers.events import AssistantTextEvent, FinalEvent, StreamEvent
 from agent_providers.grok import transport as grok_transport
 from agent_providers.process import CliRun, CliRunOutcome, CliRunReason
 from agent_providers.tool_loop import ToolOutcome, stream_tool_loop
+
+ROUTE_FAILED = SafeRouteReasonCode.ROUTE_FAILED
 
 # The exact string a tool turn command line must carry, written out rather
 # than derived from the code under test.
@@ -143,7 +145,7 @@ def _leaked_secret_env_values() -> dict[str, str]:
 def test_call_claude_routes_to_api_with_key() -> None:
     resp = ClaudeResponse(text="hi")
     with patch("agent_providers.claude.provider._call_api", return_value=resp) as mock:
-        result = call_claude("hello", api_key="sk-test")
+        result = call_claude("hello", api_key="sk-test", model="claude-sonnet-4-6")
     mock.assert_called_once()
     assert result.text == "hi"
 
@@ -166,7 +168,7 @@ def test_acall_claude_routes_to_api_with_key() -> None:
     resp = ClaudeResponse(text="async hi")
     mock = AsyncMock(return_value=resp)
     with patch("agent_providers.claude.provider._acall_api", mock):
-        result = asyncio.run(acall_claude("hello", api_key="sk-test"))
+        result = asyncio.run(acall_claude("hello", api_key="sk-test", model="claude-sonnet-4-6"))
     mock.assert_called_once()
     assert result.text == "async hi"
 
@@ -798,6 +800,119 @@ def test_call_cli_passes_model(_no_tool_gate_open) -> None:
     assert "--model" in cmd
     model_idx = cmd.index("--model")
     assert cmd[model_idx + 1] == "claude-haiku-4-5-20251001"
+
+
+@pytest.fixture
+def spawned_claude_children(_no_tool_gate_open, monkeypatch: pytest.MonkeyPatch) -> list:
+    """Every CLI child the Claude provider starts, answered by a fake that exits cleanly."""
+    children: list = []
+
+    def run_capturing(child, **_kwargs):
+        children.append(child)
+        return MagicMock(returncode=0, stdout='{"result":"ok"}', stderr="")
+
+    async def open_async_pipes(child, **_kwargs):
+        children.append(child)
+        if "stream-json" in child.arguments:
+            return _streaming_cli_process([b'{"type":"result","result":"ok"}\n'])
+        return _finished_async_process(b'{"result":"ok"}')
+
+    monkeypatch.setattr(provider, "run_capturing", run_capturing)
+    monkeypatch.setattr(provider, "open_async_pipes", open_async_pipes)
+    monkeypatch.setattr(
+        provider, "verify_cli_tool_surface", AsyncMock(return_value=Path("/usr/bin/claude")),
+    )
+    return children
+
+
+@pytest.fixture
+def anthropic_client_factory() -> MagicMock:
+    sdk = MagicMock(APITimeoutError=Exception)
+    with patch.dict("sys.modules", {"anthropic": sdk}):
+        yield sdk.Anthropic
+
+
+def _claude_entry_point(name: str, model: str | None, api_key: str | None = None) -> object:
+    if name == "call_claude":
+        return call_claude("hi", api_key=api_key, model=model)
+    if name == "acall_claude":
+        return asyncio.run(acall_claude("hi", api_key=api_key, model=model))
+    if name == "acall_claude_with_mcp":
+        return asyncio.run(provider.acall_claude_with_mcp("hi", user_id="u-1", model=model))
+    stream = acall_claude_with_mcp_stream("hi", user_id="u-1", model=model)
+    return asyncio.run(_collect_stream_events(stream))
+
+
+_CLI_ENTRY_POINTS = [
+    "call_claude", "acall_claude", "acall_claude_with_mcp", "acall_claude_with_mcp_stream",
+]
+
+
+@pytest.mark.parametrize("entry_point", _CLI_ENTRY_POINTS)
+def test_claude_entry_points_run_the_cli_default_without_a_model(
+    entry_point: str, spawned_claude_children: list,
+) -> None:
+    _claude_entry_point(entry_point, None)
+
+    assert len(spawned_claude_children) == 1
+    assert "--model" not in spawned_claude_children[0].arguments
+
+
+@pytest.mark.parametrize("entry_point", _CLI_ENTRY_POINTS)
+def test_claude_entry_points_pass_a_chosen_model_to_the_cli(
+    entry_point: str, spawned_claude_children: list,
+) -> None:
+    _claude_entry_point(entry_point, "opus")
+
+    arguments = spawned_claude_children[0].arguments
+    assert arguments[arguments.index("--model") + 1] == "opus"
+
+
+def test_a_catalog_only_host_runs_a_one_shot_on_the_cli_default(
+    spawned_claude_children: list,
+) -> None:
+    override_provider_runtime(turns=None)
+
+    assert call_claude("hi").text == "ok"
+    assert "--model" not in spawned_claude_children[0].arguments
+
+
+@pytest.mark.parametrize("entry_point", ["call_claude", "acall_claude"])
+def test_claude_api_branch_refuses_a_missing_model(
+    entry_point: str, spawned_claude_children: list, anthropic_client_factory: MagicMock,
+) -> None:
+    with pytest.raises(ProviderUnavailableError) as refused:
+        _claude_entry_point(entry_point, None, api_key="sk-test")
+
+    assert (refused.value.route, refused.value.reason.code) == ("api", ROUTE_FAILED)
+    anthropic_client_factory.assert_not_called()
+    assert spawned_claude_children == []
+
+
+@pytest.mark.parametrize(
+    ("entry_point", "api_key", "route"),
+    [
+        ("call_claude", None, "cli"),
+        ("call_claude", "sk-test", "api"),
+        ("acall_claude", None, "cli"),
+        ("acall_claude", "sk-test", "api"),
+        ("acall_claude_with_mcp", None, "cli"),
+        ("acall_claude_with_mcp_stream", None, "cli"),
+    ],
+)
+def test_claude_entry_points_refuse_an_empty_model(
+    entry_point: str,
+    api_key: str | None,
+    route: str,
+    spawned_claude_children: list,
+    anthropic_client_factory: MagicMock,
+) -> None:
+    with pytest.raises(ProviderUnavailableError) as refused:
+        _claude_entry_point(entry_point, "", api_key=api_key)
+
+    assert (refused.value.route, refused.value.reason.code) == (route, ROUTE_FAILED)
+    anthropic_client_factory.assert_not_called()
+    assert spawned_claude_children == []
 
 
 def test_call_cli_plain_text_output(_no_tool_gate_open) -> None:

@@ -38,6 +38,11 @@ from agent_providers.constants import (
     DEADLINE_EXCEEDED_REASON,
     PROBE_TIMEOUT_SECONDS,
 )
+from agent_providers.errors import (
+    ProviderUnavailableError,
+    SafeRouteReasonCode,
+    normalize_route_failure,
+)
 from agent_providers.events import (
     AssistantTextEvent,
     FinalEvent,
@@ -174,6 +179,16 @@ class ClaudeResponse:
 # ── Public interface ───────────────────────────────────────────────
 
 
+def _refuse_unusable_model(model: str | None, *, route: Literal["api", "cli"]) -> None:
+    """An empty name is never a default; the API has no default to fall back to."""
+    if model == "" or (model is None and route == "api"):
+        raise ProviderUnavailableError(
+            "claude",
+            route,
+            normalize_route_failure(SafeRouteReasonCode.ROUTE_FAILED),
+        )
+
+
 def call_claude(
     prompt: str,
     api_key: str | None = None,
@@ -183,8 +198,7 @@ def call_claude(
     messages: list[dict[str, str]] | None = None,
     timeout_seconds: float | None = None,
 ) -> ClaudeResponse:
-    if model is None:
-        model = current_turn_config().claude_chat_model
+    _refuse_unusable_model(model, route="api" if api_key else "cli")
     deadline = time.monotonic() + timeout_seconds if timeout_seconds is not None else None
     if api_key:
         log.info("Claude: using API backend (model=%s)", model)
@@ -201,8 +215,7 @@ async def acall_claude(
     max_tokens: int = 1024,
     messages: list[dict[str, str]] | None = None,
 ) -> ClaudeResponse:
-    if model is None:
-        model = current_turn_config().claude_chat_model
+    _refuse_unusable_model(model, route="api" if api_key else "cli")
     if api_key:
         log.info("Claude: using async API backend (model=%s)", model)
         return await _acall_api(prompt, api_key, system, model, max_tokens, messages)
@@ -228,8 +241,7 @@ async def acall_claude_with_mcp(
     MCP-attached turns and requires the CLI backend (the Anthropic SDK
     does not expose MCP servers).
     """
-    if model is None:
-        model = current_turn_config().claude_chat_model
+    _refuse_unusable_model(model, route="cli")
     binary = await verify_cli_tool_surface()
     flat_prompt = flatten_messages(prompt, messages)
     stdin_body = stdin_prompt(system, flat_prompt)
@@ -301,8 +313,7 @@ async def acall_claude_with_mcp_stream(
     for this turn; it is excluded from serialization and never reaches a wire
     payload.
     """
-    if model is None:
-        model = current_turn_config().claude_chat_model
+    _refuse_unusable_model(model, route="cli")
     binary = await verify_cli_tool_surface()
     flat_prompt = flatten_messages(prompt, messages)
     stdin_body = stdin_prompt(system, flat_prompt)
@@ -629,16 +640,19 @@ def _claude_child_process(
     )
 
 
+def _model_arguments(model: str | None) -> list[str]:
+    return [] if model is None else ["--model", model]
+
+
 def _cli_arguments(
-    model: str,
+    model: str | None,
     *,
     stream: bool = False,
 ) -> list[str]:
     """Arguments for a single-turn completion that needs no tools at all."""
     cmd = [
         "-p",
-        "--model",
-        model,
+        *_model_arguments(model),
         "--output-format",
         "stream-json" if stream else "json",
         *_TOOL_ISOLATION_FLAGS,
@@ -711,7 +725,7 @@ def _unlink_quiet(path: str) -> None:
 
 
 def _mcp_cli_arguments(
-    model: str,
+    model: str | None,
     config_path: str,
     spec: McpServerSpec,
     *,
@@ -727,8 +741,7 @@ def _mcp_cli_arguments(
     output_format = "stream-json" if stream else "json"
     cmd = [
         "-p",
-        "--model",
-        model,
+        *_model_arguments(model),
         "--output-format",
         output_format,
         *_TOOL_ISOLATION_FLAGS,
@@ -744,7 +757,7 @@ def _mcp_cli_arguments(
 
 @contextmanager
 def _mcp_turn_cli_arguments(
-    model: str,
+    model: str | None,
     user_id: str,
     *,
     stream: bool,
@@ -1949,8 +1962,6 @@ def _call_cli(
     rather than in each caller: a future caller of ``call_claude()``
     inherits it automatically instead of having to remember it.
     """
-    if model is None:
-        model = current_turn_config().claude_chat_model
     binary = verify_no_builtin_cli_tools()
     flat_prompt = flatten_messages(prompt, messages)
     stdin_body = stdin_prompt(system, flat_prompt)
@@ -2016,8 +2027,6 @@ async def _acall_cli(
     Gated the same way and for the same reason as ``_call_cli``: the gate
     sits in the call path both share, not in each caller.
     """
-    if model is None:
-        model = current_turn_config().claude_chat_model
     binary = await averify_no_builtin_cli_tools()
     flat_prompt = flatten_messages(prompt, messages)
     stdin_body = stdin_prompt(system, flat_prompt)

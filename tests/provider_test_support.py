@@ -599,6 +599,8 @@ class DrivenTurn:
 def drive_turn(
     provider: str,
     *,
+    route: ProviderRoute = ProviderRoute.CLI,
+    model: str | None = ...,
     correlation_id: str | None = None,
     while_the_caller_handles_an_exception: bool = False,
 ) -> DrivenTurn:
@@ -618,8 +620,8 @@ def drive_turn(
         try:
             async for event in stream_turn(
                 provider=provider,
-                route=ProviderRoute.CLI,
-                model=f"{provider}-test",
+                route=route,
+                model=f"{provider}-test" if model is ... else model,
                 user_id="user-1",
                 system="system",
                 messages=[{"role": "user", "content": "hello"}],

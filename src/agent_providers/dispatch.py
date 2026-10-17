@@ -87,7 +87,7 @@ async def stream_turn(
     *,
     provider: str,
     route: ProviderRoute,
-    model: str,
+    model: str | None,
     user_id: str,
     system: str,
     messages: list[dict[str, str]],
@@ -97,7 +97,9 @@ async def stream_turn(
 ) -> AsyncIterator[StreamEvent]:
     if provider not in ProviderName:
         raise _unavailable(provider, route, SafeRouteReasonCode.ROUTE_FAILED)
-    if not model:
+    if _model_is_unusable(
+        model, provider_default_runs=provider == "claude" and route is ProviderRoute.CLI,
+    ):
         raise _unavailable(provider, route, SafeRouteReasonCode.ROUTE_FAILED)
     try:
         stream = _stream_for_route(
@@ -275,11 +277,21 @@ async def _stream_cli_tool_turn(
         ) from exc
 
 
+def _model_is_unusable(model: str | None, *, provider_default_runs: bool) -> bool:
+    return model == "" or (model is None and not provider_default_runs)
+
+
 def call_provider_once(
-    *, provider: str, model: str, prompt: str, timeout: int, system: str | None = None,
+    *, provider: str, model: str | None, prompt: str, timeout: int, system: str | None = None,
 ) -> str:
-    """Run one tool-free completion on the provider's HTTP API."""
-    if provider not in ProviderName or not model:
+    """Run one tool-free completion.
+
+    Grok and Codex use their HTTP API. Claude uses its API with an Anthropic
+    key and its CLI without one; only the CLI runs without a model.
+    """
+    if provider not in ProviderName or _model_is_unusable(
+        model, provider_default_runs=provider == "claude",
+    ):
         raise _unavailable(provider, ProviderRoute.API, SafeRouteReasonCode.ROUTE_FAILED)
     try:
         if provider == "claude":

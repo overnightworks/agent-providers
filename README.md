@@ -189,7 +189,7 @@ The configuration is cut along the two ways into this library. `ProviderRuntimeC
 carries what the catalog path reads — the CLI binaries, the search path a bare
 binary name is resolved against, the credential files, and the working root
 below which every private directory and temporary file is created. A host that
-also runs turns adds a `TurnRuntimeConfig` as `turns`: the chat model, the
+also runs turns adds a `TurnRuntimeConfig` as `turns`: the
 Codex mounts and process caps, the prompt-file names, and an optional
 `McpServerSpec` describing the host's MCP server. A catalog-only host passes no
 `turns` at all and never invents a value it does not have; a host that runs no
@@ -232,7 +232,7 @@ A host migrates at its pin bump to 0.3.0; both configuration models refuse unkno
 
 | Before (`ProviderRuntimeConfig`) | Now |
 |---|---|
-| `claude_chat_model` | `turns.claude_chat_model` |
+| `claude_chat_model` | removed: a turn passes its model, or `None` for the Claude CLI's own default; a host that still sets `turns.claude_chat_model` fails at startup |
 | `codex_code_mode_host_binary` | `turns.codex_code_mode_host_binary` |
 | `codex_resources_directory` | `turns.codex_resources_directory` |
 | `codex_max_concurrent_processes` | `turns.codex_max_concurrent_processes` |
@@ -280,6 +280,8 @@ A host migrates at its pin bump to 0.3.0; both configuration models refuse unkno
 | The catalog error `Unknown co-writer provider '<name>'` | `Unknown provider '<name>'` | Update any text match; the exception types are unchanged. |
 | `ToolProtocolMarkup()` defaults `songmaker` / `Songmaker`; `ToolCatalog.markup` optional | Both fields and `ToolCatalog.markup` required | Declare `markup=ToolProtocolMarkup(tag_namespace="songmaker", product_name="Songmaker")`; the rendered prompt stays byte-identical. |
 | A Codex turn whose private home cannot be created or made private (`mkdtemp`, the home `chmod` or the `work` `mkdir` raises `OSError`) | Raised unchained: `ProviderUnavailableError` with `CLI_BINARY_UNAVAILABLE` ("CLI is unavailable.") on the tool turn; `CodexImageCliError("could not create a private CLI home")` on the image turn | A full or unwritable `cli_working_directory_root` now reaches the host's CLI-failure path instead of its unexpected-error path. The message holds no path. Songmaker shows it as `JOB_ERROR_COVER_IMAGE_CLI_FAILED` (`src/songmaker_cli/jobs/_runtime.py:111-116`, `:139`). |
+| `dispatch.stream_turn` and `dispatch.call_provider_once` take a required `model` of type `str` | `dispatch.stream_turn` and `dispatch.call_provider_once` take a required `model` of type `str` or `None` | Map "nothing chosen" to `None`. `None` runs the Claude CLI's own default, and so does `call_provider_once` for Claude without an Anthropic key; every other route refuses it with `ROUTE_FAILED`, as before. `""` is still refused with `ROUTE_FAILED`. |
+| `claude.provider.call_claude`, `claude.provider.acall_claude`, `claude.provider.acall_claude_with_mcp`, `claude.provider.acall_claude_with_mcp_stream`, `claude.adapter.call_claude_once` and `claude.adapter.stream_claude_turn` with `model=None` ran the configured `turns.claude_chat_model` | `claude.provider.call_claude`, `claude.provider.acall_claude`, `claude.provider.acall_claude_with_mcp`, `claude.provider.acall_claude_with_mcp_stream`, `claude.adapter.call_claude_once` and `claude.adapter.stream_claude_turn` with `model=None` run the Claude CLI's own default; with an Anthropic key, `call_claude` and `acall_claude` refuse it with `ROUTE_FAILED` | Pass a model wherever you relied on the configured one, and always on the API. `model=""` is now refused with `ROUTE_FAILED` on each of them; it used to reach the CLI or the API. `call_claude` without a model no longer needs `turns`. |
 
 ## Sandbox
 

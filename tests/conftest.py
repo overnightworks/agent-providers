@@ -38,7 +38,6 @@ _SAMPLE_MCP_SERVER = McpServerSpec(
 )
 
 _SAMPLE_TURNS = TurnRuntimeConfig(
-    claude_chat_model="claude-test-model",
     codex_code_mode_host_binary=_SAMPLE_ROOT / "codex" / "code-mode-host",
     codex_resources_directory=_SAMPLE_ROOT / "codex" / "resources",
     codex_max_concurrent_processes=4,

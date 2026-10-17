@@ -1,4 +1,4 @@
-"""Contract tests for the transport-independent co-writer tool loop."""
+"""Contract tests for the transport-independent tool loop."""
 
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ from agent_providers.tool_loop import (
     stream_tool_loop,
 )
 
-A_TOOL_FAILURE_MESSAGE = "Co-Writer tool failed."
+A_TOOL_FAILURE_MESSAGE = "The sample tool failed."
 A_CORRELATION_ID = "job-42"
 
 
@@ -170,12 +170,12 @@ def test_executor_failure_returns_a_named_error_to_the_model(caplog) -> None:
     assert events == [
         ToolCallEvent(tool_use_id="call-1", name="write", input={"text": "secret"}),
         ToolResultEvent(
-            tool_use_id="call-1", content="Co-Writer tool failed.", is_error=True,
+            tool_use_id="call-1", content="The sample tool failed.", is_error=True,
         ),
         FinalEvent(text=""),
     ]
     assert transport.messages[1] == ToolResultBatch((
-        tool_loop.ToolResult("call-1", "Co-Writer tool failed.", True),
+        tool_loop.ToolResult("call-1", "The sample tool failed.", True),
     ))
 
 

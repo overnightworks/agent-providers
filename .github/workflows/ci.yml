@@ -22,6 +22,16 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Host vocabulary stays out of the tree
+        env:
+          HOST_VOCABULARY: 'co-?writer|cowriter|song|lyric|cover[ _-]?image|album|musician|judge([^a-z]|$)|\b(bpm|key_scale|audio_duration|tempo|set_tempo|verse|chorus|rhyme|vers)\b'
+        run: |
+          hits=$(git grep -n -i -E "$HOST_VOCABULARY" -- packages tests docs | grep -v -E -f .github/host-vocabulary-allowed.txt || true)
+          if [ -n "$hits" ]; then
+            printf '%s\n' "$hits"
+            exit 1
+          fi
+
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
         with:
           enable-cache: true

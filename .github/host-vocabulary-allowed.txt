@@ -1,0 +1,10 @@
+^tests/test_service_
+^tests/service_support\.py:
+^tests/test_keycloak_token_shapes\.py:
+^tests/keycloak/realm\.json:
+^docs/decisions/0001-agent-service\.md:
+^tests/fixtures/grok_cli_real_tool_stream\.jsonl:
+^tests/fixtures/codex-tool-code-mode-host-disabled(-without-remediation)?\.jsonl:
+^tests/fixtures/codex-image-no-image-events\.jsonl:
+^tests/test_grok_cli_adapter\.py:[0-9]+:.*(get_song|song_id|"songmaker"|<songmaker_tool_call>|state of a song)
+^tests/test_codex_cli_adapter\.py:[0-9]+:.*The open song is Midnight Drive\.

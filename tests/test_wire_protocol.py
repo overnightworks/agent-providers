@@ -219,7 +219,7 @@ def _containing_itself(container: dict[str, Any] | list[Any]) -> object:
         pytest.param(float("nan"), id="NaN"),
         pytest.param(float("inf"), id="+Inf"),
         pytest.param(float("-inf"), id="-Inf"),
-        pytest.param({"chorus"}, id="a set"),
+        pytest.param({"paragraph"}, id="a set"),
         pytest.param(datetime(2026, 10, 15, tzinfo=UTC), id="a datetime"),
         pytest.param("\ud800", id="a lone surrogate"),
         pytest.param({"\ud800": "x"}, id="a lone surrogate in a key"),
@@ -238,10 +238,10 @@ def test_tool_input_that_is_not_json_is_refused(value: object) -> None:
 def test_nested_json_tool_input_is_accepted_unchanged() -> None:
     nested = {
         "line": 1,
-        "tempo": 92.5,
+        "size": 92.5,
         "draft": True,
         "note": None,
-        "lines": ["Über Grün", {"rhyme": ["a", "b"]}],
+        "lines": ["Über Grün", {"phrase": ["a", "b"]}],
     }
 
     tool_call = call(1, "call-1", tool_input=nested)
@@ -250,11 +250,11 @@ def test_nested_json_tool_input_is_accepted_unchanged() -> None:
 
 
 def test_a_value_shared_by_two_branches_of_tool_input_is_accepted() -> None:
-    chorus = {"lines": ["la", "la"]}
+    paragraph = {"lines": ["la", "la"]}
 
-    tool_call = call(1, "call-1", tool_input={"first": chorus, "again": [chorus]})
+    tool_call = call(1, "call-1", tool_input={"first": paragraph, "again": [paragraph]})
 
-    assert json.loads(tool_call.model_dump_json())["input"]["again"] == [chorus]
+    assert json.loads(tool_call.model_dump_json())["input"]["again"] == [paragraph]
 
 
 REJECTION = {"v": PROTOCOL_VERSION, "code": "busy", "message": "Another run is active."}
@@ -383,8 +383,8 @@ REQUEST = {
         "system": "You are a helpful assistant.",
         "messages": [
             {"role": "user", "text": "Write a first line."},
-            {"role": "assistant", "text": "Ein erster Vers."},
-            {"role": "user", "text": "Now a chorus."},
+            {"role": "assistant", "text": "Ein erster Absatz."},
+            {"role": "user", "text": "Now a paragraph."},
         ],
     },
 }

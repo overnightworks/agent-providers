@@ -2,7 +2,7 @@
 
 These install a library-only provider runtime and the probe patches every test
 needs, so the suite proves the provider layer against values the package owns —
-never a host application's — with no ``songmaker_cli`` on the path.
+never a host's own — with no host application on the path.
 
 ``agent_providers.config.configure()`` refuses a second, differing
 installation, so ``_configure_agent_provider_runtime`` installs one sample

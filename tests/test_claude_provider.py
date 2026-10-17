@@ -12,6 +12,8 @@ import sys
 import threading
 import time
 import weakref
+from collections.abc import Callable
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
@@ -101,6 +103,22 @@ def _reset_cli_process_pool_for_test() -> None:
         provider._zombie_reap_tasks.clear()
     with provider._tool_surface_lock:
         provider._tool_surface_probe_tasks.clear()
+
+
+@pytest.fixture(autouse=True)
+def killpg_signals():
+    """Record the signals a reap sends; the group is already gone, so no real pid is signalled.
+
+    Uses ``patch`` rather than ``monkeypatch`` for the reason the conftest autouse fixtures do.
+    """
+    signals: list[tuple[int, int]] = []
+
+    def record_and_find_the_group_gone(pid: int, signal_number: int) -> None:
+        signals.append((pid, signal_number))
+        raise ProcessLookupError
+
+    with patch.object(provider.os, "killpg", record_and_find_the_group_gone):
+        yield signals
 
 
 @pytest.fixture(autouse=True)
@@ -1769,7 +1787,7 @@ def test_a_deployment_without_an_mcp_server_streams_the_tool_free_command_line(
     process = a_claude_cli_child(pid=1, has_stdin=False)
     spawn = AsyncMock(return_value=process)
     monkeypatch.setattr(provider, "_spawn_reserved_async_cli_process", spawn)
-    monkeypatch.setattr(provider, "_reap_stream_process_after_cancellation", AsyncMock())
+    monkeypatch.setattr(provider, "_reap_behind_shield", AsyncMock())
 
     async def one_final_event(_proc, _timeout, _correlation_id):
         yield FinalEvent(text="done")
@@ -1994,7 +2012,7 @@ def test_the_streamed_mcp_turn_runs_the_same_command_its_probe_verified(
     turn_spawns = install_claude_cli_children(
         monkeypatch, a_claude_cli_child(pid=4242, has_stdin=False),
     )
-    monkeypatch.setattr(provider, "_reap_stream_process_after_cancellation", AsyncMock())
+    monkeypatch.setattr(provider, "_reap_behind_shield", AsyncMock())
 
     async def one_final_event(_proc, _timeout, _correlation_id):
         yield FinalEvent(text="done")
@@ -3861,7 +3879,7 @@ def test_public_claude_stream_names_a_missing_binary(monkeypatch) -> None:
         asyncio.run(events)
 
 
-def test_stream_reap_completes_before_a_cancelled_closer_returns(monkeypatch) -> None:
+def test_stream_reap_completes_before_a_twice_cancelled_closer_returns(monkeypatch) -> None:
     """A disconnect may cancel an ASGI 2.3 stream while it is closing.
 
     The reaper itself has awaits for SIGTERM/SIGKILL grace and process wait,
@@ -3901,9 +3919,10 @@ def test_stream_reap_completes_before_a_cancelled_closer_returns(monkeypatch) ->
 
         closer = asyncio.create_task(stream.aclose())
         await reaper_started.wait()
-        closer.cancel()
-        await asyncio.sleep(0)
-        assert not closer.done()
+        for _ in range(2):
+            closer.cancel()
+            await _after_pending_callbacks()
+            assert not closer.done()
 
         finish_reaper.set()
         with pytest.raises(asyncio.CancelledError):
@@ -4006,7 +4025,7 @@ def test_stream_reap_does_not_spin_under_anyio_level_cancellation(monkeypatch) -
         async def close_after_cancellation() -> None:
             process = a_claude_cli_child(returncode=None)
             with pytest.raises(asyncio.CancelledError):
-                await provider._reap_stream_process_after_cancellation(process)
+                await provider._reap_behind_shield(process)
             close_finished.set()
 
         async with anyio.create_task_group() as task_group:
@@ -4022,6 +4041,310 @@ def test_stream_reap_does_not_spin_under_anyio_level_cancellation(monkeypatch) -
         assert shield_calls <= 2
 
     anyio.run(_run)
+
+
+# ── every exit of a turn goes through one shielded reap ──────────────
+
+ONE_SHOT_TEST_BOUND_SECONDS = 10
+A_PROCESS_PID = 2468
+
+
+class ReapFault(Exception):
+    """The reap's own failure, distinct from every turn error."""
+
+
+async def _after_pending_callbacks() -> None:
+    callbacks_ran = asyncio.Event()
+    asyncio.get_running_loop().call_soon(callbacks_ran.set)
+    await callbacks_ran.wait()
+
+
+def _run_bounded(scenario) -> None:
+    asyncio.run(asyncio.wait_for(scenario, ONE_SHOT_TEST_BOUND_SECONDS))
+
+
+def _held_slots() -> int:
+    with provider._zombie_registry_lock:
+        return len(provider._zombie_reap_reservations)
+
+
+@dataclass
+class _ChildInAHome:
+    child: MagicMock
+    homes: list[Path]
+
+    @property
+    def home(self) -> Path:
+        return self.homes[0]
+
+
+def _install_child_in_a_home(
+    monkeypatch: pytest.MonkeyPatch, **child_knobs: object,
+) -> _ChildInAHome:
+    child = a_claude_cli_child(**child_knobs)
+    homes: list[Path] = []
+
+    def start(spawned, _stream_buffer_limit) -> MagicMock:
+        homes.append(Path(spawned.environment["HOME"]))
+        return child
+
+    install_claude_cli_children(monkeypatch, factory=start)
+    return _ChildInAHome(child, homes)
+
+
+async def _call_mcp_one_shot() -> ClaudeResponse:
+    return await provider.acall_claude_with_mcp("hi", user_id="u-1")
+
+
+async def _call_cli_one_shot() -> ClaudeResponse:
+    return await _acall_cli("hi")
+
+
+@pytest.fixture(
+    params=[_call_mcp_one_shot, _call_cli_one_shot], ids=["mcp_one_shot", "cli_one_shot"],
+)
+def one_shot(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch,
+) -> Callable[[], object]:
+    monkeypatch.setattr(provider, "_write_mcp_config", lambda _spec, _user_id: "unused")
+    monkeypatch.setattr(provider, "_unlink_quiet", lambda _path: None)
+    return request.param
+
+
+def _replace_the_reap(
+    monkeypatch: pytest.MonkeyPatch, reap: Callable[[object], object],
+) -> None:
+    monkeypatch.setattr(provider, "_reap_process_group", reap)
+
+
+def test_a_successful_one_shot_holds_its_slot_and_home_until_the_reap_is_done(
+    one_shot, monkeypatch, killpg_signals,
+) -> None:
+    exit_wait = EventGate()
+    turn_child = _install_child_in_a_home(
+        monkeypatch, communicate=(b'{"result":"ok"}', b""), wait_gate=exit_wait,
+    )
+
+    async def scenario() -> None:
+        turn = asyncio.create_task(one_shot())
+        await exit_wait.started.wait()
+        assert not turn.done()
+        assert _held_slots() == 1
+        assert turn_child.home.exists()
+
+        exit_wait.release.set()
+        assert (await turn).text == "ok"
+        assert _held_slots() == 0
+        assert not turn_child.home.exists()
+
+    _run_bounded(scenario())
+    assert killpg_signals == []
+
+
+@pytest.mark.parametrize(
+    ("turn_failure", "expected_error", "message"),
+    [
+        (asyncio.TimeoutError(), UnavailableError, "timed out"),
+        (RuntimeError("turn broke"), RuntimeError, "turn broke"),
+    ],
+    ids=["timeout", "error"],
+)
+def test_a_failed_one_shot_reaps_once_then_releases_its_slot_and_home(
+    one_shot, monkeypatch, killpg_signals, turn_failure, expected_error, message,
+) -> None:
+    turn_child = _install_child_in_a_home(
+        monkeypatch, pid=A_PROCESS_PID, returncode=None, communicate=turn_failure,
+    )
+
+    async def scenario() -> None:
+        with pytest.raises(expected_error, match=message):
+            await one_shot()
+        assert _held_slots() == 0
+        assert not turn_child.home.exists()
+
+    _run_bounded(scenario())
+    assert killpg_signals == [(A_PROCESS_PID, provider.signal.SIGTERM)]
+
+
+def test_a_cancelled_one_shot_receives_its_cancellation_only_after_the_reap(
+    one_shot, monkeypatch,
+) -> None:
+    turn_gate = EventGate()
+    exit_wait = EventGate()
+    turn_child = _install_child_in_a_home(
+        monkeypatch, returncode=None, communicate_gate=turn_gate, wait_gate=exit_wait,
+    )
+
+    async def scenario() -> None:
+        turn = asyncio.create_task(one_shot())
+        await turn_gate.started.wait()
+        turn.cancel()
+        await exit_wait.started.wait()
+        assert not turn.done()
+        assert turn_child.home.exists()
+
+        exit_wait.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await turn
+        assert not turn_child.home.exists()
+
+    _run_bounded(scenario())
+
+
+def test_a_one_shot_cancelled_twice_completes_one_reap_before_delivering_the_cancellation(
+    one_shot, monkeypatch,
+) -> None:
+    first_stage = EventGate()
+    second_stage = EventGate()
+    reaps_completed = 0
+    turn_child = _install_child_in_a_home(
+        monkeypatch, returncode=None, communicate=RuntimeError("turn broke"),
+    )
+
+    async def two_stage_reap(proc) -> bool:
+        nonlocal reaps_completed
+        await first_stage.pass_through()
+        await second_stage.pass_through()
+        reaps_completed += 1
+        provider._release_zombie_reservation(proc.pid)
+        return False
+
+    _replace_the_reap(monkeypatch, two_stage_reap)
+
+    async def scenario() -> None:
+        turn = asyncio.create_task(one_shot())
+        await first_stage.started.wait()
+        turn.cancel()
+        await _after_pending_callbacks()
+        assert reaps_completed == 0
+
+        first_stage.release.set()
+        await second_stage.started.wait()
+        turn.cancel()
+        await _after_pending_callbacks()
+        assert not turn.done()
+        assert reaps_completed == 0
+        assert turn_child.home.exists()
+
+        second_stage.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await turn
+        assert reaps_completed == 1
+        assert not turn_child.home.exists()
+
+    _run_bounded(scenario())
+
+
+@dataclass(frozen=True)
+class _ReapFaultBoundary:
+    turn_outcome: tuple[bytes, bytes] | BaseException
+    reap_fault: BaseException
+    cancelled_during_reap: bool
+    expected_context: type[BaseException] | None
+
+
+REAP_FAULT_BOUNDARIES = {
+    "timeout": _ReapFaultBoundary(asyncio.TimeoutError(), ReapFault(), False, UnavailableError),
+    "error": _ReapFaultBoundary(RuntimeError("turn broke"), ReapFault(), False, RuntimeError),
+    "cancellation": _ReapFaultBoundary(RuntimeError("turn broke"), ReapFault(), True, RuntimeError),
+    "file_not_found": _ReapFaultBoundary(
+        asyncio.TimeoutError(), FileNotFoundError(), False, UnavailableError,
+    ),
+}
+
+
+@pytest.mark.parametrize("boundary", REAP_FAULT_BOUNDARIES.values(), ids=REAP_FAULT_BOUNDARIES)
+def test_the_reaps_own_exception_wins_over_the_turns_exit(
+    one_shot, monkeypatch, boundary,
+) -> None:
+    reap_gate = EventGate()
+    _install_child_in_a_home(
+        monkeypatch, returncode=None, communicate=boundary.turn_outcome,
+    )
+
+    async def reap_that_fails(_proc) -> bool:
+        await reap_gate.pass_through()
+        raise boundary.reap_fault
+
+    _replace_the_reap(monkeypatch, reap_that_fails)
+
+    async def scenario() -> None:
+        turn = asyncio.create_task(one_shot())
+        await reap_gate.started.wait()
+        if boundary.cancelled_during_reap:
+            turn.cancel()
+            await _after_pending_callbacks()
+        reap_gate.release.set()
+        with pytest.raises(type(boundary.reap_fault)) as caught:
+            await turn
+        assert caught.value is boundary.reap_fault
+        assert isinstance(caught.value.__context__, boundary.expected_context)
+
+    _run_bounded(scenario())
+
+
+def test_a_stream_that_ends_normally_reaps_once_and_releases_its_slot_and_home(
+    monkeypatch,
+) -> None:
+    exit_wait = EventGate()
+    turn_child = _install_child_in_a_home(
+        monkeypatch,
+        has_stdin=False,
+        stream_lines=[b'{"type":"result","subtype":"success","result":"ok"}\n'],
+        wait_gate=exit_wait,
+    )
+    reaps = 0
+    real_reap = provider._reap_process_group
+
+    async def counting_reap(proc) -> bool:
+        nonlocal reaps
+        reaps += 1
+        return await real_reap(proc)
+
+    _replace_the_reap(monkeypatch, counting_reap)
+
+    async def scenario() -> None:
+        stream = provider.acall_claude_with_mcp_stream("hi", user_id="u-1")
+        consuming = asyncio.create_task(_collect_stream_events(stream))
+        await exit_wait.started.wait()
+        assert not consuming.done()
+        assert _held_slots() == 1
+        assert turn_child.home.exists()
+
+        exit_wait.release.set()
+        assert (await consuming)[-1].text == "ok"
+        assert reaps == 1
+        assert _held_slots() == 0
+        assert not turn_child.home.exists()
+
+    _run_bounded(scenario())
+
+
+def test_a_one_shot_handed_to_the_background_reaper_keeps_its_slot_and_home_with_it(
+    one_shot, monkeypatch,
+) -> None:
+    monkeypatch.setattr(provider, "_wait_for_sigterm_exit", AsyncMock(return_value=False))
+    monkeypatch.setattr(provider, "_wait_for_zombie_reap", AsyncMock(return_value=False))
+    exit_wait = EventGate()
+    turn_child = _install_child_in_a_home(
+        monkeypatch, returncode=None, communicate=asyncio.TimeoutError(), wait_gate=exit_wait,
+    )
+
+    async def scenario() -> None:
+        with pytest.raises(UnavailableError, match="timed out"):
+            await one_shot()
+        await exit_wait.started.wait()
+        assert _held_slots() == 1
+        assert turn_child.home.exists()
+
+        exit_wait.release.set()
+        with provider._zombie_registry_lock:
+            background_reaps = list(provider._zombie_reap_tasks)
+        await asyncio.gather(*background_reaps)
+        assert _held_slots() == 0
+        assert not turn_child.home.exists()
+
+    _run_bounded(scenario())
 
 
 @pytest.mark.parametrize(

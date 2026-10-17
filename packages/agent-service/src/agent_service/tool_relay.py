@@ -101,7 +101,7 @@ class Relay:
         request = await self._read_head(connection, reader, writer)
         if request is None:
             return False
-        status = self._judge(request)
+        status = self._head_status(request)
         can_stay = (
             status in _BODYLESS_REFUSALS
             and _declares_no_body(request)
@@ -131,7 +131,7 @@ class Relay:
             else:
                 return None
 
-    def _judge(self, request: h11.Request) -> HTTPStatus:
+    def _head_status(self, request: h11.Request) -> HTTPStatus:
         if _field_values(request, b"host") != [self._expected_host]:
             return HTTPStatus.FORBIDDEN
         if _field_values(request, b"origin"):

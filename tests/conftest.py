@@ -11,6 +11,8 @@ runtime and resets it after each test.
 
 from __future__ import annotations
 
+import ctypes
+import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -24,6 +26,8 @@ from agent_providers.config import (
     configure,
     reset_config,
 )
+
+PR_GET_DUMPABLE = 3
 
 _SAMPLE_ROOT = Path("/tmp/agent-providers-tests")
 
@@ -71,14 +75,40 @@ def _configure_agent_provider_runtime(tmp_path: Path):
     codex_auth = credentials / "codex.json"
     for auth_file in (claude_auth, grok_auth, codex_auth):
         auth_file.write_text("{}")
-    configure(_SAMPLE_RUNTIME.model_copy(update={
-        "claude_cli_auth_file": claude_auth,
-        "grok_cli_auth_file": grok_auth,
-        "codex_cli_auth_file": codex_auth,
-        "cli_working_directory_root": tmp_path,
-    }))
+    configure(
+        _SAMPLE_RUNTIME.model_copy(
+            update={
+                "claude_cli_auth_file": claude_auth,
+                "grok_cli_auth_file": grok_auth,
+                "codex_cli_auth_file": codex_auth,
+                "cli_working_directory_root": tmp_path,
+            }
+        )
+    )
     yield
     reset_config()
+
+
+def _worker_dumpable_flag() -> int:
+    prctl = ctypes.CDLL(None).prctl
+    prctl.argtypes = [ctypes.c_int] + [ctypes.c_ulong] * 4
+    return prctl(PR_GET_DUMPABLE, 0, 0, 0, 0)
+
+
+@pytest.fixture(autouse=True)
+def _service_hardening_never_touches_the_kernel():
+    """Run the real hardening policy as an unprivileged user over a no-op kernel call.
+
+    Uses ``patch`` rather than ``monkeypatch``: a shared ``monkeypatch`` set up this early would
+    be undone after the other autouse patches and restore their mocks into later tests.
+    """
+    with (
+        patch("agent_service.process_hardening.set_not_dumpable", return_value=None),
+        patch("agent_service.process_hardening.effective_user_id", return_value=1000),
+    ):
+        yield
+    if sys.platform == "linux":
+        assert _worker_dumpable_flag() == 1, "a test made the pytest worker non-dumpable"
 
 
 @pytest.fixture(autouse=True)

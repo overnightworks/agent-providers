@@ -45,6 +45,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import FastAPI
 from jwt.algorithms import RSAAlgorithm
+from mcp_app_fake import TestAuthority
 from provider_test_support import fake_cli_executable
 from pydantic import ValidationError
 
@@ -75,6 +76,11 @@ SONGMAKER_ORIGIN: Final = "https://songmaker.internal"
 PROCESS_TOKEN: Final = "setup-token-for-the-test-process"
 PINNED_CLAUDE_VERSION: Final = "2.1.302"
 RUN_ID_PLACEHOLDER: Final = "00000000-0000-4000-8000-000000000000"
+
+
+@pytest.fixture(name="authority", scope="session")
+def fake_app_authority(tmp_path_factory: pytest.TempPathFactory) -> TestAuthority:
+    return TestAuthority(tmp_path_factory.mktemp("fake-app-ca"))
 
 
 @functools.cache

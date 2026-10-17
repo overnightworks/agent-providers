@@ -989,23 +989,29 @@ def test_no_client_frame_of_a_closed_error_holds_the_token_as_text(
     with pytest.raises(expected) as raised:
         asyncio.run(scenario)
 
-    assert CANARY_TOKEN not in text_locals_of_client_frames(raised.value)
+    assert not any(CANARY_TOKEN in text for text in text_locals_of_client_frames(raised.value))
 
 
-def close_failing_with_the_request(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def failing_close(_transport: httpx.AsyncHTTPTransport) -> None:
+def close_failing_with_the_request(monkeypatch: pytest.MonkeyPatch) -> list[object]:
+    attempts: list[object] = []
+
+    async def failing_close(transport: httpx.AsyncHTTPTransport) -> None:
+        attempts.append(transport)
         raise failure_carrying_the_request(httpx.CloseError)
 
     monkeypatch.setattr(httpx.AsyncHTTPTransport, "aclose", failing_close)
+    return attempts
 
 
 def test_a_transport_close_failure_after_a_completed_run_leaves_as_a_closed_error(
     serve, context, monkeypatch
 ):
     fake = serve()
-    close_failing_with_the_request(monkeypatch)
+    attempts = close_failing_with_the_request(monkeypatch)
 
     failure_of(UpstreamCallLost, lambda: list_tool_names(fake, context))
+
+    assert len(attempts) == 1
 
 
 class HostFailure(Exception):
@@ -1018,6 +1024,16 @@ def exception_in_context_chain(error: BaseException | None, kind: type[BaseExcep
             return True
         error = error.__context__
     return False
+
+
+def retained_exceptions_and_secrets(error: BaseException) -> list[object]:
+    attributes = list(vars(error).values())
+    retained = [error.__cause__, *attributes]
+    leaking_text = [value for value in attributes if CANARY_TOKEN in repr(value)]
+    return [
+        *(value for value in retained if isinstance(value, BaseException)),
+        *leaking_text,
+    ]
 
 
 @pytest.mark.parametrize(
@@ -1037,7 +1053,7 @@ def test_an_exception_already_leaving_wins_over_a_close_failure(
     serve, context, monkeypatch, app, leaving, raised_in_body
 ):
     fake = serve(app)
-    close_failing_with_the_request(monkeypatch)
+    attempts = close_failing_with_the_request(monkeypatch)
 
     async def connect() -> None:
         async with open_app_tools(fake.origin, CAPABILITY, context):
@@ -1048,7 +1064,11 @@ def test_an_exception_already_leaving_wins_over_a_close_failure(
     with pytest.raises(leaving) as raised:
         asyncio.run(scenario)
 
+    assert len(attempts) == 1
+    assert raised_in_body is None or raised.value is raised_in_body
+    assert leaving is not UpstreamRefused or raised.value.status == 401
     assert not exception_in_context_chain(raised.value, httpx.CloseError)
+    assert retained_exceptions_and_secrets(raised.value) == []
 
 
 @pytest.mark.parametrize(
@@ -1068,10 +1088,10 @@ def test_a_run_sends_post_only_and_never_ends_the_session_itself(
     serve, context, monkeypatch, app, outcome, close_fails
 ):
     fake = serve(app)
-    if close_fails:
-        close_failing_with_the_request(monkeypatch)
+    attempts = close_failing_with_the_request(monkeypatch) if close_fails else []
 
     with pytest.raises(outcome) if outcome else nullcontext():
         list_tool_names(fake, context)
 
+    assert len(attempts) == close_fails
     assert {request.method for request in fake.requests} == {"POST"}

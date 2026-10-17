@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import logging
 import signal
 from collections.abc import Callable
@@ -19,16 +20,14 @@ from relay_support import (
     yield_until,
 )
 
-from agent_service.tool_relay import (
-    ADMITTED_STAND_IN,
-    LOOPBACK_HOST,
-    MAX_HEAD_BYTES,
-    RECEIVE_CHUNK_BYTES,
-    Relay,
-)
+from agent_service.tool_relay import LOOPBACK_HOST, Relay
 
 CANARY = "canary-4c9e1b7a"
-ADMITTED = int(ADMITTED_STAND_IN)
+ADMITTED = 503
+HEAD_LIMIT_BYTES = 16_384
+UNFINISHED_HEAD_BYTES = 20_480
+REFUSED_HEAD_BYTES = 24_577
+ADMITTED_LONG_HEAD_BYTES = 24_576
 SIGNALS = (signal.SIGINT, signal.SIGTERM)
 
 HeadBuilder = Callable[[Relay], bytes]
@@ -68,7 +67,8 @@ def padded_values(relay: Relay) -> RequestHead:
 ADMITTED_HEADS = [
     pytest.param(lambda r: padded_values(r).encode(), id="A6"),
     pytest.param(lambda r: mixed_case_names(standard(r)).encode(), id="A7"),
-    pytest.param(lambda r: padded_to(standard(r), MAX_HEAD_BYTES), id="A8"),
+    pytest.param(lambda r: padded_to(standard(r), HEAD_LIMIT_BYTES), id="A8"),
+    pytest.param(lambda r: padded_to(standard(r), ADMITTED_LONG_HEAD_BYTES), id="A43"),
 ]
 
 
@@ -80,6 +80,7 @@ def test_admits_a_head_that_passes_every_gate(build: HeadBuilder) -> None:
         answer = await client.answer()
         assert answer.status == ADMITTED
         assert answer.body == b""
+        assert "content-type" not in answer.headers
         assert await client.at_eof()
 
     drive(scenario)
@@ -89,11 +90,11 @@ def test_binds_loopback_and_admits_an_authorised_post_without_reading_its_body()
     async def scenario(relay: Relay) -> None:
         port = port_of(relay)
         assert port != 0
-        assert relay.access.url == f"http://{LOOPBACK_HOST}:{port}/mcp"
+        assert relay.access.url == f"http://127.0.0.1:{port}/mcp"
         with pytest.raises(ConnectionRefusedError):
             await RawClient.connect(port, host="127.0.0.2")
         client = await RawClient.connect(port)
-        await client.send(standard(relay, content_length=5).encode() + b"hello")
+        await client.send(standard(relay, content_length=10).encode() + b"hello")
         assert (await client.answer()).status == ADMITTED
         assert await client.at_eof()
 
@@ -107,6 +108,8 @@ def test_two_relays_differ_and_show_no_secret_in_repr() -> None:
         try:
             assert port_of(first) != port_of(second)
             assert first.access.secret != second.access.secret
+            for relay in (first, second):
+                assert len(base64.urlsafe_b64decode(relay.access.secret + "=")) == 32
             for relay in (first, second):
                 assert relay.access.secret not in repr(relay)
                 assert relay.access.secret not in repr(relay.access)
@@ -143,7 +146,9 @@ def test_close_ends_idle_and_mid_head_connections_and_refuses_the_old_port() -> 
         await idle.send(standard(relay).replace_method("GET").encode())
         assert (await idle.answer()).status == HTTPStatus.METHOD_NOT_ALLOWED
         mid_head = await RawClient.connect(port)
-        await mid_head.send(b"POST /mcp HTTP/1.1\r\nHost:")
+        get = standard(relay).replace_method("GET").encode()
+        await mid_head.send(get + b"POST /mcp HTTP/1.1\r\nHost:")
+        assert (await mid_head.answer()).status == HTTPStatus.METHOD_NOT_ALLOWED
         await yield_until(lambda: len(relay_tasks()) == 2)
         numbers = connection_numbers(relay_tasks())
         assert len(set(numbers)) == 2
@@ -165,8 +170,23 @@ def relay_bearer(relay: Relay) -> str:
     return f"Bearer {relay.access.secret}"
 
 
-def test_a_client_disconnecting_mid_head_leaves_nothing_behind(
-    caplog: pytest.LogCaptureFixture,
+def unlogged_beyond_asyncio_debug(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.name != "asyncio" or r.levelno >= logging.WARNING]
+
+
+def warnings_logged(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+@pytest.mark.parametrize(
+    "leave",
+    [
+        pytest.param(RawClient.disconnect, id="A5"),
+        pytest.param(RawClient.reset, id="A42"),
+    ],
+)
+def test_a_client_leaving_mid_head_leaves_nothing_behind(
+    leave: Callable[[RawClient], None], caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.DEBUG)
 
@@ -174,15 +194,15 @@ def test_a_client_disconnecting_mid_head_leaves_nothing_behind(
         client = await RawClient.connect(port_of(relay))
         await client.send(b"POST /mcp HTTP/1.1\r\nHost:")
         await yield_until(lambda: len(relay_tasks()) == 1)
-        client.disconnect()
+        leave(client)
         await yield_until(lambda: relay_tasks() == [])
 
     drive(scenario)
-    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+    assert unlogged_beyond_asyncio_debug(caplog) == []
 
 
-def refusal(relay: Relay, **changes: str) -> RequestHead:
-    head = standard(relay, 10).adding("X-Canary", CANARY)
+def refusal(relay: Relay, content_length: int = 0, **changes: str) -> RequestHead:
+    head = standard(relay, content_length).adding("X-Canary", CANARY)
     return replace(head, **changes) if changes else head
 
 
@@ -191,11 +211,11 @@ def canary_target(path: str = "/mcp") -> str:
 
 
 def over_head_limit(relay: Relay) -> bytes:
-    return padded_to(refusal(relay), MAX_HEAD_BYTES + RECEIVE_CHUNK_BYTES + 1)
+    return padded_to(refusal(relay), REFUSED_HEAD_BYTES)
 
 
 def unfinished_head(relay: Relay) -> bytes:
-    return b"POST /mcp HTTP/1.1\r\nX-Pad: " + b"a" * (MAX_HEAD_BYTES + 4096)
+    return b"POST /mcp HTTP/1.1\r\nX-Pad: " + b"a" * UNFINISHED_HEAD_BYTES
 
 
 def own_origin(relay: Relay) -> str:
@@ -221,7 +241,7 @@ CLOSING_REFUSALS = [
         501,
         id="A12",
     ),
-    pytest.param(lambda r: b"this is not http\r\n\r\n", 400, id="A13"),
+    pytest.param(lambda r: f"this is not http {CANARY}\r\n\r\n".encode(), 400, id="A13"),
     pytest.param(over_head_limit, 431, id="A14"),
     pytest.param(unfinished_head, 431, id="A15"),
     pytest.param(
@@ -235,7 +255,7 @@ CLOSING_REFUSALS = [
     pytest.param(lambda r: refusal(r, version="HTTP/1.0").without("Host").encode(), 403, id="A18"),
     pytest.param(
         lambda r: (
-            refusal(r, target=canary_target())
+            refusal(r, 10, target=canary_target())
             .with_field("Host", "localhost:1")
             .with_field("Authorization", "Bearer wrong")
             .encode()
@@ -247,7 +267,7 @@ CLOSING_REFUSALS = [
     pytest.param(lambda r: refusal(r).adding("Origin", "").encode(), 403, id="A21"),
     pytest.param(
         lambda r: (
-            refusal(r, method="OPTIONS", target=canary_target())
+            refusal(r, 10, method="OPTIONS", target=canary_target())
             .without("Authorization")
             .adding("Origin", "https://example.invalid")
             .encode()
@@ -258,7 +278,7 @@ CLOSING_REFUSALS = [
     pytest.param(lambda r: refusal(r).without("Authorization").encode(), 401, id="A23"),
     pytest.param(
         lambda r: (
-            refusal(r, target=canary_target())
+            refusal(r, 10, target=canary_target())
             .with_field("Authorization", f"Bearer {other_secret(r)}")
             .encode()
         ),
@@ -279,8 +299,8 @@ CLOSING_REFUSALS = [
     pytest.param(
         lambda r: refusal(r, target="/other").without("Authorization").encode(), 401, id="A28"
     ),
-    pytest.param(lambda r: refusal(r, method="GET").encode(), 405, id="A36"),
-    pytest.param(lambda r: refusal(r, target=canary_target("/other")).encode(), 404, id="A37"),
+    pytest.param(lambda r: refusal(r, 10, method="GET").encode(), 405, id="A36"),
+    pytest.param(lambda r: refusal(r, 10, target=canary_target("/other")).encode(), 404, id="A37"),
     pytest.param(
         lambda r: (
             refusal(r, method="GET")
@@ -290,6 +310,17 @@ CLOSING_REFUSALS = [
         ),
         405,
         id="A38",
+    ),
+    pytest.param(
+        lambda r: (
+            refusal(r, method="GET")
+            .without("Content-Length")
+            .adding("Transfer-Encoding", "chunked")
+            .encode()
+            + f"zz-{CANARY}\r\n".encode()
+        ),
+        405,
+        id="A40",
     ),
     pytest.param(
         lambda r: (
@@ -323,12 +354,14 @@ def test_refuses_with_an_empty_closing_answer_and_leaks_no_request_content(
         assert answer.body == b""
         assert answer.headers["connection"] == "close"
         assert "www-authenticate" not in answer.headers
+        assert "content-type" not in answer.headers
         assert (answer.headers.get("allow") == "POST") == (status == 405)
         assert await client.at_eof()
 
     drive(scenario)
     captured = capfd.readouterr()
     logged = caplog.text + captured.out + captured.err
+    assert warnings_logged(caplog) == []
     assert CANARY not in logged
     assert secrets_seen[0] not in logged
 
@@ -343,13 +376,18 @@ KEPT_REFUSALS = [
     pytest.param(lambda r: standard(r).replace_target(own_port_url(r)), 404, id="A33"),
     pytest.param(lambda r: standard(r).replace_method("GET"), 405, id="A34"),
     pytest.param(lambda r: standard(r).replace_method("DELETE"), 405, id="A35"),
+    pytest.param(
+        lambda r: standard(r).replace_method("GET").replace_target("/other"), 404, id="A41"
+    ),
 ]
 
 
 @pytest.mark.parametrize(("build", "status"), KEPT_REFUSALS)
 def test_keeps_the_connection_after_a_bodyless_not_found_or_method_refusal(
-    build: Callable[[Relay], RequestHead], status: int
+    build: Callable[[Relay], RequestHead], status: int, caplog: pytest.LogCaptureFixture
 ) -> None:
+    caplog.set_level(logging.DEBUG)
+
     async def scenario(relay: Relay) -> None:
         client = await RawClient.connect(port_of(relay))
         await client.send(build(relay).encode())
@@ -357,10 +395,13 @@ def test_keeps_the_connection_after_a_bodyless_not_found_or_method_refusal(
         assert refused.status == status
         assert refused.body == b""
         assert "connection" not in refused.headers
+        assert "content-type" not in refused.headers
+        assert (refused.headers.get("allow") == "POST") == (status == 405)
         await client.send(standard(relay).encode())
         assert (await client.answer()).status == ADMITTED
 
     drive(scenario)
+    assert warnings_logged(caplog) == []
 
 
 def test_a_closed_relays_secret_is_refused_by_a_new_relay_of_the_same_run() -> None:
@@ -374,6 +415,7 @@ def test_a_closed_relays_secret_is_refused_by_a_new_relay_of_the_same_run() -> N
             stale = standard(new).with_field("Authorization", f"Bearer {old_secret}")
             await client.send(stale.encode())
             assert (await client.answer()).status == HTTPStatus.UNAUTHORIZED
+            assert await client.at_eof()
         finally:
             await close_bounded(new)
 
@@ -390,6 +432,7 @@ def test_two_open_relays_each_refuse_the_other_secret_and_admit_their_own() -> N
                 crossed = standard(own).with_field("Authorization", relay_bearer(foreign))
                 await client.send(crossed.encode())
                 assert (await client.answer()).status == HTTPStatus.UNAUTHORIZED
+                assert await client.at_eof()
                 client = await RawClient.connect(port_of(own))
                 await client.send(standard(own).encode())
                 assert (await client.answer()).status == ADMITTED
@@ -398,3 +441,37 @@ def test_two_open_relays_each_refuse_the_other_secret_and_admit_their_own() -> N
             await close_bounded(second)
 
     asyncio.run(main())
+
+
+def test_an_unexpected_connection_failure_logs_its_class_and_no_request_content(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    secrets_seen: list[str] = []
+    real_drain = asyncio.StreamWriter.drain
+
+    async def scenario(relay: Relay) -> None:
+        secret = relay.access.secret
+        secrets_seen.append(secret)
+        port = port_of(relay)
+
+        async def drain_failing_on_the_relay_side(writer: asyncio.StreamWriter) -> None:
+            if writer.get_extra_info("sockname")[1] == port:
+                raise OSError("injected")
+            await real_drain(writer)
+
+        monkeypatch.setattr(asyncio.StreamWriter, "drain", drain_failing_on_the_relay_side)
+        client = await RawClient.connect(port)
+        malformed = standard(relay).with_field("Authorization", f"Bearer {secret}\x00{CANARY}")
+        await client.send(malformed.encode())
+        assert await client.at_eof()
+        await yield_until(lambda: relay_tasks() == [])
+
+    drive(scenario)
+    captured = capfd.readouterr()
+    logged = caplog.text + captured.out + captured.err
+    assert "OSError" in logged
+    assert CANARY not in logged
+    assert secrets_seen[0] not in logged

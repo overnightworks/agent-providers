@@ -1,5 +1,7 @@
 import asyncio
 import re
+import socket
+import struct
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from urllib.parse import urlsplit
@@ -129,6 +131,11 @@ class RawClient:
         return True
 
     def disconnect(self) -> None:
+        self._writer.close()
+
+    def reset(self) -> None:
+        sock = self._writer.get_extra_info("socket")
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
         self._writer.close()
 
 

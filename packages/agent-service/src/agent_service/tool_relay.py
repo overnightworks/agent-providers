@@ -2,6 +2,7 @@
 
 import asyncio
 import hmac
+import logging
 import secrets
 from dataclasses import dataclass, field
 from http import HTTPStatus
@@ -11,6 +12,9 @@ from typing import Final
 import h11
 
 from agent_client.capability import MCP_ENDPOINT_PATH
+from agent_service.run_liveness import log_failure
+
+log = logging.getLogger(__name__)
 
 LOOPBACK_HOST: Final = "127.0.0.1"
 MAX_HEAD_BYTES: Final = 16_384
@@ -81,8 +85,8 @@ class Relay:
 
     def _connection_ended(self, task: asyncio.Task[None]) -> None:
         del self._connections[task]
-        if not task.cancelled():
-            task.result()
+        if not task.cancelled() and (failure := task.exception()) is not None:
+            log_failure(log, f"A connection of the relay of run {self._run_id} failed", failure)
 
     async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         connection = h11.Connection(h11.SERVER, max_incomplete_event_size=MAX_HEAD_BYTES)

@@ -21,9 +21,19 @@ from anchored_kernel import (
     PassThroughKernel,
     RecordingKernel,
     WaitidCall,
+    install_kernel,
     join_watcher,
 )
-from anchored_leaders import SPAWN_LOGGER, ExitProbe, Leaders, Started, spawn_warnings
+from anchored_leaders import (
+    SPAWN_LOGGER,
+    ExitProbe,
+    InstrumentedLock,
+    Leaders,
+    Releaser,
+    Started,
+    spawn_warnings,
+    start_bound,
+)
 from anchored_support import GONE, TEST_WAIT_SECONDS, ChildCleanup, Exited, OwnedChild
 from provider_test_support import call_within_deadline
 
@@ -31,73 +41,6 @@ from agent_providers import spawn
 from agent_providers.spawn import AnchorState, AnchorStateError, ChildIdentityLost
 
 EXIT_CODE = 3
-
-
-class InstrumentedLock:
-    """A lifecycle lock that reports the threads waiting for it."""
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._changed = threading.Condition()
-        self._waiting: list[str] = []
-
-    def acquire(self, blocking: bool = True) -> bool:
-        if self._lock.acquire(blocking=False):
-            return True
-        if not blocking:
-            return False
-        with self._changed:
-            self._waiting.append(threading.current_thread().name)
-            self._changed.notify_all()
-        return self._lock.acquire()
-
-    def release(self) -> None:
-        self._lock.release()
-
-    def __enter__(self) -> bool:
-        return self.acquire()
-
-    def __exit__(self, *exception: object) -> None:
-        self.release()
-
-    def await_waiting(self, count: int) -> None:
-        with self._changed:
-            assert self._changed.wait_for(lambda: len(self._waiting) >= count, TEST_WAIT_SECONDS), (
-                f"fewer than {count} threads waited for the lock within the bound"
-            )
-
-
-class Releaser:
-    """A daemon thread that releases a leader, joined by the bound."""
-
-    def __init__(self, leader: spawn.AnchoredLeader) -> None:
-        self.error: BaseException | None = None
-        self._leader = leader
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
-
-    def _run(self) -> None:
-        try:
-            self._leader.release()
-        except BaseException as failure:
-            self.error = failure
-
-    def join(self) -> None:
-        self._thread.join(TEST_WAIT_SECONDS)
-        assert not self._thread.is_alive(), "a releaser was still blocked at its bound"
-
-
-def install_kernel(patch: pytest.MonkeyPatch, kernel: RecordingKernel) -> None:
-    patch.setattr(os, "waitid", kernel)
-    patch.setattr(os, "waitpid", kernel.waitpid)
-
-
-def start_bound(
-    leaders: Leaders, kernel: RecordingKernel, probe: ExitProbe | None = None
-) -> Started:
-    started = leaders.start(probe)
-    kernel.bind(started.owned.pid)
-    return started
 
 
 def release_within_bound(started: Started) -> None:

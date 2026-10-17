@@ -6,6 +6,7 @@ passes through them. They forward the code under test's numeric
 calls, so they live outside the support module that names no pid number. Each model owns its
 call log, its holds and its violation list: a protocol break is recorded, never raised inside
 the watcher, and a hold that the test never opens lets the call through after the bound.
+:class:`GroupSignalModel` does the same for ``os.killpg``.
 """
 
 from __future__ import annotations
@@ -14,14 +15,17 @@ import os
 import signal
 import threading
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Literal
 
+import pytest
 from anchored_support import TEST_WAIT_SECONDS
 
 real_waitid = os.waitid
 real_waitpid = os.waitpid
+real_killpg = os.killpg
 
 WATCHER_THREAD_PREFIX = "child-exit:"
 OBSERVE_EXIT = os.WEXITED | os.WNOWAIT
@@ -257,3 +261,59 @@ class KernelModel(RecordingKernel):
                 self._stops.popleft()
                 self._stops_without_consumption = 0
             return report
+
+
+def install_kernel(patch: pytest.MonkeyPatch, kernel: RecordingKernel) -> None:
+    patch.setattr(os, "waitid", kernel)
+    patch.setattr(os, "waitpid", kernel.waitpid)
+
+
+@dataclass(frozen=True)
+class GroupSignalCall:
+    thread: str
+    pgid: int
+    sig: int
+
+
+class GroupSignalModel:
+    """``os.killpg`` as the anchored leader's group signal sees it.
+
+    Every call is logged. A call naming a group other than the bound leader's is a recorded
+    violation and is never forwarded. ``during`` runs first, before the model answers or
+    forwards. A ``failure`` answers the first call only and is never forwarded; ``forward=False``
+    answers every call with nothing.
+    """
+
+    def __init__(
+        self,
+        *,
+        forward: bool = True,
+        failure: OSError | None = None,
+        during: Callable[[GroupSignalCall], None] | None = None,
+    ) -> None:
+        self.calls: list[GroupSignalCall] = []
+        self.violations: list[str] = []
+        self._forward = forward
+        self._failure = failure
+        self._during = during
+        self._leader_pid: int | None = None
+
+    def bind(self, leader_pid: int) -> None:
+        self._leader_pid = leader_pid
+
+    def install(self, patch: pytest.MonkeyPatch) -> None:
+        patch.setattr(os, "killpg", self)
+
+    def __call__(self, pgid: int, sig: int) -> None:
+        call = GroupSignalCall(threading.current_thread().name, pgid, int(sig))
+        self.calls.append(call)
+        if pgid != self._leader_pid:
+            self.violations.append(f"a group signal named {pgid}, not the bound leader")
+            return
+        if self._during is not None:
+            self._during(call)
+        failure, self._failure = self._failure, None
+        if failure is not None:
+            raise failure
+        if self._forward:
+            real_killpg(pgid, sig)

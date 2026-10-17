@@ -1487,26 +1487,39 @@ def test_the_credential_writer_never_replaces_a_file(tmp_path: Path, plant) -> N
 
 
 @pytest.mark.parametrize("fault", DESTINATION_FAULTS)
+@pytest.mark.parametrize(
+    "inside_a_handler", (False, True), ids=("plain-call", "inside-a-handler"),
+)
 def test_a_failed_credential_copy_keeps_no_credential_in_its_error(
-    tmp_path: Path, fault: str,
+    tmp_path: Path, fault: str, inside_a_handler: bool,
 ) -> None:
     source = tmp_path / "source.json"
     source.write_text(_A_RAW_CREDENTIAL_CANARY)
     open_descriptors = len(os.listdir("/proc/self/fd"))
 
-    with a_credential_destination_that_fails(fault):
-        with pytest.raises(AgentCliUnavailableError) as raised:
-            PrivateCredentialHome(
-                source,
-                Path(".claude/.credentials.json"),
-                prefix="private-home-",
-                missing_credential_is_error=True,
-            )
+    def install_failing() -> AgentCliUnavailableError:
+        with a_credential_destination_that_fails(fault):
+            with pytest.raises(AgentCliUnavailableError) as raised:
+                PrivateCredentialHome(
+                    source,
+                    Path(".claude/.credentials.json"),
+                    prefix="private-home-",
+                    missing_credential_is_error=True,
+                )
+        return raised.value
 
-    assert str(raised.value) == "could not prepare the private CLI credential copy"
-    assert raised.value.__cause__ is None
-    assert raised.value.__context__ is None
-    assert not traceback_frames_hold(raised.value, _A_RAW_CREDENTIAL_CANARY)
+    if inside_a_handler:
+        try:
+            raise RuntimeError("the caller's own failure")
+        except RuntimeError:
+            refusal = install_failing()
+    else:
+        refusal = install_failing()
+
+    assert str(refusal) == "could not prepare the private CLI credential copy"
+    assert refusal.__cause__ is None
+    assert refusal.__context__ is None
+    assert not traceback_frames_hold(refusal, _A_RAW_CREDENTIAL_CANARY)
     assert not list(tmp_path.glob("private-home-*"))
     assert len(os.listdir("/proc/self/fd")) == open_descriptors
 

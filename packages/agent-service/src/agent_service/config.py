@@ -1,9 +1,11 @@
 """The service's one configuration: identity, listener, profiles, purposes and apps.
 
-An app may name its one https MCP origin, which no other app shares and which
-needs the signing key. At load, every such app's capability is measured against
-the 8,192-character limit with a reserved subject size and timestamp width, so
-an app whose tools do not fit stops startup instead of failing its users.
+The service accepts at most one subscription profile, for Claude, which needs its
+token file. An app that lists tools names its one https MCP origin; an origin is
+never shared between apps and needs the signing key. At load, every such app's
+capability is measured against the 8,192-character limit with a reserved subject
+size and timestamp width, so an app whose tools do not fit stops startup instead
+of failing its users.
 
 A TOML file is read once at startup into frozen models that forbid unknown
 fields. A file the models refuse stops the service with an error naming the
@@ -212,6 +214,25 @@ class ServiceConfig(_Section):
         return self
 
     @model_validator(mode="after")
+    def _only_claude_can_have_a_profile(self) -> Self:
+        for name, profile in self.profiles.items():
+            if profile.provider is not Provider.CLAUDE:
+                raise ValueError(
+                    f"profiles.{shown_text(name)}.provider: {profile.provider} has no"
+                    " subscription route yet; only claude can have a profile"
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _a_claude_profile_needs_its_token(self) -> Self:
+        for name, profile in self.profiles.items():
+            if profile.token is None:
+                raise ValueError(
+                    f"profiles.{shown_text(name)}.token_file: required for a claude profile"
+                )
+        return self
+
+    @model_validator(mode="after")
     def _apps_name_known_purposes(self) -> Self:
         for app_name, app in self.apps.items():
             for purpose in app.purposes:
@@ -243,6 +264,15 @@ class ServiceConfig(_Section):
                 raise ValueError(
                     f"apps.{shown_text(app_name)}.mcp_origin: needs a [signing] section,"
                     " because the app's runs carry a signed capability"
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _tools_need_an_origin(self) -> Self:
+        for app_name, app in self.apps.items():
+            if app.tools and app.mcp_origin is None:
+                raise ValueError(
+                    f"apps.{shown_text(app_name)}.mcp_origin: required because the app lists tools"
                 )
         return self
 

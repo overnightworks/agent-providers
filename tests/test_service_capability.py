@@ -38,13 +38,13 @@ from service_support import (
     failure_lines,
     get_run,
     pem_of,
+    plain_service_config,
     post_run,
     reaches_text,
     record_signed_tokens,
     run_body,
     run_headers,
     served,
-    service_config,
     tool_names_with_the_last_of_length,
     with_placeholder_run_id,
 )
@@ -418,7 +418,9 @@ def serving(tmp_path, monkeypatch, caplog) -> ServingFactory:
         capable: bool = True,
     ) -> Iterator[_Service]:
         config = (
-            capable_service_config(tmp_path, songmaker=songmaker) if capable else service_config()
+            capable_service_config(tmp_path, songmaker=songmaker)
+            if capable
+            else plain_service_config()
         )
         signed = record_signed_tokens(monkeypatch)
         clock = WallClock()

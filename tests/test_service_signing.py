@@ -17,12 +17,20 @@ import uvicorn
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import dsa, ec, ed25519, rsa
 from jwt.algorithms import RSAAlgorithm
-from service_support import generated_rsa_key, pem_of, written_key_file
+from service_support import (
+    CALLED_PLAINLY_OR_FROM_AN_ACTIVE_HANDLER,
+    called_from,
+    everything_a_refusal_holds,
+    generated_rsa_key,
+    pem_of,
+    reaches_private_key,
+    written_key_file,
+)
 from test_service_config import VALID_CONFIG, _written
 from webauth.jwt_verification import JwtVerifier, Rejected, RejectionReason, VerifiedClaims
 
 from agent_service.cli import EXIT_BAD_CONFIG, main
-from agent_service.config import ServiceConfig, load_config
+from agent_service.config import ConfigError, ServiceConfig, load_config
 from agent_service.signing import (
     EmptyTokenType,
     SigningKey,
@@ -250,6 +258,62 @@ def test_an_unsound_key_file_stops_startup_with_one_line_naming_its_path_and_no_
     assert capsys.readouterr().err == (
         f"agent-service: refusing to start: {config_file}: signing.key_file: "
         f"{shown_key_file} {reason}\n"
+    )
+
+
+def _encrypted_pem() -> bytes:
+    return generated_rsa_key(3072).private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.BestAvailableEncryption(b"passphrase"),
+    )
+
+
+def _truncated_pem() -> bytes:
+    pem = pem_of(generated_rsa_key(3072))
+    return pem[: len(pem) // 2]
+
+
+REFUSED_BUT_REAL_KEYS = [
+    pytest.param(lambda: pem_of(ec.generate_private_key(ec.SECP256R1())), id="ec-p256"),
+    pytest.param(lambda: pem_of(generated_rsa_key(2048)), id="rsa-2048"),
+    pytest.param(
+        lambda: pem_of(generated_rsa_key(3072)) + pem_of(generated_rsa_key(3072)), id="two-blocks"
+    ),
+    pytest.param(_encrypted_pem, id="encrypted"),
+    pytest.param(_truncated_pem, id="truncated"),
+    pytest.param(lambda: pem_of(generated_rsa_key(3072, 3)), id="rsa-3072-exponent-3"),
+]
+
+
+@pytest.mark.parametrize("inside_active_handler", CALLED_PLAINLY_OR_FROM_AN_ACTIVE_HANDLER)
+@pytest.mark.parametrize("key", REFUSED_BUT_REAL_KEYS)
+def test_a_refused_real_key_leaves_no_key_object_or_text_in_what_the_refusal_holds(
+    tmp_path, key, inside_active_handler
+):
+    key_file = tmp_path / "signing-key.pem"
+    key_file.write_bytes(key())
+    key_file.chmod(0o600)
+    key_body = key_file.read_text().splitlines()[1]
+    config_file = _written(tmp_path, _config_text(str(key_file)))
+
+    with pytest.raises(UnsoundSigningKey) as from_loading:
+        called_from(lambda: load_signing_key(key_file), inside_active_handler)
+    with pytest.raises(ConfigError) as from_config:
+        called_from(lambda: load_config(config_file), inside_active_handler)
+
+    for refusal in (from_loading.value, from_config.value):
+        held = everything_a_refusal_holds(refusal)
+        assert key_body not in repr(held)
+        assert not reaches_private_key(held)
+
+
+def test_a_subclass_building_from_a_private_key_gets_its_own_type():
+    class SpecializedSigningKey(SigningKey):
+        pass
+
+    assert isinstance(
+        SpecializedSigningKey.from_private_key(generated_rsa_key()), SpecializedSigningKey
     )
 
 

@@ -251,8 +251,8 @@ def tool_names_with_the_last_of_length(last_tool_name_length: int) -> list[str]:
     return [*names, "127".ljust(last_tool_name_length, "x")]
 
 
-def reaches_text(root: object, needles: Sequence[str]) -> bool:
-    """Whether any text reachable from ``root`` contains a needle.
+def _reaches(root: object, found: Callable[[object], bool]) -> bool:
+    """Whether any object reachable from ``root`` satisfies ``found``.
 
     The walk follows ``gc.get_referents`` and skips types, modules and
     functions, whose reach is the program's and not the object's.
@@ -266,10 +266,25 @@ def reaches_text(root: object, needles: Sequence[str]) -> bool:
         ):
             continue
         seen.add(id(candidate))
-        if isinstance(candidate, str) and any(needle in candidate for needle in needles):
+        if found(candidate):
             return True
         pending.extend(gc.get_referents(candidate))
     return False
+
+
+def reaches_text(root: object, needles: Sequence[str]) -> bool:
+    """Whether any text reachable from ``root`` contains a needle."""
+    return _reaches(
+        root,
+        lambda candidate: (
+            isinstance(candidate, str) and any(needle in candidate for needle in needles)
+        ),
+    )
+
+
+def reaches_private_key(root: object) -> bool:
+    """Whether any private-key object, which can reproduce its PEM, is reachable from ``root``."""
+    return _reaches(root, lambda candidate: hasattr(candidate, "private_bytes"))
 
 
 def record_signed_tokens(monkeypatch) -> list[str]:
@@ -283,6 +298,25 @@ def record_signed_tokens(monkeypatch) -> list[str]:
 
     monkeypatch.setattr(signing.SigningKey, "sign", recording_sign)
     return signed
+
+
+class UnrelatedFailure(Exception):
+    """Raised by a test only to leave a handler active around the call under test."""
+
+
+CALLED_PLAINLY_OR_FROM_AN_ACTIVE_HANDLER = [
+    pytest.param(False, id="plainly"),
+    pytest.param(True, id="from-an-active-handler"),
+]
+
+
+def called_from(call: Callable[[], object], inside_active_handler: bool) -> object:
+    if not inside_active_handler:
+        return call()
+    try:
+        raise UnrelatedFailure
+    except UnrelatedFailure:
+        return call()
 
 
 def everything_a_refusal_holds(refusal: BaseException) -> list[object]:
@@ -481,7 +515,7 @@ def decoded_events(raw: bytes) -> list[RunEvent]:
     decoder = RunStreamDecoder()
     decoded = decoder.feed(raw) + decoder.close()
     events = [item for item in decoded if not isinstance(item, StreamViolation)]
-    assert len(events) == len(decoded), f"the stream broke the contract: {decoded[len(events):]}"
+    assert len(events) == len(decoded), f"the stream broke the contract: {decoded[len(events) :]}"
     return events
 
 

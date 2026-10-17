@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import errno
 import json
+import os
+import stat
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 from service_support import (
+    CALLED_PLAINLY_OR_FROM_AN_ACTIVE_HANDLER,
     LAST_TOOL_NAME_LENGTH_AT_THE_LIMIT,
+    called_from,
     everything_a_refusal_holds,
     generated_rsa_key,
     reaches_text,
@@ -560,3 +566,219 @@ def test_an_oversized_capability_refusal_holds_no_token_anywhere(tmp_path, monke
 
     assert signed
     assert not reaches_text(everything_a_refusal_holds(refusal.value), signed)
+
+
+CANARY = "canary-token-value-7f3a91"
+API_KEY_SHAPE = "sk-ant-" + "api03-" + CANARY
+WHITESPACE_REASON = "holds whitespace; a setup token holds none"
+TOKEN_FILE_FIELD = "profiles.claude-main.token_file"
+
+
+def _token_file_with(tmp_path: Path, contents: bytes, mode: int = 0o600) -> Path:
+    path = tmp_path / "claude.token"
+    path.write_bytes(contents)
+    path.chmod(mode)
+    return path
+
+
+def _token_config(token_file: str) -> str:
+    return VALID_CONFIG.replace(
+        'provider = "claude"\n', f'provider = "claude"\ntoken_file = {json.dumps(token_file)}\n', 1
+    )
+
+
+def _holding(contents: bytes, mode: int = 0o600) -> Callable[[Path, pytest.MonkeyPatch], str]:
+    return lambda tmp_path, _monkeypatch: str(_token_file_with(tmp_path, contents, mode))
+
+
+def _outgrowing_a_reported_size_of_zero(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+    token_file = _token_file_with(tmp_path, CANARY.encode() + b"x" * (64 * 1024))
+    real_fstat = os.fstat
+
+    def reporting_zero(descriptor):
+        reported = list(real_fstat(descriptor))
+        reported[stat.ST_SIZE] = 0
+        return os.stat_result(reported)
+
+    monkeypatch.setattr(os, "fstat", reporting_zero)
+    return str(token_file)
+
+
+def _failing_after_a_partial_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+    token_file = _token_file_with(tmp_path, CANARY.encode())
+    real_read = os.read
+    reads = []
+
+    def read_then_fail(descriptor, length):
+        reads.append(descriptor)
+        if len(reads) > 1:
+            raise OSError(errno.EIO, os.strerror(errno.EIO))
+        return real_read(descriptor, len(CANARY))
+
+    monkeypatch.setattr(os, "read", read_then_fail)
+    return str(token_file)
+
+
+def _open_to_others(mode: int) -> str:
+    return (
+        f"is open to group or others (mode {mode:04o});"
+        " a token file must grant them nothing, for example 0600 or 0400"
+    )
+
+
+REFUSED_TOKEN_FILES = [
+    pytest.param(_holding(CANARY.encode(), 0o640), _open_to_others(0o640), id="readable-by-group"),
+    pytest.param(
+        _holding(CANARY.encode(), 0o644), _open_to_others(0o644), id="readable-by-everyone"
+    ),
+    pytest.param(
+        lambda tmp_path, _monkeypatch: str(tmp_path), "is not a regular file", id="directory"
+    ),
+    pytest.param(
+        lambda tmp_path, _monkeypatch: str(tmp_path / "absent.token"),
+        "cannot be read: No such file or directory",
+        id="missing",
+    ),
+    pytest.param(_holding(b""), "is empty; it must hold the token", id="empty"),
+    pytest.param(_holding(b"\n"), "is empty; it must hold the token", id="only-a-newline"),
+    pytest.param(
+        _holding(f"{CANARY}\n{CANARY}\n".encode()),
+        "holds more than one line; it must hold one token",
+        id="two-lines",
+    ),
+    pytest.param(
+        _holding(b"x" * (16 * 1024) + CANARY.encode()),
+        "is larger than 16384 bytes",
+        id="oversized",
+    ),
+    pytest.param(
+        _holding(f"{CANARY}\x1b[0m".encode()),
+        "contains a control or non-printing character; a token must not",
+        id="escape-character",
+    ),
+    pytest.param(
+        _holding(f"{CANARY}\r\n".encode()),
+        "contains a control or non-printing character; a token must not",
+        id="carriage-return",
+    ),
+    pytest.param(
+        _outgrowing_a_reported_size_of_zero,
+        "is larger than 16384 bytes",
+        id="outgrows-a-reported-size-of-zero",
+    ),
+    pytest.param(
+        _failing_after_a_partial_read,
+        "cannot be read: Input/output error",
+        id="read-fails-after-a-partial-chunk",
+    ),
+    pytest.param(_holding(b"\xff" + CANARY.encode()), "is not UTF-8 text", id="not-text"),
+    pytest.param(
+        _holding(b" " + API_KEY_SHAPE.encode()),
+        WHITESPACE_REASON,
+        id="api-key-shape-with-a-leading-space",
+    ),
+    pytest.param(
+        _holding(f"{CANARY[:4]} {CANARY[4:]}".encode()), WHITESPACE_REASON, id="inner-space"
+    ),
+    pytest.param(_holding(f"{CANARY}  ".encode()), WHITESPACE_REASON, id="trailing-spaces"),
+    pytest.param(
+        _holding(API_KEY_SHAPE.encode()),
+        "holds an API key; it must hold a subscription token from setup-token",
+        id="api-key-shape",
+    ),
+    pytest.param(
+        _holding(f"{API_KEY_SHAPE}\n".encode()),
+        "holds an API key; it must hold a subscription token from setup-token",
+        id="api-key-shape-with-a-newline",
+    ),
+]
+
+
+@pytest.mark.parametrize(("arrange", "reason"), REFUSED_TOKEN_FILES)
+def test_an_unsound_token_file_stops_startup_with_one_line_naming_field_and_path_only(
+    tmp_path, capsys, monkeypatch, arrange, reason
+):
+    token_file = arrange(tmp_path, monkeypatch)
+    config_file = _written(tmp_path, _token_config(token_file))
+
+    refusal = _refused_on_one_line(config_file, capsys)
+
+    assert refusal == f"{TOKEN_FILE_FIELD}: {token_file} {reason}"
+    assert CANARY not in refusal
+
+
+@pytest.mark.parametrize("inside_active_handler", CALLED_PLAINLY_OR_FROM_AN_ACTIVE_HANDLER)
+@pytest.mark.parametrize(("arrange", "reason"), REFUSED_TOKEN_FILES)
+def test_an_unsound_token_file_leaks_no_content_into_the_refusal_or_what_it_holds(
+    tmp_path, monkeypatch, arrange, reason, inside_active_handler
+):
+    config_file = _written(tmp_path, _token_config(arrange(tmp_path, monkeypatch)))
+
+    with pytest.raises(ConfigError) as refusal:
+        called_from(lambda: load_config(config_file), inside_active_handler)
+
+    held = everything_a_refusal_holds(refusal.value)
+    assert not reaches_text(held, [CANARY])
+    assert CANARY not in repr(held)
+
+
+@pytest.mark.parametrize("token_file", ["secrets/claude.token", "~/.secrets/claude.token"])
+def test_a_relative_token_path_is_refused_naming_the_field(tmp_path, capsys, token_file):
+    config_file = _written(tmp_path, _token_config(token_file))
+
+    assert _refused_on_one_line(config_file, capsys) == (
+        f"{TOKEN_FILE_FIELD}: {token_file} must be an absolute path to the token file;"
+        " ~ is not expanded"
+    )
+
+
+@pytest.mark.parametrize("trailing", ["", "\n"])
+def test_a_sound_token_file_is_read_with_its_trailing_newline_dropped(tmp_path, trailing):
+    token_file = _token_file_with(tmp_path, (CANARY + trailing).encode(), 0o400)
+
+    config = load_config(_written(tmp_path, _token_config(str(token_file))))
+
+    assert config.profiles["claude-main"].token.get_secret_value() == CANARY
+
+
+def test_a_loaded_token_never_shows_in_the_repr_or_text_of_the_configuration(tmp_path):
+    token_file = _token_file_with(tmp_path, CANARY.encode())
+
+    config = load_config(_written(tmp_path, _token_config(str(token_file))))
+
+    assert not reaches_text([repr(config), str(config), repr(config.profiles)], [CANARY])
+    assert CANARY not in config.model_dump_json()
+
+
+def test_a_profile_without_a_token_file_still_loads(tmp_path):
+    config = load_config(_written(tmp_path, VALID_CONFIG))
+
+    assert config.profiles["claude-main"].token is None
+
+
+def test_a_path_swapped_after_the_open_still_loads_the_opened_token_file(tmp_path, monkeypatch):
+    token_file = _token_file_with(tmp_path, CANARY.encode())
+    real_open = os.open
+
+    def open_then_swap(path, flags, *arguments):
+        descriptor = real_open(path, flags, *arguments)
+        impostor = tmp_path / "impostor.token"
+        impostor.write_bytes(b"impostor")
+        impostor.chmod(0o600)
+        impostor.rename(token_file)
+        return descriptor
+
+    monkeypatch.setattr(os, "open", open_then_swap)
+
+    config = load_config(_written(tmp_path, _token_config(str(token_file))))
+
+    assert config.profiles["claude-main"].token.get_secret_value() == CANARY
+
+
+def test_the_token_file_is_read_once_so_replacing_it_afterwards_changes_nothing(tmp_path):
+    token_file = _token_file_with(tmp_path, CANARY.encode())
+    config = load_config(_written(tmp_path, _token_config(str(token_file))))
+
+    token_file.write_bytes(b"replacement")
+
+    assert config.profiles["claude-main"].token.get_secret_value() == CANARY

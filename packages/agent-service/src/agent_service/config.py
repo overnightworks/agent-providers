@@ -8,7 +8,7 @@ an app whose tools do not fit stops startup instead of failing its users.
 A TOML file is read once at startup into frozen models that forbid unknown
 fields. A file the models refuse stops the service with an error naming the
 field, so a typo never becomes a silently ignored policy. The signing key file
-the TOML names is read and checked with it, in the same pass.
+and each profile's token file the TOML names are read and checked with it, in the same pass.
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ from pydantic import (
     BeforeValidator,
     ConfigDict,
     Field,
+    SecretStr,
     StrictFloat,
     StrictInt,
     ValidationError,
@@ -41,7 +42,8 @@ from agent_service.capability import (
     preflight_claims,
     signed_capability,
 )
-from agent_service.signing import SigningKey, load_signing_key, shown_text
+from agent_service.secret_file import read_token_file, shown_text
+from agent_service.signing import SigningKey, load_signing_key
 
 NonEmptyText = Annotated[str, Field(min_length=1)]
 
@@ -84,16 +86,25 @@ class IdentityConfig(_Section):
     leeway_seconds: int = Field(default=0, ge=0, le=300)
 
 
-def _signing_key_in_file(key_file: object) -> SigningKey:
-    """Loads the key the absolute path names; a refusal stops startup as a field error."""
-    if not isinstance(key_file, str):
-        raise ValueError("must be an absolute path to the signing key file; ~ is not expanded")
-    if not Path(key_file).is_absolute():
+def _absolute_path_to(file_description: str, value: object) -> Path:
+    if not isinstance(value, str):
+        raise ValueError(f"must be an absolute path to the {file_description}; ~ is not expanded")
+    if not Path(value).is_absolute():
         raise ValueError(
-            f"{shown_text(key_file)} must be an absolute path to the signing key file;"
+            f"{shown_text(value)} must be an absolute path to the {file_description};"
             " ~ is not expanded"
         )
-    return load_signing_key(Path(key_file))
+    return Path(value)
+
+
+def _signing_key_in_file(key_file: object) -> SigningKey:
+    """Loads the key the absolute path names; a refusal stops startup as a field error."""
+    return load_signing_key(_absolute_path_to("signing key file", key_file))
+
+
+def _token_in_file(token_file: object) -> SecretStr:
+    """Reads the token the absolute path names; a refusal stops startup as a field error."""
+    return SecretStr(read_token_file(_absolute_path_to("token file", token_file)))
 
 
 class SigningConfig(_Section):
@@ -148,6 +159,9 @@ class ProfileConfig(_Section):
     """One subscription login the CLI route may run under."""
 
     provider: Provider
+    token: Annotated[SecretStr, BeforeValidator(_token_in_file)] | None = Field(
+        default=None, validation_alias="token_file"
+    )
 
 
 class PurposeConfig(_Section):

@@ -2044,46 +2044,73 @@ def test_private_credential_home_closes_every_handle_when_the_repair_fails_midwa
     assert not home.path.exists()
 
 
-@pytest.mark.parametrize("failing_close_index", [0, 1], ids=["root_frame", "middle_frame"])
-def test_a_close_failing_during_unwinding_does_not_leave_the_other_frames_open(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failing_close_index: int,
+class _FalseValuedError(Exception):
+    def __bool__(self) -> bool:
+        return False
+
+
+class _UntestableError(Exception):
+    def __bool__(self) -> bool:
+        raise AssertionError("an exception was truth-tested")
+
+
+
+
+@pytest.mark.parametrize(
+    ("traversal_failure", "failing_closes", "later_classes"),
+    [
+        (RuntimeError, {4: KeyboardInterrupt}, ["KeyboardInterrupt"]),
+        (None, {1: KeyboardInterrupt, 2: OSError}, ["OSError"]),
+        (None, {4: KeyboardInterrupt, 5: OSError}, ["OSError"]),
+        (None, {4: _FalseValuedError, 5: _UntestableError}, ["_UntestableError"]),
+        (None, {4: _UntestableError, 5: _FalseValuedError}, ["_FalseValuedError"]),
+    ],
+    ids=[
+        "traversal_then_cleanup_close",
+        "handle_close_then_root_frame_close",
+        "popped_frame_close_then_ancestor_close",
+        "false_valued_then_untestable",
+        "untestable_then_false_valued",
+    ],
+)
+def test_the_earliest_failure_propagates_and_every_descriptor_is_still_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    traversal_failure: type[BaseException] | None,
+    failing_closes: dict[int, type[BaseException]],
+    later_classes: list[str],
 ) -> None:
     (tmp_path / "a" / "b").mkdir(parents=True)
-    real_open, real_close, real_scandir = os.open, os.close, os.scandir
-    listings: list[int] = []
-    listing_closes: list[int] = []
-    interruption = KeyboardInterrupt()
-    deepest_failure = RuntimeError("deepest listing read failed")
-
-    def open_(path, flags, *args, **options):
-        descriptor = real_open(path, flags, *args, **options)
-        if not flags & os.O_PATH:
-            listings.append(descriptor)
-        return descriptor
+    real_close, real_scandir = os.close, os.scandir
+    raised_in_order: list[BaseException] = []
+    listings_opened = 0
+    closes_seen = 0
 
     def scandir(path=".", *args, **options):
-        if len(listings) == 3:
-            raise deepest_failure
+        nonlocal listings_opened
+        listings_opened += 1
+        if traversal_failure is not None and listings_opened == 3:
+            raised_in_order.append(traversal_failure("listing read failed"))
+            raise raised_in_order[-1]
         return real_scandir(path, *args, **options)
 
     def close(descriptor: int) -> None:
+        nonlocal closes_seen
+        closes_seen += 1
         real_close(descriptor)
-        if descriptor in listings:
-            listing_closes.append(descriptor)
-            if len(listing_closes) == failing_close_index + 1:
-                raise interruption
+        if closes_seen in failing_closes:
+            raised_in_order.append(failing_closes[closes_seen]("close failed"))
+            raise raised_in_order[-1]
 
-    monkeypatch.setattr(os, "open", open_)
     monkeypatch.setattr(os, "scandir", scandir)
     monkeypatch.setattr(os, "close", close)
     descriptors_before = _descriptor_count()
 
-    with pytest.raises(KeyboardInterrupt) as raised:
+    with pytest.raises(BaseException) as raised:  # noqa: PT011
         process._make_tree_removable(tmp_path)
 
-    assert raised.value is interruption
-    assert raised.value.__context__ is deepest_failure
-    assert len(listings) == 3
+    assert raised.value is raised_in_order[0]
+    assert [note.rsplit("(", 1)[1].rstrip(")") for note in raised.value.__notes__] == later_classes
     assert _descriptor_count() == descriptors_before
 
 

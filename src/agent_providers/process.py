@@ -1506,12 +1506,13 @@ def _make_tree_removable(root: Path) -> None:
     tree's depth and not its width. Each level's frame is on the stack before
     its listing descriptor is opened, so the stack's cleanup closes it from the
     statement that receives it. Every acquired descriptor is passed to
-    os.close, and a close that raises does not stop the cleanup: every
-    remaining frame is still closed and the first exception propagates. An
-    exception raised instead of the real close is not covered, because Linux
-    releases the descriptor even when close fails. An asynchronous
-    interruption between two statements is the host obligation the README's
-    Interruptions paragraph states, and no claim is made about it.
+    os.close, and a close that raises does not stop the cleanup. The earliest
+    exception propagates, whether it came from the traversal or from a cleanup
+    close; every later close failure is attached to it as a note naming the
+    failure's class only. An exception raised instead of the real close is not
+    covered, because Linux releases the descriptor even when close fails. An
+    asynchronous interruption between two statements is the host obligation
+    the README's Interruptions paragraph states, and no claim is made about it.
     """
     acquisition_flags = _directory_flags("O_PATH", "O_NOFOLLOW", "O_DIRECTORY", "O_CLOEXEC")
     listing_flags = _directory_flags("O_DIRECTORY", "O_CLOEXEC") | os.O_RDONLY
@@ -1526,20 +1527,28 @@ def _make_tree_removable(root: Path) -> None:
                 )
             else:
                 frames.pop().close()
-    finally:
-        _close_all(frame.listing for frame in frames if frame.listing is not None)
+    except BaseException as failure:
+        _close_all((frame.listing for frame in frames if frame.listing is not None), failure)
+        raise
 
 
-def _close_all(descriptors: Iterable[int]) -> None:
-    """Close every descriptor, then raise the first failure so none stays open."""
-    first_failure: BaseException | None = None
+def _close_all(descriptors: Iterable[int], earlier_failure: BaseException | None = None) -> None:
+    """Close every descriptor; the earliest failure wins and later ones become its notes.
+
+    With an earlier failure the caller re-raises it; without one, the first
+    close failure is raised after the last descriptor is closed.
+    """
+    earliest = earlier_failure
     for descriptor in descriptors:
         try:
             os.close(descriptor)
         except BaseException as failure:
-            first_failure = first_failure or failure
-    if first_failure is not None:
-        raise first_failure
+            if earliest is None:
+                earliest = failure
+            else:
+                earliest.add_note(f"a descriptor close also failed ({type(failure).__name__})")
+    if earliest is not None and earlier_failure is None:
+        raise earliest
 
 
 def _directory_flags(*names: str) -> int:
@@ -1577,8 +1586,10 @@ def _enter_directory(
         os.chmod(link, 0o700)
         frame.listing = os.open(link, listing_flags)
         frame.unvisited_subdirectories = _subdirectory_names(frame.listing)
-    finally:
-        os.close(handle)
+    except BaseException as failure:
+        _close_all([handle], failure)
+        raise
+    _close_all([handle])
 
 
 def _subdirectory_names(listing: int) -> list[str]:

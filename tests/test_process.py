@@ -276,6 +276,27 @@ def test_codex_model_catalog_without_a_binary_raises(monkeypatch) -> None:
         codex_cli_model_catalog()
 
 
+@pytest.mark.parametrize(
+    "run",
+    (
+        None,
+        CliRun(returncode=None, stdout="", stderr="", complete=False),
+        CliRun(returncode=1, stdout="", stderr="", complete=True),
+    ),
+    ids=("no run", "incomplete", "non-zero"),
+)
+def test_codex_catalogue_that_does_not_come_back_raises_the_bare_base(
+    monkeypatch, run: CliRun | None
+) -> None:
+    monkeypatch.setattr(process, "resolve_cli_binary", lambda _binary: Path(sys.executable))
+    monkeypatch.setattr(process, "_run_credentialed_catalog_cli", lambda *_a, **_k: run)
+
+    with pytest.raises(AgentCliUnavailableError, match="did not return a catalog") as raised:
+        codex_cli_model_catalog()
+
+    assert type(raised.value) is AgentCliUnavailableError
+
+
 def test_codex_answering_in_words_we_do_not_know_raises() -> None:
     with _a_cli_that_says("auth: unknown"), pytest.raises(
         CliLoginUnusableError,

@@ -2030,7 +2030,7 @@ _HOME_CODES = {
     "reserve": _RESERVE_CODE_OF_A_HOME,
     "refused reserve": _RESERVE_CODE_OF_A_HOME,
     "release": (
-        process._PrivateCredentialHomeReservation.release,
+        process.PrivateCredentialHomeReservation.release,
         PrivateCredentialHome._release,
         PrivateCredentialHome._remove_if_unused,
         process._remove_private_tree,
@@ -3434,7 +3434,7 @@ def _private_homes_under(root: Path) -> list[Path]:
 
 
 def _enter_through_a_codex_turn_home(tmp_path: Path) -> str:
-    create_codex_turn_home(CODEX_TOOL_TURN_DIRECTORY_PREFIX).close()
+    create_codex_turn_home(CODEX_TOOL_TURN_DIRECTORY_PREFIX).home.close()
     return "installed"
 
 

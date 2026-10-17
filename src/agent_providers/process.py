@@ -273,6 +273,36 @@ class StepFailures:
             raise self._first_control_flow
 
 
+def _failed_runner_outcome() -> CliRunOutcome:
+    return CliRunOutcome(
+        started=False,
+        spawn_error=None,
+        returncode=None,
+        stdout="",
+        stderr="",
+        complete=False,
+        became_zombie=False,
+        reason=CliRunReason.IO_ERROR,
+    )
+
+
+def run_publishing_failures(channel: CliLineChannel, runner_step: Callable[[], object]) -> None:
+    """Run one runner step, containing every exception, then end the channel and name its class.
+
+    A function rather than a context manager: the report must run outside the
+    handler of the contained exception, or a failing log handler chains the
+    exception's message into what it prints. Runs only on a runner thread,
+    where neither ``KeyboardInterrupt`` nor ``SystemExit`` can be a signal,
+    because Python delivers signals to the main thread. Never raises.
+    """
+    failures = StepFailures()
+    with failures.contained("run"):
+        runner_step()
+    if failures.failed("run"):
+        with failures.contained("publish"):
+            channel._close(_failed_runner_outcome())
+    failures.report()
+
 LOGGED_OUT = CliLogin(logged_in=False, auth_method=None)
 
 # A probe can spend its answer budget and then two termination grace periods
@@ -1247,7 +1277,7 @@ class PrivateCredentialHome:
             )
             self._registry_key = registry_key
             self._home = Path(created)
-            self._reservation_tokens: set[_PrivateCredentialHomeReservation] = set()
+            self._reservation_tokens: set[PrivateCredentialHomeReservation] = set()
             self._cleanup_requested = False
             self._cleaned = False
             self._removal_claim = threading.Lock()
@@ -1270,8 +1300,8 @@ class PrivateCredentialHome:
     def path(self) -> Path:
         return self._home
 
-    def reserve(self) -> _PrivateCredentialHomeReservation:
-        token = _PrivateCredentialHomeReservation(self)
+    def reserve(self) -> PrivateCredentialHomeReservation:
+        token = PrivateCredentialHomeReservation(self)
         self._reservation_tokens.add(token)
         if self._cleanup_requested:
             self._reservation_tokens.discard(token)
@@ -1284,7 +1314,7 @@ class PrivateCredentialHome:
         self._cleanup_requested = True
         self._remove_if_unused()
 
-    def _release(self, token: _PrivateCredentialHomeReservation) -> None:
+    def _release(self, token: PrivateCredentialHomeReservation) -> None:
         self._reservation_tokens.discard(token)
         self._remove_if_unused()
 
@@ -1302,7 +1332,7 @@ class PrivateCredentialHome:
             self._removal_claim.release()
 
 
-class _PrivateCredentialHomeReservation:
+class PrivateCredentialHomeReservation:
     def __init__(self, home: PrivateCredentialHome) -> None:
         self._home = home
 

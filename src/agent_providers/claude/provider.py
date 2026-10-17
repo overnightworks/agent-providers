@@ -929,7 +929,7 @@ class _ZombieReservation:
     """A pool slot before it is bound to the spawned process's PID."""
 
     pid: int | None = None
-    home_reservation: process._PrivateCredentialHomeReservation | None = None
+    home_reservation: process.PrivateCredentialHomeReservation | None = None
 
 
 # The process-pool reservations are process-wide and shared by probes and real
@@ -1735,7 +1735,7 @@ def _claude_cli_process_pool_limit_message() -> str:
 
 
 def _reserve_zombie_admission(
-    home_reservation: process._PrivateCredentialHomeReservation | None = None,
+    home_reservation: process.PrivateCredentialHomeReservation | None = None,
 ) -> _ZombieReservation | None:
     """Reserve one shared CLI-process slot before spawning."""
     reservation = _ZombieReservation(home_reservation=home_reservation)
@@ -1777,7 +1777,7 @@ def _release_zombie_reservation(reservation: _ZombieReservation | int | None) ->
 async def _spawn_reserved_async_cli_process(
     child: ChildProcess,
     *,
-    home_reservation: process._PrivateCredentialHomeReservation | None = None,
+    home_reservation: process.PrivateCredentialHomeReservation | None = None,
     stream_buffer_limit: int | None = None,
 ) -> AsyncPipedProcess:
     reservation = _reserve_zombie_admission(home_reservation)

@@ -206,11 +206,13 @@ def refusal(
     base = _a_private_directory(tmp_path / THE_ROOT_NAME)
     config = _runtime_with_root(tmp_path, make_root(base, monkeypatch))
     reset_config()
+    install = (
+        _configure_while_handling_an_exception_naming_the_root
+        if while_the_caller_handles_an_exception
+        else configure
+    )
     with caplog.at_level(logging.DEBUG), pytest.raises(WorkingRootNotPrivateError) as raised:
-        if while_the_caller_handles_an_exception:
-            _configure_while_handling_an_exception_naming_the_root(config)
-        else:
-            configure(config)
+        install(config)
     return _Refusal(expected_violation, raised.value, list(caplog.records))
 
 

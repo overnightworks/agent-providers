@@ -50,7 +50,7 @@ import os
 import subprocess
 import threading
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
@@ -119,7 +119,7 @@ class ChildProcess:
 
     binary: Path
     arguments: tuple[str, ...]
-    environment: Mapping[str, str]
+    environment: Mapping[str, str] = field(repr=False)
     working_directory: Path
 
     def __post_init__(self) -> None:

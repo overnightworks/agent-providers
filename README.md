@@ -43,7 +43,7 @@ It owns the machinery that is the same in every deployment:
 | `agent_client.capability` | The format of the run capability the service mints and an app's MCP server verifies (A1m): token type `agent-capability+jwt`, at most 8,192 characters, the strict `CapabilityClaims`, `McpOrigin`, the one decider of an app's canonical https MCP origin, and `MCP_ENDPOINT_PATH`, the one path an app's MCP server serves and the service's client calls |
 | `agent_providers.codex_login` | `assess_codex_login`: the one decider of whether a Codex login can start a child, and the blanked copy it receives |
 | `agent_providers.tools` | The `ToolCatalog`, its host-declared `ToolProtocolMarkup` and its Anthropic/OpenAI schema projections; re-exports the identical `ToolDeclaration` |
-| `agent_providers.spawn` | `ChildProcess` and the only calls in this library that create a child process |
+| `agent_providers.spawn` | `ChildProcess` (its `repr` omits the environment field) and the only calls in this library that create a child process |
 | `agent_providers.process` | `run_cli_bounded`: the bounded runner over a `ChildProcess` (start, stdin, first line, deadline, process-group cleanup); its line channel ends in exactly one outcome before the run returns, `cli_settle_deadline(deadline)` is the one instant by which every wait ends, and a failed step is reported by name and exception class only |
 | `agent_providers.procfs` | `group_census`, one scan of one process group's live members from `/proc`, unavailable unless `/proc` is visibly a procfs of the process's own PID namespace with nothing hidden |
 | `agent_providers.images` | The `ImagePolicy` an image turn is held to |

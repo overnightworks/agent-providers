@@ -18,12 +18,14 @@ import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final, Literal
 
 import anyio
+from pydantic import SecretStr
 
+from agent_client.wire import TurnMessage
 from agent_providers import process
 from agent_providers.config import McpServerSpec, current_config, current_turn_config
 from agent_providers.constants import (
@@ -64,6 +66,7 @@ from agent_providers.process import (
 from agent_providers.spawn import (
     AsyncPipedProcess,
     ChildProcess,
+    ChildProcessSpecificationError,
     PipedProcessTimeout,
     closed_environment,
     open_async_pipes,
@@ -104,6 +107,18 @@ _TOOL_ISOLATION_FLAGS: Final = (
     "--strict-mcp-config",
     "--disable-slash-commands",
 )
+
+RELAY_SERVER_NAME: Final = "relay"
+_OAUTH_TOKEN_VARIABLE: Final = "CLAUDE_CODE_OAUTH_TOKEN"
+_RUN_SWITCHES: Final = {
+    "DISABLE_AUTOUPDATER": "1",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    "DISABLE_TELEMETRY": "1",
+}
+# The CLI counts one turn per tool-using response and checks its limit after
+# that response's calls ran, so one turn beyond the service's call limit stays
+# behind it (ADR 0001, A1b-0b2 and A1b-4a).
+TURNS_BEYOND_TOOL_CALLS: Final = 1
 
 _NO_TOOLS_EXPECTED: Final[frozenset[str]] = frozenset()
 
@@ -652,6 +667,90 @@ def flatten_messages(prompt: str, messages: list[dict[str, str]] | None) -> str:
     return "\n\n".join(parts)
 
 
+@dataclass(frozen=True)
+class ClaudeRun:
+    """One subscription run of the pinned CLI: its child and its one stdin line.
+
+    It describes the run and starts nothing; the spawn owner starts the child.
+    """
+
+    binary: Path
+    token: SecretStr
+    home: Path
+    working_directory: Path
+    system_prompt_file: Path
+    max_tool_calls: int
+    history: tuple[TurnMessage, ...] = field(repr=False)
+    relay_config: Path | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.token, SecretStr):
+            raise ChildProcessSpecificationError("A Claude run needs its token as a SecretStr")
+        paths = {
+            "binary": self.binary,
+            "home": self.home,
+            "working_directory": self.working_directory,
+            "system_prompt_file": self.system_prompt_file,
+            "relay_config": self.relay_config,
+        }
+        for name, path in paths.items():
+            if path is not None and not path.is_absolute():
+                raise ChildProcessSpecificationError(f"A Claude run needs an absolute {name}")
+        if self.working_directory == self.home:
+            raise ChildProcessSpecificationError(
+                "A Claude run needs a working_directory apart from its home",
+            )
+        if self.max_tool_calls < 1:
+            raise ChildProcessSpecificationError("A Claude run needs max_tool_calls of at least 1")
+        if not self.history:
+            raise ChildProcessSpecificationError("A Claude run needs a non-empty history")
+
+    def child(self) -> ChildProcess:
+        return ChildProcess(
+            binary=self.binary,
+            arguments=self._arguments(),
+            environment=closed_environment(
+                self.home,
+                **{_OAUTH_TOKEN_VARIABLE: self.token.get_secret_value()},
+                **_RUN_SWITCHES,
+            ),
+            working_directory=self.working_directory,
+        )
+
+    def stdin_message(self) -> bytes:
+        transcript = flatten_messages(
+            "",
+            [{"role": message.role.value, "content": message.text} for message in self.history],
+        )
+        line = {"type": "user", "message": {"role": "user", "content": transcript}}
+        return (json.dumps(line) + "\n").encode()
+
+    def _arguments(self) -> tuple[str, ...]:
+        arguments = (
+            "-p",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            *_TOOL_ISOLATION_FLAGS,
+            "--no-session-persistence",
+            "--max-turns",
+            str(self.max_tool_calls + TURNS_BEYOND_TOOL_CALLS),
+            "--system-prompt-file",
+            str(self.system_prompt_file),
+        )
+        if self.relay_config is None:
+            return arguments
+        return (
+            *arguments,
+            "--mcp-config",
+            str(self.relay_config),
+            "--allowedTools",
+            f"{_mcp_tool_prefix(RELAY_SERVER_NAME)}*",
+        )
+
+
 @contextmanager
 def _faults_in_the_claude_family() -> Iterator[None]:
     try:
@@ -708,18 +807,18 @@ def _cli_arguments(
     return cmd
 
 
-def _mcp_tool_prefix(spec: McpServerSpec) -> str:
+def _mcp_tool_prefix(server_name: str) -> str:
     """The CLI namespaces an MCP tool as ``mcp__<server>__<tool>``; a spec
     carries the bare names its server registers."""
-    return f"mcp__{spec.name}__"
+    return f"mcp__{server_name}__"
 
 
 def _mcp_allowed_tools(spec: McpServerSpec) -> str:
-    return f"{_mcp_tool_prefix(spec)}*"
+    return f"{_mcp_tool_prefix(spec.name)}*"
 
 
 def _expected_mcp_tool_names(spec: McpServerSpec) -> frozenset[str]:
-    prefix = _mcp_tool_prefix(spec)
+    prefix = _mcp_tool_prefix(spec.name)
     return frozenset(f"{prefix}{name}" for name in spec.tool_names)
 
 

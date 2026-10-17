@@ -489,12 +489,13 @@ def test_waiting_for_a_child_that_never_reports_ends_at_the_deadline_after_one_p
     reports,
 ):
     waitid = ScriptedWaitid(*reports)
+    clock = SteppingClock()
 
     with pytest.raises(ChildDidNotEndError):
         wait_for_exit_report(
             ended_stdout,
             7,
-            clock=SteppingClock(),
+            clock=clock,
             waitid=waitid,
             deadline=deadline,
         )
@@ -526,12 +527,13 @@ def test_every_poll_asks_without_blocking_and_without_reaping(ended_stdout):
 
 def test_a_child_that_was_already_reaped_fails_the_wait_loudly(ended_stdout):
     waitid = ScriptedWaitid(error=ChildProcessError("reaped"))
+    clock = SteppingClock()
 
     with pytest.raises(ChildProcessError):
         wait_for_exit_report(
             ended_stdout,
             7,
-            clock=SteppingClock(),
+            clock=clock,
             waitid=waitid,
             deadline=SOON,
         )
@@ -616,6 +618,7 @@ def test_a_child_that_closed_stdout_and_stays_alive_is_killed_and_reaped_after_t
     start_child,
 ):
     child = start_child(CLOSE_STDOUT_THEN_WAIT_FOR_STDIN)
+    deadline = time.monotonic() + STUCK_CHILD_DEADLINE_SECONDS
 
     with pytest.raises(ChildDidNotEndError):
         wait_for_exit_report(
@@ -623,7 +626,7 @@ def test_a_child_that_closed_stdout_and_stays_alive_is_killed_and_reaped_after_t
             child.pid,
             clock=time.monotonic,
             waitid=os.waitid,
-            deadline=time.monotonic() + STUCK_CHILD_DEADLINE_SECONDS,
+            deadline=deadline,
         )
     reap_group(child.process)
 

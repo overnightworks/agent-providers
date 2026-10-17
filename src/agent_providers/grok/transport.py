@@ -29,6 +29,7 @@ from agent_providers.errors import (
     ToolProtocolRejectionCode,
     normalize_route_failure,
     raise_without_chain,
+    refuse_empty_model,
 )
 from agent_providers.process import (
     CliEnvironmentUnavailableError,
@@ -101,7 +102,8 @@ class GrokCliToolTransport:
     receives a different one.
     """
 
-    def __init__(self, *, model: str, catalog: ToolCatalog) -> None:
+    def __init__(self, *, model: str | None, catalog: ToolCatalog) -> None:
+        refuse_empty_model("grok", "cli", model)
         self._model = model
         self._catalog = catalog
         try:
@@ -339,7 +341,7 @@ def _finish_grok_tool_round(
 
 
 def _grok_cli_tool_arguments(
-    model: str,
+    model: str | None,
     session_id: str | None = None,
 ) -> tuple[str, ...]:
     command = [
@@ -353,9 +355,9 @@ def _grok_cli_tool_arguments(
         "1",
         "--no-subagents",
         "--disable-web-search",
-        "--model",
-        model,
     ]
+    if model is not None:
+        command.extend(("--model", model))
     if session_id is not None:
         command.extend(("--resume", session_id))
     return tuple(command)

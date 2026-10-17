@@ -405,6 +405,16 @@ def resolve_cli_binary(name_or_path: str) -> Path | None:
     return Path(found) if found else None
 
 
+def require_cli_binary(name_or_path: str, missing_detail: str) -> Path:
+    """Resolve one configured CLI or say, as an environment fault, that it cannot run."""
+    binary = resolve_cli_binary(name_or_path)
+    if binary is None:
+        raise CliEnvironmentUnavailableError(
+            missing_detail, cause=CliEnvironmentCause.BINARY_MISSING,
+        )
+    return binary
+
+
 class CachedProbe[T]:
     """A cached probe with a published future for each cold flight.
 
@@ -1262,11 +1272,7 @@ def _catalog_cli_output(
     missing_binary_detail: str,
     credential_copy: CredentialCopy | None = None,
 ) -> str | None:
-    binary = resolve_cli_binary(binary_name)
-    if binary is None:
-        raise CliEnvironmentUnavailableError(
-            missing_binary_detail, cause=CliEnvironmentCause.BINARY_MISSING,
-        )
+    binary = require_cli_binary(binary_name, missing_binary_detail)
     run = _run_credentialed_catalog_cli(
         binary,
         args,
@@ -1879,12 +1885,12 @@ def _probe_grok_status() -> GrokCliStatus:
 def grok_cli_token_is_present() -> bool:
     """Whether the Grok CLI credential mirror contains a non-empty access token."""
     try:
-        document = json.loads(current_config().grok_cli_auth_file.read_text())
+        document = json.loads(current_config().grok_cli_auth_file.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return False
     except OSError as exc:
         raise CliLoginUnusableError("could not read Grok CLI credentials") from exc
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, UnicodeDecodeError):
         raise_without_chain(CliLoginUnusableError(GROK_CLI_CREDENTIALS_INVALID_DETAIL))
     if not isinstance(document, dict):
         raise CliLoginUnusableError(GROK_CLI_CREDENTIALS_INVALID_DETAIL)
@@ -1968,11 +1974,9 @@ def _probe_codex_login() -> CliLogin:
 
 def codex_cli_model_catalog() -> str:
     """Return the current JSON catalog emitted by ``codex debug models``."""
-    binary = resolve_cli_binary(current_config().codex_cli_binary)
-    if binary is None:
-        raise CliEnvironmentUnavailableError(
-            CODEX_CLI_BINARY_MISSING_DETAIL, cause=CliEnvironmentCause.BINARY_MISSING,
-        )
+    binary = require_cli_binary(
+        current_config().codex_cli_binary, CODEX_CLI_BINARY_MISSING_DETAIL,
+    )
     run = _run_credentialed_catalog_cli(
         binary,
         CODEX_CLI_MODELS_ARGS,

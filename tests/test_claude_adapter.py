@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import sys
 from collections.abc import AsyncIterator, Iterator
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -235,18 +236,21 @@ def test_claude_cli_turn_with_an_unusable_credential_reports_it_as_not_signed_in
 
 
 @contextlib.contextmanager
-def _a_working_root_that_was_removed(tmp_path) -> Iterator[None]:
+def _a_working_root_that_was_removed(tmp_path) -> Iterator[Path]:
     root = tmp_path / "removed-root"
     root.mkdir(mode=0o700)
     override_provider_runtime(cli_working_directory_root=root)
     root.rmdir()
-    yield
+    yield root
 
 
 @contextlib.contextmanager
-def _a_credential_copy_that_cannot_be_written(_tmp_path) -> Iterator[None]:
+def _a_credential_copy_that_cannot_be_written(tmp_path) -> Iterator[Path]:
+    root = tmp_path / "working-root"
+    root.mkdir(mode=0o700)
+    override_provider_runtime(cli_working_directory_root=root)
     with a_credential_destination_that_fails("write"):
-        yield
+        yield root
 
 
 @pytest.mark.parametrize(
@@ -257,12 +261,13 @@ def _a_credential_copy_that_cannot_be_written(_tmp_path) -> Iterator[None]:
 def test_claude_cli_turn_that_cannot_run_here_reports_the_cli_unavailable(
     tmp_path, environment_fault,
 ) -> None:
-    with environment_fault(tmp_path):
+    with environment_fault(tmp_path) as root:
         driving = _drive_real_claude_turn()
 
         with pytest.raises(ProviderUnavailableError) as failure:
             asyncio.run(driving)
 
+    assert not root.exists() or not any(root.iterdir())
     assert failure.value.reason.code is SafeRouteReasonCode.CLI_UNAVAILABLE
     cause = failure.value.__cause__
     assert type(cause) is CliUnavailableError

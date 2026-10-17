@@ -10,8 +10,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import os
-import stat
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -23,11 +21,11 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from jwt.algorithms import RSAAlgorithm
 
+from agent_service.secret_file import UnsoundSecretFile, read_secret_file, shown_text
+
 SIGNING_KEY_BITS: Final = 3072
 SIGNING_KEY_EXPONENT: Final = 65537
-MAX_KEY_FILE_BYTES: Final = 16 * 1024
 _PEM_BLOCK_START: Final = b"-----BEGIN "
-_OPEN_FLAGS: Final = os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC
 
 
 class UnsoundSigningKey(ValueError):
@@ -36,18 +34,6 @@ class UnsoundSigningKey(ValueError):
 
 class EmptyTokenType(ValueError):
     """A token must say what it is for; an empty ``typ`` would silently drop the header."""
-
-
-UNSHOWABLE_PATH = "contains a control or non-printing character; a path must not"
-
-
-def shown_text(text: str) -> str:
-    """Operator-supplied text with control and non-printing characters escaped, one line."""
-    return "".join(map(_shown_character, text))
-
-
-def _shown_character(character: str) -> str:
-    return character if character.isprintable() else character.encode("unicode_escape").decode()
 
 
 def key_id(public_key: rsa.RSAPublicKey) -> str:
@@ -96,45 +82,14 @@ class SigningKey:
 
 def load_signing_key(path: Path) -> SigningKey:
     """Reads the file through one descriptor and raises ``UnsoundSigningKey`` for any refusal."""
-    shown = shown_text(str(path))
-    if shown != str(path):
-        raise UnsoundSigningKey(f"{shown} {UNSHOWABLE_PATH}")
     try:
-        return SigningKey.from_private_key(_parsed_private_key(_read_key_file(path)))
-    except OSError as error:
-        raise UnsoundSigningKey(f"{shown} cannot be read: {error.strerror}") from error
+        contents = read_secret_file(path, "key file")
+    except UnsoundSecretFile as refusal:
+        raise UnsoundSigningKey(str(refusal)) from None
+    try:
+        return SigningKey.from_private_key(_parsed_private_key(contents))
     except UnsoundSigningKey as refusal:
-        raise UnsoundSigningKey(f"{shown} {refusal}") from None
-
-
-def _read_key_file(path: Path) -> bytes:
-    descriptor = os.open(path, _OPEN_FLAGS)
-    try:
-        status = os.fstat(descriptor)
-        if not stat.S_ISREG(status.st_mode):
-            raise UnsoundSigningKey("is not a regular file")
-        if status.st_mode & 0o077:
-            raise UnsoundSigningKey(
-                f"is open to group or others (mode {stat.S_IMODE(status.st_mode):04o});"
-                " a key file must grant them nothing, for example 0600 or 0400"
-            )
-        if status.st_size > MAX_KEY_FILE_BYTES:
-            raise UnsoundSigningKey(f"is larger than {MAX_KEY_FILE_BYTES} bytes")
-        contents = _read_at_most(descriptor, MAX_KEY_FILE_BYTES + 1)
-    finally:
-        os.close(descriptor)
-    if len(contents) > MAX_KEY_FILE_BYTES:
-        raise UnsoundSigningKey(f"is larger than {MAX_KEY_FILE_BYTES} bytes")
-    return contents
-
-
-def _read_at_most(descriptor: int, limit: int) -> bytes:
-    chunks: list[bytes] = []
-    remaining = limit
-    while remaining and (chunk := os.read(descriptor, remaining)):
-        chunks.append(chunk)
-        remaining -= len(chunk)
-    return b"".join(chunks)
+        raise UnsoundSigningKey(f"{shown_text(str(path))} {refusal}") from None
 
 
 def _parsed_private_key(contents: bytes) -> object:

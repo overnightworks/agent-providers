@@ -1,0 +1,105 @@
+"""How the service reads a secret the operator keeps in a file: once, from one descriptor.
+
+The signing key and a profile's login token follow the same rules (decision record
+0001, A1a4 ruling): the file is opened once, type, mode and size come from that
+descriptor, and no message carries the file's content.
+"""
+
+from __future__ import annotations
+
+import os
+import stat
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Final
+
+MAX_SECRET_FILE_BYTES: Final = 16 * 1024
+API_KEY_PREFIX: Final = "sk-ant-api"
+_OPEN_FLAGS: Final = os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC
+UNSHOWABLE_PATH: Final = "contains a control or non-printing character; a path must not"
+
+
+class UnsoundSecretFile(ValueError):
+    """A secret file the service refuses to use; the message is the service's own words."""
+
+
+def shown_text(text: str) -> str:
+    """Operator-supplied text with control and non-printing characters escaped, one line."""
+    return "".join(map(_shown_character, text))
+
+
+def _shown_character(character: str) -> str:
+    return character if character.isprintable() else character.encode("unicode_escape").decode()
+
+
+def read_secret_file(path: Path, subject: str) -> bytes:
+    """The file's bytes; a refusal names the path in an ``UnsoundSecretFile``, never the content."""
+    shown = shown_text(str(path))
+    if shown != str(path):
+        raise UnsoundSecretFile(f"{shown} {UNSHOWABLE_PATH}")
+    try:
+        return _read_through_one_descriptor(path, subject)
+    except OSError as error:
+        raise UnsoundSecretFile(f"{shown} cannot be read: {error.strerror}") from error
+    except UnsoundSecretFile as refusal:
+        raise UnsoundSecretFile(f"{shown} {refusal}") from None
+
+
+def read_token_file(path: Path) -> str:
+    """The one-line token the file holds; an API key is refused, since only a login token fits."""
+    judged = _token_or_refusal(read_secret_file(path, "token file"))
+    if isinstance(judged, _TokenRefusal):
+        raise UnsoundSecretFile(f"{shown_text(str(path))} {judged.reason}")
+    return judged
+
+
+@dataclass(frozen=True)
+class _TokenRefusal:
+    reason: str
+
+
+def _token_or_refusal(contents: bytes) -> str | _TokenRefusal:
+    try:
+        text = contents.decode("utf-8")
+    except UnicodeDecodeError:
+        return _TokenRefusal("is not UTF-8 text")
+    token = text.removesuffix("\n")
+    if not token:
+        return _TokenRefusal("is empty; it must hold the token")
+    if "\n" in token:
+        return _TokenRefusal("holds more than one line; it must hold one token")
+    if not token.isprintable():
+        return _TokenRefusal("contains a control or non-printing character; a token must not")
+    if token.startswith(API_KEY_PREFIX):
+        return _TokenRefusal("holds an API key; it must hold a subscription token from setup-token")
+    return token
+
+
+def _read_through_one_descriptor(path: Path, subject: str) -> bytes:
+    descriptor = os.open(path, _OPEN_FLAGS)
+    try:
+        status = os.fstat(descriptor)
+        if not stat.S_ISREG(status.st_mode):
+            raise UnsoundSecretFile("is not a regular file")
+        if status.st_mode & 0o077:
+            raise UnsoundSecretFile(
+                f"is open to group or others (mode {stat.S_IMODE(status.st_mode):04o});"
+                f" a {subject} must grant them nothing, for example 0600 or 0400"
+            )
+        if status.st_size > MAX_SECRET_FILE_BYTES:
+            raise UnsoundSecretFile(f"is larger than {MAX_SECRET_FILE_BYTES} bytes")
+        return _read_within_limit(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _read_within_limit(descriptor: int) -> bytes:
+    chunks: list[bytes] = []
+    remaining = MAX_SECRET_FILE_BYTES + 1
+    while remaining and (chunk := os.read(descriptor, remaining)):
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    if remaining == 0:
+        chunks.clear()
+        raise UnsoundSecretFile(f"is larger than {MAX_SECRET_FILE_BYTES} bytes")
+    return b"".join(chunks)

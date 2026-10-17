@@ -31,9 +31,9 @@ from agent_providers.errors import (
     raise_without_chain,
 )
 from agent_providers.process import (
-    AgentCliUnavailableError,
-    CliCredentialNotConfiguredError,
+    CliEnvironmentUnavailableError,
     CliLineChannel,
+    CliLoginUnusableError,
     CliRunOutcome,
     PrivateCredentialHome,
     PrivateCredentialHomeReservation,
@@ -111,17 +111,17 @@ class GrokCliToolTransport:
                 prefix=GROK_CLI_TURN_DIRECTORY_PREFIX,
                 missing_credential_is_error=True,
             )
-        except CliCredentialNotConfiguredError as exc:
+        except CliLoginUnusableError as exc:
             raise ProviderUnavailableError(
                 "grok",
                 "cli",
                 normalize_route_failure(SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED),
             ) from exc
-        except AgentCliUnavailableError as exc:
+        except CliEnvironmentUnavailableError as exc:
             raise ProviderUnavailableError(
                 "grok",
                 "cli",
-                normalize_route_failure(SafeRouteReasonCode.CLI_PROTOCOL_ERROR),
+                normalize_route_failure(SafeRouteReasonCode.CLI_UNAVAILABLE),
             ) from exc
         self._working_directory = self._home.path.resolve()
         self._deadline = time.monotonic() + TURN_TIMEOUT_SECONDS
@@ -135,7 +135,7 @@ class GrokCliToolTransport:
             raise ProviderUnavailableError(
                 "grok",
                 "cli",
-                normalize_route_failure(SafeRouteReasonCode.CLI_PROTOCOL_ERROR),
+                normalize_route_failure(SafeRouteReasonCode.CLI_UNAVAILABLE),
             )
         return ChildProcess(
             binary=binary,

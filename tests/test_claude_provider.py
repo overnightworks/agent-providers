@@ -11,6 +11,8 @@ import stat
 import sys
 import threading
 import time
+import weakref
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -20,10 +22,12 @@ import pytest
 from provider_test_support import (
     A_RUNNER_FAILURE_CANARY,
     CLAUDE_MODEL_CATALOG_STDOUT,
+    DESTINATION_FAULTS,
     MCP_TOOL_NAMES,
     SAMPLE_TOOL_CATALOG,
     SECRET_ENV_KEYS,
     RunnerFailureWatch,
+    a_credential_destination_that_fails,
     assert_private_credential_child,
     drive_turn,
     fail_to_start_the_runner_thread,
@@ -36,9 +40,13 @@ from pydantic import SecretStr
 from agent_providers import process, spawn
 from agent_providers.claude import provider
 from agent_providers.claude.provider import (
+    CLAUDE_CLI_BINARY_NOT_FOUND_DETAIL,
+    CLAUDE_CLI_LOGIN_NOT_CONFIGURED_DETAIL,
     CLAUDE_CLI_UNAVAILABLE_DETAIL,
     ClaudeResponse,
+    CliLoginNotConfiguredError,
     CliToolSurfaceError,
+    CliUnavailableError,
     UnavailableError,
     _acall_cli,
     _call_api,
@@ -781,8 +789,12 @@ def test_acall_cli_surfaces_a_missing_or_failed_binary(
     monkeypatch.setattr(provider, "_spawn_reserved_async_cli_process", spawn)
 
     call = _acall_cli("hello")
-    with pytest.raises(UnavailableError, match="Claude CLI (binary not found|is unavailable)"):
+    with pytest.raises(
+        UnavailableError, match="Claude CLI (binary not found|is unavailable)",
+    ) as raised:
         asyncio.run(call)
+
+    assert isinstance(raised.value, CliUnavailableError) is (failure == "missing")
 
 
 @pytest.mark.parametrize("failure", ["missing", "nonzero"])
@@ -3540,14 +3552,15 @@ def test_one_shot_deadline_keeps_and_caches_a_zombie_probe_failure(
 
     with provider._tool_surface_lock:
         failure = provider._tool_surface_failures[key]
-    assert failure.is_zombie is True
     assert failure.ttl_seconds() == provider.CLAUDE_CLI_ZOMBIE_FAILURE_CACHE_SECONDS
 
 
 # ── #351 round 6, Finding 6: the reaper pool caps new probes too ─────
 
 
+@pytest.mark.parametrize("probe_kind", ("async", "sync"))
 def test_tool_surface_probe_refuses_to_start_when_the_zombie_pool_is_saturated(
+    probe_kind: str,
     claude_binary,
     monkeypatch,
 ) -> None:
@@ -3594,8 +3607,13 @@ def test_tool_surface_probe_refuses_to_start_when_the_zombie_pool_is_saturated(
                 await provider.acall_claude_with_mcp(prompt="hi", user_id="u-1")
 
         await asyncio.gather(*(started.wait() for started in reapers_started))
+        async def refused_probe() -> Path:
+            if probe_kind == "async":
+                return await averify_no_builtin_cli_tools()
+            return verify_no_builtin_cli_tools()
+
         with pytest.raises(UnavailableError) as exc:
-            verify_no_builtin_cli_tools()
+            await refused_probe()
         assert str(exc.value) == (
             "Claude CLI process pool is at its concurrency limit (2); refusing to start another"
         )
@@ -3973,7 +3991,7 @@ def test_public_claude_stream_names_a_missing_binary(monkeypatch) -> None:
 
     stream = acall_claude_with_mcp_stream(prompt="hi", user_id="u-1")
     events = _collect_stream_events(stream)
-    with pytest.raises(provider.CliBinaryUnavailableError, match="not found"):
+    with pytest.raises(CliUnavailableError, match="not found"):
         asyncio.run(events)
 
 
@@ -4390,3 +4408,174 @@ def test_no_builtin_gate_sync_and_async_share_one_cache(
     verify_no_builtin_cli_tools()
 
     assert len(commands) == 1
+
+
+@pytest.mark.parametrize(
+    ("parent", "other"),
+    (
+        (CliUnavailableError, CliLoginNotConfiguredError),
+        (CliLoginNotConfiguredError, CliUnavailableError),
+    ),
+    ids=("unavailable", "not-configured"),
+)
+def test_the_claude_cli_faults_are_unavailable_errors_and_not_each_other(parent, other) -> None:
+    assert issubclass(parent, UnavailableError)
+    assert not issubclass(parent, other)
+
+
+def _a_claude_binary_missing_at(site: str, monkeypatch: pytest.MonkeyPatch):
+    if site == "require":
+        monkeypatch.setattr(provider, "_find_claude_binary", lambda: None)
+        return list_cli_model_aliases
+    monkeypatch.setattr(
+        provider, "averify_no_builtin_cli_tools", AsyncMock(return_value=Path("/usr/bin/claude")),
+    )
+    monkeypatch.setattr(
+        provider, "verify_cli_tool_surface", AsyncMock(return_value=Path("/usr/bin/claude")),
+    )
+    monkeypatch.setattr(
+        provider, "_spawn_reserved_async_cli_process", AsyncMock(side_effect=FileNotFoundError()),
+    )
+    monkeypatch.setattr(provider, "_write_mcp_config", lambda _spec, _user_id: "unused")
+    monkeypatch.setattr(provider, "_unlink_quiet", lambda _path: None)
+    if site == "acall-cli":
+        return lambda: asyncio.run(_acall_cli("hello"))
+    if site == "mcp":
+        return lambda: asyncio.run(provider.acall_claude_with_mcp("hi", user_id="u-1"))
+    return lambda: asyncio.run(acall_claude_with_mcp_stream(prompt="hi", user_id="u-1").__anext__())
+
+
+@pytest.mark.parametrize(
+    ("site", "detail"),
+    (
+        ("require", "Claude CLI not found"),
+        ("acall-cli", CLAUDE_CLI_BINARY_NOT_FOUND_DETAIL),
+        ("mcp", CLAUDE_CLI_BINARY_NOT_FOUND_DETAIL),
+        ("mcp-stream", CLAUDE_CLI_BINARY_NOT_FOUND_DETAIL),
+    ),
+)
+def test_a_missing_claude_binary_raises_cli_unavailable(
+    site: str, detail: str, _no_tool_gate_open, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = _a_claude_binary_missing_at(site, monkeypatch)
+
+    with pytest.raises(CliUnavailableError, match=detail):
+        run()
+
+
+def _cli_root_removed(tmp_path: Path) -> None:
+    root = tmp_path / "removed-root"
+    root.mkdir(mode=0o700)
+    override_provider_runtime(cli_working_directory_root=root)
+    root.rmdir()
+
+
+def _credential_source_replaced_by_a_link(tmp_path: Path) -> None:
+    source = current_config().claude_cli_auth_file
+    target = tmp_path / "elsewhere.json"
+    target.write_text("{}")
+    source.unlink()
+    source.symlink_to(target)
+
+
+@pytest.mark.parametrize(
+    ("make_fault", "raised_class", "detail"),
+    (
+        (_cli_root_removed, CliUnavailableError, CLAUDE_CLI_UNAVAILABLE_DETAIL),
+        (
+            _credential_source_replaced_by_a_link,
+            CliLoginNotConfiguredError,
+            CLAUDE_CLI_LOGIN_NOT_CONFIGURED_DETAIL,
+        ),
+    ),
+    ids=("home-not-made", "linked-credential"),
+)
+def test_the_claude_model_listing_raises_only_the_claude_family(
+    make_fault, raised_class, detail, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(provider, "_find_claude_binary", lambda: Path("/usr/bin/claude"))
+    make_fault(tmp_path)
+
+    with pytest.raises(UnavailableError) as raised:
+        list_cli_model_aliases()
+
+    assert type(raised.value) is raised_class
+    assert str(raised.value) == detail
+    assert isinstance(raised.value.__cause__, process.AgentCliUnavailableError)
+
+
+@pytest.mark.parametrize("fault", DESTINATION_FAULTS)
+def test_a_credential_copy_that_cannot_be_written_raises_cli_unavailable(
+    fault: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(provider, "_find_claude_binary", lambda: Path("/usr/bin/claude"))
+    with a_credential_destination_that_fails(fault):
+        with pytest.raises(UnavailableError) as raised:
+            list_cli_model_aliases()
+
+    assert type(raised.value) is CliUnavailableError
+    assert str(raised.value) == CLAUDE_CLI_UNAVAILABLE_DETAIL
+    assert isinstance(raised.value.__cause__, process.CliEnvironmentUnavailableError)
+    assert raised.value.__cause__.cause is process.CliEnvironmentCause.CREDENTIAL_COPY_NOT_WRITTEN
+
+
+def _probe_failing_with(error_class, message: str, alive: list[weakref.ref]):
+    def fail() -> None:
+        error = error_class(message)
+        alive.append(weakref.ref(error))
+        raise error
+
+    return fail
+
+
+def _run_to_completion(coroutine_function) -> None:
+    asyncio.run(coroutine_function())
+
+
+def _failure_of(call) -> tuple[type, str, BaseException | None]:
+    try:
+        call()
+    except UnavailableError as exc:
+        return type(exc), str(exc), exc.__cause__
+    raise AssertionError("the call did not fail")
+
+
+@pytest.mark.parametrize("probe_kind", ("async", "sync"))
+@pytest.mark.parametrize(
+    ("error_class", "message"),
+    (
+        (CliLoginNotConfiguredError, CLAUDE_CLI_LOGIN_NOT_CONFIGURED_DETAIL),
+        (CliUnavailableError, CLAUDE_CLI_UNAVAILABLE_DETAIL),
+        (provider._ZombieProbeError, "probe process outlived SIGKILL"),
+    ),
+    ids=("login", "environment", "zombie"),
+)
+def test_a_failed_tool_surface_probe_replays_its_class_and_message_without_the_exception(
+    probe_kind: str, error_class, message: str, claude_binary, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    alive: list[weakref.ref] = []
+    fail = _probe_failing_with(error_class, message, alive)
+    probes: list[None] = []
+
+    async def failing_async_probe(*_args, **_kwargs):
+        probes.append(None)
+        fail()
+
+    def failing_sync_probe(*_args, **_kwargs):
+        probes.append(None)
+        fail()
+
+    if probe_kind == "async":
+        monkeypatch.setattr(provider, "_probe_cli_surface_async", failing_async_probe)
+        verify = partial(_run_to_completion, verify_cli_tool_surface)
+    else:
+        monkeypatch.setattr(provider, "_probe_cli_surface_sync", failing_sync_probe)
+        verify = verify_no_builtin_cli_tools
+
+    _failure_of(verify)
+    gc.collect()
+    replayed = _failure_of(verify)
+
+    assert replayed == (error_class, message, None)
+    assert len(probes) == 1
+    assert alive[0]() is None

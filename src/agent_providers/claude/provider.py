@@ -78,6 +78,7 @@ CLAUDE_CLI_MODEL_CATALOG_ERROR: Final = "Claude CLI could not list models."
 CLAUDE_CLI_BINARY_NOT_FOUND_DETAIL: Final = "Claude CLI binary not found"
 CLAUDE_CLI_UNAVAILABLE_DETAIL: Final = "Claude CLI is unavailable. Check server logs for details."
 CLAUDE_CLI_LOGIN_REFUSED_DETAIL: Final = "Claude CLI login was refused."
+CLAUDE_CLI_LOGIN_NOT_CONFIGURED_DETAIL: Final = "Claude CLI is not signed in."
 
 # The CLI is a bind-mounted, self-updating binary reading a prompt that carries
 # untrusted content (host data, @-mentions, tool results). These flags make its
@@ -130,8 +131,13 @@ class UnavailableError(Exception):
     """Raised when no Claude backend is available."""
 
 
-class CliBinaryUnavailableError(UnavailableError):
-    """Raised when the Claude CLI executable cannot be found or started."""
+class CliUnavailableError(UnavailableError):
+    """Raised when the Claude CLI cannot run here: its binary is missing, or
+    its private home or credential copy cannot be made."""
+
+
+class CliLoginNotConfiguredError(UnavailableError):
+    """Raised when the configured Claude CLI credential is missing or unusable."""
 
 
 class CliLoginRefusedError(UnavailableError):
@@ -257,7 +263,7 @@ async def acall_claude_with_mcp(
                     home_reservation=home.reserve(),
                 )
             except FileNotFoundError:
-                raise CliBinaryUnavailableError(CLAUDE_CLI_BINARY_NOT_FOUND_DETAIL)
+                raise CliUnavailableError(CLAUDE_CLI_BINARY_NOT_FOUND_DETAIL)
             try:
                 stdout_bytes, stderr_bytes = await asyncio.wait_for(
                     proc.communicate(stdin_body.encode()),
@@ -330,7 +336,7 @@ async def acall_claude_with_mcp_stream(
                     stream_buffer_limit=_STREAM_BUFFER_LIMIT,
                 )
             except FileNotFoundError:
-                raise CliBinaryUnavailableError(CLAUDE_CLI_BINARY_NOT_FOUND_DETAIL)
+                raise CliUnavailableError(CLAUDE_CLI_BINARY_NOT_FOUND_DETAIL)
             try:
                 if proc.stdin is not None:
                     proc.stdin.write(stdin_body.encode())
@@ -536,7 +542,8 @@ def list_cli_model_aliases() -> list[str]:
     takes full ids that this list does not hold.
     """
     binary = _require_claude_binary()
-    run = run_claude_catalog_cli(binary, ("-p", "/model"))
+    with _faults_in_the_claude_family():
+        run = run_claude_catalog_cli(binary, ("-p", "/model"))
     if run is None:
         raise UnavailableError("Claude CLI /model failed to run")
     if not run.complete:
@@ -614,16 +621,24 @@ def flatten_messages(prompt: str, messages: list[dict[str, str]] | None) -> str:
     return "\n\n".join(parts)
 
 
-def _claude_private_home() -> process.PrivateCredentialHome:
+@contextmanager
+def _faults_in_the_claude_family() -> Iterator[None]:
     try:
+        yield
+    except process.CliLoginUnusableError as exc:
+        raise CliLoginNotConfiguredError(CLAUDE_CLI_LOGIN_NOT_CONFIGURED_DETAIL) from exc
+    except process.CliEnvironmentUnavailableError as exc:
+        raise CliUnavailableError(CLAUDE_CLI_UNAVAILABLE_DETAIL) from exc
+
+
+def _claude_private_home() -> process.PrivateCredentialHome:
+    with _faults_in_the_claude_family():
         return process.PrivateCredentialHome(
             current_config().claude_cli_auth_file,
             _CLAUDE_CREDENTIAL_PATH,
             prefix=_CLAUDE_TURN_HOME_PREFIX,
             missing_credential_is_error=True,
         )
-    except process.AgentCliUnavailableError as exc:
-        raise UnavailableError(CLAUDE_CLI_UNAVAILABLE_DETAIL) from exc
 
 
 def _claude_child_process(
@@ -900,17 +915,18 @@ class _ToolSurfaceMismatch:
 class _ToolSurfaceFailure:
     """A probe failure, remembered separately from a genuine verdict — see
     the module-level comment above for why the two must never share a
-    cache. ``is_zombie`` picks the TTL: a process that outlived SIGKILL
-    gets the much longer ``CLAUDE_CLI_ZOMBIE_FAILURE_CACHE_SECONDS``."""
+    cache. It keeps the failure's class and safe message, never the exception
+    or its traceback. A zombie class gets the much longer
+    ``CLAUDE_CLI_ZOMBIE_FAILURE_CACHE_SECONDS``."""
 
     recorded_at: float
+    error_class: type[UnavailableError]
     message: str
-    is_zombie: bool
 
     def ttl_seconds(self) -> float:
         return (
             CLAUDE_CLI_ZOMBIE_FAILURE_CACHE_SECONDS
-            if self.is_zombie
+            if issubclass(self.error_class, _ZombieProbeError)
             else CLAUDE_CLI_TOOL_SURFACE_FAILURE_CACHE_SECONDS
         )
 
@@ -1190,11 +1206,7 @@ async def _run_probe_and_resolve_async(
         mismatch = _evaluate_tool_surface(key, surface)
     except UnavailableError as exc:
         if not isinstance(exc, _ClaudeCliProcessPoolSaturated):
-            _record_tool_surface_failure(
-                key,
-                str(exc),
-                is_zombie=isinstance(exc, _ZombieProbeError),
-            )
+            _record_tool_surface_failure(key, exc)
         _resolve_inflight_async(key, future, exception=exc)
         return
     except asyncio.CancelledError as exc:
@@ -1296,15 +1308,8 @@ def _verify_tool_surface_sync(
         surface = probe(probe_deadline)
         mismatch = _evaluate_tool_surface(key, surface)
     except UnavailableError as exc:
-        is_zombie = isinstance(exc, _ZombieProbeError)
-        if is_zombie:
-            _record_tool_surface_failure(key, str(exc), is_zombie=True)
-        if not is_zombie and not isinstance(exc, _ClaudeCliProcessPoolSaturated):
-            _record_tool_surface_failure(
-                key,
-                str(exc),
-                is_zombie=False,
-            )
+        if not isinstance(exc, _ClaudeCliProcessPoolSaturated):
+            _record_tool_surface_failure(key, exc)
         _resolve_inflight_sync(key, future, exception=exc)
         raise exc
     except BaseException as exc:
@@ -1404,12 +1409,14 @@ def _cached_tool_surface_verdict(key: _ToolSurfaceKey) -> _ToolSurfaceMismatch |
         return None
     if time.monotonic() - failure.recorded_at >= failure.ttl_seconds():
         return None
-    raise UnavailableError(failure.message)
+    raise failure.error_class(failure.message)
 
 
-def _record_tool_surface_failure(key: _ToolSurfaceKey, message: str, *, is_zombie: bool) -> None:
+def _record_tool_surface_failure(key: _ToolSurfaceKey, error: UnavailableError) -> None:
     with _tool_surface_lock:
-        _tool_surface_failures[key] = _ToolSurfaceFailure(time.monotonic(), message, is_zombie)
+        _tool_surface_failures[key] = _ToolSurfaceFailure(
+            time.monotonic(), type(error), str(error),
+        )
 
 
 def _evaluate_tool_surface(
@@ -1861,7 +1868,7 @@ def _parse_cli_output(stdout: str) -> str:
 def _require_claude_binary() -> Path:
     binary = _find_claude_binary()
     if not binary:
-        raise CliBinaryUnavailableError(
+        raise CliUnavailableError(
             "Claude CLI not found. Install Claude Code or provide an API key."
         )
     return binary
@@ -2050,7 +2057,7 @@ async def _acall_cli(
             await _reap_process_group(proc)
             raise
     except FileNotFoundError:
-        raise UnavailableError(CLAUDE_CLI_BINARY_NOT_FOUND_DETAIL)
+        raise CliUnavailableError(CLAUDE_CLI_BINARY_NOT_FOUND_DETAIL)
     finally:
         home.close()
 

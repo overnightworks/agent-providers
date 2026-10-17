@@ -22,7 +22,7 @@ from collections import deque
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import Enum, StrEnum
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Final, Literal, NotRequired, Required, TypedDict, Unpack, cast
@@ -61,15 +61,52 @@ CODEX_CLI_MODEL_CATALOG_OUTPUT_READ_LIMIT_BYTES: Final = 4 * 1024 * 1024
 
 
 class AgentCliUnavailableError(Exception):
-    """Raised when a CLI's login response does not match its contract."""
+    """A CLI cannot serve this call.
+
+    Raised directly only for a catalogue answer that breaks its contract.
+    """
 
 
-class CliCredentialNotConfiguredError(AgentCliUnavailableError):
-    """Raised when a turn cannot copy its configured credential source."""
+class CliLoginUnusableError(AgentCliUnavailableError):
+    """The configured CLI login is missing, unreadable, invalid or too large.
+
+    Or the CLI reported no login status.
+    """
 
 
-class PrivateHomeNotCreatedError(AgentCliUnavailableError):
-    """Raised when a private CLI home could not be created or made private."""
+class CliEnvironmentCause(StrEnum):
+    """Why a CLI cannot run here, whatever its login."""
+
+    BINARY_MISSING = "binary_missing"
+    HOME_NOT_CREATED = "home_not_created"
+    CREDENTIAL_COPY_NOT_WRITTEN = "credential_copy_not_written"
+
+
+type _EnvironmentReduction = tuple[
+    Callable[[str, CliEnvironmentCause], CliEnvironmentUnavailableError],
+    tuple[str, CliEnvironmentCause],
+    dict[str, Any],
+]
+
+
+class CliEnvironmentUnavailableError(AgentCliUnavailableError):
+    """The CLI cannot run here.
+
+    Its binary is missing, or its private home or credential copy cannot be made.
+    """
+
+    def __init__(self, detail: str, *, cause: CliEnvironmentCause) -> None:
+        super().__init__(detail)
+        self.cause = cause
+
+    def __reduce__(self) -> _EnvironmentReduction:
+        return (_restore_environment_error, (str(self), self.cause), self.__dict__)
+
+
+def _restore_environment_error(
+    detail: str, cause: CliEnvironmentCause,
+) -> CliEnvironmentUnavailableError:
+    return CliEnvironmentUnavailableError(detail, cause=cause)
 
 
 class CliProbeBudgetExceeded(AgentCliUnavailableError):
@@ -328,6 +365,11 @@ log = logging.getLogger(__name__)
 
 GROK_CLI_CREDENTIALS_INVALID_DETAIL: Final = "could not parse Grok CLI credentials"
 CODEX_CLI_CREDENTIALS_INVALID_DETAIL: Final = "could not parse Codex CLI credentials"
+CLAUDE_CLI_BINARY_MISSING_DETAIL: Final = (
+    "the configured Claude CLI binary is not on the search path"
+)
+GROK_CLI_BINARY_MISSING_DETAIL: Final = "the configured Grok CLI binary is not on the search path"
+CODEX_CLI_BINARY_MISSING_DETAIL: Final = "the configured Codex CLI binary is not on the search path"
 _CATALOG_HOME_PREFIX: Final = "agent-cli-catalog-"
 _CATALOG_AUTH_FILE_PATH: Final = Path("auth.json")
 CredentialCopy = Callable[[bytes], bytes | None]
@@ -1217,11 +1259,14 @@ def _catalog_cli_output(
     *,
     credential_home_variable: str,
     auth_file: Path,
+    missing_binary_detail: str,
     credential_copy: CredentialCopy | None = None,
 ) -> str | None:
     binary = resolve_cli_binary(binary_name)
     if binary is None:
-        return None
+        raise CliEnvironmentUnavailableError(
+            missing_binary_detail, cause=CliEnvironmentCause.BINARY_MISSING,
+        )
     run = _run_credentialed_catalog_cli(
         binary,
         args,
@@ -1301,7 +1346,10 @@ class PrivateCredentialHome:
                 )
             except OSError:
                 raise_without_chain(
-                    PrivateHomeNotCreatedError("could not create a private CLI home")
+                    CliEnvironmentUnavailableError(
+                        "could not create a private CLI home",
+                        cause=CliEnvironmentCause.HOME_NOT_CREATED,
+                    )
                 )
             self._finalizer = _live_home_finalizers[registry_key] = weakref.finalize(
                 self, _remove_abandoned_tree, Path(created), os.getpid(), registry_key,
@@ -1315,7 +1363,11 @@ class PrivateCredentialHome:
             try:
                 os.chmod(self._home, 0o700)
             except OSError:
-                raise_without_chain(PrivateHomeNotCreatedError(_CREDENTIAL_COPY_FAILED_DETAIL))
+                raise_without_chain(
+                    CliEnvironmentUnavailableError(
+                        _CREDENTIAL_COPY_FAILED_DETAIL, cause=CliEnvironmentCause.HOME_NOT_CREATED,
+                    )
+                )
             install_credential_file(
                 auth_file,
                 self._home / relative_destination,
@@ -1493,7 +1545,7 @@ def _install_credential(
     if payload is None:
         if missing_credential_is_error:
             raise_without_chain(
-                CliCredentialNotConfiguredError("configured CLI credential is missing")
+                CliLoginUnusableError("configured CLI credential is missing")
             )
         # A probe with no credential answers "logged out", which is
         # indistinguishable from a typo in the configured path. Name the path
@@ -1509,7 +1561,7 @@ def _install_credential(
         if payload is None:
             if missing_credential_is_error:
                 raise_without_chain(
-                    CliCredentialNotConfiguredError("configured CLI credential is unusable")
+                    CliLoginUnusableError("configured CLI credential is unusable")
                 )
             log.warning(
                 "the credential at the configured path %s is not a usable login; "
@@ -1521,7 +1573,12 @@ def _install_credential(
         destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         _write_new_credential_file(destination, payload, mode)
     except OSError:
-        raise_without_chain(AgentCliUnavailableError(_CREDENTIAL_COPY_FAILED_DETAIL))
+        raise_without_chain(
+            CliEnvironmentUnavailableError(
+                _CREDENTIAL_COPY_FAILED_DETAIL,
+                cause=CliEnvironmentCause.CREDENTIAL_COPY_NOT_WRITTEN,
+            )
+        )
 
 
 def _write_new_credential_file(destination: Path, payload: bytes, mode: int) -> None:
@@ -1640,7 +1697,7 @@ def _read_credential_file(path: Path) -> bytes | None:
             if exc.errno == errno.ELOOP
             else _CREDENTIAL_UNREADABLE_DETAIL
         )
-        raise_without_chain(AgentCliUnavailableError(refusal))
+        raise_without_chain(CliLoginUnusableError(refusal))
     try:
         content, refusal = _read_regular_file(descriptor)
     finally:
@@ -1648,7 +1705,7 @@ def _read_credential_file(path: Path) -> bytes | None:
     if not closed:
         content, refusal = None, _CREDENTIAL_UNREADABLE_DETAIL
     if refusal is not None:
-        raise_without_chain(AgentCliUnavailableError(refusal))
+        raise_without_chain(CliLoginUnusableError(refusal))
     return content
 
 
@@ -1809,6 +1866,7 @@ def _probe_grok_status() -> GrokCliStatus:
         GROK_CLI_STATUS_ARGS,
         credential_home_variable=_GROK_CREDENTIAL_HOME_VARIABLE,
         auth_file=current_config().grok_cli_auth_file,
+        missing_binary_detail=GROK_CLI_BINARY_MISSING_DETAIL,
     )
     if output is None:
         return GrokCliStatus(login=LOGGED_OUT, model_names=())
@@ -1821,25 +1879,23 @@ def _probe_grok_status() -> GrokCliStatus:
 def grok_cli_token_is_present() -> bool:
     """Whether the Grok CLI credential mirror contains a non-empty access token."""
     try:
-        raw_auth = current_config().grok_cli_auth_file.read_text()
+        document = json.loads(current_config().grok_cli_auth_file.read_text())
     except FileNotFoundError:
         return False
     except OSError as exc:
-        raise AgentCliUnavailableError("could not read Grok CLI credentials") from exc
-    try:
-        document = json.loads(raw_auth)
-    except json.JSONDecodeError as exc:
-        raise AgentCliUnavailableError(GROK_CLI_CREDENTIALS_INVALID_DETAIL) from exc
+        raise CliLoginUnusableError("could not read Grok CLI credentials") from exc
+    except json.JSONDecodeError:
+        raise_without_chain(CliLoginUnusableError(GROK_CLI_CREDENTIALS_INVALID_DETAIL))
     if not isinstance(document, dict):
-        raise AgentCliUnavailableError(GROK_CLI_CREDENTIALS_INVALID_DETAIL)
+        raise CliLoginUnusableError(GROK_CLI_CREDENTIALS_INVALID_DETAIL)
     for realm in document.values():
         if not isinstance(realm, dict):
-            raise AgentCliUnavailableError(GROK_CLI_CREDENTIALS_INVALID_DETAIL)
+            raise CliLoginUnusableError(GROK_CLI_CREDENTIALS_INVALID_DETAIL)
         key = realm.get("key")
         if key is None:
             continue
         if not isinstance(key, str):
-            raise AgentCliUnavailableError(GROK_CLI_CREDENTIALS_INVALID_DETAIL)
+            raise CliLoginUnusableError(GROK_CLI_CREDENTIALS_INVALID_DETAIL)
         if key:
             return True
     return False
@@ -1856,7 +1912,7 @@ def _codex_login_in_the_mirror_is_usable() -> bool:
         return False
     verdict = assess_codex_login(document).verdict
     if verdict is CodexLoginVerdict.MALFORMED:
-        raise_without_chain(AgentCliUnavailableError(CODEX_CLI_CREDENTIALS_INVALID_DETAIL))
+        raise_without_chain(CliLoginUnusableError(CODEX_CLI_CREDENTIALS_INVALID_DETAIL))
     return verdict is CodexLoginVerdict.USABLE
 
 
@@ -1870,7 +1926,7 @@ def _parse_grok_login(output: str) -> CliLogin:
             return CliLogin(logged_in=True, auth_method=account or None)
         if stripped == GROK_CLI_LOGGED_OUT_MARKER:
             return LOGGED_OUT
-    raise AgentCliUnavailableError("grok models did not report its login status")
+    raise CliLoginUnusableError("grok models did not report its login status")
 
 
 def _parse_grok_model_names(output: str) -> tuple[str, ...]:
@@ -1902,6 +1958,7 @@ def _probe_codex_login() -> CliLogin:
         CODEX_CLI_STATUS_ARGS,
         credential_home_variable=_CODEX_CREDENTIAL_HOME_VARIABLE,
         auth_file=current_config().codex_cli_auth_file,
+        missing_binary_detail=CODEX_CLI_BINARY_MISSING_DETAIL,
         credential_copy=blanked_copy,
     )
     if output is None:
@@ -1913,7 +1970,9 @@ def codex_cli_model_catalog() -> str:
     """Return the current JSON catalog emitted by ``codex debug models``."""
     binary = resolve_cli_binary(current_config().codex_cli_binary)
     if binary is None:
-        raise AgentCliUnavailableError("codex debug models did not return a catalog")
+        raise CliEnvironmentUnavailableError(
+            CODEX_CLI_BINARY_MISSING_DETAIL, cause=CliEnvironmentCause.BINARY_MISSING,
+        )
     run = _run_credentialed_catalog_cli(
         binary,
         CODEX_CLI_MODELS_ARGS,
@@ -1938,7 +1997,7 @@ def _parse_codex_login(output: str) -> CliLogin:
             return CliLogin(logged_in=True, auth_method=account or None)
         if stripped == CODEX_CLI_LOGGED_OUT_MARKER:
             return LOGGED_OUT
-    raise AgentCliUnavailableError("codex login status did not report its login status")
+    raise CliLoginUnusableError("codex login status did not report its login status")
 
 
 _grok_status_probe = CachedProbe(_probe_grok_status)
@@ -1949,7 +2008,9 @@ _claude_login_probes_lock = threading.Lock()
 
 def claude_cli_login(binary: Path | None) -> CliLogin:
     if binary is None:
-        return LOGGED_OUT
+        raise CliEnvironmentUnavailableError(
+            CLAUDE_CLI_BINARY_MISSING_DETAIL, cause=CliEnvironmentCause.BINARY_MISSING,
+        )
     with _claude_login_probes_lock:
         probe = _claude_login_probes.setdefault(
             str(binary),

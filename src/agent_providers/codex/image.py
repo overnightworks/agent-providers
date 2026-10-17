@@ -53,13 +53,13 @@ from agent_providers.config import current_config, current_turn_config
 from agent_providers.errors import SafeRouteReasonCode, raise_without_chain
 from agent_providers.images import ImagePolicy
 from agent_providers.process import (
-    AgentCliUnavailableError,
     ClaimedStartThread,
+    CliEnvironmentUnavailableError,
     CliLineChannel,
+    CliLoginUnusableError,
     CliRunOutcome,
     CliRunReason,
     PrivateCredentialHomeReservation,
-    PrivateHomeNotCreatedError,
     cli_settle_deadline,
     resolve_cli_binary,
 )
@@ -207,9 +207,9 @@ def generate_codex_image(
         raise CodexImageEncoderUnavailableError(_IMAGE_ENCODER_MISSING_DETAIL)
     try:
         turn_home = create_codex_turn_home(CODEX_IMAGE_TURN_DIRECTORY_PREFIX)
-    except PrivateHomeNotCreatedError:
+    except CliEnvironmentUnavailableError:
         raise_without_chain(CodexImageCliError("could not create a private CLI home"))
-    except AgentCliUnavailableError:
+    except CliLoginUnusableError:
         raise_without_chain(CodexImageLoginError())
     try:
         try:
@@ -254,7 +254,7 @@ def _run_codex_image_cli(
     event_gate = _CodexImageEventGate(codex_home=turn_home.codex_home)
     try:
         child = codex_child_process(_codex_image_arguments(model), turn_home)
-    except AgentCliUnavailableError as exc:
+    except CliEnvironmentUnavailableError as exc:
         raise CodexImageCliError() from exc
     try:
         stdin_payload = prompt.encode("utf-8")

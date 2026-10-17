@@ -232,10 +232,10 @@ def _codex_image_failure(monkeypatch, auth_file: Path):
         pytest.param(b"{}", SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED, id="tokens-absent"),
         pytest.param(
             a_codex_login(tokens={"account_id": 7}),
-            SafeRouteReasonCode.CLI_BINARY_UNAVAILABLE, id="numeric-account-id",
+            SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED, id="numeric-account-id",
         ),
         pytest.param(
-            A_CODEX_LOGIN_WITH_INVALID_UTF8, SafeRouteReasonCode.CLI_BINARY_UNAVAILABLE,
+            A_CODEX_LOGIN_WITH_INVALID_UTF8, SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED,
             id="invalid-encoding",
         ),
     ],
@@ -257,7 +257,17 @@ def test_codex_image_preflight_refuses_a_fifo_login_without_waiting(monkeypatch,
 
     failure = _codex_image_failure(monkeypatch, auth_file)
 
-    assert failure.code is SafeRouteReasonCode.CLI_BINARY_UNAVAILABLE
+    assert failure.code is SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED
+
+
+def test_codex_image_preflight_says_the_cli_is_unavailable_when_an_image_dependency_is_missing(
+    monkeypatch,
+):
+    monkeypatch.setattr(dispatch, "codex_image_turn_is_available", lambda: False)
+
+    failure = image_capability("codex", ProviderRoute.CLI).failure
+
+    assert failure.code is SafeRouteReasonCode.CLI_UNAVAILABLE
 
 
 README = Path(__file__).resolve().parents[1] / "README.md"

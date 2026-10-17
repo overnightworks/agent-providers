@@ -20,11 +20,12 @@ from agent_providers.codex_login import blanked_copy
 from agent_providers.config import current_config
 from agent_providers.errors import SafeRouteReasonCode, raise_without_chain
 from agent_providers.process import (
-    AgentCliUnavailableError,
+    CODEX_CLI_BINARY_MISSING_DETAIL,
+    CliEnvironmentCause,
+    CliEnvironmentUnavailableError,
     CliLineChannel,
     PrivateCredentialHome,
     PrivateCredentialHomeReservation,
-    PrivateHomeNotCreatedError,
     resolve_cli_binary,
     run_cli_bounded,
     run_publishing_failures,
@@ -93,7 +94,9 @@ def codex_child_process(arguments: tuple[str, ...], turn_home: CodexTurnHome) ->
     """
     binary = resolve_cli_binary(current_config().codex_cli_binary)
     if binary is None:
-        raise AgentCliUnavailableError("the configured Codex CLI binary is not on the search path")
+        raise CliEnvironmentUnavailableError(
+            CODEX_CLI_BINARY_MISSING_DETAIL, cause=CliEnvironmentCause.BINARY_MISSING,
+        )
     return ChildProcess(
         binary=binary,
         arguments=arguments,
@@ -180,7 +183,11 @@ def create_codex_turn_home(prefix: str) -> CodexTurnHome:
         )
     except OSError:
         home.close()
-        raise_without_chain(PrivateHomeNotCreatedError("could not create a private CLI home"))
+        raise_without_chain(
+            CliEnvironmentUnavailableError(
+                "could not create a private CLI home", cause=CliEnvironmentCause.HOME_NOT_CREATED,
+            )
+        )
     except BaseException:  # NOSONAR(S5754) closes the home, re-raises
         home.close()
         raise

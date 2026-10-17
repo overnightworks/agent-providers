@@ -2012,7 +2012,7 @@ def _drive_the_reader_with_an_oversize_source(codex_login_source: Path) -> BaseE
 
 
 def _drive_the_credential_seam(codex_login_source: Path) -> BaseException:
-    with pytest.raises(process.CliCredentialNotConfiguredError) as raised:
+    with pytest.raises(process.CliLoginUnusableError) as raised:
         process.PrivateCredentialHome(
             codex_login_source,
             Path("auth.json"),
@@ -2270,22 +2270,13 @@ def _the_image_turn_is_started_bare() -> None:
 
 def _assert_the_tool_turn_found_the_cli_unavailable(refusal: BaseException) -> None:
     assert isinstance(refusal, ProviderUnavailableError)
-    assert refusal.reason.code is SafeRouteReasonCode.CLI_BINARY_UNAVAILABLE
+    assert refusal.reason.code is SafeRouteReasonCode.CLI_UNAVAILABLE
     assert str(refusal) == "CLI is unavailable."
 
 
 def _assert_the_image_turn_could_not_make_its_home(refusal: BaseException) -> None:
     assert type(refusal) is codex_image.CodexImageCliError
     assert str(refusal) == "could not create a private CLI home"
-
-
-def _assert_the_tool_turn_found_the_login_rejected(refusal: BaseException) -> None:
-    assert isinstance(refusal, ProviderUnavailableError)
-    assert refusal.reason.code is SafeRouteReasonCode.CLI_AUTH_REJECTED
-
-
-def _assert_the_image_turn_found_the_login_rejected(refusal: BaseException) -> None:
-    assert type(refusal) is codex_image.CodexImageLoginError
 
 
 _TOOL_TURN_CANNOT_MAKE_ITS_HOME = (
@@ -2295,14 +2286,6 @@ _TOOL_TURN_CANNOT_MAKE_ITS_HOME = (
 _IMAGE_TURN_CANNOT_MAKE_ITS_HOME = (
     _the_image_turn_is_started_bare, codex_image.CodexImageCliError,
     _assert_the_image_turn_could_not_make_its_home,
-)
-_TOOL_TURN_FINDS_THE_LOGIN_REJECTED = (
-    _the_tool_turn_is_started_bare, ProviderUnavailableError,
-    _assert_the_tool_turn_found_the_login_rejected,
-)
-_IMAGE_TURN_FINDS_THE_LOGIN_REJECTED = (
-    _the_image_turn_is_started_bare, codex_image.CodexImageLoginError,
-    _assert_the_image_turn_found_the_login_rejected,
 )
 
 
@@ -2327,12 +2310,12 @@ _IMAGE_TURN_FINDS_THE_LOGIN_REJECTED = (
             id="work-directory-image-turn",
         ),
         pytest.param(
-            _fail_the_codex_home_directory, *_TOOL_TURN_FINDS_THE_LOGIN_REJECTED,
-            id="codex-home-directory-tool-turn",
+            _fail_the_codex_home_directory, *_TOOL_TURN_CANNOT_MAKE_ITS_HOME,
+            id="codex-directory-tool-turn",
         ),
         pytest.param(
-            _fail_the_codex_home_directory, *_IMAGE_TURN_FINDS_THE_LOGIN_REJECTED,
-            id="codex-home-directory-image-turn",
+            _fail_the_codex_home_directory, *_IMAGE_TURN_CANNOT_MAKE_ITS_HOME,
+            id="codex-directory-image-turn",
         ),
     ),
 )
@@ -2464,10 +2447,15 @@ def test_codex_turns_refuse_a_login_that_is_not_a_plain_file(
 
 
 @pytest.mark.parametrize(
-    "turn", (_the_tool_turn_refusal, _the_image_turn_refusal), ids=("tool-turn", "image-turn"),
+    ("start_the_turn", "expected_class", "assert_the_refusal"),
+    (
+        pytest.param(*_TOOL_TURN_CANNOT_MAKE_ITS_HOME, id="tool-turn"),
+        pytest.param(*_IMAGE_TURN_CANNOT_MAKE_ITS_HOME, id="image-turn"),
+    ),
 )
 def test_a_failed_turn_copy_keeps_no_credential_in_its_error(
-    tmp_path: Path, monkeypatch, codex_login_source: Path, turn,
+    tmp_path: Path, monkeypatch, codex_login_source: Path, start_the_turn, expected_class,
+    assert_the_refusal,
 ) -> None:
     turns = tmp_path / "turns"
     turns.mkdir(mode=0o700)
@@ -2484,11 +2472,14 @@ def test_a_failed_turn_copy_keeps_no_credential_in_its_error(
     gc.disable()
     try:
         with a_credential_destination_that_fails("write"):
-            refusal = turn()
+            with pytest.raises(expected_class) as raised:
+                start_the_turn()
+            refusal = raised.value
         frames_left_holding_it = live_frames_holding(CANARY_ACCESS_TOKEN)
     finally:
         gc.enable()
 
+    assert_the_refusal(refusal)
     assert refusal.__cause__ is None
     assert refusal.__context__ is None
     assert not traceback_frames_hold(refusal, CANARY_ACCESS_TOKEN)
@@ -2759,7 +2750,7 @@ def test_a_tool_turn_without_a_binary_reserves_nothing(
     turn = _run_the_tool_turn(monkeypatch, image_turn, _TURN_SECONDS)
 
     assert isinstance(turn.error, ProviderUnavailableError)
-    assert turn.error.reason.code is SafeRouteReasonCode.CLI_PROTOCOL_ERROR
+    assert turn.error.reason.code is SafeRouteReasonCode.CLI_UNAVAILABLE
     assert turn.error.__cause__ is None
     assert turn.error.__context__ is None
     assert "Codex CLI failed" not in caplog.text
@@ -2767,6 +2758,17 @@ def test_a_tool_turn_without_a_binary_reserves_nothing(
     assert turn.after_close == []
     runner.assert_not_called()
     image_turn.watch.assert_nothing_leaked(turn.error)
+
+
+def test_an_image_run_without_a_binary_fails_with_a_bare_cli_error(tmp_path: Path) -> None:
+    override_provider_runtime(codex_cli_binary="no-such-codex-binary-7c1d")
+
+    with pytest.raises(codex_image.CodexImageCliError) as raised:
+        _generate_image()
+
+    assert type(raised.value) is codex_image.CodexImageCliError
+    assert str(raised.value) == ""
+    assert list(tmp_path.glob(f"{CODEX_IMAGE_TURN_DIRECTORY_PREFIX}*")) == []
 
 
 def test_a_tool_round_whose_worker_cannot_start_releases_its_home(

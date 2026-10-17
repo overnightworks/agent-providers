@@ -45,7 +45,7 @@ from agent_providers.openai_adapter import (
     stream_openai_compatible_turn,
 )
 from agent_providers.process import (
-    AgentCliUnavailableError,
+    CliLoginUnusableError,
     codex_cli_login_is_usable,
 )
 from agent_providers.tool_loop import (
@@ -361,11 +361,11 @@ def image_capability(provider: str, route: ProviderRoute) -> ImageCapability:
 def _codex_cli_image_route_failure() -> SafeRouteReason | None:
     """Name what keeps the mounted Codex CLI from running an image turn."""
     if not codex_image_turn_is_available():
-        return normalize_route_failure(SafeRouteReasonCode.CLI_BINARY_UNAVAILABLE)
+        return normalize_route_failure(SafeRouteReasonCode.CLI_UNAVAILABLE)
     try:
         signed_in = codex_cli_login_is_usable()
-    except AgentCliUnavailableError:
-        return normalize_route_failure(SafeRouteReasonCode.CLI_BINARY_UNAVAILABLE)
+    except CliLoginUnusableError:
+        return normalize_route_failure(SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED)
     if not signed_in:
         return normalize_route_failure(SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED)
     return None

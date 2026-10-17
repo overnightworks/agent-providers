@@ -7,9 +7,10 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from agent_providers.claude.provider import (
-    CliBinaryUnavailableError,
+    CliLoginNotConfiguredError,
     CliLoginRefusedError,
     CliToolSurfaceError,
+    CliUnavailableError,
     UnavailableError,
     acall_claude_with_mcp_stream,
     call_claude,
@@ -241,8 +242,10 @@ def _protocol_error(code: SafeRouteReasonCode) -> ProviderUnavailableError:
 
 def _claude_cli_failure_reason(error: UnavailableError) -> SafeRouteReasonCode:
     """Map typed Claude CLI failures without exposing their diagnostics."""
-    if isinstance(error, CliBinaryUnavailableError):
-        return SafeRouteReasonCode.CLI_BINARY_UNAVAILABLE
+    if isinstance(error, CliUnavailableError):
+        return SafeRouteReasonCode.CLI_UNAVAILABLE
+    if isinstance(error, CliLoginNotConfiguredError):
+        return SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED
     if isinstance(error, CliLoginRefusedError):
         return SafeRouteReasonCode.CLI_AUTH_REJECTED
     if isinstance(error, CliToolSurfaceError):

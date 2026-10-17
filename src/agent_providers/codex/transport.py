@@ -50,11 +50,11 @@ from agent_providers.errors import (
     raise_without_chain,
 )
 from agent_providers.process import (
-    AgentCliUnavailableError,
+    CliEnvironmentUnavailableError,
     CliLineChannel,
+    CliLoginUnusableError,
     CliRunOutcome,
     PrivateCredentialHomeReservation,
-    PrivateHomeNotCreatedError,
     cli_settle_deadline,
 )
 from agent_providers.sandbox.paths import CODEX_TOOL_TURN_DIRECTORY_PREFIX
@@ -125,15 +125,15 @@ class CodexCliToolTransport:
         self._catalog = catalog
         try:
             self._turn_home = create_codex_turn_home(CODEX_TOOL_TURN_DIRECTORY_PREFIX)
-        except PrivateHomeNotCreatedError:
+        except CliEnvironmentUnavailableError:
             raise_without_chain(
                 ProviderUnavailableError(
                     "codex",
                     "cli",
-                    normalize_route_failure(SafeRouteReasonCode.CLI_BINARY_UNAVAILABLE),
+                    normalize_route_failure(SafeRouteReasonCode.CLI_UNAVAILABLE),
                 )
             )
-        except AgentCliUnavailableError:
+        except CliLoginUnusableError:
             raise_without_chain(
                 ProviderUnavailableError(
                     "codex",
@@ -242,12 +242,12 @@ class CodexCliToolTransport:
     ) -> tuple[ChildProcess, PrivateCredentialHomeReservation, CodexProcessReservation]:
         try:
             child = codex_child_process(arguments, self._turn_home)
-        except AgentCliUnavailableError:
+        except CliEnvironmentUnavailableError:
             raise_without_chain(
                 ProviderUnavailableError(
                     "codex",
                     "cli",
-                    normalize_route_failure(SafeRouteReasonCode.CLI_PROTOCOL_ERROR),
+                    normalize_route_failure(SafeRouteReasonCode.CLI_UNAVAILABLE),
                 )
             )
         home_reservation = self._turn_home.home.reserve()

@@ -9,6 +9,7 @@ import json
 import linecache
 import logging
 import os
+import pickle
 import stat
 import subprocess
 import sys
@@ -46,6 +47,7 @@ from provider_test_support import (
     call_within_deadline,
     exception_chain,
     fail_mkdtemp,
+    fail_the_directory_named,
     fail_the_home_chmod,
     fail_the_work_directory,
     fail_to_start_the_runner_thread,
@@ -58,7 +60,7 @@ from provider_test_support import (
 
 from agent_providers import process
 from agent_providers.codex.pool import CodexProcessKind, CodexProcessPool
-from agent_providers.codex.protocol import create_codex_turn_home
+from agent_providers.codex.protocol import codex_child_process, create_codex_turn_home
 from agent_providers.codex_login import _blanked_document, assess_codex_login, blanked_copy
 from agent_providers.config import current_config
 from agent_providers.constants import (
@@ -67,19 +69,23 @@ from agent_providers.constants import (
     CLI_OUTPUT_READ_LIMIT_BYTES,
 )
 from agent_providers.process import (
+    CLAUDE_CLI_BINARY_MISSING_DETAIL,
+    CODEX_CLI_BINARY_MISSING_DETAIL,
     CODEX_CLI_CREDENTIALS_INVALID_DETAIL,
+    GROK_CLI_BINARY_MISSING_DETAIL,
     GROK_CLI_CREDENTIALS_INVALID_DETAIL,
     AgentCliUnavailableError,
     CachedProbe,
     ClaimedStartThread,
-    CliCredentialNotConfiguredError,
+    CliEnvironmentCause,
+    CliEnvironmentUnavailableError,
     CliLineChannel,
+    CliLoginUnusableError,
     CliProbeBudgetExceeded,
     CliRun,
     CliRunOutcome,
     CliRunReason,
     PrivateCredentialHome,
-    PrivateHomeNotCreatedError,
     _run_credentialed_catalog_cli,
     claude_cli_login,
     clear_agent_cli_caches,
@@ -205,7 +211,7 @@ def test_grok_that_cannot_be_asked_counts_as_logged_out() -> None:
 
 def test_grok_answering_in_words_we_do_not_know_raises() -> None:
     with _a_cli_that_says("Session ready.\n"), pytest.raises(
-        AgentCliUnavailableError,
+        CliLoginUnusableError,
         match="login status",
     ):
         grok_cli_status()
@@ -215,8 +221,10 @@ def test_grok_that_is_signed_in_but_lists_nothing_raises() -> None:
     with _a_cli_that_says("You are logged in with grok.com.\n"), pytest.raises(
         AgentCliUnavailableError,
         match="model name",
-    ):
+    ) as raised:
         grok_cli_status()
+
+    assert type(raised.value) is AgentCliUnavailableError
 
 
 def test_codex_reports_the_account_it_is_signed_in_with() -> None:
@@ -259,19 +267,30 @@ def test_codex_model_catalog_reads_past_the_login_probe_limit(monkeypatch) -> No
     assert codex_cli_model_catalog() == "x" * catalog_length
 
 
-def test_codex_model_catalog_without_a_binary_raises(monkeypatch) -> None:
-    monkeypatch.setattr(process, "resolve_cli_binary", lambda _binary: None)
+@pytest.mark.parametrize(
+    "run",
+    (
+        None,
+        CliRun(returncode=None, stdout="", stderr="", complete=False),
+        CliRun(returncode=1, stdout="", stderr="", complete=True),
+    ),
+    ids=("no run", "incomplete", "non-zero"),
+)
+def test_codex_catalogue_that_does_not_come_back_raises_the_bare_base(
+    monkeypatch, run: CliRun | None
+) -> None:
+    monkeypatch.setattr(process, "resolve_cli_binary", lambda _binary: Path(sys.executable))
+    monkeypatch.setattr(process, "_run_credentialed_catalog_cli", lambda *_a, **_k: run)
 
-    with pytest.raises(
-        AgentCliUnavailableError,
-        match="did not return a catalog",
-    ):
+    with pytest.raises(AgentCliUnavailableError, match="did not return a catalog") as raised:
         codex_cli_model_catalog()
+
+    assert type(raised.value) is AgentCliUnavailableError
 
 
 def test_codex_answering_in_words_we_do_not_know_raises() -> None:
     with _a_cli_that_says("auth: unknown"), pytest.raises(
-        AgentCliUnavailableError,
+        CliLoginUnusableError,
         match="login status",
     ):
         codex_cli_login()
@@ -1358,9 +1377,50 @@ def test_claude_does_not_accept_a_failed_or_incomplete_run(run: CliRun) -> None:
     assert login.logged_in is False
 
 
-def test_a_cli_that_is_not_installed_cannot_be_asked() -> None:
-    with patch("agent_providers.process.resolve_cli_binary", return_value=None):
-        assert grok_cli_status().login.logged_in is False
+def _codex_child_for_a_turn_home() -> None:
+    current_config().codex_cli_auth_file.write_bytes(a_codex_login())
+    turn_home = create_codex_turn_home(CODEX_TOOL_TURN_DIRECTORY_PREFIX)
+    try:
+        codex_child_process(("exec",), turn_home)
+    finally:
+        turn_home.home.close()
+
+
+BINARY_SITES = (
+    pytest.param(
+        "claude", lambda: claude_cli_login(None), CLAUDE_CLI_BINARY_MISSING_DETAIL,
+        id="claude-login",
+    ),
+    pytest.param("grok", grok_cli_status, GROK_CLI_BINARY_MISSING_DETAIL, id="grok-status"),
+    pytest.param("codex", codex_cli_login, CODEX_CLI_BINARY_MISSING_DETAIL, id="codex-login"),
+    pytest.param(
+        "codex", codex_cli_model_catalog, CODEX_CLI_BINARY_MISSING_DETAIL,
+        id="codex-model-catalog",
+    ),
+    pytest.param(
+        "codex", _codex_child_for_a_turn_home, CODEX_CLI_BINARY_MISSING_DETAIL,
+        id="codex-child-process",
+    ),
+)
+
+
+@pytest.mark.parametrize(("provider", "ask", "detail"), BINARY_SITES)
+def test_a_missing_binary_is_an_environment_fault_naming_the_provider(
+    provider: str, ask: Callable[[], object], detail: str, tmp_path: Path,
+) -> None:
+    configured_value = "a-secret-binary-name"
+    override_provider_runtime(
+        cli_binary_search_path=(tmp_path,), **{f"{provider}_cli_binary": configured_value},
+    )
+
+    with pytest.raises(CliEnvironmentUnavailableError) as raised:
+        ask()
+
+    assert raised.value.cause is CliEnvironmentCause.BINARY_MISSING
+    assert str(raised.value) == detail
+    assert provider.capitalize() in detail
+    assert configured_value not in str(raised.value)
+    assert raised.value.__cause__ is None
 
 
 def _expected_closed_names(credential_home_variable: str) -> list[str]:
@@ -1520,7 +1580,7 @@ def test_private_credential_home_stays_open_when_only_a_descendant_vanished(
 
 
 def test_private_credential_home_removes_a_failed_setup(tmp_path: Path) -> None:
-    with pytest.raises(AgentCliUnavailableError, match="configured CLI credential is missing"):
+    with pytest.raises(CliLoginUnusableError, match="configured CLI credential is missing"):
         PrivateCredentialHome(
             tmp_path / "missing.json",
             Path(".grok/auth.json"),
@@ -1535,7 +1595,7 @@ def test_an_unusable_login_is_an_error_where_a_missing_credential_is(tmp_path: P
     unusable = tmp_path / "unusable.json"
     unusable.write_text("not json")
 
-    with pytest.raises(CliCredentialNotConfiguredError):
+    with pytest.raises(CliLoginUnusableError):
         PrivateCredentialHome(
             unusable,
             Path("auth.json"),
@@ -1609,7 +1669,7 @@ def test_an_unusable_copy_follows_missing_credential_is_error(
         )
 
     if refused:
-        with pytest.raises(CliCredentialNotConfiguredError) as raised:
+        with pytest.raises(CliLoginUnusableError) as raised:
             install()
         assert str(raised.value) == "configured CLI credential is unusable"
         assert raised.value.__cause__ is None
@@ -1649,9 +1709,10 @@ def test_the_credential_writer_never_replaces_a_file(tmp_path: Path, plant) -> N
     planted = plant(tmp_path)
     kept = planted.read_text() if planted.exists() else None
 
-    with pytest.raises(AgentCliUnavailableError) as raised:
+    with pytest.raises(CliEnvironmentUnavailableError) as raised:
         _install_a_copy(source, planted)
 
+    assert raised.value.cause is CliEnvironmentCause.CREDENTIAL_COPY_NOT_WRITTEN
     assert str(raised.value) == "could not prepare the private CLI credential copy"
     assert raised.value.__cause__ is None
     assert raised.value.__context__ is None
@@ -1673,10 +1734,10 @@ def test_a_failed_credential_copy_keeps_no_credential_in_its_error(
 
     destination_closes: list[list[int]] = []
 
-    def install_failing() -> AgentCliUnavailableError:
+    def install_failing() -> CliEnvironmentUnavailableError:
         with a_credential_destination_that_fails(fault) as closes:
             destination_closes.append(closes)
-            with pytest.raises(AgentCliUnavailableError) as raised:
+            with pytest.raises(CliEnvironmentUnavailableError) as raised:
                 PrivateCredentialHome(
                     source,
                     Path(".claude/.credentials.json"),
@@ -1693,6 +1754,7 @@ def test_a_failed_credential_copy_keeps_no_credential_in_its_error(
     else:
         refusal = install_failing()
 
+    assert refusal.cause is CliEnvironmentCause.CREDENTIAL_COPY_NOT_WRITTEN
     assert str(refusal) == "could not prepare the private CLI credential copy"
     assert refusal.__cause__ is None
     assert refusal.__context__ is None
@@ -1700,6 +1762,61 @@ def test_a_failed_credential_copy_keeps_no_credential_in_its_error(
     assert not list(tmp_path.glob("private-home-*"))
     assert len(os.listdir("/proc/self/fd")) == open_descriptors
     assert [len(closes) for closes in destination_closes] == [1]
+
+
+@pytest.mark.parametrize("destination_directory", (".claude", ".codex"))
+def test_a_destination_directory_that_cannot_be_made_is_a_copy_environment_fault(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, destination_directory: str,
+) -> None:
+    source = tmp_path / "source.json"
+    source.write_text(_A_RAW_CREDENTIAL_CANARY)
+    fail_the_directory_named(monkeypatch, destination_directory, OSError(errno.ENOSPC, "full"))
+    open_descriptors = len(os.listdir("/proc/self/fd"))
+
+    with pytest.raises(CliEnvironmentUnavailableError) as raised:
+        PrivateCredentialHome(
+            source,
+            Path(destination_directory) / "credentials.json",
+            prefix="private-home-",
+            missing_credential_is_error=True,
+        )
+
+    assert raised.value.cause is CliEnvironmentCause.CREDENTIAL_COPY_NOT_WRITTEN
+    assert str(raised.value) == "could not prepare the private CLI credential copy"
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+    assert not list(tmp_path.glob("private-home-*"))
+    assert len(os.listdir("/proc/self/fd")) == open_descriptors
+
+
+def test_an_unreadable_grok_token_mirror_is_a_login_fault_chained_from_the_read_error(
+    tmp_path: Path,
+) -> None:
+    override_provider_runtime(grok_cli_auth_file=tmp_path)
+
+    with pytest.raises(CliLoginUnusableError) as raised:
+        process.grok_cli_token_is_present()
+
+    assert isinstance(raised.value.__cause__, OSError)
+
+
+def test_the_cli_fault_classes_split_login_from_environment() -> None:
+    environment = CliEnvironmentUnavailableError(
+        "no room", cause=CliEnvironmentCause.CREDENTIAL_COPY_NOT_WRITTEN,
+    )
+    restored = pickle.loads(pickle.dumps(environment))
+
+    assert issubclass(CliLoginUnusableError, AgentCliUnavailableError)
+    assert issubclass(CliEnvironmentUnavailableError, AgentCliUnavailableError)
+    assert not issubclass(CliLoginUnusableError, CliEnvironmentUnavailableError)
+    assert not issubclass(CliEnvironmentUnavailableError, CliLoginUnusableError)
+    assert issubclass(CliProbeBudgetExceeded, AgentCliUnavailableError)
+    assert {cause.value for cause in CliEnvironmentCause} == {
+        "binary_missing", "home_not_created", "credential_copy_not_written",
+    }
+    assert (type(restored), str(restored), restored.cause) == (
+        CliEnvironmentUnavailableError, "no room", CliEnvironmentCause.CREDENTIAL_COPY_NOT_WRITTEN,
+    )
 
 
 def _remove_the_source(monkeypatch: pytest.MonkeyPatch, source: Path) -> None:
@@ -1711,13 +1828,13 @@ def _remove_the_source(monkeypatch: pytest.MonkeyPatch, source: Path) -> None:
     (
         (
             fail_the_home_chmod,
-            PrivateHomeNotCreatedError,
+            CliEnvironmentUnavailableError,
             "could not prepare the private CLI credential copy",
         ),
-        (fail_mkdtemp, PrivateHomeNotCreatedError, "could not create a private CLI home"),
+        (fail_mkdtemp, CliEnvironmentUnavailableError, "could not create a private CLI home"),
         (
             _remove_the_source,
-            CliCredentialNotConfiguredError,
+            CliLoginUnusableError,
             "configured CLI credential is missing",
         ),
     ),
@@ -1746,6 +1863,8 @@ def test_a_private_home_refusal_inside_a_handler_carries_no_chain(
             )
 
     assert type(raised.value) is error_class
+    if issubclass(error_class, CliEnvironmentUnavailableError):
+        assert raised.value.cause is CliEnvironmentCause.HOME_NOT_CREATED
     assert str(raised.value) == detail
     assert raised.value.__cause__ is None
     assert raised.value.__context__ is None
@@ -1830,7 +1949,7 @@ def test_private_credential_home_keeps_the_setup_error_when_its_cleanup_fails(
 
     monkeypatch.setattr(process.shutil, "rmtree", refuse_removal)
 
-    with pytest.raises(AgentCliUnavailableError, match="configured CLI credential is missing"):
+    with pytest.raises(CliLoginUnusableError, match="configured CLI credential is missing"):
         PrivateCredentialHome(
             tmp_path / "missing.json",
             Path(".grok/auth.json"),
@@ -2486,7 +2605,7 @@ def test_the_home_registry_forgets_every_closed_or_collected_home(
     assert len(process._live_home_finalizers) == registered_before + 10
     del closed, unclosed, home
     gc.collect()
-    with pytest.raises(CliCredentialNotConfiguredError):
+    with pytest.raises(CliLoginUnusableError):
         PrivateCredentialHome(
             tmp_path / "missing.json",
             Path(".claude/.credentials.json"),
@@ -3203,8 +3322,40 @@ def test_credential_probe_names_malformed_mounted_credentials(
     field = "grok_cli_auth_file" if checker == "grok" else "codex_cli_auth_file"
     override_provider_runtime(**{field: credential_file})
 
-    with pytest.raises(AgentCliUnavailableError, match=detail):
+    with pytest.raises(CliLoginUnusableError, match=detail):
         function()
+
+
+def _a_credential_document_holding(canary: str) -> str:
+    return '{"realm": {"key": "' + canary + '"'
+
+
+@pytest.mark.parametrize("inside_active_handler", [False, True], ids=["plainly", "from-a-handler"])
+def test_a_malformed_grok_credential_refusal_holds_no_text_of_the_document(
+    tmp_path, inside_active_handler: bool,
+) -> None:
+    canary = "grok-credential-canary-5d2e"
+    credential_file = tmp_path / "grok.json"
+    credential_file.write_text(_a_credential_document_holding(canary))
+    override_provider_runtime(grok_cli_auth_file=credential_file)
+
+    def refusal() -> CliLoginUnusableError:
+        with pytest.raises(CliLoginUnusableError) as raised:
+            process.grok_cli_token_is_present()
+        return raised.value
+
+    if inside_active_handler:
+        try:
+            raise RuntimeError("unrelated")
+        except RuntimeError:
+            held = refusal()
+    else:
+        held = refusal()
+
+    assert exception_chain(held) == [held]
+    assert not traceback_frames_hold(held, canary)
+    for link in exception_chain(held):
+        assert canary not in repr(vars(link))
 
 
 _A_COMPLETE_CODEX_LOGIN = json.loads(a_codex_login())
@@ -3315,14 +3466,14 @@ def test_the_credential_reader_refuses_what_is_not_a_plain_file(
     source = make_source(tmp_path)
     open_descriptors = len(os.listdir("/proc/self/fd"))
 
-    with pytest.raises(AgentCliUnavailableError) as refusal:
+    with pytest.raises(CliLoginUnusableError) as refusal:
         call_within_deadline(process._read_credential_file, source)
 
     assert str(refusal.value) == detail
     assert len(os.listdir("/proc/self/fd")) == open_descriptors
 
 
-def _read_while_close_fails(source: Path) -> AgentCliUnavailableError:
+def _read_while_close_fails(source: Path) -> CliLoginUnusableError:
     real_close = os.close
 
     def close_then_fail(descriptor: int) -> None:
@@ -3330,12 +3481,12 @@ def _read_while_close_fails(source: Path) -> AgentCliUnavailableError:
         raise OSError(errno.EIO, "synthetic close failure")
 
     with patch.object(process.os, "close", close_then_fail):
-        with pytest.raises(AgentCliUnavailableError) as refusal:
+        with pytest.raises(CliLoginUnusableError) as refusal:
             process._read_credential_file(source)
     return refusal.value
 
 
-def _read_while_close_fails_inside_a_handler(source: Path) -> AgentCliUnavailableError:
+def _read_while_close_fails_inside_a_handler(source: Path) -> CliLoginUnusableError:
     try:
         raise RuntimeError("an error the caller is already handling")
     except RuntimeError:
@@ -3524,9 +3675,9 @@ _LOGIN_SCENARIOS = {
         b'{"token":"canary-access-token",',
         _a_stored_login_read_whole,
         {
-            _enter_through_the_login_decider: AgentCliUnavailableError,
-            _enter_through_a_private_credential_home: CliCredentialNotConfiguredError,
-            _enter_through_a_codex_turn_home: CliCredentialNotConfiguredError,
+            _enter_through_the_login_decider: CliLoginUnusableError,
+            _enter_through_a_private_credential_home: CliLoginUnusableError,
+            _enter_through_a_codex_turn_home: CliLoginUnusableError,
         },
     ),
     "incomplete": (
@@ -3534,17 +3685,17 @@ _LOGIN_SCENARIOS = {
         _a_stored_login_read_whole,
         {
             _enter_through_the_login_decider: False,
-            _enter_through_a_private_credential_home: CliCredentialNotConfiguredError,
-            _enter_through_a_codex_turn_home: CliCredentialNotConfiguredError,
+            _enter_through_a_private_credential_home: CliLoginUnusableError,
+            _enter_through_a_codex_turn_home: CliLoginUnusableError,
         },
     ),
     "read-fails-mid-way": (
         a_codex_login(),
         _a_read_that_fails_after_one_chunk,
         {
-            _enter_through_the_login_decider: AgentCliUnavailableError,
-            _enter_through_a_private_credential_home: AgentCliUnavailableError,
-            _enter_through_a_codex_turn_home: AgentCliUnavailableError,
+            _enter_through_the_login_decider: CliLoginUnusableError,
+            _enter_through_a_private_credential_home: CliLoginUnusableError,
+            _enter_through_a_codex_turn_home: CliLoginUnusableError,
         },
     ),
 }
@@ -3694,7 +3845,7 @@ def test_a_memory_error_inside_the_malformed_handler_holds_no_credential_bytes(
     ("fault", "refusal"),
     (
         (KeyboardInterrupt(), KeyboardInterrupt),
-        (OSError(errno.ENOSPC, "synthetic"), PrivateHomeNotCreatedError),
+        (OSError(errno.ENOSPC, "synthetic"), CliEnvironmentUnavailableError),
     ),
     ids=("interruption", "oserror"),
 )
@@ -3708,7 +3859,8 @@ def test_a_failed_codex_turn_home_layout_removes_the_home_and_leaves_no_chain(
         create_codex_turn_home(CODEX_TOOL_TURN_DIRECTORY_PREFIX)
 
     assert not _private_homes_under(tmp_path)
-    if refusal is PrivateHomeNotCreatedError:
+    if refusal is CliEnvironmentUnavailableError:
+        assert raised.value.cause is CliEnvironmentCause.HOME_NOT_CREATED
         assert str(raised.value) == "could not create a private CLI home"
         assert raised.value.__cause__ is None
         assert raised.value.__context__ is None

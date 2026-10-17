@@ -11,6 +11,7 @@ from capability_support import canary_token, capability_carrying
 from relay_support import (
     Delivery,
     RawClient,
+    RelayWrites,
     RequestHead,
     ScriptedCalls,
     clean_reply,
@@ -450,7 +451,10 @@ def test_a_call_in_flight_when_another_connection_refuses_the_owner_gets_nothing
     ] * 3
 
 
-def test_a_gated_call_sends_nothing_until_released_and_then_exactly_its_reply() -> None:
+def test_a_gated_call_sends_nothing_until_released_and_then_exactly_its_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    relay_writes = RelayWrites(monkeypatch)
     calls = ScriptedCalls(gated=True)
 
     async def scenario(relay: Relay) -> None:
@@ -461,13 +465,16 @@ def test_a_gated_call_sends_nothing_until_released_and_then_exactly_its_reply() 
         waiting = asyncio.create_task(caller.answer())
         await bystander.send(message_for(relay, json_rpc("ping", 6)))
         assert (await bystander.answer()).status == HTTPStatus.OK
-        assert caller.received_bytes == 0
+        assert relay_writes.to(caller) == b""
         calls.release()
         answer = await waiting
         assert answer.status == HTTPStatus.OK
-        assert answer.body == written(
-            {"id": 5, "result": {"content": [{"type": "text", "text": "done"}]}}
-        )
+        reply = written({"id": 5, "result": {"content": [{"type": "text", "text": "done"}]}})
+        assert answer.body == reply
+        written_to_caller = relay_writes.to(caller)
+        assert written_to_caller.startswith(b"HTTP/1.1 200 ")
+        assert written_to_caller.endswith(reply)
+        assert written_to_caller.count(b"HTTP/1.1") == 1
 
     drive(scenario, owner=owner_of(calls=calls), calls=calls)
 

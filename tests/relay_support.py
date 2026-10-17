@@ -14,6 +14,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import h11
+import pytest
 from mcp_app_fake import WAIT_SECONDS
 from service_support import StepClock, SteppedLoop
 
@@ -210,48 +211,41 @@ def port_of(relay: Relay) -> int:
     return port
 
 
-class _ArrivalCountingProtocol(asyncio.StreamReaderProtocol):
-    """Counts bytes in the transport callback, so the count never waits for a reader."""
+class RelayWrites:
+    """Records every stream write synchronously, so a gate check never waits on delivery order."""
 
-    def __init__(self, reader: asyncio.StreamReader) -> None:
-        super().__init__(reader)
-        self.arrived = 0
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._writes: list[tuple[Any, bytes]] = []
+        original = asyncio.StreamWriter.write
 
-    def data_received(self, data: bytes) -> None:
-        self.arrived += len(data)
-        super().data_received(data)
+        def recording(writer: asyncio.StreamWriter, data: bytes | bytearray | memoryview) -> None:
+            self._writes.append((writer.get_extra_info("peername"), bytes(data)))
+            original(writer, data)
+
+        monkeypatch.setattr(asyncio.StreamWriter, "write", recording)
+
+    def to(self, client: "RawClient") -> bytes:
+        return b"".join(data for peer, data in self._writes if peer == client.address)
 
 
 class RawClient:
-    def __init__(
-        self,
-        reader: asyncio.StreamReader,
-        writer: asyncio.StreamWriter,
-        protocol: _ArrivalCountingProtocol,
-    ) -> None:
+    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self._reader = reader
         self._writer = writer
-        self._protocol = protocol
         self._parser = self._new_parser()
-        self._arrived_before_send = 0
-
-    @classmethod
-    async def _open(cls, **destination: Any) -> "RawClient":
-        loop = asyncio.get_running_loop()
-        reader = asyncio.StreamReader(loop=loop)
-        protocol = _ArrivalCountingProtocol(reader)
-        async with asyncio.timeout(WAIT_SECONDS):
-            transport, _ = await loop.create_connection(lambda: protocol, **destination)
-        return cls(reader, asyncio.StreamWriter(transport, protocol, reader, loop), protocol)
+        self._received = 0
 
     @classmethod
     async def connect(cls, port: int, host: str = LOOPBACK_HOST) -> "RawClient":
-        return await cls._open(host=host, port=port)
+        async with asyncio.timeout(WAIT_SECONDS):
+            reader, writer = await asyncio.open_connection(host, port)
+        return cls(reader, writer)
 
     @classmethod
     async def adopt(cls, connected: socket.socket) -> "RawClient":
         connected.setblocking(False)
-        return await cls._open(sock=connected)
+        reader, writer = await asyncio.open_connection(sock=connected)
+        return cls(reader, writer)
 
     @staticmethod
     def _new_parser() -> h11.Connection:
@@ -266,10 +260,13 @@ class RawClient:
 
     @property
     def received_bytes(self) -> int:
-        return self._protocol.arrived - self._arrived_before_send
+        return self._received
+
+    @property
+    def address(self) -> Any:
+        return self._writer.get_extra_info("sockname")
 
     async def send(self, raw: bytes) -> None:
-        self._arrived_before_send = self._protocol.arrived
         self._writer.write(raw)
         async with asyncio.timeout(WAIT_SECONDS):
             await self._writer.drain()
@@ -278,6 +275,7 @@ class RawClient:
         status = 0
         headers: dict[str, str] = {}
         body = b""
+        self._received = 0
         while True:
             event = self._parser.next_event()
             if event is h11.NEED_DATA:
@@ -291,7 +289,6 @@ class RawClient:
                 if self._parser.our_state is h11.DONE and self._parser.their_state is h11.DONE:
                     self._parser.start_next_cycle()
                     self._prime(self._parser)
-                self._arrived_before_send = self._protocol.arrived
                 return Answer(status, headers, body)
             else:
                 raise AssertionError(f"unexpected {event!r}")
@@ -303,7 +300,8 @@ class RawClient:
         except ConnectionResetError:
             chunk = b""
         if not chunk:
-            raise ConnectionEnded(Delivery.INTERRUPTED if self.received_bytes else Delivery.ABSENT)
+            raise ConnectionEnded(Delivery.INTERRUPTED if self._received else Delivery.ABSENT)
+        self._received += len(chunk)
         return chunk
 
     async def delivery(self) -> Delivery:

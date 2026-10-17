@@ -1131,7 +1131,8 @@ the parallel-run limit stands once, in H7's Decision.
 
 Measured on 17.10.2026 on `$HOME/.local/share/claude/versions/2.1.302`
 (`claude --version` prints `2.1.302 (Claude Code)`), a 285,793,528-byte Bun
-executable. No cell used a login, a token or an Anthropic account. Nothing here
+executable. No cell used a login, a token or an Anthropic account, except
+A1b-0b1, which used the dedicated measurement token. Nothing here
 reads `~/.claude`.
 
 **Harness (every cell).** Each run is the CLI under `bwrap` with the network
@@ -1556,6 +1557,117 @@ network and a newer release is not measured. The host's `versions/` directory
 itself holds five versions (2.1.296, 2.1.299 to 2.1.302); whether a self-updating
 install keeps old binaries in general is not measured. The image is to pin the file
 and set the switch (A1d conditions).
+
+#### A1b-0b1 the setup token as the login, live
+
+Measured on 17.10.2026 on 2.1.302 (`claude --version` prints `2.1.302 (Claude Code)`)
+with the operator's dedicated measurement token, authorized for this cell. It
+reached the CLI only as `CLAUDE_CODE_OAUTH_TOKEN`, put into the child's environment
+by a scratch script; no `ANTHROPIC_*` variable was set, and `<token>` below stands
+for its value. Every stored output was redacted (the token value and any
+`sk-ant-` string become `<token>`), and no stored output contained either. Billed
+model calls: 1 (cap 2).
+
+**Harness.** The A1b harness above with two changes: the network is not unshared
+(`/run/systemd/resolve` is bound read-only so `/etc/resolv.conf` resolves), and the
+scratch driver starts `bwrap` itself with the environment `PATH=/usr/bin:/bin`,
+`HOME` and `TMPDIR` in a private home (mode 700), `DISABLE_AUTOUPDATER=1` and
+`CLAUDE_CODE_OAUTH_TOKEN=<token>`. Inside the sandbox a script lists the home, the
+working directory and `/tmp` before and after and runs the CLI under
+`strace -f -qq -e trace=connect`. `ARGS` is `-p --input-format stream-json
+--output-format stream-json --verbose --max-turns 1 --tools "" --no-session-persistence
+--model haiku`; the message is `hello`, written 0.5 s after the start, and stdin is
+closed once the `result` event has arrived. `--model haiku` was accepted and init
+reports `model` `"claude-haiku-5-5"`. The private home was fresh and empty for every
+run and was deleted afterwards.
+
+**c1 The token is accepted.** The run reached an answer. The events in order are
+`system/init`, `assistant`, `rate_limit_event`, `result`. The `assistant` event has
+no `error` field and `model` `"claude-haiku-5-5"`; the `result` has `subtype:
+"success"`, `is_error: false`, `terminal_reason: "completed"`, `stop_reason:
+"end_turn"`, `num_turns: 1`, `total_cost_usd` 0.00058909 and `duration_api_ms` 911.
+The `rate_limit_event` carries the keys `rate_limit_info`, `session_id`, `type` and
+`uuid`. The process exited 0 after stdin was closed (no-login run, A1b-0a c4:
+exit 1).
+
+**c2 `apiKeySource`.** The init event of that run has `apiKeySource` `"none"`, the
+same value as without a login (A1b-0a c2), although the token was accepted and the
+call was billed. `apiKeySource` therefore does not tell a token login from no login
+on 2.1.302; the `assistant` event without `error` and a `result` with
+`is_error: false` do. Line 18's check cannot rest on this field.
+
+**c3 No credential file.** The CLI wrote these files under the empty private home
+(names and sizes; the token or `.credentials*` appeared in no name, and a scan of
+every file's bytes for the token, `sk-ant-` and `oat01` found none):
+
+| Path under the home | Size |
+|---|---|
+| `.claude.json` | 51,875 |
+| `.claude/backups/.claude.json.backup.<ms>` | 84 |
+| `.claude/policy-limits.json` | 214 |
+| `.claude/policy-limits.json.stamp.json` | 225 |
+| `.claude/remote-settings.json` | 2 |
+| `.claude/remote-settings.json.synced-at` | 13 |
+| directories `.claude/projects/<cwd>/memory`, `.claude/sessions`, `tmp/claude-<uid>` | 4,096 each |
+
+No file named `.credentials*` or holding a token exists, so with the token in the
+environment the CLI writes no credential file. It does write `policy-limits.json`
+and `remote-settings.json`, which the run of c5 (token rejected) did not: it wrote
+only `.claude.json` (50,940 bytes) and its 84-byte backup. The two files appear
+only with an accepted token.
+
+**c4 Refresh.** No credential was written (c3). Under `strace -f -e trace=connect`
+the run connected to `127.0.0.53:53` (the resolver), and on port 443 to
+`160.79.104.10` and `2607:6bc0::10` (both `api.anthropic.com`) and
+`2600:1901:0:9e23::` (resolves to `http-intake.logs.us5.datadoghq.com`); `34.149.66.165`
+was only probed on port 0 during name resolution. The accepted run made 12 `connect`
+calls to port 443, the rejected run of c5 13 and the line-break run below 9, to the
+same hosts apart from the Datadog address, which the line-break run did not use. The
+connect trace gives host and port, not request paths, so it cannot tell a call to a
+token endpoint from an inference call; the run made no connection to a host other
+than these, and there was no refresh or credential write to observe. Whether the CLI
+refreshes an expiring token is not measured.
+
+**c5 Invalid shape.** A token of 12 random alphanumeric characters (not
+`sk-ant-oat`-shaped) was not rejected locally: the CLI contacted the API, retried and
+gave a closed error. The events in order are `system/init`, `system/api_retry`
+(`attempt` 1, `retry_delay_ms` 607, `error_status` 401, `error`
+`"authentication_failed"`, `max_retries` 10), a second `api_retry` (`attempt` 2,
+`retry_delay_ms` 1123, same status), `assistant`, `result`. The `assistant` has
+`error: "authentication_failed"`, `is_api_error_message: true`, `model:
+"<synthetic>"`, zero usage and the text `Failed to authenticate. API Error: 401
+Invalid bearer token`. The `result` has `subtype: "success"`, `is_error: true`,
+`terminal_reason: "api_error"`, `total_cost_usd: 0`, `duration_api_ms: 0` and the
+same text; the `result` has no `error` field (the field is on the `assistant`).
+`apiKeySource` is `"none"`. The process exited 1 after stdin was closed, 3.2 s after
+the start. It reached `api.anthropic.com:443` and produced no model answer (no
+billed call). The text did not echo the malformed value.
+
+**c5a Token with line breaks (unplanned).** The first c1 run read the token file
+unchanged: it holds 112 bytes in three lines, with the token wrapped after 80
+characters (110 characters without the final line break). The CLI rejected it
+before any request for the answer: events `system/init`, `assistant`, `result`;
+`assistant` has `error: "invalid_request"` and the text `Invalid auth token · Fix
+external auth token · Invalid Authorization header value from CLAUDE_CODE_OAUTH_TOKEN:
+it contains a line break at character 80 (110 characters on 2 lines).`; `result`
+has `subtype: "success"`, `is_error: true`, `terminal_reason: "api_error"`,
+`total_cost_usd: 0`, `duration_api_ms: 0`; exit 1 after stdin was closed. No model
+call was billed. The CLI does not remove interior line breaks from the variable,
+so a token file that holds the token on one line is a precondition of A1b-6a
+`token_file`; the c1 run above used the file's content with all whitespace removed
+by the scratch script. Not measured: whether a single trailing line break is
+accepted.
+
+**c6 `cmdline`.** While the c1 run was alive, `/proc/<pid>/cmdline` of every
+process of the sandbox tree (`bwrap`, the inner `sh`, `strace` and `/opt/claude`)
+was compared in memory with the token before the message, 1 s after it and at the
+`result`: `contains token: no` in all 12 samples. The CLI's cmdline is `/opt/claude -p
+--input-format stream-json --output-format stream-json --verbose --max-turns 1 --tools
+ --no-session-persistence --model haiku`. `/proc/<pid>/environ` was not read.
+
+Not measured: the token's lifetime and what the CLI does when it expires or is
+revoked; request paths (no proxy); a run with the token and an `~/.claude`
+credential together.
 
 ## H8 atelier-2
 

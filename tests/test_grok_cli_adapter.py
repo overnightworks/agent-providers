@@ -9,6 +9,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 from provider_test_support import (
@@ -258,6 +259,8 @@ def test_grok_tool_transport_starts_then_resumes_in_one_private_credential_home(
 def _grok_runner_that_fails_by(failure: str, monkeypatch):
     if failure == "the-runner-thread-cannot-start":
         fail_to_start_the_runner_thread(monkeypatch, RuntimeError(A_RUNNER_FAILURE_CANARY))
+    elif failure == "the-worker-start-raises-system-exit":
+        fail_to_start_the_runner_thread(monkeypatch, SystemExit(A_RUNNER_FAILURE_CANARY))
     else:
         def spawn_that_raises(*_arguments, **_keywords):
             raise BaseException(A_RUNNER_FAILURE_CANARY)
@@ -269,6 +272,10 @@ def _grok_runner_that_fails_by(failure: str, monkeypatch):
     ("failure", "reported_steps"),
     [
         ("the-runner-thread-cannot-start", ["start RuntimeError"]),
+        (
+            "the-worker-start-raises-system-exit",
+            ["start SystemExit", "run SystemExit"],
+        ),
         ("the-spawn-raises-a-base-exception", []),
     ],
 )
@@ -299,6 +306,36 @@ def test_a_grok_tool_turn_whose_runner_fails_ends_promptly_and_removes_its_home(
     assert failed.reason.code is SafeRouteReasonCode.CLI_PROTOCOL_ERROR
     assert not Path(children[0].environment["HOME"]).exists()
     assert watch.reported_steps() == reported_steps
+    watch.assert_nothing_leaked(failed)
+
+
+def test_a_tool_consumer_ends_at_the_settle_instant(monkeypatch, caplog, capfd) -> None:
+    watch = RunnerFailureWatch(monkeypatch, caplog, capfd)
+    tiny = 0.01
+    monkeypatch.setattr(process, "CLI_TERMINATION_GRACE_SECONDS", tiny)
+    monkeypatch.setattr(process, "CLI_PROBE_CALLER_TIMEOUT_MARGIN_SECONDS", tiny)
+    monkeypatch.setattr(grok_cli_adapter, "TURN_TIMEOUT_SECONDS", 1.0)
+    override_provider_runtime(grok_cli_binary="/bin/true")
+    monkeypatch.setattr(
+        process.CliLineChannel, "_close", Mock(side_effect=RuntimeError(A_RUNNER_FAILURE_CANARY)),
+    )
+    built_at = time.monotonic()
+    transport = _transport()
+    built_by = time.monotonic()
+
+    async def stream_and_close() -> ProviderUnavailableError:
+        with pytest.raises(ProviderUnavailableError) as raised:
+            await asyncio.wait_for(_collect_transport_responses(transport), timeout=10)
+        await transport.aclose()
+        return raised.value
+
+    failed = asyncio.run(stream_and_close())
+    ended_at = time.monotonic()
+
+    assert failed.reason.code is SafeRouteReasonCode.CLI_PROTOCOL_ERROR
+    assert process.cli_settle_deadline(built_at + 1.0) <= ended_at
+    assert ended_at <= process.cli_settle_deadline(built_by + 1.0) + 0.5
+    assert watch.reported_steps() == ["close RuntimeError"]
     watch.assert_nothing_leaked(failed)
 
 

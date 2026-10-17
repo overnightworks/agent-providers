@@ -10,6 +10,8 @@ owns the other's internals.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
@@ -19,12 +21,13 @@ from agent_providers.config import current_config
 from agent_providers.errors import SafeRouteReasonCode, raise_without_chain
 from agent_providers.process import (
     AgentCliUnavailableError,
-    CliRunOutcome,
-    CliRunReason,
+    CliLineChannel,
     PrivateCredentialHome,
+    PrivateCredentialHomeReservation,
     PrivateHomeNotCreatedError,
     resolve_cli_binary,
     run_cli_bounded,
+    run_publishing_failures,
 )
 from agent_providers.sandbox.paths import CODEX_HOME_DIRECTORY_NAME
 from agent_providers.spawn import ChildProcess, closed_environment
@@ -72,16 +75,19 @@ class CodexCliStreamFailure(Exception):
         self.code = code
 
 
-def codex_child_process(
-    arguments: tuple[str, ...],
-    *,
-    turn_root: Path,
-    work_directory: Path,
-    codex_home: Path,
-) -> ChildProcess:
+@dataclass(frozen=True)
+class CodexTurnHome:
+    """One turn's private home and the two directories the Codex child runs in."""
+
+    home: PrivateCredentialHome
+    work_directory: Path
+    codex_home: Path
+
+
+def codex_child_process(arguments: tuple[str, ...], turn_home: CodexTurnHome) -> ChildProcess:
     """Describe one Codex child around this turn's own private directories.
 
-    ``HOME`` is the turn root, not the account that started this process, so
+    ``HOME`` is the turn home, not the account that started this process, so
     the CLI discovers only the redacted login this turn installed under
     ``CODEX_HOME``.
     """
@@ -91,45 +97,70 @@ def codex_child_process(
     return ChildProcess(
         binary=binary,
         arguments=arguments,
-        environment=closed_environment(turn_root, CODEX_HOME=str(codex_home)),
-        working_directory=work_directory,
+        environment=closed_environment(
+            turn_home.home.path.resolve(), CODEX_HOME=str(turn_home.codex_home.resolve())
+        ),
+        working_directory=turn_home.work_directory.resolve(),
     )
+
+
+def release_turn_reservations(
+    home_reservation: PrivateCredentialHomeReservation,
+    release_slot: Callable[[], None],
+) -> None:
+    """Release a turn's home token and its pool slot, the slot even when the token raises."""
+    try:
+        home_reservation.release()
+    finally:
+        release_slot()
 
 
 def run_reserved_codex_cli(
     reservation: CodexProcessReservation,
+    home_reservation: PrivateCredentialHomeReservation,
     child: ChildProcess,
-    **kwargs,
-) -> CliRunOutcome:
-    """Run one already-admitted CLI process through the bounded runner."""
+    *,
+    stdin_payload: bytes,
+    deadline: float,
+    channel: CliLineChannel,
+) -> None:
+    """Run one already-admitted CLI process through the bounded runner.
+
+    The runner releases both reservations through its callbacks; a failure of
+    this step ends the channel instead of raising.
+    """
     process_pool = get_codex_process_pool()
 
     def on_spawned(process_id: int) -> None:
         process_pool.bind(reservation, process_id)
 
     def on_spawn_failed() -> None:
-        process_pool.abandon_unspawned(reservation)
+        release_turn_reservations(
+            home_reservation, lambda: process_pool.abandon_unspawned(reservation)
+        )
 
     def on_reaped(process_id: int, _became_zombie: bool) -> None:
-        process_pool.reap(reservation, process_id)
+        release_turn_reservations(
+            home_reservation, lambda: process_pool.reap(reservation, process_id)
+        )
 
-    try:
-        outcome = run_cli_bounded(
+    run_publishing_failures(
+        channel,
+        lambda: run_cli_bounded(
             child,
             on_spawned=on_spawned,
             on_spawn_failed=on_spawn_failed,
             on_reaped=on_reaped,
-            **kwargs,
-        )
-    except BaseException:
-        process_pool.abandon_unspawned(reservation)
-        raise
-    if outcome.reason is CliRunReason.SPAWN_FAILED:
-        process_pool.abandon_unspawned(reservation)
-    return outcome
+            stdin_payload=stdin_payload,
+            read="all",
+            deadline=deadline,
+            output_read_limit_bytes=CODEX_CLI_TURN_OUTPUT_READ_LIMIT_BYTES,
+            stdout_line_channel=channel,
+        ),
+    )
 
 
-def create_codex_turn_home(prefix: str) -> PrivateCredentialHome:
+def create_codex_turn_home(prefix: str) -> CodexTurnHome:
     """Make one private Codex turn home holding ``work`` and the blanked login copy."""
     home = PrivateCredentialHome(
         current_config().codex_cli_auth_file,
@@ -140,8 +171,13 @@ def create_codex_turn_home(prefix: str) -> PrivateCredentialHome:
         mode=CODEX_TURN_LOGIN_MODE,
     )
     try:
-        (home.path / "work").mkdir(mode=0o700)
-        return home
+        work_directory = home.path / "work"
+        work_directory.mkdir(mode=0o700)
+        return CodexTurnHome(
+            home=home,
+            work_directory=work_directory,
+            codex_home=home.path / CODEX_HOME_DIRECTORY_NAME,
+        )
     except OSError:
         home.close()
         raise_without_chain(PrivateHomeNotCreatedError("could not create a private CLI home"))

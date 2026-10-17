@@ -9,7 +9,6 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Final
 
 from agent_providers.claude.provider import (
@@ -18,14 +17,12 @@ from agent_providers.claude.provider import (
 )
 from agent_providers.codex.pool import (
     CodexProcessKind,
-    CodexProcessReservation,
     get_codex_process_pool,
 )
 from agent_providers.codex.protocol import (
     BLOCKED_ITEM_TYPES,
     CODEX_APPROVAL_POLICY_NEVER_CONFIG,
     CODEX_CLI_LINE_CHANNEL_CAPACITY,
-    CODEX_CLI_TURN_OUTPUT_READ_LIMIT_BYTES,
     CODEX_EMPTY_MCP_SERVERS_CONFIG,
     CODEX_ITEM_COMPLETED_EVENT,
     INFORMATIONAL_ITEM_TYPES,
@@ -55,13 +52,10 @@ from agent_providers.process import (
     AgentCliUnavailableError,
     CliLineChannel,
     CliRunOutcome,
-    CliRunReason,
     PrivateHomeNotCreatedError,
+    cli_settle_deadline,
 )
-from agent_providers.sandbox.paths import (
-    CODEX_HOME_DIRECTORY_NAME,
-    CODEX_TOOL_TURN_DIRECTORY_PREFIX,
-)
+from agent_providers.sandbox.paths import CODEX_TOOL_TURN_DIRECTORY_PREFIX
 from agent_providers.text_tool_protocol import (
     FinalText as ParsedFinalText,
 )
@@ -127,7 +121,7 @@ class CodexCliToolTransport:
         self._model = model
         self._catalog = catalog
         try:
-            self._home = create_codex_turn_home(CODEX_TOOL_TURN_DIRECTORY_PREFIX)
+            self._turn_home = create_codex_turn_home(CODEX_TOOL_TURN_DIRECTORY_PREFIX)
         except PrivateHomeNotCreatedError:
             raise_without_chain(
                 ProviderUnavailableError(
@@ -144,9 +138,6 @@ class CodexCliToolTransport:
                     normalize_route_failure(SafeRouteReasonCode.CLI_AUTH_REJECTED),
                 )
             )
-        self._turn_root = self._home.path.resolve()
-        self._work_directory = self._turn_root / "work"
-        self._codex_home = self._turn_root / CODEX_HOME_DIRECTORY_NAME
         self._deadline = time.monotonic() + TURN_TIMEOUT_SECONDS
         self._thread_id: str | None = None
         self._round_index = 0
@@ -169,24 +160,37 @@ class CodexCliToolTransport:
         self._round_index += 1
         channel = CliLineChannel(CODEX_CLI_LINE_CHANNEL_CAPACITY)
         try:
+            child = codex_child_process(arguments, self._turn_home)
+        except AgentCliUnavailableError:
+            raise_without_chain(
+                ProviderUnavailableError(
+                    "codex",
+                    "cli",
+                    normalize_route_failure(SafeRouteReasonCode.CLI_PROTOCOL_ERROR),
+                )
+            )
+        home_reservation = self._turn_home.home.reserve()
+        try:
             reservation = get_codex_process_pool().reserve(CodexProcessKind.TEXT)
         except CodexProcessPoolSaturatedError as exc:
+            home_reservation.release()
             raise ProviderUnavailableError(
                 "codex",
                 "cli",
                 normalize_route_failure(SafeRouteReasonCode.CLI_CAPACITY_EXHAUSTED),
             ) from exc
+        except BaseException:  # NOSONAR(S5754) the home token is released, re-raises
+            home_reservation.release()
+            raise
         runner = asyncio.create_task(
             asyncio.to_thread(
-                _run_codex_tool_round,
-                reservation=reservation,
-                arguments=arguments,
-                prompt=prompt,
+                run_reserved_codex_cli,
+                reservation,
+                home_reservation,
+                child,
+                stdin_payload=prompt,
                 deadline=self._deadline,
                 channel=channel,
-                turn_root=self._turn_root,
-                work_directory=self._work_directory,
-                codex_home=self._codex_home,
             )
         )
         parser = TextToolStreamParser(self._catalog)
@@ -196,7 +200,9 @@ class CodexCliToolTransport:
         stream_failure_reason: SafeRouteReasonCode | None = None
         try:
             while True:
-                item = await asyncio.to_thread(channel.receive)
+                item = await asyncio.to_thread(
+                    channel.receive, settle_by=cli_settle_deadline(self._deadline)
+                )
                 if isinstance(item, CliRunOutcome):
                     outcome = item
                     break
@@ -255,7 +261,7 @@ class CodexCliToolTransport:
         if self._closed:
             return
         self._closed = True
-        await asyncio.to_thread(self._home.close)
+        await asyncio.shield(asyncio.to_thread(self._turn_home.home.close))
 
 
 def _codex_tool_arguments(
@@ -295,50 +301,6 @@ def _codex_tool_arguments(
         thread_id,
         "-",
     )
-
-
-def _run_codex_tool_round(
-    *,
-    reservation: CodexProcessReservation,
-    arguments: tuple[str, ...],
-    prompt: bytes,
-    deadline: float,
-    channel: CliLineChannel,
-    turn_root: Path,
-    work_directory: Path,
-    codex_home: Path,
-) -> CliRunOutcome:
-    """Run one round from stdin and reap its reservation."""
-    try:
-        return run_reserved_codex_cli(
-            reservation,
-            codex_child_process(
-                arguments,
-                turn_root=turn_root,
-                work_directory=work_directory,
-                codex_home=codex_home,
-            ),
-            stdin_payload=prompt,
-            read="all",
-            deadline=deadline,
-            output_read_limit_bytes=CODEX_CLI_TURN_OUTPUT_READ_LIMIT_BYTES,
-            stdout_line_channel=channel,
-        )
-    except Exception as exc:
-        get_codex_process_pool().abandon_unspawned(reservation)
-        outcome = CliRunOutcome(
-            started=False,
-            spawn_error=exc,
-            returncode=None,
-            stdout="",
-            stderr="",
-            complete=False,
-            became_zombie=False,
-            reason=CliRunReason.IO_ERROR,
-            io_error=exc if isinstance(exc, OSError) else None,
-        )
-        channel._close(outcome)
-        return outcome
 
 
 def _refuse_a_multi_result_batch(message: InitialTurn | ToolResultBatch) -> None:

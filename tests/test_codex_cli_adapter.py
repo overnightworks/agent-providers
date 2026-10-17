@@ -18,6 +18,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -629,20 +630,25 @@ def test_deadline_before_spawn_keeps_the_codex_slot_until_late_reap(monkeypatch)
 
     monkeypatch.setattr(codex_protocol, "run_cli_bounded", fake_runner)
     reservation = process_pool.reserve(CodexProcessKind.TEXT)
+    turn_home = codex_protocol.create_codex_turn_home(CODEX_TOOL_TURN_DIRECTORY_PREFIX)
 
     codex_protocol.run_reserved_codex_cli(
         reservation,
-        ("codex", "exec"),
+        turn_home.home.reserve(),
+        shell_child("-c", ":"),
         stdin_payload=b"prompt",
-        read="all",
         deadline=10_000_000,
+        channel=process.CliLineChannel(1),
     )
+    turn_home.home.close()
 
     with pytest.raises(CodexProcessPoolSaturatedError):
         process_pool.reserve(CodexProcessKind.TEXT)
+    assert turn_home.home.path.exists()
     callbacks["on_spawned"](41)
     callbacks["on_reaped"](41, True)
     assert process_pool.reservation_count() == 0
+    assert not turn_home.home.path.exists()
 
 
 def _generated_png_runner() -> object:
@@ -943,6 +949,25 @@ def _types_line(tokens: tuple[str, ...]) -> str:
     return "types=[" + ", ".join(tokens) + "]"
 
 
+class _HomeReleases:
+    """Counts the turn reservations released, on whichever thread releases them."""
+
+    def __init__(self, monkeypatch) -> None:
+        self._released = threading.Semaphore(0)
+        release = codex_protocol.release_turn_reservations
+
+        def release_and_count(home_reservation, release_slot) -> None:
+            try:
+                release(home_reservation, release_slot)
+            finally:
+                self._released.release()
+
+        monkeypatch.setattr(codex_protocol, "release_turn_reservations", release_and_count)
+
+    def wait_for_one(self) -> None:
+        assert self._released.acquire(timeout=_HANG_BOUND_SECONDS), "no reservation was released"
+
+
 _TURN_SECONDS = 0.3
 _HANG_BOUND_SECONDS = 20
 _ALLOWANCE_SECONDS = 0.5
@@ -994,10 +1019,12 @@ class _ImageTurnFrame:
         *,
         runner_steps: tuple[str, ...] = (),
         reservations: int = 0,
+        holdings_checked: bool = True,
     ) -> None:
         assert self.watch.reported_steps() == list(runner_steps)
-        assert self.process_pool.image_reservation_count() == reservations
-        assert list(self.working_root.iterdir()) == []
+        if holdings_checked:
+            assert self.process_pool.image_reservation_count() == reservations
+            assert list(self.working_root.iterdir()) == []
         self.watch.assert_nothing_leaked(*(error for error in (turn.error,) if error))
 
 
@@ -1015,7 +1042,10 @@ def image_turn(monkeypatch, caplog, capfd, tmp_path) -> _ImageTurnFrame:
 
 def _the_child_plays(monkeypatch, script: str) -> None:
     played = shell_child("-c", script)
-    monkeypatch.setattr(codex_image, "codex_child_process", lambda *_arguments, **_keywords: played)
+    for turn_module in (codex_image, codex_transport):
+        monkeypatch.setattr(
+            turn_module, "codex_child_process", lambda *_arguments, **_keywords: played,
+        )
 
 
 def _the_child_prints_then_sleeps(monkeypatch, events: list[dict]) -> None:
@@ -1176,14 +1206,16 @@ def test_a_runner_that_raises_ends_the_image_turn_and_names_only_its_class(
 
     assert type(turn.error) is codex_image.CodexImageCliError
     assert turn.elapsed < 1
-    image_turn.assert_ended(turn, runner_steps=(f"run {runner_error.__name__}",))
+    image_turn.assert_ended(
+        turn, runner_steps=(f"run {runner_error.__name__}",), holdings_checked=False,
+    )
 
 
 def test_an_image_thread_that_cannot_start_abandons_its_reservation_and_raises_unchained(
     monkeypatch, image_turn,
 ) -> None:
     fail_to_start_the_runner_thread(
-        monkeypatch, RuntimeError(A_RUNNER_FAILURE_CANARY), codex_image._run_codex_image_runner,
+        monkeypatch, RuntimeError(A_RUNNER_FAILURE_CANARY), codex_protocol.run_reserved_codex_cli,
     )
 
     turn = image_turn.drive(_TURN_SECONDS)
@@ -1202,12 +1234,15 @@ def test_an_image_thread_that_cannot_start_abandons_its_reservation_and_raises_u
 def test_control_flow_from_an_image_thread_that_cannot_start_passes_after_abandoning_its_slot(
     monkeypatch, image_turn, control_flow: BaseException,
 ) -> None:
-    fail_to_start_the_runner_thread(monkeypatch, control_flow, codex_image._run_codex_image_runner)
+    fail_to_start_the_runner_thread(
+        monkeypatch, control_flow, codex_protocol.run_reserved_codex_cli,
+    )
 
     turn = image_turn.drive(_TURN_SECONDS)
 
     assert turn.error is control_flow
     assert image_turn.process_pool.image_reservation_count() == 0
+    assert list(image_turn.working_root.iterdir()) == []
     image_turn.watch.assert_nothing_leaked()
 
 
@@ -1280,6 +1315,7 @@ def test_a_child_that_outlasts_a_short_deadline_ends_the_turn_by_the_settle_inst
 def test_a_zombie_child_ends_the_turn_while_its_reservation_waits_for_the_background_reap(
     monkeypatch, image_turn,
 ) -> None:
+    releases = _HomeReleases(monkeypatch)
     release_background_reap = threading.Event()
     real_background_reap = process._reap_in_background
 
@@ -1299,6 +1335,7 @@ def test_a_zombie_child_ends_the_turn_while_its_reservation_waits_for_the_backgr
 
     assert type(turn.error) is codex_image.CodexImageTimeoutError
     assert held_at_return == 1
+    releases.wait_for_one()
     image_turn.assert_ended(turn)
 
 
@@ -2142,27 +2179,60 @@ def _assert_the_image_turn_found_the_login_rejected(refusal: BaseException) -> N
     assert type(refusal) is codex_image.CodexImageLoginError
 
 
+_TOOL_TURN_CANNOT_MAKE_ITS_HOME = (
+    _the_tool_turn_is_started_bare, ProviderUnavailableError,
+    _assert_the_tool_turn_found_the_cli_unavailable,
+)
+_IMAGE_TURN_CANNOT_MAKE_ITS_HOME = (
+    _the_image_turn_is_started_bare, codex_image.CodexImageCliError,
+    _assert_the_image_turn_could_not_make_its_home,
+)
+_TOOL_TURN_FINDS_THE_LOGIN_REJECTED = (
+    _the_tool_turn_is_started_bare, ProviderUnavailableError,
+    _assert_the_tool_turn_found_the_login_rejected,
+)
+_IMAGE_TURN_FINDS_THE_LOGIN_REJECTED = (
+    _the_image_turn_is_started_bare, codex_image.CodexImageLoginError,
+    _assert_the_image_turn_found_the_login_rejected,
+)
+
+
 @CALLER_CONTEXTS
 @pytest.mark.parametrize(
-    ("make_the_home_fail", "turns_and_refusals"),
+    ("make_the_home_fail", "start_the_turn", "expected_class", "assert_the_refusal"),
     (
-        (fail_mkdtemp, "cannot-be-made"),
-        (fail_the_home_chmod, "cannot-be-made"),
-        (_fail_the_work_directory, "cannot-be-made"),
-        (_fail_the_codex_home_directory, "login"),
+        pytest.param(fail_mkdtemp, *_TOOL_TURN_CANNOT_MAKE_ITS_HOME, id="mkdtemp-tool-turn"),
+        pytest.param(fail_mkdtemp, *_IMAGE_TURN_CANNOT_MAKE_ITS_HOME, id="mkdtemp-image-turn"),
+        pytest.param(
+            fail_the_home_chmod, *_TOOL_TURN_CANNOT_MAKE_ITS_HOME, id="home-chmod-tool-turn",
+        ),
+        pytest.param(
+            fail_the_home_chmod, *_IMAGE_TURN_CANNOT_MAKE_ITS_HOME, id="home-chmod-image-turn",
+        ),
+        pytest.param(
+            _fail_the_work_directory, *_TOOL_TURN_CANNOT_MAKE_ITS_HOME,
+            id="work-directory-tool-turn",
+        ),
+        pytest.param(
+            _fail_the_work_directory, *_IMAGE_TURN_CANNOT_MAKE_ITS_HOME,
+            id="work-directory-image-turn",
+        ),
+        pytest.param(
+            _fail_the_codex_home_directory, *_TOOL_TURN_FINDS_THE_LOGIN_REJECTED,
+            id="codex-home-directory-tool-turn",
+        ),
+        pytest.param(
+            _fail_the_codex_home_directory, *_IMAGE_TURN_FINDS_THE_LOGIN_REJECTED,
+            id="codex-home-directory-image-turn",
+        ),
     ),
-    ids=("mkdtemp", "home-chmod", "work-directory", "codex-home-directory"),
 )
-@pytest.mark.parametrize("turn", ("tool-turn", "image-turn"))
 def test_a_codex_turn_home_that_fails_is_refused_unchained_and_leaves_nothing(
     tmp_path: Path, monkeypatch, codex_login_source: Path, make_the_home_fail,
-    turns_and_refusals: str, turn: str, while_the_caller_handles_an_exception,
+    start_the_turn, expected_class, assert_the_refusal, while_the_caller_handles_an_exception,
 ) -> None:
     turns = _an_empty_working_root(tmp_path)
     make_the_home_fail(monkeypatch, codex_login_source)
-    start_the_turn, expected_class, assert_the_refusal = _EXPECTED_REFUSALS[
-        (turn, turns_and_refusals)
-    ]
 
     if while_the_caller_handles_an_exception:
         try:
@@ -2176,26 +2246,6 @@ def test_a_codex_turn_home_that_fails_is_refused_unchained_and_leaves_nothing(
     assert refusal.__cause__ is None
     assert refusal.__context__ is None
     assert list(turns.iterdir()) == []
-
-
-_EXPECTED_REFUSALS = {
-    ("tool-turn", "cannot-be-made"): (
-        _the_tool_turn_is_started_bare, ProviderUnavailableError,
-        _assert_the_tool_turn_found_the_cli_unavailable,
-    ),
-    ("image-turn", "cannot-be-made"): (
-        _the_image_turn_is_started_bare, codex_image.CodexImageCliError,
-        _assert_the_image_turn_could_not_make_its_home,
-    ),
-    ("tool-turn", "login"): (
-        _the_tool_turn_is_started_bare, ProviderUnavailableError,
-        _assert_the_tool_turn_found_the_login_rejected,
-    ),
-    ("image-turn", "login"): (
-        _the_image_turn_is_started_bare, codex_image.CodexImageLoginError,
-        _assert_the_image_turn_found_the_login_rejected,
-    ),
-}
 
 
 def _refusal_of(start_the_turn, expected_class: type[BaseException]) -> BaseException:
@@ -2341,3 +2391,363 @@ def test_a_failed_turn_copy_keeps_no_credential_in_its_error(
     assert children == []
     assert list(turns.iterdir()) == []
     assert len(os.listdir("/proc/self/fd")) == open_descriptors
+
+
+@dataclass(frozen=True)
+class _TurnHomes:
+    error: BaseException | None
+    at_return: list[str]
+    after_close: list[str]
+
+
+def _homes_in(working_root: Path) -> list[str]:
+    return sorted(entry.name for entry in working_root.iterdir())
+
+
+def _run_the_image_turn(monkeypatch, frame: _ImageTurnFrame, seconds: float) -> _TurnHomes:
+    turn = frame.drive(seconds)
+    homes = _homes_in(frame.working_root)
+    return _TurnHomes(turn.error, homes, homes)
+
+
+def _run_the_tool_turn(monkeypatch, frame: _ImageTurnFrame, seconds: float) -> _TurnHomes:
+    monkeypatch.setattr(codex_transport, "TURN_TIMEOUT_SECONDS", seconds)
+
+    async def stream_then_close() -> _TurnHomes:
+        transport = _transport()
+        error = None
+        try:
+            await asyncio.wait_for(_collect_tool_responses(transport), timeout=_HANG_BOUND_SECONDS)
+        except Exception as raised:
+            error = raised
+        at_return = _homes_in(frame.working_root)
+        await transport.aclose()
+        return _TurnHomes(error, at_return, _homes_in(frame.working_root))
+
+    return asyncio.run(stream_then_close())
+
+
+async def _collect_tool_responses(transport) -> list[object]:
+    return [item async for item in transport.stream(InitialTurn("system", []))]
+
+
+_BOTH_CODEX_TURNS = pytest.mark.parametrize(
+    ("run_the_turn", "home_waits_for_close"),
+    ((_run_the_image_turn, False), (_run_the_tool_turn, True)),
+    ids=("image-turn", "tool-turn"),
+)
+
+
+def _hold_until_opened(monkeypatch, module, name: str, *, then=None) -> Callable[[], None]:
+    """Make ``module.name`` wait for the returned gate, then run ``then`` or the real function."""
+    gate = threading.Event()
+    real = getattr(module, name)
+
+    def held(*arguments, **keywords):
+        gate.wait(timeout=_HANG_BOUND_SECONDS)
+        return (then or real)(*arguments, **keywords)
+
+    monkeypatch.setattr(module, name, held)
+    return gate.set
+
+
+def _a_child_that_exits(monkeypatch) -> Callable[[], None]:
+    _the_child_plays(monkeypatch, ":")
+    return lambda: None
+
+
+def _a_reap_that_outlasts_the_settle_instant(monkeypatch) -> Callable[[], None]:
+    _settle_within_a_few_hundredths(monkeypatch)
+    _the_child_plays(monkeypatch, "exec sleep 10")
+    return _hold_until_opened(monkeypatch, process, "_reap_process_group")
+
+
+def _a_zombie_child(monkeypatch) -> Callable[[], None]:
+    gate = threading.Event()
+    real_background_reap = process._reap_in_background
+
+    def reap_once_opened(child, on_reaped) -> None:
+        gate.wait(timeout=_HANG_BOUND_SECONDS)
+        os.killpg(child.pid, signal.SIGKILL)
+        real_background_reap(child, on_reaped)
+
+    monkeypatch.setattr(process, "_reap_process_group", lambda _child: True)
+    monkeypatch.setattr(process, "_reap_in_background", reap_once_opened)
+    _the_child_plays(monkeypatch, "exec sleep 10")
+    return gate.set
+
+
+def _a_spawn_held_past_the_deadline(monkeypatch) -> Callable[[], None]:
+    _the_child_plays(monkeypatch, ":")
+    return _hold_until_opened(monkeypatch, process, "open_pipes")
+
+
+def _a_spawn_that_raises(monkeypatch) -> Callable[[], None]:
+    monkeypatch.setattr(process, "open_pipes", Mock(side_effect=OSError(errno.ENOENT, "gone")))
+    return lambda: None
+
+
+def _a_spawn_held_past_the_deadline_that_then_raises(monkeypatch) -> Callable[[], None]:
+    return _hold_until_opened(
+        monkeypatch, process, "open_pipes", then=Mock(side_effect=OSError(errno.ENOENT, "gone")),
+    )
+
+
+@_BOTH_CODEX_TURNS
+@pytest.mark.parametrize(
+    ("arrange", "child_outlives_the_turn"),
+    (
+        (_a_child_that_exits, False),
+        (_a_reap_that_outlasts_the_settle_instant, True),
+        (_a_zombie_child, True),
+        (_a_spawn_held_past_the_deadline, True),
+        (_a_spawn_that_raises, False),
+        (_a_spawn_held_past_the_deadline_that_then_raises, True),
+    ),
+    ids=("normal", "reap-overran", "zombie", "late-spawn", "spawn-raises", "late-spawn-raises"),
+)
+def test_a_codex_turn_home_waits_for_its_child(
+    monkeypatch, image_turn, run_the_turn, home_waits_for_close, arrange,
+    child_outlives_the_turn,
+) -> None:
+    releases = _HomeReleases(monkeypatch)
+    open_gate = arrange(monkeypatch)
+    try:
+        turn = run_the_turn(monkeypatch, image_turn, _TURN_SECONDS)
+    finally:
+        open_gate()
+
+    assert bool(turn.at_return) == (child_outlives_the_turn or home_waits_for_close)
+    assert bool(turn.after_close) == child_outlives_the_turn
+    releases.wait_for_one()
+    assert _homes_in(image_turn.working_root) == []
+    assert image_turn.process_pool.reservation_count() == 0
+    image_turn.watch.assert_nothing_leaked()
+
+
+def test_a_tool_turn_home_outlives_its_last_round(monkeypatch, image_turn) -> None:
+    releases = _HomeReleases(monkeypatch)
+    monkeypatch.setattr(codex_transport, "TURN_TIMEOUT_SECONDS", _TURN_SECONDS)
+    children = iter((shell_child("-c", ":"), shell_child("-c", "exec sleep 10")))
+    monkeypatch.setattr(codex_transport, "codex_child_process", lambda *_a, **_k: next(children))
+    _settle_within_a_few_hundredths(monkeypatch)
+    open_gate = _hold_until_opened(monkeypatch, process, "_reap_process_group")
+
+    async def two_rounds_then_close() -> tuple[list[str], list[str], list[str]]:
+        transport = _transport()
+        for _round in range(2):
+            with pytest.raises(ProviderUnavailableError):
+                await asyncio.wait_for(
+                    _collect_tool_responses(transport), timeout=_HANG_BOUND_SECONDS,
+                )
+            if _round == 0:
+                after_first_round = _homes_in(image_turn.working_root)
+        after_second_round = _homes_in(image_turn.working_root)
+        await transport.aclose()
+        return after_first_round, after_second_round, _homes_in(image_turn.working_root)
+
+    try:
+        after_first_round, after_second_round, after_close = asyncio.run(two_rounds_then_close())
+    finally:
+        open_gate()
+
+    assert len(after_first_round) == 1
+    assert after_second_round == after_first_round
+    assert after_close == after_first_round
+    releases.wait_for_one()
+    releases.wait_for_one()
+    assert _homes_in(image_turn.working_root) == []
+    assert image_turn.process_pool.reservation_count() == 0
+    image_turn.watch.assert_nothing_leaked()
+
+
+@_BOTH_CODEX_TURNS
+def test_a_failed_removal_on_the_late_path_never_changes_the_turn(
+    monkeypatch, image_turn, caplog, run_the_turn, home_waits_for_close,
+) -> None:
+    releases = _HomeReleases(monkeypatch)
+    open_gate = _a_reap_that_outlasts_the_settle_instant(monkeypatch)
+    _RemovalThatFailsOnce(monkeypatch)
+    caplog.set_level(logging.ERROR, logger=process.__name__)
+    try:
+        turn = run_the_turn(monkeypatch, image_turn, _TURN_SECONDS)
+    finally:
+        open_gate()
+    releases.wait_for_one()
+
+    assert type(turn.error) in {codex_image.CodexImageTimeoutError, ProviderUnavailableError}
+    assert [
+        record.getMessage() for record in caplog.records if record.name == process.__name__
+    ] == ["private credential home removal failed (PermissionError)"]
+    assert len(_homes_in(image_turn.working_root)) == 1
+    del turn
+    gc.collect()
+    assert _homes_in(image_turn.working_root) == []
+
+
+@pytest.mark.parametrize(
+    "runner_error",
+    (OSError, BaseException, KeyboardInterrupt, SystemExit),
+    ids=("os-error", "base-exception", "keyboard-interrupt", "system-exit"),
+)
+def test_a_tool_round_that_raises_ends_the_turn_and_names_only_its_class(
+    monkeypatch, image_turn, runner_error: type[BaseException],
+) -> None:
+    monkeypatch.setattr(
+        codex_protocol, "run_cli_bounded", Mock(side_effect=runner_error(A_RUNNER_FAILURE_CANARY)),
+    )
+    started_at = time.monotonic()
+
+    turn = _run_the_tool_turn(monkeypatch, image_turn, _HANG_BOUND_SECONDS)
+
+    assert isinstance(turn.error, ProviderUnavailableError)
+    assert turn.error.reason.code is SafeRouteReasonCode.CLI_PROTOCOL_ERROR
+    assert time.monotonic() - started_at < 1
+    assert image_turn.watch.reported_steps() == [f"run {runner_error.__name__}"]
+    image_turn.watch.assert_nothing_leaked(turn.error)
+
+
+@pytest.mark.parametrize("pool_is_saturated", (False, True), ids=("pool-free", "pool-saturated"))
+def test_a_tool_turn_without_a_binary_reserves_nothing(
+    monkeypatch, image_turn, caplog, pool_is_saturated: bool,
+) -> None:
+    override_provider_runtime(codex_cli_binary="no-such-codex-binary-7c1d")
+    runner = Mock()
+    monkeypatch.setattr(codex_protocol, "run_cli_bounded", runner)
+    held_slots = [image_turn.process_pool.reserve(CodexProcessKind.TEXT) for _ in range(8)]
+    if not pool_is_saturated:
+        image_turn.process_pool.abandon_unspawned(held_slots.pop())
+    expected_holdings = len(held_slots)
+
+    turn = _run_the_tool_turn(monkeypatch, image_turn, _TURN_SECONDS)
+
+    assert isinstance(turn.error, ProviderUnavailableError)
+    assert turn.error.reason.code is SafeRouteReasonCode.CLI_PROTOCOL_ERROR
+    assert turn.error.__cause__ is None
+    assert turn.error.__context__ is None
+    assert "Codex CLI failed" not in caplog.text
+    assert image_turn.process_pool.reservation_count() == expected_holdings
+    assert turn.after_close == []
+    runner.assert_not_called()
+
+
+def test_a_tool_round_whose_worker_cannot_start_releases_its_home(
+    monkeypatch, image_turn,
+) -> None:
+    releases = _HomeReleases(monkeypatch)
+    fail_to_start_the_runner_thread(monkeypatch, SystemExit(A_RUNNER_FAILURE_CANARY))
+    _the_child_plays(monkeypatch, ":")
+
+    turn = _run_the_tool_turn(monkeypatch, image_turn, _TURN_SECONDS)
+
+    assert isinstance(turn.error, ProviderUnavailableError)
+    releases.wait_for_one()
+    assert turn.after_close == []
+    assert image_turn.process_pool.reservation_count() == 0
+    assert image_turn.watch.reported_steps() == ["start SystemExit", "run SystemExit"]
+    image_turn.watch.assert_nothing_leaked(turn.error)
+
+
+@pytest.mark.parametrize(
+    ("run_the_turn", "slot_kind", "refusal_is_expected"),
+    (
+        (
+            _run_the_image_turn, CodexProcessKind.IMAGE,
+            lambda error: type(error) is CodexProcessPoolSaturatedError,
+        ),
+        (
+            _run_the_tool_turn, CodexProcessKind.TEXT,
+            lambda error: (
+                isinstance(error, ProviderUnavailableError)
+                and error.reason.code is SafeRouteReasonCode.CLI_CAPACITY_EXHAUSTED
+            ),
+        ),
+    ),
+    ids=("image-turn", "tool-turn"),
+)
+def test_a_saturated_pool_returns_the_turns_home_token(
+    monkeypatch, image_turn, run_the_turn, slot_kind, refusal_is_expected,
+) -> None:
+    pool = CodexProcessPool(maximum_processes=1, maximum_image_runs=1)
+    use_codex_process_pool(monkeypatch, pool)
+    pool.reserve(slot_kind)
+    runner = Mock()
+    monkeypatch.setattr(codex_protocol, "run_cli_bounded", runner)
+    _the_child_plays(monkeypatch, ":")
+
+    turn = run_the_turn(monkeypatch, image_turn, _TURN_SECONDS)
+
+    assert refusal_is_expected(turn.error)
+    runner.assert_not_called()
+    assert pool.reservation_count() == 1
+    assert turn.after_close == []
+
+
+@_BOTH_CODEX_TURNS
+def test_a_refused_home_reservation_reserves_no_slot(
+    monkeypatch, image_turn, run_the_turn, home_waits_for_close,
+) -> None:
+    refusal = RuntimeError("private credential home is closing")
+    monkeypatch.setattr(process.PrivateCredentialHome, "reserve", Mock(side_effect=refusal))
+    runner = Mock()
+    monkeypatch.setattr(codex_protocol, "run_cli_bounded", runner)
+    _the_child_plays(monkeypatch, ":")
+
+    turn = run_the_turn(monkeypatch, image_turn, _TURN_SECONDS)
+
+    assert turn.error is refusal
+    runner.assert_not_called()
+    assert image_turn.process_pool.reservation_count() == 0
+    assert turn.after_close == []
+
+
+@pytest.mark.parametrize("home_release_raises", (True, False), ids=("raises", "releases"))
+def test_the_turn_release_frees_the_slot_even_when_the_home_release_raises(
+    home_release_raises: bool,
+) -> None:
+    slot_releases: list[str] = []
+
+    def release_the_home() -> None:
+        if home_release_raises:
+            raise RuntimeError(A_RUNNER_FAILURE_CANARY)
+
+    home_reservation = SimpleNamespace(release=release_the_home)
+
+    if home_release_raises:
+        with pytest.raises(RuntimeError):
+            codex_protocol.release_turn_reservations(
+                home_reservation, lambda: slot_releases.append("slot"),
+            )
+    else:
+        codex_protocol.release_turn_reservations(
+            home_reservation, lambda: slot_releases.append("slot"),
+        )
+
+    assert slot_releases == ["slot"]
+
+
+def test_a_tool_consumer_ends_at_the_settle_instant(monkeypatch, image_turn) -> None:
+    _settle_within_a_few_hundredths(monkeypatch)
+    monkeypatch.setattr(codex_transport, "TURN_TIMEOUT_SECONDS", 1.0)
+    override_provider_runtime(codex_cli_binary="/bin/true")
+    monkeypatch.setattr(
+        process.CliLineChannel, "_close", Mock(side_effect=RuntimeError(A_RUNNER_FAILURE_CANARY)),
+    )
+    built_at = time.monotonic()
+    transport = _transport()
+    built_by = time.monotonic()
+
+    async def stream_and_close() -> BaseException:
+        with pytest.raises(ProviderUnavailableError) as raised:
+            await asyncio.wait_for(_collect_tool_responses(transport), timeout=10)
+        await transport.aclose()
+        return raised.value
+
+    failed = asyncio.run(stream_and_close())
+    ended_at = time.monotonic()
+
+    assert failed.reason.code is SafeRouteReasonCode.CLI_PROTOCOL_ERROR
+    assert process.cli_settle_deadline(built_at + 1.0) <= ended_at
+    assert ended_at <= process.cli_settle_deadline(built_by + 1.0) + _ALLOWANCE_SECONDS
+    assert image_turn.watch.reported_steps() == ["close RuntimeError"]
+    image_turn.watch.assert_nothing_leaked(failed)

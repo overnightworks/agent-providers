@@ -1573,13 +1573,13 @@ model calls: 1 (cap 2).
 scratch driver starts `bwrap` itself with the environment `PATH=/usr/bin:/bin`,
 `HOME` and `TMPDIR` in a private home (mode 700), `DISABLE_AUTOUPDATER=1` and
 `CLAUDE_CODE_OAUTH_TOKEN=<token>`. Inside the sandbox a script lists the home, the
-working directory and `/tmp` before and after and runs the CLI under
-`strace -f -qq -e trace=connect`. `ARGS` is `-p --input-format stream-json
---output-format stream-json --verbose --max-turns 1 --tools "" --no-session-persistence
---model haiku`; the message is `hello`, written 0.5 s after the start, and stdin is
-closed once the `result` event has arrived. `--model haiku` was accepted and init
-reports `model` `"claude-haiku-5-5"`. The private home was fresh, holding only the empty `tmp`, for every
-run and was deleted afterwards.
+working directory and `/tmp` before and after and runs the CLI under `strace -f -qq
+-e trace=connect`. `ARGS` is `-p --input-format stream-json --output-format
+stream-json --verbose --max-turns 1 --tools "" --no-session-persistence --model
+haiku`; the message is `hello`, written 0.5 s after the start, and stdin is closed
+once the `result` event has arrived. `--model haiku` was accepted and init reports
+`model` `"claude-haiku-5-5"`. The private home was fresh, holding only the empty
+`tmp`, for every run and was deleted afterwards.
 
 **c1 The token is accepted.** The run reached an answer. The events in order are
 `system/init`, `assistant`, `rate_limit_event`, `result`. The `assistant` event has
@@ -1593,14 +1593,15 @@ exit 1).
 **c2 `apiKeySource`.** The init event of that run has `apiKeySource` `"none"`, the
 same value as without a login (A1b-0a c2), although the token was accepted and the
 call was billed. `apiKeySource` therefore does not tell a token login from no login
-on 2.1.302; the `assistant` event without `error` and a `result` with
-`is_error: false` do. A token login also reports `"none"`, so a check that `apiKeySource` is `"none"`
-(Q2 (a), line 18) passes a token run; the value with an API key in the child is not
-measured here.
+on 2.1.302; the `assistant` event without `error` and a `result` with `is_error:
+false` do. A token login also reports `"none"`, so a check that `apiKeySource` is
+`"none"` (Q2 (a), line 18) passes a token run; the value with an API key in the
+child is not measured here.
 
-**c3 No credential file.** The CLI wrote these files under the private home, fresh and holding only the empty `tmp`
-(names and sizes; the token or `.credentials*` appeared in no name, and a scan of
-every file's bytes for the token, `sk-ant-` and `oat01` found none):
+**c3 No credential file.** The CLI wrote these files under the private home, fresh
+and holding only the empty `tmp` (names and sizes; the token or `.credentials*`
+appeared in no name, and a scan of every file's bytes for the token, `sk-ant-` and
+`oat01` found none):
 
 | Path under the home | Size |
 |---|---|
@@ -1622,18 +1623,18 @@ only in the accepted run.
 the run connected to `127.0.0.53:53` (the resolver), and on port 443 to
 `160.79.104.10` and `2607:6bc0::10` (both `api.anthropic.com`) and
 `2600:1901:0:9e23::` (an address of `http-intake.logs.us5.datadoghq.com`, as is
-`34.149.66.165`); `34.149.66.165`
-was only probed on port 0 during name resolution. The accepted run made 12 `connect`
-calls to port 443, the rejected run of c5 13 and the line-break run below 9, to the
-same hosts apart from the Datadog address, which the line-break run did not use. The
-connect trace gives host and port, not request paths, so it cannot tell a call to a
-token endpoint from an inference call; the run made no connection to a host other
-than these, and no credential was written (c3); whether any request refreshed something cannot be
-seen from host and port. Whether the CLI refreshes an expiring token is not measured.
+`34.149.66.165`, which was only probed on port 0 during name resolution). The
+accepted run made 12 `connect` calls to port 443, the rejected run of c5 13 and the
+line-break run below 9, to the same hosts apart from the Datadog address, which the
+line-break run did not use. The connect trace gives host and port, not request
+paths, so it cannot tell a call to a token endpoint from an inference call; the run
+made no connection to a host other than these, and no credential was written (c3);
+whether any request refreshed something cannot be seen from host and port. Whether
+the CLI refreshes an expiring token is not measured.
 
 **c5 Invalid shape.** A token of 12 random alphanumeric characters (not
-`sk-ant-oat`-shaped) was not rejected locally: the CLI contacted the API, retried and
-gave a closed error. The events in order are `system/init`, `system/api_retry`
+`sk-ant-oat`-shaped) was not rejected locally: the CLI contacted the API, retried
+and gave a closed error. The events in order are `system/init`, `system/api_retry`
 (`attempt` 1, `retry_delay_ms` 607, `error_status` 401, `error`
 `"authentication_failed"`, `max_retries` 10), a second `api_retry` (`attempt` 2,
 `retry_delay_ms` 1123, same status), `assistant`, `result`. The `assistant` has
@@ -1642,33 +1643,35 @@ gave a closed error. The events in order are `system/init`, `system/api_retry`
 Invalid bearer token`. The `result` has `subtype: "success"`, `is_error: true`,
 `terminal_reason: "api_error"`, `total_cost_usd: 0`, `duration_api_ms: 0` and the
 same text; the `result` has no `error` field (the field is on the `assistant`).
-`apiKeySource` is `"none"`. Stdin was closed at 3.2 s (after the `result`) and the process exited 1 at 4.3 s. It reached `api.anthropic.com:443` and produced no model answer (no
-billed call). The text did not echo the malformed value. The `error` value
-`"authentication_failed"` is the same as without a login (A1b-0a c4), which
-`claude/provider.py:109` maps to `CliLoginRefusedError`, so line 11's closed cause
-holds for a rejected token.
+`apiKeySource` is `"none"`. Stdin was closed at 3.2 s (after the `result`) and the
+process exited 1 at 4.3 s. It reached `api.anthropic.com:443` and produced no model
+answer (no billed call). The text did not echo the malformed value. The `error`
+value `"authentication_failed"` is the same as without a login (A1b-0a c4), which
+`claude/provider.py:465-466` (`_raise_for_api_error_message`) maps to
+`CliLoginRefusedError`, so line 11's closed cause holds for a rejected token.
 
-**c5a Token with line breaks (unplanned).** The first c1 run read the token file
-unchanged, with the token spread over more than one line. The CLI rejected it
-before any request for the answer: events `system/init`, `assistant`, `result`;
-`assistant` has `error: "invalid_request"` and the text `Invalid auth token · Fix
-external auth token · Invalid Authorization header value from CLAUDE_CODE_OAUTH_TOKEN:
-it contains a line break at character <n> (<n> characters on <n> lines).`; `result`
-has `subtype: "success"`, `is_error: true`, `terminal_reason: "api_error"`,
-`total_cost_usd: 0`, `duration_api_ms: 0`; exit 1 after stdin was closed. No model
-call was billed. The CLI does not remove interior line breaks from the variable,
-so a token file that holds the token on one line is a precondition of A1b-6a
-`token_file`; the landed `token_file` reader (`agent_service.secret_file`) already
-refuses such a value before any run; the c1 run above used the file's content with all whitespace removed
-by the scratch script. Not measured: whether a single trailing line break is
-accepted.
+**c5a Token with line breaks (unplanned).** A `CLAUDE_CODE_OAUTH_TOKEN` value that
+contains an interior line break is refused locally with `invalid_request`, exit 1,
+no billed call. The CLI rejected it before any request for the answer: events
+`system/init`, `assistant`, `result`; `assistant` has `error: "invalid_request"` and
+the text `Invalid auth token · Fix external auth token · Invalid Authorization
+header value from CLAUDE_CODE_OAUTH_TOKEN: it contains a line break at character <n>
+(<n> characters on <n> lines).`; `result` has `subtype: "success"`, `is_error:
+true`, `terminal_reason: "api_error"`, `total_cost_usd: 0`, `duration_api_ms: 0`;
+exit 1 after stdin was closed. No model call was billed. The CLI does not remove
+interior line breaks from the variable, so a token file that holds the token on one
+line is a precondition of A1b-6a `token_file`; the landed `token_file` reader
+(`agent_service.secret_file`) already refuses such a value before any run; the c1
+run above used the file's content with all whitespace removed by the scratch script.
+Not measured: whether a single trailing line break is accepted.
 
-**c6 `cmdline`.** While the c1 run was alive, `/proc/<pid>/cmdline` of every
-process of the sandbox tree (`bwrap`, the inner `sh`, `strace` and `/opt/claude`)
-was compared in memory with the token before the message, 1 s after it and at the
-`result`: `contains token: no` in all 12 samples. The CLI's cmdline is `/opt/claude -p
---input-format stream-json --output-format stream-json --verbose --max-turns 1 --tools
- --no-session-persistence --model haiku`. `/proc/<pid>/environ` was not read.
+**c6 `cmdline`.** While the c1 run was alive, `/proc/<pid>/cmdline` of every process
+of the sandbox tree (`bwrap`, the inner `sh`, `strace` and `/opt/claude`) was
+compared in memory with the token before the message, 1 s after it and at the
+`result`: `contains token: no` in all 12 samples. The CLI's cmdline is `/opt/claude
+-p --input-format stream-json --output-format stream-json --verbose --max-turns 1
+--tools  --no-session-persistence --model haiku`. `/proc/<pid>/environ` was not
+read.
 
 Not measured: the token's lifetime and what the CLI does when it expires or is
 revoked; request paths (no proxy); a run with the token and an `~/.claude`

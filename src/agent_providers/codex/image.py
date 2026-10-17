@@ -14,7 +14,6 @@ import importlib.util
 import logging
 import os
 import re
-import tempfile
 import threading
 from collections import deque
 from dataclasses import dataclass, field
@@ -41,10 +40,10 @@ from agent_providers.codex.protocol import (
     CodexCliStreamFailure,
     codex_child_process,
     codex_cli_failure_reason,
+    create_codex_turn_home,
     error_item_message,
     event_item_type,
     failed_turn_message,
-    install_codex_turn_login,
     parse_codex_line,
     run_reserved_codex_cli,
     top_level_error_message,
@@ -57,6 +56,7 @@ from agent_providers.process import (
     CliLineChannel,
     CliRunOutcome,
     CliRunReason,
+    PrivateHomeNotCreatedError,
     StepFailures,
     cli_settle_deadline,
     resolve_cli_binary,
@@ -150,7 +150,7 @@ class CodexImageTimeoutError(CodexImageError):
 
 
 class CodexImageCliError(CodexImageError):
-    """The CLI ended without a verified successful image result."""
+    """The CLI could not be run, or ended without a verified successful image result."""
 
 
 class CodexImageEncoderUnavailableError(CodexImageError):
@@ -206,27 +206,21 @@ def generate_codex_image(
     """
     if not image_encoder_is_installed():
         raise CodexImageEncoderUnavailableError(_IMAGE_ENCODER_MISSING_DETAIL)
-    with tempfile.TemporaryDirectory(
-        prefix=CODEX_IMAGE_TURN_DIRECTORY_PREFIX,
-        dir=current_config().cli_working_directory_root,
-    ) as directory:
-        root = Path(directory)
-        work_dir = root / "work"
-        codex_home = root / CODEX_HOME_DIRECTORY_NAME
-        root.chmod(0o700)
-        work_dir.mkdir(mode=0o700)
-        codex_home.mkdir(mode=0o700)
-        try:
-            install_codex_turn_login(codex_home)
-        except AgentCliUnavailableError:
-            raise_without_chain(CodexImageLoginError())
+    try:
+        home = create_codex_turn_home(CODEX_IMAGE_TURN_DIRECTORY_PREFIX)
+    except PrivateHomeNotCreatedError:
+        raise_without_chain(CodexImageCliError("could not create a private CLI home"))
+    except AgentCliUnavailableError:
+        raise_without_chain(CodexImageLoginError())
+    try:
+        codex_home = home.path / CODEX_HOME_DIRECTORY_NAME
         try:
             outcome = _run_codex_image_cli(
                 prompt=prompt,
                 deadline=deadline,
-                turn_root=root,
+                turn_root=home.path,
                 codex_home=codex_home,
-                work_dir=work_dir,
+                work_dir=home.path / "work",
                 abort_signal=abort_signal,
                 model=model,
             )
@@ -247,6 +241,8 @@ def generate_codex_image(
             log.warning("Codex image not created route=cli types=[%s]", ", ".join(observed))
             raise
         return _normalize_generated_png(artifact, policy)
+    finally:
+        home.close()
 
 
 def _run_codex_image_cli(

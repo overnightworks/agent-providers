@@ -16,15 +16,17 @@ from typing import Final
 from agent_providers.codex.pool import CodexProcessReservation, get_codex_process_pool
 from agent_providers.codex_login import blanked_copy
 from agent_providers.config import current_config
-from agent_providers.errors import SafeRouteReasonCode
+from agent_providers.errors import SafeRouteReasonCode, raise_without_chain
 from agent_providers.process import (
     AgentCliUnavailableError,
     CliRunOutcome,
     CliRunReason,
-    install_credential_file,
+    PrivateCredentialHome,
+    PrivateHomeNotCreatedError,
     resolve_cli_binary,
     run_cli_bounded,
 )
+from agent_providers.sandbox.paths import CODEX_HOME_DIRECTORY_NAME
 from agent_providers.spawn import ChildProcess, closed_environment
 
 CODEX_CLI_LINE_CHANNEL_CAPACITY: Final = 64
@@ -127,15 +129,25 @@ def run_reserved_codex_cli(
     return outcome
 
 
-def install_codex_turn_login(codex_home: Path) -> None:
-    """Install the operator's Codex login, refresh token blanked, in one empty private home."""
-    install_credential_file(
+def create_codex_turn_home(prefix: str) -> PrivateCredentialHome:
+    """Make one private Codex turn home holding ``work`` and the blanked login copy."""
+    home = PrivateCredentialHome(
         current_config().codex_cli_auth_file,
-        codex_home / "auth.json",
-        mode=CODEX_TURN_LOGIN_MODE,
-        credential_copy=blanked_copy,
+        Path(CODEX_HOME_DIRECTORY_NAME) / "auth.json",
+        prefix=prefix,
         missing_credential_is_error=True,
+        credential_copy=blanked_copy,
+        mode=CODEX_TURN_LOGIN_MODE,
     )
+    try:
+        (home.path / "work").mkdir(mode=0o700)
+        return home
+    except OSError:
+        home.close()
+        raise_without_chain(PrivateHomeNotCreatedError("could not create a private CLI home"))
+    except BaseException:  # NOSONAR(S5754) closes the home, re-raises
+        home.close()
+        raise
 
 
 def parse_codex_line(line: bytes) -> tuple[str, dict[str, object]]:

@@ -133,12 +133,13 @@ body rules be fixed before the build.
   | The workload token is missing, or webauth refuses it while parsing it, before it looks up a key (among others: longer than 8192 characters, not a compact JWS whose header and claims set are strict JSON objects, a number that overflows to infinity, a header or claims set nested deeper than 8 levels, a forbidden header member (`crit`, `jku`, `jwk`, `x5u`, `x5c`, `b64`), an `alg` other than RS256, or a missing or invalid `kid`) | 401 `unauthorized`, one body, `WWW-Authenticate: Bearer` |
   | The service holds no current key set and cannot fetch one, or a token's `kid` is missing from a current key set and the refresh fails; this is decided when a token is verified (in practice the workload token, verified first) | 503 `unavailable`, `Retry-After: 30` |
   | The workload token fails its signature, issuer, `aud` ∌ `agent-service` or time check, or has an empty `sub`; these are checked only once a current key set is held | 401 `unauthorized`, one body, `WWW-Authenticate: Bearer` |
-  | The user token is missing or not `Authorization: Bearer <token>`, or fails verification as the workload token above; or it has no `sub` or a malformed group claim | 401 `unauthorized`, one body, `WWW-Authenticate: Bearer` |
+  | The user token is missing or not `Authorization: Bearer <token>`, or fails verification as the workload token above; or it has no `sub`, a `sub` that is not valid Unicode text (A1a4 O7), or a malformed group claim | 401 `unauthorized`, one body, `WWW-Authenticate: Bearer` |
   | The workload binding above fails (among others: an absent workload `sub`, an absent or empty `azp` or `client_id`); the user's `azp` differs from the workload's; the user's `sub` equals the workload's | 403 `forbidden` |
   | The body, at most 256 KiB enforced before buffering, parsed as strict JSON (no `NaN`, no member twice): its `v` is absent, not an integer, or not 1 | 400 `unsupported_version` |
   | The body is not strict JSON or not UTF-8 (UTF-16 and UTF-32, with or without a BOM, are refused; a UTF-8 BOM is accepted), too large, or not exactly a `RunRequest` | 422 `invalid_request` |
   | The purpose is not in the app's list | 403 `forbidden` |
   | H5 routing answers `not_enabled`; no run starts | 403 `not_enabled` |
+  | The run's capability would exceed 8,192 characters (A1a4 item 12): a subject wider than the preflight's reserve, or a wall clock past 2286 | 422 `capability_too_large` |
   | Admitted | 200 `text/event-stream` |
 
   Every rejection is a `RunRejection` with `Cache-Control: no-store`, and no
@@ -233,9 +234,12 @@ a request that names its own tools or MCP endpoint could reach anything.
   MCP URL, MCP token, route, provider, model or user id; the one exception is the
   job ticket of H12.
 - The capability is per run, not per call. When the service admits a run it
-  mints one short-lived capability bound to the audience (the app's MCP origin),
-  the app, the principal, the run id, the purpose, the tool allowlist, and an
-  expiry equal to the run's maximum duration (`[runs] max_duration_s`). The CLI gets it in its per-run MCP
+  mints one RS256 capability (token type `agent-capability+jwt`, at most 8,192
+  characters; a larger one refuses the admission as `capability_too_large`) bound
+  to the audience (the app's MCP origin), the app, the principal, the run id, the
+  purpose and the tool allowlist. It expires at ⌊admission + `[runs]
+  max_duration_s`⌋, whether or not the run ended earlier, and nothing revokes it
+  (A1a4 O4). The CLI gets it in its per-run MCP
   config header; the API-route tool loop sends the same one. The app's MCP server
   checks it on every request, opens a fresh DB session and re-checks ownership.
 - Hardening: redirects are denied, egress is limited to the registered origins,
@@ -244,7 +248,8 @@ a request that names its own tools or MCP endpoint could reach anything.
   internal-only as defence in depth. mTLS/SPIFFE is out of scope.
 
 **Consequence.** Tool reach is decided once, server-side, per app; a leaked
-capability is useful only for one run, one app and one allowlist.
+capability is useful only for one app, one user and one allowlist, until its run's
+maximum duration has passed since admission, even after the run ended.
 
 ### A1a4 ruling (operator and head, 16.10.2026)
 
@@ -344,8 +349,8 @@ compromise.
    keys at run time; no private key is committed.
 6. **Generation and rotation** are those of O1 and O2 above: one key at a time, a
    restart is required, and a restart does not revoke issued capabilities.
-7. **Interim.** Until A1a4-2b lands, the service mints no capability for a run;
-   `[signing]` is optional.
+7. **`[signing]` is optional.** An app with an MCP origin needs it (item 8), and each
+   admitted run of such an app carries a capability (item 12).
 
 **A1a4-2a rulings (operator and head, 16.10.2026).**
 
@@ -364,7 +369,8 @@ compromise.
 - **O5 Which tools.** Membership in an app's `tools` table grants capability
   permission, absence denies it, and an empty table grants none. The `tools` claim is
   the table's keys, sorted.
-- **O6 Capability size.** `identity.py` gains no subject policy. A capability is at
+- **O6 Capability size.** `identity.py` gains no subject policy beyond O7's
+  valid-Unicode rule. A capability is at
   most `MAX_CAPABILITY_CHARACTERS = 8192` characters, webauth's token limit. The
   configuration preflight measures every purpose of every app with an origin against
   a reserve; admission checks the actual compact token (A1a4-2b) and answers an
@@ -421,6 +427,64 @@ compromise.
 15a. **Documents.** This ruling, H3's registry bullet, the A0b codes table and the
     README rows `agent_client.capability`, `agent_service.config` and
     `agent_service.capability`.
+
+**A1a4-2b rulings (operator and head, 16. and 17.10.2026).**
+
+- **O7 A verified subject the capability cannot carry (operator, ruled (a),
+  16.10.2026).** Identity refuses a user token whose `sub` is not valid Unicode
+  text as `unauthorized` (401), on `POST` and `GET`, for every app. It applies
+  `UnicodeText`, the one decider of valid wire text, through a module-level
+  `TypeAdapter` in `identity.py`, right after the missing-`sub` check and before
+  every 403. Such a token is an unusable credential, as an empty `sub` already is;
+  RFC 7493 (I-JSON) §2.1 forbids such strings and RFC 8259 §8.2 calls their handling
+  unpredictable; and every later token that names the user needs the same answer
+  from one owner. No valid-Unicode subject is refused: length and characters stay
+  free (O6). The alternative, a `forbidden` answer only for an app with an origin,
+  was rejected. Counterexamples: a 500 with a traceback; a subject repaired,
+  replaced or escaped into another string; `capability_too_large` for it.
+- **D11 hand-off.** `AdmittedRun.capability: Capability | None`, with no default, so
+  every construction names it. The alternative, `Runner.run(admitted, capability)`,
+  would change every runner.
+- **D12 wall clock.** One injected aware-UTC clock drives capability minting and the
+  default run-record store: `create_app(..., wall_clock=utc_now)` builds
+  `RunRecords(wall_clock)` and mints at `wall_clock().timestamp()`. A caller that
+  injects a store supplies the same clock to both when it needs shared time. Token
+  verification keeps webauth's own clock.
+- **D16 the failure log line.** `run_liveness.log_failure` stays the one writer of
+  failure lines, by class name and positions, never the message, notes, chained
+  exceptions or `exc_info`. Admission adds no category table and no log helper. A
+  runner that names an exception class or a function after run data is outside the
+  guarantee; that runner's slice owns it (A1b, A2b, under H7).
+
+**A1a4-2b items.**
+
+12. **When a capability exists.** Identity, body, purpose and routing refusals
+    happen before capability construction: no runner is reached and nothing is
+    signed. For each admitted run of an app whose `capability_scope` is not `None`,
+    on either route, the service draws the run id, reads the wall clock once, builds
+    the claims with `capability_claims`, signs them with `signed_capability` and
+    builds `AdmittedRun(..., capability=...)`. An app without an origin gets
+    `capability = None`, and nothing is signed. When `signed_capability` raises
+    `CapabilityTooLarge`, the answer is 422 `capability_too_large`: no runner is
+    called, no stream starts and no record begins. One WARNING record names the app,
+    the measured length and the limit, and neither the token nor the subject. With no
+    runner installed, the capability is minted into `AdmittedRun` and dropped with it.
+13. **The runner receives it.** `AdmittedRun.capability` is the capability itself, not
+    a lookup from configuration. Its token verifies under webauth with `aud` equal to
+    the app's origin and fails for another origin; `repr` of the admitted run shows
+    no token.
+14. **Never on the wire, in an answer, or in a log.** The token never appears, whole
+    or as its signature segment, in a frame, a response header, a rejection body or a
+    service log record (its message and its formatted output, uvicorn's included). The
+    one new log line is item 12's WARNING, written from the app, the measured length
+    and the limit, never `str` of the refusal and never `exc_info`. A runner's failure
+    and its close's failure reach the log only through `log_failure`. Deferred to A1b
+    and A2b under H7: content a runner yields; a runner whose `run` raises before it
+    returns its generator (`runners.py` states the contract); and a recorder failure
+    whose chain carries a yielded event.
+15b. **Documents.** This ruling, H3's capability bullet and Consequence, the A1a1
+    order table and the README rows `agent_service.app`, `agent_service.signing`,
+    `agent_service.capability` and `agent_service.runners`.
 
 ## H4 MCP is optional per app
 

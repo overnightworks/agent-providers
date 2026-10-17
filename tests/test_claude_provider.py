@@ -3468,7 +3468,7 @@ def test_probe_reaps_a_process_whose_popen_call_returns_after_the_deadline(
     reaped = threading.Event()
     reaped_pids: list[int] = []
     probe_threads: list[threading.Thread] = []
-    real_thread = threading.Thread
+    real_thread = provider.process.ClaimedStartThread
     _build, key = provider._tool_surface_key(provider._NO_TOOLS_EXPECTED)
 
     def fake_popen(*_cmd, **_kw):
@@ -3489,7 +3489,7 @@ def test_probe_reaps_a_process_whose_popen_call_returns_after_the_deadline(
     monkeypatch.setattr(provider.process, "_reap_process_group", fake_reap)
     monkeypatch.setattr(provider, "CLAUDE_CLI_NO_TOOL_SURFACE_TIMEOUT_SECONDS", 0.02)
     monkeypatch.setattr(provider, "CLAUDE_CLI_MAX_CONCURRENT_PROCESSES", 1)
-    monkeypatch.setattr(provider.process.threading, "Thread", tracked_thread)
+    monkeypatch.setattr(provider.process, "ClaimedStartThread", tracked_thread)
 
     started = time.monotonic()
     with pytest.raises(UnavailableError, match="did not start"):

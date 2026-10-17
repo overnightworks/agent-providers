@@ -54,6 +54,7 @@ from agent_providers.errors import SafeRouteReasonCode, raise_without_chain
 from agent_providers.images import ImagePolicy
 from agent_providers.process import (
     AgentCliUnavailableError,
+    ClaimedStartThread,
     CliLineChannel,
     CliRunOutcome,
     CliRunReason,
@@ -290,7 +291,7 @@ def _start_codex_image_runner(
     deadline: float,
     channel: CliLineChannel,
 ) -> None:
-    runner = threading.Thread(
+    runner = ClaimedStartThread(
         target=run_reserved_codex_cli,
         args=(reservation, home_reservation, child),
         kwargs={
@@ -306,6 +307,8 @@ def _start_codex_image_runner(
         start_failure = exc
     else:
         return
+    if not runner.take_start_claim():
+        raise start_failure
     release_turn_reservations(
         home_reservation, lambda: get_codex_process_pool().abandon_unspawned(reservation)
     )

@@ -1,0 +1,7 @@
+claim_id = "d5dc7040f07547efa66fbca52da1e604"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "ca356a58f1bce7d9a938a0372a0d1069918b3c85"
+branch = "claude/issue-183-a1b-3p1b0a-zombie-anker"
+scope = ["tests/anchored_support.py", "tests/conftest.py", "tests/test_zombie_anchor.py"]
+opened_commit = "486e8ae0c9a241f89bf97b49936bb8a3e54496ba"

@@ -1,8 +1,0 @@
-claim_id = "ddcf94427b9e475c9c518fe440f889fc"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "e2b3ed3b2d6b80e273469c51bd95c94c2a53f0c1"
-branch = "claude/issue-201-a1b-3p1b2a-test-umbau"
-scope = ["tests/anchored_kernel.py", "tests/anchored_leaders.py", "tests/anchored_support.py", "tests/conftest.py", "tests/test_anchored_child.py", "tests/test_anchored_support.py", "tests/test_spawn_owner.py"]
-opened_commit = "0dd82381581fc69dbdf09afc8a1a67fbd884eb9a"
-whole_reason = "A test-only carry-over whose parts depend on each other: the harness move, the watcher pair and the stop wait are all consumed by the same two cells, and 3p1b-2b needs all of them; splitting would leave a module importing a half-moved harness."

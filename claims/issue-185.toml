@@ -1,7 +1,0 @@
-claim_id = "7a39b22ac3994a1088a6eeef974334d0"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "ed59c0c640b8ed46f08d8edac00e09c375116a48"
-branch = "claude/issue-185-a1b-3p1b0-aufraeum-besitzer"
-scope = ["tests/anchored_support.py", "tests/conftest.py", "tests/test_anchored_support.py"]
-opened_commit = "e4b100ac4c0fa13beaffd079a778f9ec63070f62"

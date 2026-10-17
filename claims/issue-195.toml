@@ -1,0 +1,8 @@
+claim_id = "e66822e4da3c4dc0b5bba3e4d4ce1d5d"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "59690ecf6072f72262229a0139ea83ef6e5350c9"
+branch = "claude/issue-195-modellvorgabe-3-default-label"
+scope = ["README.md", "src/agent_providers/catalog.py", "src/agent_providers/claude/provider.py", "src/agent_providers/constants.py", "tests/test_catalog.py", "tests/test_claude_provider.py"]
+opened_commit = "ce37dae5df795e907e1b9499f921311d7c296ea0"
+whole_reason = "One rename and one new snapshot field along a single owner chain (claude/provider.py, then catalog.py, plus the marker in constants.py), with its two test modules and the README rows; splitting it would leave a half-renamed function or a field nothing sets."

@@ -24,6 +24,7 @@ from agent_client.wire import UnicodeText
 CAPABILITY_ISSUER: Final = "agent-service"
 CAPABILITY_TOKEN_TYPE: Final = "agent-capability+jwt"
 MAX_CAPABILITY_CHARACTERS: Final = 8192
+MCP_ENDPOINT_PATH: Final = "/mcp"
 
 _HTTPS_SCHEME: Final = "https://"
 _DEFAULT_HTTPS_PORT: Final = 443

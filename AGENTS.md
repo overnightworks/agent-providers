@@ -68,6 +68,8 @@ uv run lint-imports
 uv build --all-packages
 ```
 
+CI's "Host vocabulary" step greps `packages tests docs` for host words; `.github/host-vocabulary-allowed.txt` is the one owner of the allowed hits.
+
 The suite is fast and needs no live provider: the CLI processes are faked and
 the tool-surface probe is patched. Run it whole. `[image]` is required at
 collection because one test imports Pillow at module load.

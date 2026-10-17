@@ -1,4 +1,4 @@
-"""Grok subscription CLI transport for the shared co-writer tool loop."""
+"""Grok subscription CLI transport for the shared tool loop."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 from provider_test_support import (
     A_RUNNER_FAILURE_CANARY,
+    A_TOOL_FAILURE_MESSAGE,
     CALLER_CONTEXTS,
     DEEPLY_NESTED_JSON,
     GROK_SESSION_ID,
@@ -54,11 +55,9 @@ from agent_providers.tool_loop import (
 )
 from agent_providers.tools import ToolCatalog, ToolProtocolMarkup
 
-A_TOOL_FAILURE_MESSAGE = "Co-Writer tool failed."
-
 
 def _transport() -> grok_cli_adapter.GrokCliToolTransport:
-    """Build the transport under test with songmaker's own tool catalog."""
+    """Build the transport under test with a host's own tool catalog."""
     return grok_cli_adapter.GrokCliToolTransport(
         model="grok-test", catalog=SAMPLE_TOOL_CATALOG,
     )
@@ -402,7 +401,7 @@ def test_recorded_grok_tool_stream_executes_then_resumes_without_streaming_proto
 
     def executor(name: str, arguments: dict[str, object]) -> ToolOutcome:
         executed.append((name, arguments))
-        return ToolOutcome('{"note_id":"fixture-note-527","bpm":68}', False)
+        return ToolOutcome('{"note_id":"fixture-note-527","word_count":68}', False)
 
     events = asyncio.run(_collect_tool_events(_tool_transport_events(transport, executor)))
 
@@ -419,11 +418,11 @@ def test_grok_tool_stream_executes_a_write_after_prose_and_exposes_its_result_ne
     monkeypatch,
 ) -> None:
     calls = []
-    state = {"bpm": 68}
+    state = {"word_count": 68}
     tool_call = (
         "I'll change the fictional note now.\n"
         "<notes_tool_call>\n"
-        '{"name":"update_note_tags","arguments":{"note_id":"fixture-note-527","bpm":69}}\n'
+        '{"name":"update_note_tags","arguments":{"note_id":"fixture-note-527","word_count":69}}\n'
         "</notes_tool_call>"
     )
 
@@ -432,7 +431,7 @@ def test_grok_tool_stream_executes_a_write_after_prose_and_exposes_its_result_ne
         lines = (
             grok_tool_round_lines(tool_call)
             if len(calls) == 1
-            else grok_tool_round_lines(f"The fictional note now has {state['bpm']} words.")
+            else grok_tool_round_lines(f"The fictional note now has {state['word_count']} words.")
         )
         for line in lines:
             assert kwargs["stdout_line_channel"]._send(line)
@@ -442,8 +441,8 @@ def test_grok_tool_stream_executes_a_write_after_prose_and_exposes_its_result_ne
 
     def executor(name: str, arguments: dict[str, object]) -> ToolOutcome:
         assert name == "update_note_tags"
-        state["bpm"] = arguments["bpm"]
-        return ToolOutcome('{"note_id":"fixture-note-527","bpm":69}', False)
+        state["word_count"] = arguments["word_count"]
+        return ToolOutcome('{"note_id":"fixture-note-527","word_count":69}', False)
 
     monkeypatch.setattr(grok_cli_adapter, "run_cli_bounded", run_cli_bounded)
     events = asyncio.run(_collect_tool_events(_tool_transport_events(
@@ -453,7 +452,7 @@ def test_grok_tool_stream_executes_a_write_after_prose_and_exposes_its_result_ne
     streamed_text = "".join(
         event.text for event in events if isinstance(event, AssistantTextEvent)
     )
-    assert state == {"bpm": 69}
+    assert state == {"word_count": 69}
     assert "<notes_tool_call>" not in streamed_text
     assert events[-1] == FinalEvent(
         text="I'll change the fictional note now.\nThe fictional note now has 69 words.",

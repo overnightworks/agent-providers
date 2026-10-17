@@ -324,7 +324,7 @@ def _parse_streamed_call(catalog: ToolCatalog, buffer: str) -> TextToolCall:
     """Parse the first complete call in a streamed buffer.
 
     A streaming model may keep talking after the closing tag (a closing
-    remark such as "Done -- want another verse?"). That trailing text is
+    remark such as "Done -- want another paragraph?"). That trailing text is
     ordinary prose: it is discarded here, not forwarded, because by the
     time ``finish()`` runs the stream is already over and there is no live
     text channel left to deliver it on.

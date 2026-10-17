@@ -68,13 +68,13 @@ from agent_providers.grok import transport as grok_transport
 from agent_providers.process import CliRun, CliRunOutcome, CliRunReason
 from agent_providers.tool_loop import ToolOutcome, stream_tool_loop
 
-# The exact string a co-writer command line must carry, written out rather
+# The exact string a tool turn command line must carry, written out rather
 # than derived from the code under test.
 SAMPLE_ALLOWED_TOOLS = "mcp__notes__*"
 
 
 def _configured_mcp_server():
-    """The MCP server songmaker installs for the provider layer."""
+    """The MCP server a host installs for the provider layer."""
     return current_turn_config().mcp_server
 
 
@@ -434,12 +434,12 @@ def test_call_api_no_anthropic_package() -> None:
             _call_api("hello", "sk-test", None, "claude-sonnet-4-20250514", 1024)
 
 
-def test_judge_api_uses_its_remaining_budget_without_retries(
+def test_one_shot_api_uses_its_remaining_budget_without_retries(
     incrementing_monotonic_clock,
 ) -> None:
     mock_client = MagicMock()
     mock_client.with_options.return_value = mock_client
-    mock_content = MagicMock(text="judge verdict")
+    mock_content = MagicMock(text="completion text")
     mock_client.messages.create.return_value = MagicMock(content=[mock_content])
     mock_anthropic = MagicMock(APITimeoutError=Exception)
     mock_anthropic.Anthropic.return_value = mock_client
@@ -453,14 +453,14 @@ def test_judge_api_uses_its_remaining_budget_without_retries(
             timeout_seconds=10,
         )
 
-    assert result.text == "judge verdict"
+    assert result.text == "completion text"
     assert mock_client.with_options.call_args.kwargs == {
         "timeout": 9.5,
         "max_retries": 0,
     }
 
 
-def test_judge_api_timeout_uses_the_shared_timeout_reason() -> None:
+def test_one_shot_api_timeout_uses_the_shared_timeout_reason() -> None:
     class APITimeoutError(Exception):
         pass
 
@@ -480,7 +480,7 @@ def test_judge_api_timeout_uses_the_shared_timeout_reason() -> None:
     assert str(exc.value) == "deadline_exceeded"
 
 
-def test_nonjudge_api_timeout_keeps_the_provider_exception() -> None:
+def test_non_one_shot_api_timeout_keeps_the_provider_exception() -> None:
     class APITimeoutError(Exception):
         pass
 
@@ -494,11 +494,11 @@ def test_nonjudge_api_timeout_keeps_the_provider_exception() -> None:
             _call_api("hello", "sk-test", None, "claude-sonnet-4-6", 1024)
 
 
-def test_judge_cli_gives_the_provider_request_the_remaining_budget(
+def test_one_shot_cli_gives_the_provider_request_the_remaining_budget(
     incrementing_monotonic_clock,
 ) -> None:
     gate = MagicMock(return_value=Path("/usr/bin/claude"))
-    completed = MagicMock(returncode=0, stdout='{"result": "judge verdict"}', stderr="")
+    completed = MagicMock(returncode=0, stdout='{"result": "completion text"}', stderr="")
 
     incrementing_monotonic_clock.step = 2.5
     with (
@@ -511,7 +511,7 @@ def test_judge_cli_gives_the_provider_request_the_remaining_budget(
             timeout_seconds=10,
         )
 
-    assert result.text == "judge verdict"
+    assert result.text == "completion text"
     gate.assert_called_once_with()
     assert run.call_args.kwargs["timeout"] == 7.5
 
@@ -521,8 +521,8 @@ def test_judge_cli_gives_the_provider_request_the_remaining_budget(
 # Both are gated by verify_no_builtin_cli_tools() / averify_no_builtin_
 # cli_tools() before they build a command or spawn anything (Finding 1 of
 # the #351 review — this is the one funnel every non-MCP CLI call shares,
-# so chat_api.py's legacy endpoint and the lyrical-coherence judge inherit
-# the gate without either having to call it themselves). The tests below
+# so every host one-shot caller inherits
+# the gate without having to call it themselves). The tests below
 # that exercise _call_cli's/_acall_cli's OWN behavior (command shape,
 # secret scrubbing, error handling) bypass the gate via the fixture below;
 # the gate's own wiring and behavior get their own tests further down.
@@ -729,7 +729,7 @@ def test_acall_cli_surfaces_a_missing_or_failed_binary(
 
 
 @pytest.mark.parametrize("failure", ["missing", "nonzero"])
-def test_cowriter_cli_surfaces_a_missing_or_failed_binary(
+def test_tool_turn_cli_surfaces_a_missing_or_failed_binary(
     monkeypatch: pytest.MonkeyPatch,
     failure: str,
 ) -> None:
@@ -830,7 +830,7 @@ def test_acall_cli_refuses_a_cli_the_gate_rejects(_no_tool_gate_open, monkeypatc
     create.assert_not_called()
 
 
-def test_healthy_cowriter_turn_holds_its_process_pool_reservation_until_it_exits(
+def test_healthy_mcp_turn_holds_its_process_pool_reservation_until_it_exits(
     monkeypatch,
 ) -> None:
     started = asyncio.Event()
@@ -867,7 +867,7 @@ def test_healthy_cowriter_turn_holds_its_process_pool_reservation_until_it_exits
     asyncio.run(run_turn())
 
 
-def test_cowriter_refuses_a_healthy_turn_when_the_shared_process_pool_is_full(
+def test_mcp_turn_refuses_a_healthy_turn_when_the_shared_process_pool_is_full(
     monkeypatch,
 ) -> None:
     process_cap = 2
@@ -1478,7 +1478,7 @@ def _flag_value(cmd: list[str], flag: str) -> str:
     return cmd[cmd.index(flag) + 1]
 
 
-def test_cowriter_command_offers_no_builtin_tool() -> None:
+def test_mcp_turn_command_offers_no_builtin_tool() -> None:
     cmd = _mcp_cli_arguments("opus", "/tmp/mcp.json", _configured_mcp_server())
 
     assert _flag_value(cmd, "--tools") == ""
@@ -1487,14 +1487,14 @@ def test_cowriter_command_offers_no_builtin_tool() -> None:
     assert "bypassPermissions" not in cmd
 
 
-def test_cowriter_command_ignores_the_mounted_settings_file() -> None:
+def test_mcp_turn_command_ignores_the_mounted_settings_file() -> None:
     cmd = _mcp_cli_arguments("opus", "/tmp/mcp.json", _configured_mcp_server())
 
     assert _flag_value(cmd, "--setting-sources") == ""
     assert "--strict-mcp-config" in cmd
 
 
-def test_cowriter_command_disables_slash_commands() -> None:
+def test_mcp_turn_command_disables_slash_commands() -> None:
     cmd = _mcp_cli_arguments("opus", "/tmp/mcp.json", _configured_mcp_server())
 
     assert "--disable-slash-commands" in cmd
@@ -1551,8 +1551,8 @@ def test_the_mcp_config_file_is_readable_only_by_its_owner() -> None:
 def test_a_deployment_without_an_mcp_server_runs_the_tool_free_command_line(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``mcp_server=None`` is a valid configuration: the co-writer turn then
-    runs the same command line the judge does — no ``--mcp-config``, no
+    """``mcp_server=None`` is a valid configuration: the tool turn then
+    runs the same command line the one-shot call does — no ``--mcp-config``, no
     ``--allowedTools`` — and writes no config file at all."""
     override_turn_runtime(mcp_server=None)
     monkeypatch.setattr(
@@ -1615,7 +1615,7 @@ def test_a_deployment_without_an_mcp_server_streams_the_tool_free_command_line(
 #
 # Two gates share one probe mechanism (see the block comment above
 # ``verify_cli_tool_surface`` in provider.py): the MCP-attached one used by
-# the co-writer, expecting exactly the configured server's tools, and the
+# the tool turn, expecting exactly the configured server's tools, and the
 # no-builtin-tools one used by ``_call_cli``/``_acall_cli``, expecting none
 # at all. Both are exercised below.
 
@@ -1628,7 +1628,7 @@ def _init_line(
 ) -> bytes:
     """A ``system``/``init`` line. ``mcp_connected`` only matters to the
     MCP-attached probe (the no-MCP probe never reads ``mcp_servers`` at
-    all) — defaults to a connected songmaker server so every existing
+    all) — defaults to a connected host server so every existing
     MCP-attached test keeps proving what it always proved."""
     return (
         json.dumps(
@@ -1701,7 +1701,7 @@ def test_tool_surface_rejects_a_cli_offering_fewer_than_the_configured_tools(
     claude_binary,
     monkeypatch,
 ) -> None:
-    """A drift check that only flags additions would miss the songmaker
+    """A drift check that only flags additions would miss the host
     server silently losing a registration too — #351 Finding 2 wants the
     reported set compared exactly, not just checked for extras."""
     _answer_with(monkeypatch, _init_line(_ALL_SAMPLE_TOOLS[:-1]))
@@ -1728,7 +1728,7 @@ def test_tool_surface_rejects_a_cli_that_still_advertises_slash_commands(
     assert "/compact" in str(exc.value)
 
 
-def test_tool_surface_is_probed_with_the_cowriter_restrictions(
+def test_tool_surface_is_probed_with_the_mcp_turn_restrictions(
     claude_binary,
     monkeypatch,
 ) -> None:
@@ -1793,7 +1793,7 @@ def _spawned_async_cli(commands: list[tuple[str, ...]], stdout: bytes):
     return fake_exec
 
 
-def test_the_cowriter_turn_runs_the_same_command_its_probe_verified(
+def test_the_mcp_turn_runs_the_same_command_its_probe_verified(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -1813,11 +1813,11 @@ def test_the_cowriter_turn_runs_the_same_command_its_probe_verified(
     )
 
 
-def test_the_streamed_cowriter_turn_runs_the_same_command_its_probe_verified(
+def test_the_streamed_mcp_turn_runs_the_same_command_its_probe_verified(
     tmp_path,
     monkeypatch,
 ) -> None:
-    """The streaming twin of the co-writer turn carries the same assurance.
+    """The streaming twin of the tool turn carries the same assurance.
 
     It builds its own command line from the gate's answer, so a future
     caller that re-resolved the mounted binary would ship a turn nobody
@@ -1858,7 +1858,7 @@ def test_the_tool_free_turn_runs_the_same_command_its_probe_verified(
     tmp_path,
     monkeypatch,
 ) -> None:
-    """``_call_cli`` — the judge's and the legacy chat endpoint's shared funnel.
+    """``_call_cli`` — the one-shot calls' shared funnel.
 
     Its gate holds the CLI to no tool at all, so probe and turn must agree on
     the same build and the same isolation flags, and neither may attach an
@@ -1904,7 +1904,7 @@ def test_tool_surface_gate_expects_no_tool_when_no_mcp_server_is_configured(
     claude_binary,
     monkeypatch,
 ) -> None:
-    """Without a configured MCP server the co-writer runs the tool-free
+    """Without a configured MCP server the tool turn runs the tool-free
     command line, so its gate must hold the CLI to the tool-free
     expectation — and probe without ``--mcp-config``, which the
     scoring-worker container could not answer anyway."""
@@ -2461,7 +2461,7 @@ def test_claude_cli_tool_surface_health_transitions_from_unverified_to_ok(
     monkeypatch,
 ) -> None:
     """/health must not be a frozen boot snapshot — a later successful
-    co-writer probe (e.g. the CLI was briefly unreachable at boot but is
+    tool turn probe (e.g. the CLI was briefly unreachable at boot but is
     fine by the time someone actually opens a chat) must clear an
     earlier "unverified"."""
     commands = _answer_with(monkeypatch, b"not json\n", _init_line(_ALL_SAMPLE_TOOLS))
@@ -3045,7 +3045,7 @@ def test_tool_surface_probe_deadline_includes_the_default_executor_queue(
     asyncio.run(_run())
 
 
-def test_delayed_probe_start_is_a_probe_failure_not_a_judge_timeout(
+def test_delayed_probe_start_is_a_probe_failure_not_a_one_shot_timeout(
     claude_binary,
     monkeypatch,
 ) -> None:
@@ -3319,7 +3319,7 @@ def test_tool_surface_preflight_uses_its_configured_bound(
     assert observed_deadlines == [105.0]
 
 
-def test_judge_deadline_keeps_and_caches_a_zombie_probe_failure(
+def test_one_shot_deadline_keeps_and_caches_a_zombie_probe_failure(
     claude_binary,
     incrementing_monotonic_clock,
 ) -> None:
@@ -3608,7 +3608,7 @@ def test_a_probe_whose_cleanup_overruns_fails_at_the_settle_instant_not_the_asyn
 # ── #351 round 6, Finding 8: the non-streaming MCP entry point ───────
 
 
-def test_cowriter_non_stream_turn_refuses_a_cli_with_an_unverified_tool_surface(
+def test_mcp_turn_non_stream_turn_refuses_a_cli_with_an_unverified_tool_surface(
     monkeypatch,
 ) -> None:
     """The streaming entry point already had this proof; the
@@ -3624,7 +3624,7 @@ def test_cowriter_non_stream_turn_refuses_a_cli_with_an_unverified_tool_surface(
 
     async def fake_exec(*cmd, **_kw):
         spawned.append(cmd)
-        raise AssertionError("the co-writer must not spawn an unverified CLI")
+        raise AssertionError("the tool turn must not spawn an unverified CLI")
 
     monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
 
@@ -3634,7 +3634,7 @@ def test_cowriter_non_stream_turn_refuses_a_cli_with_an_unverified_tool_surface(
     assert spawned == []
 
 
-def test_cowriter_turn_refuses_a_cli_with_an_unverified_tool_surface(
+def test_mcp_turn_refuses_a_cli_with_an_unverified_tool_surface(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
@@ -3646,7 +3646,7 @@ def test_cowriter_turn_refuses_a_cli_with_an_unverified_tool_surface(
 
     async def fake_exec(*cmd, **_kw):
         spawned.append(cmd)
-        raise AssertionError("the co-writer must not spawn an unverified CLI")
+        raise AssertionError("the tool turn must not spawn an unverified CLI")
 
     monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
 
@@ -4044,7 +4044,7 @@ def test_no_builtin_gate_and_mcp_gate_cache_independently(
     claude_binary,
     monkeypatch,
 ) -> None:
-    """Same binary build, different expectation — a co-writer turn passing
+    """Same binary build, different expectation — a tool turn passing
     verify_cli_tool_surface() must not let _call_cli skip its own probe,
     and vice versa; they check different command shapes."""
     commands = _answer_with(

@@ -154,14 +154,14 @@ def test_nonleading_or_fenced_call_syntax_is_ordinary_final_text(response):
     assert parse_text_tool_response(SAMPLE_TOOL_CATALOG, response) == FinalText(response)
 
 
-def test_stream_parser_executes_a_lyrics_call_followed_by_a_trailing_remark():
+def test_stream_parser_executes_a_text_call_followed_by_a_trailing_remark():
     parser = TextToolStreamParser(SAMPLE_TOOL_CATALOG)
     text = (
-        "Verse one, line one\n"
-        "Verse one, line two\n"
+        "Paragraph one, line one\n"
+        "Paragraph one, line two\n"
         "\n"
-        "Chorus, the hook line\n"
-        "Chorus, again"
+        "Paragraph two, line one\n"
+        "Paragraph two, line two"
     )
     payload = json.dumps(
         {"name": "update_note_text", "arguments": {"note_id": "note-1", "text": text}},
@@ -173,7 +173,7 @@ def test_stream_parser_executes_a_lyrics_call_followed_by_a_trailing_remark():
         payload[15:40],
         payload[40:],
         "\n</notes_tool_call>",
-        "\nDone — tell me if you want another verse.",
+        "\nDone — tell me if you want another paragraph.",
     ]
     for chunk in chunks:
         parser.feed(chunk)
@@ -236,7 +236,7 @@ def test_stream_parser_takes_the_first_complete_call_when_a_later_close_tag_also
     assert parser.finish() == TextToolCall("list_notes", {})
 
 
-def test_stream_parser_parses_a_lyrics_call_that_mentions_the_close_tag_text():
+def test_stream_parser_parses_a_text_call_that_mentions_the_close_tag_text():
     parser = TextToolStreamParser(SAMPLE_TOOL_CATALOG)
     text = "use </notes_tool_call> to call a tool"
     payload = json.dumps(
@@ -250,12 +250,12 @@ def test_stream_parser_parses_a_lyrics_call_that_mentions_the_close_tag_text():
     )
 
 
-def test_stream_parser_parses_a_lyrics_mention_of_the_close_tag_with_a_same_line_real_close():
+def test_stream_parser_parses_a_text_mention_of_the_close_tag_with_a_same_line_real_close():
     """The production combination: an in-string close tag AND a same-line real close.
 
     Neither the in-string mention nor the newline-free close is enough on
     its own to reproduce the original bug's shape; a model that both quotes
-    the tag in lyrics and closes the call on the same line as the final
+    the tag in text and closes the call on the same line as the final
     brace needs the JSON decoder to walk past the in-string one structurally
     and still recognize the real one right after the value ends.
     """
@@ -288,12 +288,12 @@ def test_stream_parser_forwards_ordinary_text_and_keeps_only_whitespace_until_fi
 A_CATALOG_WITH_A_NUMBER = ToolCatalog(
     tools=(
         ToolDeclaration(
-            name="set_tempo",
-            description="Set the tempo.",
+            name="set_font_size",
+            description="Set the font size.",
             parameters={
                 "type": "object",
-                "properties": {"bpm": {"type": "number"}},
-                "required": ["bpm"],
+                "properties": {"size": {"type": "number"}},
+                "required": ["size"],
                 "additionalProperties": False,
             },
         ),
@@ -303,10 +303,10 @@ A_CATALOG_WITH_A_NUMBER = ToolCatalog(
 
 
 def test_a_finite_number_argument_is_accepted():
-    response = _call('{"name":"set_tempo","arguments":{"bpm":96.5}}')
+    response = _call('{"name":"set_font_size","arguments":{"size":96.5}}')
 
     assert parse_text_tool_response(A_CATALOG_WITH_A_NUMBER, response) == TextToolCall(
-        "set_tempo", {"bpm": 96.5}
+        "set_font_size", {"size": 96.5}
     )
 
 
@@ -400,10 +400,10 @@ def test_a_host_brands_the_prompt_and_the_markers_it_is_parsed_with():
 
 
 def test_a_branded_catalog_reads_another_hosts_markers_as_ordinary_text():
-    songmaker_call = _call('{"name":"open_slide","arguments":{"slide_id":"slide-1"}}')
+    another_hosts_call = _call('{"name":"open_slide","arguments":{"slide_id":"slide-1"}}')
 
-    assert parse_text_tool_response(A_BRANDED_CATALOG, songmaker_call) == FinalText(
-        songmaker_call,
+    assert parse_text_tool_response(A_BRANDED_CATALOG, another_hosts_call) == FinalText(
+        another_hosts_call,
     )
 
 
@@ -421,7 +421,7 @@ def test_a_catalog_refuses_a_tool_it_never_declared():
 OPEN = "<notes_tool_call>"
 CLOSE = "</notes_tool_call>"
 A_LIST_CALL = '{"name":"list_notes","arguments":{}}'
-A_NUMBER_CALL = '{{"name":"set_tempo","arguments":{{"bpm":{}}}}}'
+A_NUMBER_CALL = '{{"name":"set_font_size","arguments":{{"size":{}}}}}'
 THE_VALUE_START = len(OPEN) + len("\n")
 
 

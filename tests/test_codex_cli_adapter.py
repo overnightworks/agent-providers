@@ -1,4 +1,4 @@
-"""Codex subscription CLI co-writer transport."""
+"""Codex subscription CLI tool turn transport."""
 
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ from PIL import Image
 from provider_test_support import (
     A_CALLER_CANARY,
     A_RUNNER_FAILURE_CANARY,
+    A_TOOL_FAILURE_MESSAGE,
     CALLER_CONTEXTS,
     CANARY_ACCESS_TOKEN,
     DEEPLY_NESTED_JSON,
@@ -77,8 +78,7 @@ from agent_providers.tool_loop import (
     stream_tool_loop,
 )
 
-A_TOOL_FAILURE_MESSAGE = "Co-Writer tool failed."
-A_COVER_POLICY = ImagePolicy(
+AN_IMAGE_POLICY = ImagePolicy(
     maximum_source_bytes=8 * 1024 * 1024,
     maximum_pixels=20_000_000,
     output_edge_pixels=1024,
@@ -88,7 +88,7 @@ A_COVER_POLICY = ImagePolicy(
 
 
 def _transport() -> codex_transport.CodexCliToolTransport:
-    """Build the transport under test with songmaker's own tool catalog."""
+    """Build the transport under test with a host's own tool catalog."""
     return codex_transport.CodexCliToolTransport(
         model="codex-test", catalog=SAMPLE_TOOL_CATALOG,
     )
@@ -98,7 +98,7 @@ _FIXTURES = Path(__file__).parent / "fixtures"
 
 
 @pytest.mark.parametrize("missing", ("cli", "code_mode_host", "resources"))
-def test_cover_image_capability_requires_every_codex_mount(
+def test_image_capability_requires_every_codex_mount(
     tmp_path: Path, missing: str,
 ) -> None:
     cli = tmp_path / "codex"
@@ -126,7 +126,7 @@ def test_cover_image_capability_requires_every_codex_mount(
     assert not codex_image.codex_image_turn_is_available()
 
 
-def test_cover_image_capability_requires_the_installed_image_encoder(
+def test_image_capability_requires_the_installed_image_encoder(
     tmp_path: Path, monkeypatch,
 ) -> None:
     cli = tmp_path / "codex"
@@ -160,7 +160,7 @@ def test_a_deployment_without_the_image_encoder_refuses_before_it_spawns(
 
     with pytest.raises(codex_image.CodexImageEncoderUnavailableError):
         codex_image.generate_codex_image(
-            "prompt", policy=A_COVER_POLICY, deadline=10_000_000,
+            "prompt", policy=AN_IMAGE_POLICY, deadline=10_000_000,
         )
 
     assert spawns == []
@@ -313,7 +313,6 @@ def test_codex_tool_command_pins_read_only_isolation_for_start_and_resume() -> N
     ) == ("exec", "resume", *common, thread_id, "-")
 
 
-@pytest.mark.acceptance("ACC-COWRITER-12")
 def test_codex_tool_transport_uses_an_empty_private_work_directory_on_resume(monkeypatch) -> None:
     calls: list = []
     prompts: list[bytes] = []
@@ -626,7 +625,7 @@ def _generated_png_runner() -> object:
     """A Codex run that leaves exactly one generated PNG in its private home."""
     def run_cli_bounded(child, **kwargs):
         codex_home = Path(child.environment["CODEX_HOME"])
-        artifact = codex_home / "generated_images" / "thread" / "cover.png"
+        artifact = codex_home / "generated_images" / "thread" / "image.png"
         artifact.parent.mkdir(parents=True)
         artifact.write_bytes(_png_bytes())
         outcome = _outcome(stdout=_MEASURED_STREAM)
@@ -644,7 +643,7 @@ def _host_image_policy(
     maximum_pixels: int = 20_000_000,
     output_edge_pixels: int = 256,
 ) -> ImagePolicy:
-    """A host's own image bounds, stated without songmaker's cover constants."""
+    """A host's own image bounds."""
     return ImagePolicy(
         maximum_source_bytes=maximum_source_bytes,
         maximum_pixels=maximum_pixels,
@@ -654,11 +653,11 @@ def _host_image_policy(
     )
 
 
-def test_codex_cover_image_accepts_the_measured_0_163_stream(monkeypatch) -> None:
+def test_codex_image_accepts_the_measured_0_163_stream(monkeypatch) -> None:
     monkeypatch.setattr(codex_protocol, "run_cli_bounded", _generated_png_runner())
 
     assert codex_image.generate_codex_image(
-        "prompt", policy=A_COVER_POLICY, deadline=10_000_000,
+        "prompt", policy=AN_IMAGE_POLICY, deadline=10_000_000,
     ).startswith(b"\x89PNG")
 
 
@@ -728,7 +727,7 @@ def test_a_generated_image_outside_the_hosts_bounds_is_refused(
         (
             _outcome(
                 returncode=1,
-                stdout=(_FIXTURES / "codex-cover-quota-exceeded.jsonl").read_text(),
+                stdout=(_FIXTURES / "codex-image-quota-exceeded.jsonl").read_text(),
             ),
             codex_image.CodexImageQuotaError,
             "usage limit",
@@ -785,7 +784,7 @@ def test_a_generated_image_outside_the_hosts_bounds_is_refused(
         "turn-never-completed",
     ),
 )
-def test_codex_cover_image_names_terminal_cli_failures_without_logging_the_gate(
+def test_codex_image_names_terminal_cli_failures_without_logging_the_gate(
     monkeypatch,
     caplog,
     outcome: CliRunOutcome,
@@ -797,7 +796,7 @@ def test_codex_cover_image_names_terminal_cli_failures_without_logging_the_gate(
     caplog.set_level("WARNING", logger="agent_providers.codex.image")
 
     with pytest.raises(expected_error) as raised:
-        _generate_cover()
+        _generate_image()
 
     assert _warnings(caplog) == []
     if expected_message is not None:
@@ -833,7 +832,7 @@ def _write_generated_file(name: str, content: bytes):
 
 
 def _write_png_beside_a_text_file(codex_home: Path) -> None:
-    _write_generated_file("cover.png", _png_bytes())(codex_home)
+    _write_generated_file("image.png", _png_bytes())(codex_home)
     (codex_home / "generated_images" / "notes.txt").write_text("not an image")
 
 
@@ -849,7 +848,7 @@ def _write_two_generated_pngs(codex_home: Path) -> None:
 def _symlink_generated_images_root(codex_home: Path) -> None:
     real_root = codex_home / "elsewhere"
     real_root.mkdir()
-    (real_root / "cover.png").write_bytes(_png_bytes())
+    (real_root / "image.png").write_bytes(_png_bytes())
     (codex_home / "generated_images").symlink_to(real_root, target_is_directory=True)
 
 
@@ -892,18 +891,18 @@ def _streaming_runner(events: _StreamedEvents, state: dict[str, bool]):
     return run_cli_bounded
 
 
-_DEFAULT_COVER_SECONDS = 30
+_DEFAULT_IMAGE_SECONDS = 30
 
 
-def _generate_cover(
+def _generate_image(
     prompt: str = "prompt",
     deadline: float | None = None,
     abort_signal: threading.Event | None = None,
 ) -> bytes:
     return codex_image.generate_codex_image(
         prompt,
-        policy=A_COVER_POLICY,
-        deadline=time.monotonic() + _DEFAULT_COVER_SECONDS if deadline is None else deadline,
+        policy=AN_IMAGE_POLICY,
+        deadline=time.monotonic() + _DEFAULT_IMAGE_SECONDS if deadline is None else deadline,
         abort_signal=abort_signal,
     )
 
@@ -927,7 +926,7 @@ _TINY_GRACE_SECONDS = 0.01
 
 
 @dataclass(frozen=True)
-class _CoverTurn:
+class _ImageTurn:
     value: bytes | None
     error: BaseException | None
     elapsed: float
@@ -946,18 +945,18 @@ class _ImageTurnFrame:
         *,
         prompt: str = "prompt",
         abort_signal: threading.Event | None = None,
-    ) -> _CoverTurn:
+    ) -> _ImageTurn:
         started_at = time.monotonic()
         deadline = started_at + seconds
-        results: list[_CoverTurn] = []
+        results: list[_ImageTurn] = []
 
         def run() -> None:
             value, error = None, None
             try:
-                value = _generate_cover(prompt, deadline, abort_signal)
+                value = _generate_image(prompt, deadline, abort_signal)
             except BaseException as raised:
                 error = raised
-            results.append(_CoverTurn(value, error, time.monotonic() - started_at))
+            results.append(_ImageTurn(value, error, time.monotonic() - started_at))
 
         turn = threading.Thread(target=run, daemon=True)
         turn.start()
@@ -967,7 +966,7 @@ class _ImageTurnFrame:
 
     def assert_ended(
         self,
-        turn: _CoverTurn,
+        turn: _ImageTurn,
         *,
         runner_steps: tuple[str, ...] = (),
         reservations: int = 0,
@@ -1305,9 +1304,9 @@ _WITH_IMAGE_GEN_ITEMS = [
 @pytest.mark.parametrize(
     ("stdout", "create_artifacts"),
     (
-        (_MEASURED_STREAM, _write_generated_file("thread/cover.png", _png_bytes())),
+        (_MEASURED_STREAM, _write_generated_file("thread/image.png", _png_bytes())),
         (_MEASURED_STREAM, _write_png_beside_a_text_file),
-        (_jsonl(_WITH_IMAGE_GEN_ITEMS), _write_generated_file("cover.png", _png_bytes())),
+        (_jsonl(_WITH_IMAGE_GEN_ITEMS), _write_generated_file("image.png", _png_bytes())),
     ),
     ids=(
         "png-nested-in-a-directory",
@@ -1315,14 +1314,14 @@ _WITH_IMAGE_GEN_ITEMS = [
         "image-gen-items-around-the-png",
     ),
 )
-def test_codex_cover_image_returns_the_generated_png_of_a_completed_turn(
+def test_codex_image_returns_the_generated_png_of_a_completed_turn(
     monkeypatch, stdout: str, create_artifacts: Callable[[Path], None],
 ) -> None:
     monkeypatch.setattr(
         codex_protocol, "run_cli_bounded", _image_runner(_outcome(stdout=stdout), create_artifacts),
     )
 
-    assert _generate_cover().startswith(b"\x89PNG")
+    assert _generate_image().startswith(b"\x89PNG")
 
 
 @pytest.mark.parametrize(
@@ -1332,7 +1331,7 @@ def test_codex_cover_image_returns_the_generated_png_of_a_completed_turn(
         (_MEASURED_STREAM, _write_generated_file("notes.txt", b"not an image"), _MEASURED_TOKENS),
         (_MEASURED_STREAM, None, _MEASURED_TOKENS),
         (
-            (_FIXTURES / "codex-cover-no-image-events.jsonl").read_text(),
+            (_FIXTURES / "codex-image-no-image-events.jsonl").read_text(),
             None,
             (
                 "thread.started",
@@ -1352,7 +1351,7 @@ def test_codex_cover_image_returns_the_generated_png_of_a_completed_turn(
         "only-a-completed-turn",
     ),
 )
-def test_codex_cover_image_reports_a_completed_turn_without_a_png_as_not_created(
+def test_codex_image_reports_a_completed_turn_without_a_png_as_not_created(
     monkeypatch,
     caplog,
     stdout: str,
@@ -1365,7 +1364,7 @@ def test_codex_cover_image_reports_a_completed_turn_without_a_png_as_not_created
     caplog.set_level("WARNING", logger="agent_providers.codex.image")
 
     with pytest.raises(codex_image.CodexImageNotCreatedError):
-        _generate_cover(_A_PRIVATE_PROMPT_MARKER)
+        _generate_image(_A_PRIVATE_PROMPT_MARKER)
 
     expected_line = f"Codex image not created route=cli {_types_line(expected_tokens)}"
     assert _warnings(caplog) == [expected_line]
@@ -1378,7 +1377,7 @@ def test_codex_cover_image_reports_a_completed_turn_without_a_png_as_not_created
     (_write_two_generated_pngs, _symlink_generated_images_root),
     ids=("two-pngs", "symlinked-root"),
 )
-def test_codex_cover_image_refuses_ambiguous_artifacts_without_logging_the_gate(
+def test_codex_image_refuses_ambiguous_artifacts_without_logging_the_gate(
     monkeypatch, caplog, create_artifacts: Callable[[Path], None],
 ) -> None:
     monkeypatch.setattr(
@@ -1389,7 +1388,7 @@ def test_codex_cover_image_refuses_ambiguous_artifacts_without_logging_the_gate(
     caplog.set_level("WARNING", logger="agent_providers.codex.image")
 
     with pytest.raises(codex_image.CodexImageArtifactError):
-        _generate_cover()
+        _generate_image()
 
     assert _warnings(caplog) == []
 
@@ -1465,7 +1464,7 @@ _BLOCKED_TURNS = (
 
 
 @pytest.mark.parametrize(("events", "expected_reason", "expected_tokens"), _BLOCKED_TURNS)
-def test_codex_cover_image_aborts_a_blocked_turn_and_logs_only_closed_names(
+def test_codex_image_aborts_a_blocked_turn_and_logs_only_closed_names(
     monkeypatch,
     caplog,
     events: _StreamedEvents,
@@ -1477,7 +1476,7 @@ def test_codex_cover_image_aborts_a_blocked_turn_and_logs_only_closed_names(
     caplog.set_level("WARNING", logger="agent_providers.codex.image")
 
     with pytest.raises(codex_image.ImageToolBlockedError) as raised:
-        _generate_cover(_A_PRIVATE_PROMPT_MARKER)
+        _generate_image(_A_PRIVATE_PROMPT_MARKER)
 
     assert (raised.value.reason, raised.value.observed) == (expected_reason, expected_tokens)
     expected_line = (
@@ -1591,7 +1590,7 @@ def test_codex_public_adapters_reject_unusable_login_mirrors(
     override_provider_runtime(codex_cli_auth_file=auth_file)
 
     with pytest.raises(codex_image.CodexImageLoginError):
-        codex_image.generate_codex_image("prompt", policy=A_COVER_POLICY, deadline=10_000_000)
+        codex_image.generate_codex_image("prompt", policy=AN_IMAGE_POLICY, deadline=10_000_000)
     with pytest.raises(ProviderUnavailableError) as raised:
         _transport()
 
@@ -1802,7 +1801,7 @@ def _drive_the_tool_turn(monkeypatch, copies, files) -> None:
 def _drive_the_image_turn(monkeypatch, copies, files) -> None:
     runner = _recording_runner(copies, _generated_png_runner(), files)
     monkeypatch.setattr(codex_protocol, "run_cli_bounded", runner)
-    codex_image.generate_codex_image("prompt", policy=A_COVER_POLICY, deadline=10_000_000)
+    codex_image.generate_codex_image("prompt", policy=AN_IMAGE_POLICY, deadline=10_000_000)
 
 
 @pytest.mark.parametrize(
@@ -1840,7 +1839,7 @@ def test_no_codex_child_is_handed_the_operators_live_refresh_token(
 
 def _drive_the_image_path(_codex_login_mirror: Path) -> BaseException:
     with pytest.raises(codex_image.CodexImageLoginError) as raised:
-        codex_image.generate_codex_image("prompt", policy=A_COVER_POLICY, deadline=10_000_000)
+        codex_image.generate_codex_image("prompt", policy=AN_IMAGE_POLICY, deadline=10_000_000)
     return raised.value
 
 

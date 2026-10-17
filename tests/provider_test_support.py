@@ -4,12 +4,11 @@ A sibling ``conftest.py`` in this directory would make ``from conftest import``
 ambiguous under pytest's prepend import mode — the root ``tests/conftest.py``
 and this package's own ``conftest.py`` both import as ``conftest``. The lib
 tests therefore reach their shared helpers here, by basename, which resolves
-the same way both inside songmaker today and inside the extracted
-``agent_providers`` repository tomorrow (issue #825, S1).
+the same way wherever the suite runs.
 
 Self-contained by design: it imports only ``agent_providers`` and the standard
-library, never ``songmaker_cli``. The deployment facts below are the package's
-own sample — a host named ``songmaker`` with its twelve co-writer tools — not
+library, never a host application. The deployment facts below are the package's
+own sample — a notes host with its twelve tools — not
 an import of the application's constants, so the tests prove the provider layer
 against values this package owns.
 """
@@ -361,7 +360,7 @@ SAMPLE_TOOL_CATALOG: ToolCatalog = ToolCatalog(
                     "folder_id": _STRING,
                     "title": _STRING,
                     "text": _STRING,
-                    "prompt": _STRING,
+                    "summary": _STRING,
                 },
                 ["folder_id", "title"],
             ),
@@ -374,17 +373,17 @@ SAMPLE_TOOL_CATALOG: ToolCatalog = ToolCatalog(
         ToolDeclaration(
             name="update_note_summary",
             description="Replace the note's current summary.",
-            parameters=_object({"note_id": _STRING, "prompt": _STRING}, ["note_id", "prompt"]),
+            parameters=_object({"note_id": _STRING, "summary": _STRING}, ["note_id", "summary"]),
         ),
         ToolDeclaration(
             name="update_note_tags",
-            description="Update bpm, key_scale, and/or audio_duration tags.",
+            description="Update word_count, language, and/or reading_minutes tags.",
             parameters=_object(
                 {
                     "note_id": _STRING,
-                    "bpm": _INT,
-                    "key_scale": _STRING,
-                    "audio_duration": _INT,
+                    "word_count": _INT,
+                    "language": _STRING,
+                    "reading_minutes": _INT,
                 },
                 ["note_id"],
             ),
@@ -468,6 +467,7 @@ def grok_tool_round_lines(text: str, session_id: str = GROK_SESSION_ID) -> list[
 
 
 A_CANARY: Final = "canary-text-3f9c71"
+A_TOOL_FAILURE_MESSAGE: Final = "The sample tool failed."
 A_CALLER_CANARY: Final = "caller-canary-8b21e5"
 PROSE_BEFORE_THE_CALL: Final = "Looking that up.\n"
 DEEPLY_NESTED_JSON: Final = "[" * 100_000

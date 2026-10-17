@@ -34,7 +34,7 @@ from agent_client.wire import (
 
 A_RUN: list[RunEvent] = [
     started(),
-    text(1, "Ein erster Vers – über Grün."),
+    text(1, "Ein erster Absatz – über Grün."),
     call(2, "call-1", name="write_text", tool_input={"line": 1}),
     result(3, "call-1", content="saved\nline two"),
     heartbeat(4),
@@ -69,7 +69,7 @@ UMLAUT_TEXT_FRAME = (
     b"id: 1\n"
     b"event: assistant_text\n"
     b'data: {"v":1,"run_id":"8c2f6c1e-3b5a-4d8e-9f10-2a7b4c6d8e01","seq":1,'
-    b'"type":"assistant_text","text":"Ein erster Vers \xe2\x80\x93 \xc3\xbcber Gr\xc3\xbcn."}\n'
+    b'"type":"assistant_text","text":"Ein erster Absatz \xe2\x80\x93 \xc3\xbcber Gr\xc3\xbcn."}\n'
     b"\n"
 )
 

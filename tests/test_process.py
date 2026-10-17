@@ -1586,9 +1586,10 @@ def test_the_frame_check_reads_credential_views() -> None:
         del payload
         raise RuntimeError(len(buffer))
 
+    canary = _A_RAW_CREDENTIAL_CANARY.encode()
     for hold in (hold_in_a_view, hold_in_a_buffer):
         with pytest.raises(RuntimeError) as raised:
-            hold(_A_RAW_CREDENTIAL_CANARY.encode())
+            hold(canary)
         assert traceback_frames_hold(raised.value, _A_RAW_CREDENTIAL_CANARY)
 
 

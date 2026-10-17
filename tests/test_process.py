@@ -2803,7 +2803,7 @@ def test_a_private_prompt_file_is_written_below_the_host_named_root(
     monkeypatch,
 ) -> None:
     working_root = tmp_path / "host-root"
-    working_root.mkdir()
+    working_root.mkdir(mode=0o700)
     monkeypatch.setenv("TMPDIR", str(tmp_path / "somewhere-else"))
     override_provider_runtime(cli_working_directory_root=working_root)
 

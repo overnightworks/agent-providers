@@ -71,6 +71,7 @@ from agent_providers.codex import protocol as codex_protocol
 from agent_providers.codex import transport as codex_transport
 from agent_providers.codex.pool import CodexProcessKind, CodexProcessPool
 from agent_providers.codex_login import blanked_copy
+from agent_providers.config import current_config
 from agent_providers.errors import (
     CodexProcessPoolSaturatedError,
     ProviderModelCatalogUnavailableError,
@@ -1006,7 +1007,7 @@ def image_turn(monkeypatch, caplog, capfd, tmp_path) -> _ImageTurnFrame:
     process_pool = CodexProcessPool(maximum_processes=8, maximum_image_runs=1)
     use_codex_process_pool(monkeypatch, process_pool)
     working_root = tmp_path / "turn-homes"
-    working_root.mkdir()
+    working_root.mkdir(mode=0o700)
     override_provider_runtime(cli_working_directory_root=working_root)
     return _ImageTurnFrame(
         process_pool, working_root, RunnerFailureWatch(monkeypatch, caplog, capfd), caplog,
@@ -2047,6 +2048,7 @@ def _the_image_turn_is_started(monkeypatch, seen: list) -> None:
 @dataclass(frozen=True)
 class _SeenHome:
     name: str
+    parent: Path
     login_mode: int
     login_bytes: bytes
     directory_modes: dict[str, int]
@@ -2059,6 +2061,7 @@ def _stating_runner(seen: list, runner) -> object:
         home = codex_home.parent
         seen.append(_SeenHome(
             name=home.name,
+            parent=home.parent,
             login_mode=stat.S_IMODE(login.stat().st_mode),
             login_bytes=login.read_bytes(),
             directory_modes={
@@ -2096,9 +2099,29 @@ def test_the_codex_turn_copy_is_private_writable_and_blanked(
     }
 
 
+@pytest.mark.parametrize(
+    ("start_the_turn", "prefix"),
+    (
+        (_the_tool_turn_is_started, CODEX_TOOL_TURN_DIRECTORY_PREFIX),
+        (_the_image_turn_is_started, CODEX_IMAGE_TURN_DIRECTORY_PREFIX),
+    ),
+    ids=("tool-turn", "image-turn"),
+)
+def test_the_codex_turn_home_lies_directly_below_the_working_root_named_by_its_prefix(
+    monkeypatch, codex_login_source: Path, start_the_turn, prefix: str,
+) -> None:
+    seen: list[_SeenHome] = []
+
+    start_the_turn(monkeypatch, seen)
+
+    [home] = seen
+    assert home.parent == current_config().cli_working_directory_root
+    assert home.name.startswith(prefix)
+
+
 def _an_empty_working_root(tmp_path: Path) -> Path:
     turns = tmp_path / "turns"
-    turns.mkdir()
+    turns.mkdir(mode=0o700)
     override_provider_runtime(cli_working_directory_root=turns)
     return turns
 
@@ -2283,7 +2306,7 @@ def test_codex_turns_refuse_a_login_that_is_not_a_plain_file(
     tmp_path: Path, monkeypatch, make_source, turn,
 ) -> None:
     turns = tmp_path / "turns"
-    turns.mkdir()
+    turns.mkdir(mode=0o700)
     sources = tmp_path / "sources"
     sources.mkdir()
     override_provider_runtime(
@@ -2311,7 +2334,7 @@ def test_a_failed_turn_copy_keeps_no_credential_in_its_error(
     tmp_path: Path, monkeypatch, codex_login_source: Path, turn,
 ) -> None:
     turns = tmp_path / "turns"
-    turns.mkdir()
+    turns.mkdir(mode=0o700)
     override_provider_runtime(
         codex_cli_auth_file=codex_login_source, cli_working_directory_root=turns,
     )

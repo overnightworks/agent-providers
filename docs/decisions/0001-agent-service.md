@@ -162,7 +162,7 @@ body rules be fixed before the build.
   budget `max_tool_calls` (default 30) and `max_bytes` (default 4 MiB,
   4194304), and `max_parallel_cli_runs` (default 5), all positive integers
   outside that ordering;
-  `[profiles.<name>]` one profile per provider;
+  `[profiles.<name>]` at most one profile, for Claude, with a required `token_file`;
   `[purposes."<p>"]` an optional `cli_provider` and `api_alias`;
   `[apps.<app>]` its `workload_client`, its purposes, and its tools' effects,
   where an unlisted tool counts as side-effecting. `agent_service.routing.route`
@@ -210,13 +210,14 @@ Per-person subscription mapping waits for a named caller.
 
 **Context.** The operator holds several subscriptions and wants them adjustable.
 
-**Decision.** A profile is one subscription login, with a name, a provider
-(`claude`, `codex`, `grok`), whether background purposes may use it (H12), and
-its login. A Claude profile's login is one `claude setup-token` token read from the
-profile's `token_file` (A1b ruling, Q2 a); Codex and Grok keep their device-code
-logins, decided when their routes arrive (A1r3). There is one profile per
-provider. The profile list is service configuration, kept as code in edge; the
-login files live in `~/.secrets`, never in a repository.
+**Decision.** A profile is one subscription login, with a name, a provider,
+whether background purposes may use it (H12), and its login. A Claude profile's
+login is one `claude setup-token` token read from the profile's `token_file`
+(A1b ruling, Q2 a). Until the additional provider routes arrive, the service
+accepts at most one subscription profile, for Claude. It requires a `token_file`.
+Codex and Grok profiles are refused at startup; their login contracts are decided
+with their routes. The profile list is service configuration, kept as code
+in edge; the login files live in `~/.secrets`, never in a repository.
 
 **Consequence.** Nothing in the code is tied to the operator; another
 installation lists its own profiles.
@@ -388,7 +389,7 @@ compromise.
   `purpose`, `principal {iss, sub}` and `tools`; no `jti`, `nbf`, groups or turn text.
 - **D8 issuer.** `CAPABILITY_ISSUER = "agent-service"`; installations are told apart
   by their keys.
-- **D10 registry.** `mcp_origin` is optional and must be in its serialized form: a
+- **D10 registry.** `mcp_origin` is required when an app lists tools and optional otherwise, and must be in its serialized form: a
   lower-case DNS host, a non-default port only, no path. A host whose last label is
   all decimal digits or `0x` followed by zero or more hexadecimal digits, and a bracketed IPv6
   address, are refused.
@@ -417,7 +418,7 @@ compromise.
    none starting or ending with a hyphen, 253 in all, no trailing dot), a port only
    when it is not 443, in decimal digits
    from 1 to 65535 without leading zeros, and nothing else. Origins are unique, and an
-   origin needs `[signing]`. A refusal names `apps.<app>.mcp_origin` and gives the
+   origin needs `[signing]`, and an app that lists tools needs an origin. A refusal names `apps.<app>.mcp_origin` and gives the
    canonical form where one exists and would itself load.
 9. **The format.** `CapabilityClaims` (frozen, strict, `extra="forbid"`) with token
    type `agent-capability+jwt`; `principal.sub` is the exact verified subject, never

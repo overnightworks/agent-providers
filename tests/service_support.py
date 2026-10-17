@@ -9,13 +9,16 @@ fetch serves; the Keycloak suite uses the real issuer's tokens instead.
 from __future__ import annotations
 
 import asyncio
+import atexit
 import functools
 import gc
 import json
 import logging
 import re
 import selectors
+import shutil
 import socket
+import tempfile
 import threading
 import time
 import types
@@ -68,14 +71,38 @@ SONGMAKER_GROUP: Final = "/apps/songmaker"
 CLI_PROFILE: Final = "claude-main"
 COWRITER_ALIAS: Final = "cowriter"
 SONGMAKER_ORIGIN: Final = "https://songmaker.internal"
+PROCESS_TOKEN: Final = "setup-token-for-the-test-process"
 RUN_ID_PLACEHOLDER: Final = "00000000-0000-4000-8000-000000000000"
 
 
-def _service_config_document(issuer: str, runs: Mapping[str, object] | None) -> dict[str, Any]:
+@functools.cache
+def _process_secret_directory() -> Path:
+    directory = Path(tempfile.mkdtemp(prefix="agent-service-tests-"))
+    atexit.register(shutil.rmtree, directory, ignore_errors=True)
+    return directory
+
+
+@functools.cache
+def process_signing_key_file() -> Path:
+    return written_key_file(_process_secret_directory(), generated_rsa_key())
+
+
+@functools.cache
+def process_token_file() -> Path:
+    path = _process_secret_directory() / "claude.token"
+    path.write_text(PROCESS_TOKEN, encoding="utf-8")
+    path.chmod(0o600)
+    return path
+
+
+def _service_config_document(
+    issuer: str, runs: Mapping[str, object] | None, songmaker: Mapping[str, object] | None
+) -> dict[str, Any]:
     return {
         **({} if runs is None else {"runs": runs}),
         "identity": {"issuer": issuer, "jwks_url": TEST_JWKS_URL},
-        "profiles": {CLI_PROFILE: {"provider": "claude"}},
+        "signing": {"key_file": str(process_signing_key_file())},
+        "profiles": {CLI_PROFILE: {"provider": "claude", "token_file": str(process_token_file())}},
         "purposes": {
             COWRITER: {"cli_provider": "claude", "api_alias": COWRITER_ALIAS},
             PRESENTER: {"api_alias": "copresenter"},
@@ -85,6 +112,8 @@ def _service_config_document(issuer: str, runs: Mapping[str, object] | None) -> 
                 "workload_client": SONGMAKER_CLIENT,
                 "purposes": [COWRITER],
                 "tools": {"read_song": "read_only", "edit_song": "side_effecting"},
+                "mcp_origin": SONGMAKER_ORIGIN,
+                **(songmaker or {}),
             },
             "presentator": {"workload_client": PRESENTATOR_CLIENT, "purposes": [PRESENTER]},
         },
@@ -92,9 +121,17 @@ def _service_config_document(issuer: str, runs: Mapping[str, object] | None) -> 
 
 
 def service_config(
-    issuer: str = TEST_ISSUER, runs: Mapping[str, object] | None = None
+    issuer: str = TEST_ISSUER,
+    runs: Mapping[str, object] | None = None,
+    *,
+    songmaker: Mapping[str, object] | None = None,
 ) -> ServiceConfig:
-    return ServiceConfig.model_validate(_service_config_document(issuer, runs))
+    return ServiceConfig.model_validate(_service_config_document(issuer, runs, songmaker))
+
+
+def plain_service_config() -> ServiceConfig:
+    """``service_config`` with songmaker listing no tools and naming no origin."""
+    return service_config(songmaker={"tools": {}, "mcp_origin": None})
 
 
 def capable_service_config(
@@ -103,14 +140,9 @@ def capable_service_config(
     issuer: str = TEST_ISSUER,
     songmaker: Mapping[str, object] | None = None,
 ) -> ServiceConfig:
-    """``service_config`` with a signing key written under ``directory`` and songmaker's origin."""
-    document = _service_config_document(issuer, None)
+    """``service_config`` signing with a key written under ``directory``."""
+    document = _service_config_document(issuer, None, songmaker)
     document["signing"] = {"key_file": str(written_key_file(directory, generated_rsa_key()))}
-    document["apps"]["songmaker"] = {
-        **document["apps"]["songmaker"],
-        "mcp_origin": SONGMAKER_ORIGIN,
-        **(songmaker or {}),
-    }
     return ServiceConfig.model_validate(document)
 
 

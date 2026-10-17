@@ -1,0 +1,7 @@
+claim_id = "acd75062d1124f0096ab34de5774e68a"
+agent = "claude"
+role = "builder"
+base = "ea4e37cef009002d0d1714e26bcffcde16ea71a0"
+branch = "claude/issue-113-homes-lock-free"
+scope = ["README.md", "src/agent_providers/process.py", "tests/test_process.py"]
+opened_commit = "694ee9513ce6ba6f559810c20d42df8a759a5b87"

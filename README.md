@@ -36,7 +36,7 @@ It owns the machinery that is the same in every deployment:
 | `agent_client.wire` | The one owner of the agent service's wire: the `RunRequest` body, the versioned run-event union, the `RunRejection` body and the `RunStatus` body of `GET /runs/{id}` |
 | `agent_client.run_stream` | `parse_event` and `RunStream`: the rules a run's event stream keeps, and how a cut-short run ends |
 | `agent_client.sse` | `encode_event` and `RunStreamDecoder`: one SSE frame per run event, decoded and checked against the wire and its stream rules |
-| `agent_client.capability` | The format of the run capability the service mints and an app's MCP server verifies (A1m): token type `agent-capability+jwt`, at most 8,192 characters, the strict `CapabilityClaims`, and `McpOrigin`, the one decider of an app's canonical https MCP origin |
+| `agent_client.capability` | The format of the run capability the service mints and an app's MCP server verifies (A1m): token type `agent-capability+jwt`, at most 8,192 characters, the strict `CapabilityClaims`, `McpOrigin`, the one decider of an app's canonical https MCP origin, and `MCP_ENDPOINT_PATH`, the one path an app's MCP server serves and the service's client calls |
 | `agent_providers.codex_login` | `assess_codex_login`: the one decider of whether a Codex login can start a child, and the blanked copy it receives |
 | `agent_providers.tools` | The `ToolCatalog`, its host-declared `ToolProtocolMarkup` and its Anthropic/OpenAI schema projections; re-exports the identical `ToolDeclaration` |
 | `agent_providers.spawn` | `ChildProcess` and the only calls in this library that create a child process |
@@ -56,6 +56,7 @@ It owns the machinery that is the same in every deployment:
 | `agent_service.run_liveness` | When frames go out: the heartbeat, the idle timeout and the maximum duration, enforced by a supervisor that does not depend on the client reading, and drops a client that stops taking frames |
 | `agent_service.runners` | The `Runner` port a route's provider plugs into; production installs none yet; an admitted run carries its capability |
 | `agent_service.run_records` | The in-memory record of each run (owner, instants, events accepted, ending, client lost; never event text): readable by its own app and user up to one hour after the run ended, evicted earlier once 10,000 ended records are held, gone after a restart. The record is written as the run's events are accepted and ended when its runner is closed |
+| `agent_service.mcp_wire` | The JSON-only MCP wire profile, pure and free of sockets, clients and the relay: strict JSON-RPC models, the one supported protocol version (`2025-11-25`) and its negotiation, the `MCP-Protocol-Version` header rule (an absent header is refused with 400), the `initialize` result built from constants, `tools/list` with a cursor, `tools/call` read as text with `is_error`, the `application/json`-only answer rule, 202 with an empty body for a notification, and one closed `McpWireError` that echoes nothing of its input; a body over `MAX_EVENT_BYTES` and a batch array are refused |
 
 It leaves the application everything the library cannot know: the MCP tool set
 and its execution, the prompts, where settings are stored, and domain

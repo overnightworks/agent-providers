@@ -691,7 +691,7 @@ image = [
 [package.metadata]
 requires-dist = [
     { name = "anthropic", marker = "extra == 'api'", specifier = ">=0.26,<2" },
-    { name = "anyio", specifier = ">=4,<5" },
+    { name = "anyio", specifier = ">=4.12,<5" },
     { name = "httpx", specifier = ">=0.27,<1" },
     { name = "import-linter", marker = "extra == 'dev'", specifier = ">=2.15,<3" },
     { name = "overnightworks-agent-client", editable = "packages/agent-client" },
@@ -724,7 +724,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "anyio", specifier = ">=4,<5" },
+    { name = "anyio", specifier = ">=4.12,<5" },
     { name = "cryptography", specifier = ">=50.0.2" },
     { name = "fastapi", specifier = ">=0.133,<1" },
     { name = "h11", specifier = ">=0.16,<1" },

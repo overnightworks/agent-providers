@@ -14,16 +14,19 @@ import uvicorn
 from service_support import (
     CALLED_PLAINLY_OR_FROM_AN_ACTIVE_HANDLER,
     LAST_TOOL_NAME_LENGTH_AT_THE_LIMIT,
+    PROCESS_TOKEN,
     called_from,
     everything_a_refusal_holds,
     process_signing_key_file,
     process_token_file,
+    reaches_private_key,
     reaches_text,
     record_signed_tokens,
     tool_names_with_the_last_of_length,
 )
 
 from agent_client.tools import ToolEffect
+from agent_service import cli
 from agent_service.cli import EXIT_BAD_CONFIG, main
 from agent_service.config import ConfigError, Provider, load_config
 
@@ -55,6 +58,14 @@ workload_client = "songmaker-test"
 purposes = ["songmaker.cowriter"]
 {TOOLS_LINE}
 {SONGMAKER_ORIGIN_LINE}"""
+
+
+@pytest.fixture(autouse=True)
+def _never_really_serve(monkeypatch):
+    def fail_instead_of_binding_a_port(*_arguments, **_where):
+        raise AssertionError("a refused configuration reached serving")
+
+    monkeypatch.setattr(uvicorn, "run", fail_instead_of_binding_a_port)
 
 
 def _written(tmp_path: Path, text: str) -> Path:
@@ -92,7 +103,7 @@ def test_an_unlisted_tool_counts_as_side_effecting(tmp_path, tool, effect):
     assert config.apps["songmaker"].tool_effect(tool) is effect
 
 
-SECOND_CLAUDE_PROFILE = '\n[profiles.claude-spare]\nprovider = "claude"\n'
+SECOND_CLAUDE_PROFILE = f'\n[profiles.claude-spare]\nprovider = "claude"\n{TOKEN_FILE_LINE}\n'
 SECOND_APP_WITH_SAME_CLIENT = (
     '\n[apps.presentator]\nworkload_client = "songmaker-test"\npurposes = []\n'
 )
@@ -497,13 +508,17 @@ def test_a_name_with_a_newline_is_shown_escaped_once_on_one_line(tmp_path, capsy
     assert _refused_on_one_line(_written(tmp_path, text), capsys) == refusal
 
 
-def test_an_origin_without_a_signing_section_stops_startup_naming_the_field(tmp_path, capsys):
-    config_file = _written(tmp_path, _with(SIGNING_SECTION, ""))
+ORIGIN_WITHOUT_SIGNING = _with(SIGNING_SECTION, "")
+ORIGIN_WITHOUT_SIGNING_REFUSAL = (
+    "apps.songmaker.mcp_origin: needs a [signing] section,"
+    " because the app's runs carry a signed capability"
+)
 
-    assert _refused_on_one_line(config_file, capsys) == (
-        "apps.songmaker.mcp_origin: needs a [signing] section,"
-        " because the app's runs carry a signed capability"
-    )
+
+def test_an_origin_without_a_signing_section_stops_startup_naming_the_field(tmp_path, capsys):
+    config_file = _written(tmp_path, ORIGIN_WITHOUT_SIGNING)
+
+    assert _refused_on_one_line(config_file, capsys) == ORIGIN_WITHOUT_SIGNING_REFUSAL
 
 
 def test_an_app_whose_capability_is_exactly_8192_characters_at_the_preflight_loads(tmp_path):
@@ -807,9 +822,17 @@ def _with_profile_of(provider: str, name: str = '"codex-main"', token: bool = Fa
     ],
 )
 def test_a_document_with_no_profile_or_one_sound_claude_profile_reaches_serving(
-    tmp_path, served_apps, text
+    tmp_path, served_apps, monkeypatch, text
 ):
-    assert main(["--config", str(_written(tmp_path, text))]) == 0
+    app_configs = []
+    create_app = cli.create_app
+    monkeypatch.setattr(
+        cli, "create_app", lambda config: app_configs.append(config) or create_app(config)
+    )
+
+    assert main(["--config", str(config_file := _written(tmp_path, text))]) == 0
+
+    assert [config.profiles for config in app_configs] == [load_config(config_file).profiles]
 
     assert [where for _app, where in served_apps] == [{"host": "127.0.0.1", "port": 8099}]
 
@@ -827,43 +850,48 @@ def test_an_api_only_installation_with_tools_an_origin_and_signing_loads(tmp_pat
     assert config.capability_scope("songmaker") is not None
 
 
+PROFILE_RULE_REFUSALS = [
+    pytest.param(
+        WITHOUT_TOKEN_FILE,
+        "profiles.claude-main.token_file: required for a claude profile",
+        id="claude-without-a-token-file",
+    ),
+    pytest.param(
+        _with_profile_of("codex"),
+        "profiles.codex-main.provider: codex has no subscription route yet;"
+        " only claude can have a profile",
+        id="codex",
+    ),
+    pytest.param(
+        _with_profile_of("grok", '"grok-main"'),
+        "profiles.grok-main.provider: grok has no subscription route yet;"
+        " only claude can have a profile",
+        id="grok",
+    ),
+    pytest.param(
+        _with_profile_of("codex", token=True),
+        "profiles.codex-main.provider: codex has no subscription route yet;"
+        " only claude can have a profile",
+        id="codex-with-a-token-file",
+    ),
+    pytest.param(
+        VALID_CONFIG + SECOND_CLAUDE_PROFILE,
+        "profiles.claude-spare.provider: claude already has profile 'claude-main'",
+        id="two-claude-profiles",
+    ),
+    pytest.param(
+        VALID_CONFIG + '\n[profiles.codex-main]\nprovider = "codex"\n',
+        "profiles.codex-main.provider: codex has no subscription route yet;"
+        " only claude can have a profile",
+        id="claude-and-codex",
+    ),
+]
+
+
 @pytest.mark.parametrize(
     ("text", "refusal"),
     [
-        pytest.param(
-            WITHOUT_TOKEN_FILE,
-            "profiles.claude-main.token_file: required for a claude profile",
-            id="claude-without-a-token-file",
-        ),
-        pytest.param(
-            _with_profile_of("codex"),
-            "profiles.codex-main.provider: codex has no subscription route yet;"
-            " only claude can have a profile",
-            id="codex",
-        ),
-        pytest.param(
-            _with_profile_of("grok", '"grok-main"'),
-            "profiles.grok-main.provider: grok has no subscription route yet;"
-            " only claude can have a profile",
-            id="grok",
-        ),
-        pytest.param(
-            _with_profile_of("codex", token=True),
-            "profiles.codex-main.provider: codex has no subscription route yet;"
-            " only claude can have a profile",
-            id="codex-with-a-token-file",
-        ),
-        pytest.param(
-            VALID_CONFIG + SECOND_CLAUDE_PROFILE,
-            "profiles.claude-spare.provider: claude already has profile 'claude-main'",
-            id="two-claude-profiles",
-        ),
-        pytest.param(
-            VALID_CONFIG + '\n[profiles.codex-main]\nprovider = "codex"\n',
-            "profiles.codex-main.provider: codex has no subscription route yet;"
-            " only claude can have a profile",
-            id="claude-and-codex",
-        ),
+        *PROFILE_RULE_REFUSALS,
         pytest.param(
             _with('provider = "claude"', 'provider = "gemini"'),
             "profiles.claude-main.provider: Input should be",
@@ -871,7 +899,8 @@ def test_an_api_only_installation_with_tools_an_origin_and_signing_loads(tmp_pat
         ),
         pytest.param(
             _with(TOKEN_FILE_LINE, 'token_file = ""'),
-            "profiles.claude-main.token_file:",
+            "profiles.claude-main.token_file:  must be an absolute path to the token file;"
+            " ~ is not expanded",
             id="empty-token-file-path",
         ),
     ],
@@ -882,35 +911,58 @@ def test_a_profile_the_service_cannot_serve_stops_startup_naming_the_field(
     assert _refused_on_one_line(_written(tmp_path, text), capsys).startswith(refusal)
 
 
-@pytest.mark.parametrize(
-    ("text", "refusal"),
-    [
-        pytest.param(
-            WITHOUT_ORIGIN,
-            "apps.songmaker.mcp_origin: required because the app lists tools",
-            id="with-a-profile",
-        ),
-        pytest.param(
-            _with(PROFILE_TABLE, "").replace(SONGMAKER_ORIGIN_LINE, ""),
-            "apps.songmaker.mcp_origin: required because the app lists tools",
-            id="without-a-profile",
-        ),
-        pytest.param(
-            _with('cli_provider = "claude"\n', "").replace(SONGMAKER_ORIGIN_LINE, ""),
-            "apps.songmaker.mcp_origin: required because the app lists tools",
-            id="purposes-with-only-an-api-alias",
-        ),
-        pytest.param(
-            SECOND_APP_LISTING_TOOLS_WITHOUT_ORIGIN,
-            "apps.presentator.mcp_origin: required because the app lists tools",
-            id="only-the-second-app",
-        ),
-    ],
-)
+TOOLS_WITHOUT_ORIGIN_REFUSALS = [
+    pytest.param(
+        WITHOUT_ORIGIN,
+        "apps.songmaker.mcp_origin: required because the app lists tools",
+        id="with-a-profile",
+    ),
+    pytest.param(
+        _with(PROFILE_TABLE, "").replace(SONGMAKER_ORIGIN_LINE, ""),
+        "apps.songmaker.mcp_origin: required because the app lists tools",
+        id="without-a-profile",
+    ),
+    pytest.param(
+        _with('cli_provider = "claude"\n', "").replace(SONGMAKER_ORIGIN_LINE, ""),
+        "apps.songmaker.mcp_origin: required because the app lists tools",
+        id="purposes-with-only-an-api-alias",
+    ),
+    pytest.param(
+        SECOND_APP_LISTING_TOOLS_WITHOUT_ORIGIN,
+        "apps.presentator.mcp_origin: required because the app lists tools",
+        id="only-the-second-app",
+    ),
+]
+
+
+@pytest.mark.parametrize(("text", "refusal"), TOOLS_WITHOUT_ORIGIN_REFUSALS)
 def test_an_app_that_lists_tools_without_an_origin_stops_startup_naming_the_field(
     tmp_path, capsys, text, refusal
 ):
     assert _refused_on_one_line(_written(tmp_path, text), capsys) == refusal
+
+
+@pytest.mark.parametrize("inside_active_handler", CALLED_PLAINLY_OR_FROM_AN_ACTIVE_HANDLER)
+@pytest.mark.parametrize(
+    ("text", "refusal"),
+    [
+        *PROFILE_RULE_REFUSALS,
+        *TOOLS_WITHOUT_ORIGIN_REFUSALS,
+        pytest.param(
+            ORIGIN_WITHOUT_SIGNING, ORIGIN_WITHOUT_SIGNING_REFUSAL, id="origin-without-signing"
+        ),
+    ],
+)
+def test_a_refused_relationship_holds_no_token_or_key_in_what_the_refusal_holds(
+    tmp_path, text, refusal, inside_active_handler
+):
+    with pytest.raises(ConfigError) as refused:
+        called_from(lambda: load_config(_written(tmp_path, text)), inside_active_handler)
+
+    held = everything_a_refusal_holds(refused.value)
+    assert refusal in str(refused.value)
+    assert not reaches_text(held, [PROCESS_TOKEN])
+    assert not reaches_private_key(held)
 
 
 @pytest.mark.parametrize(
@@ -926,10 +978,14 @@ def test_an_app_that_lists_no_tools_needs_no_origin(tmp_path, app_without_tools_
     assert config.apps["songmaker"].mcp_origin is None
 
 
-CONTROL_CHARACTERS = {"carriage-return": "\\r", "escape": "\\u001b", "newline": "\\n"}
-
-
-@pytest.mark.parametrize("control", CONTROL_CHARACTERS.values(), ids=CONTROL_CHARACTERS)
+@pytest.mark.parametrize(
+    ("control", "shown_name"),
+    [
+        pytest.param("\\r", "a\\rb", id="carriage-return"),
+        pytest.param("\\u001b", "a\\x1bb", id="escape"),
+        pytest.param("\\n", "a\\nb", id="newline"),
+    ],
+)
 @pytest.mark.parametrize(
     ("arrange", "field"),
     [
@@ -951,12 +1007,13 @@ CONTROL_CHARACTERS = {"carriage-return": "\\r", "escape": "\\u001b", "newline": 
     ],
 )
 def test_a_name_with_a_control_character_is_refused_on_one_line_with_no_raw_control_character(
-    tmp_path, capsys, arrange, field, control
+    tmp_path, capsys, arrange, field, control, shown_name
 ):
     name = f'"a{control}b"'
     refusal = _refused_on_one_line(_written(tmp_path, arrange(name)), capsys)
 
     assert field in refusal
+    assert shown_name in refusal
     assert refusal.isprintable()
 
 

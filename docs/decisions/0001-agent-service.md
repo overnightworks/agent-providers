@@ -216,7 +216,7 @@ login is one `claude setup-token` token read from the profile's `token_file`
 (A1b ruling, Q2 a). Until the additional provider routes arrive, the service
 accepts at most one subscription profile, for Claude. It requires a `token_file`.
 Codex and Grok profiles are refused at startup; their login contracts are decided
-with their routes (A1r3). The profile list is service configuration, kept as code
+with their routes. The profile list is service configuration, kept as code
 in edge; the login files live in `~/.secrets`, never in a repository.
 
 **Consequence.** Nothing in the code is tied to the operator; another

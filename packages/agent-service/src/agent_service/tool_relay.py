@@ -101,27 +101,31 @@ class _ReceiveDeadline:
     def __init__(
         self, clock: RunClock, seconds: float, transport: asyncio.Transport, task_name: str
     ) -> None:
-        self.expired = False
         self._clock = clock
         self._seconds = seconds
         self._transport = transport
         self._task_name = task_name
+        self._instant: float | None = None
         self._timer: asyncio.Task[None] | None = None
+
+    @property
+    def expired(self) -> bool:
+        return self._instant is not None and self._clock() >= self._instant
 
     def start(self) -> None:
         if self._timer is None:
-            instant = self._clock() + self._seconds
+            self._instant = self._clock() + self._seconds
             self._timer = asyncio.get_running_loop().create_task(
-                self._abort_at(instant), name=self._task_name
+                self._abort_at(self._instant), name=self._task_name
             )
 
-    def stop(self) -> None:
+    async def stop(self) -> None:
         if self._timer is not None:
             self._timer.cancel()
+            await asyncio.gather(self._timer, return_exceptions=True)
 
     async def _abort_at(self, instant: float) -> None:
         await self._clock.wait_until(instant)
-        self.expired = True
         self._transport.abort()
 
 
@@ -166,12 +170,11 @@ class Relay:
             self._close_attempt = asyncio.get_running_loop().create_task(
                 self._close_once(), name=f"relay:{self._run_id}:close"
             )
-            self._close_attempt.add_done_callback(self._close_attempt_ended)
+            self._close_attempt.add_done_callback(self._retrieve_close_outcome)
         await asyncio.shield(self._close_attempt)
 
-    def _close_attempt_ended(self, attempt: asyncio.Task[None]) -> None:
-        if self._close_attempt is attempt:
-            self._close_attempt = None
+    @staticmethod
+    def _retrieve_close_outcome(attempt: asyncio.Task[None]) -> None:
         if not attempt.cancelled():
             attempt.exception()
 
@@ -281,7 +284,7 @@ class Relay:
         self, seconds: float, writer: asyncio.StreamWriter, phase: str
     ) -> _ReceiveDeadline:
         return _ReceiveDeadline(
-            self._clock, seconds, writer.transport, f"relay-deadline:{self._run_id}:{phase}"
+            self._clock, seconds, writer.transport, f"relay:{self._run_id}:{phase}-deadline"
         )
 
     async def _next_event(
@@ -293,9 +296,9 @@ class Relay:
             except h11.RemoteProtocolError as refusal:
                 raise _Refusal(HTTPStatus(refusal.error_status_hint)) from None
             if event is not h11.NEED_DATA:
-                return event
+                return None if deadline.expired else event
             chunk = await reader.read(RECEIVE_CHUNK_BYTES)
-            if not chunk or deadline.expired:
+            if not chunk:
                 return None
             deadline.start()
             connection.receive_data(chunk)
@@ -308,7 +311,7 @@ class Relay:
         try:
             event = await self._next_event(connection, reader, deadline)
         finally:
-            deadline.stop()
+            await deadline.stop()
         return event if isinstance(event, h11.Request) else None
 
     async def _read_body(
@@ -328,7 +331,7 @@ class Relay:
                 elif event is None:
                     return None
         finally:
-            deadline.stop()
+            await deadline.stop()
 
     def _head_status(self, request: h11.Request) -> HTTPStatus | None:
         if _field_values(request, b"host") != [self._expected_host]:

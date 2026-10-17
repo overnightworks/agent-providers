@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import contextvars
+import gc
 import re
 import socket
 import struct
@@ -304,8 +305,20 @@ def relay_tasks(run_id: str = RUN_ID) -> list[str]:
     )
 
 
+def retained_relay_tasks(run_id: str = RUN_ID) -> list[str]:
+    """Names of the relay's tasks that are still referenced, finished or not."""
+    gc.collect()
+    prefix = f"relay:{run_id}:"
+    return sorted(
+        name
+        for obj in gc.get_objects()
+        if isinstance(obj, asyncio.Task) and (name := obj.get_name()).startswith(prefix)
+    )
+
+
 def connection_numbers(task_names: list[str]) -> list[int]:
-    return [int(re.fullmatch(r"relay:.+:conn-(\d+)", name).group(1)) for name in task_names]
+    matches = (re.fullmatch(r"relay:.+:conn-(\d+)", name) for name in task_names)
+    return [int(match.group(1)) for match in matches if match]
 
 
 async def yield_until(condition: Callable[[], bool]) -> None:

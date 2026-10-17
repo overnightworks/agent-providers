@@ -26,6 +26,7 @@ from relay_support import (
     post,
     record_task_names,
     relay_tasks,
+    retained_relay_tasks,
     yield_until,
 )
 from service_support import StepClock
@@ -43,7 +44,7 @@ from agent_service.tool_relay import (
 SIGNALS = (signal.SIGINT, signal.SIGTERM)
 JUST_BEFORE_SECONDS = 0.001
 SHARES_OF_A_WINDOW = 4
-LARGE_ANSWER = HttpAnswer(HTTPStatus.OK, JSON_MEDIA_TYPE, b"x" * 16_777_216)
+ANSWER_BEYOND_THE_SOCKET_BUFFERS = HttpAnswer(HTTPStatus.OK, JSON_MEDIA_TYPE, b"x" * 16_777_216)
 CLOSE_TASK = f"relay:{RUN_ID}:close"
 
 Scenario = Callable[[Relay, StepClock], Awaitable[None]]
@@ -68,6 +69,10 @@ def handlers() -> dict[signal.Signals, object]:
 
 def relay_log_records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
     return [r for r in caplog.records if r.name.startswith("agent_service")]
+
+
+def unretrieved_task_errors(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if "never retrieved" in r.getMessage()]
 
 
 async def answered(client: RawClient, relay: Relay) -> None:
@@ -209,13 +214,37 @@ def test_a_stalled_request_is_aborted_at_its_deadline_without_the_owner_and_free
     drive_stepped(scenario, owner)
 
 
-def test_a_partial_next_head_behind_a_gated_request_is_timed_from_the_answer() -> None:  # L7
+async def next_head_in_the_requests_segment(
+    client: RawClient, relay: Relay, owner: ScriptedOwner
+) -> None:
+    await client.send(post(relay, b"{}") + partial_head(relay))
+    await owner.wait_entered()
+
+
+async def next_head_after_the_request_entered_the_owner(
+    client: RawClient, relay: Relay, owner: ScriptedOwner
+) -> None:
+    await client.send(post(relay, b"{}"))
+    await owner.wait_entered()
+    await client.send(partial_head(relay))
+
+
+@pytest.mark.parametrize(
+    "next_head",
+    [
+        pytest.param(next_head_in_the_requests_segment, id="L7"),
+        pytest.param(next_head_after_the_request_entered_the_owner, id="L7-stream-buffered"),
+    ],
+)
+def test_a_partial_next_head_behind_a_gated_request_is_timed_from_the_answer(
+    next_head: Callable[[RawClient, Relay, ScriptedOwner], Awaitable[None]],
+) -> None:
     owner = ScriptedOwner(gated=True)
 
     async def scenario(relay: Relay, clock: StepClock) -> None:
         client = await RawClient.connect(port_of(relay))
-        await client.send(post(relay, b"{}") + partial_head(relay))
-        await owner.wait_entered()
+        await next_head(client, relay, owner)
+        await parked_at(clock, None)
         clock.advance(HEAD_RECEIVE_SECONDS * 2)
         await parked_at(clock, None)
         assert not client.has_ended()
@@ -244,6 +273,50 @@ def test_a_trickled_request_is_aborted_at_the_absolute_deadline_without_the_owne
     async def scenario(relay: Relay, clock: StepClock) -> None:
         client = await RawClient.connect(port_of(relay))
         await trickle_until_aborted(client, clock, opening(relay), window)
+        assert owner.requests == []
+
+    drive_stepped(scenario, owner)
+
+
+def head_split_before_its_last_bytes(relay: Relay) -> tuple[bytes, bytes]:
+    request = post(relay, b"{}")
+    return request[:10], request[10:]
+
+
+def body_split_before_its_last_bytes(relay: Relay) -> tuple[bytes, bytes]:
+    return partial_length_body(relay), b"x" * 97
+
+
+async def let_the_server_read_the_last_bytes_first(turns: int) -> None:
+    for _ in range(turns):
+        await asyncio.sleep(0)
+
+
+@pytest.mark.parametrize(
+    "turns_before_the_clock_moves", [1, 2], ids=["timer-first", "reader-first"]
+)
+@pytest.mark.parametrize(
+    ("split", "window"),
+    [
+        pytest.param(head_split_before_its_last_bytes, HEAD_RECEIVE_SECONDS, id="head"),
+        pytest.param(body_split_before_its_last_bytes, BODY_RECEIVE_SECONDS, id="body"),
+    ],
+)
+def test_a_request_completed_in_the_turn_its_deadline_passes_never_reaches_the_owner(
+    split: Callable[[Relay], tuple[bytes, bytes]], window: float, turns_before_the_clock_moves: int
+) -> None:
+    owner = ScriptedOwner()
+
+    async def scenario(relay: Relay, clock: StepClock) -> None:
+        client = await RawClient.connect(port_of(relay))
+        first, last = split(relay)
+        await client.send(first)
+        deadline = clock.now + window
+        await parked_at(clock, deadline)
+        await client.send(last)
+        await let_the_server_read_the_last_bytes_first(turns_before_the_clock_moves)
+        clock.advance_to(deadline)
+        assert await client.delivery() is Delivery.ABSENT
         assert owner.requests == []
 
     drive_stepped(scenario, owner)
@@ -318,12 +391,38 @@ def test_the_next_close_after_the_owner_lets_go_completes(
     async def scenario(relay: Relay, clock: StepClock) -> None:
         await start_gated_request(relay, owner)
         await exhaust_close_budget(relay, clock)
+        await exhaust_close_budget(relay, clock)
+        assert clock.now == 2 * RELAY_CLOSE_SECONDS
         owner.release()
         await close_bounded(relay)
         assert relay_tasks() == []
 
     drive_stepped(scenario, owner)
     assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+
+def test_a_task_ending_mid_budget_does_not_renew_the_close_deadline() -> None:
+    owner = SuppressingOwner()
+
+    async def scenario(relay: Relay, clock: StepClock) -> None:
+        await start_gated_request(relay, owner)
+        loop, held = await hold_one_accepted_connection(relay)
+        closing = asyncio.create_task(relay.close())
+        deadline = clock.now + RELAY_CLOSE_SECONDS
+        await parked_at(clock, deadline)
+        clock.advance_to(deadline / 2)
+        owner.release()
+        await yield_until(lambda: connection_numbers(relay_tasks()) == [])
+        await parked_at(clock, deadline)
+        assert not closing.done()
+        clock.advance_to(deadline)
+        with pytest.raises(RelayCleanupIncomplete):
+            await closing
+        loop.release_acceptance()
+        await close_bounded(relay)
+        assert await held.delivery() is Delivery.ABSENT
+
+    drive_stepped(scenario, owner, loop_factory=HoldingSteppedLoop)
 
 
 def test_an_owner_absorbing_one_cancellation_is_cancelled_again_by_the_next_close() -> None:  # L17
@@ -405,12 +504,14 @@ def test_an_attempt_whose_every_caller_was_cancelled_still_ends_and_leaves_no_un
             await caller
         clock.advance_to(deadline)
         await yield_until(lambda: CLOSE_TASK not in relay_tasks())
-        gc.collect()
-        assert [r for r in caplog.records if "never retrieved" in r.getMessage()] == []
         owner.release()
         await close_bounded(relay)
+        gc.collect()
+        assert unretrieved_task_errors(caplog) == []
 
     drive_stepped(scenario, owner)
+    gc.collect()
+    assert unretrieved_task_errors(caplog) == []
 
 
 def test_closing_after_a_complete_close_returns_at_once_with_no_new_attempt() -> None:  # L22
@@ -485,9 +586,9 @@ def test_a_task_cancelled_before_its_first_step_is_deregistered(
         loop, client = await hold_one_accepted_connection(relay)
         loop.release_acceptance()
         await close_bounded(relay)
-        gc.collect()
         assert await client.delivery() is Delivery.ABSENT
         assert relay_tasks() == []
+        assert connection_numbers(retained_relay_tasks()) == []
         assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
 
     drive_stepped(scenario, loop_factory=HoldingSteppedLoop)
@@ -496,7 +597,7 @@ def test_a_task_cancelled_before_its_first_step_is_deregistered(
 def test_closing_while_an_answer_is_written_never_counts_a_cut_answer_as_delivered(
     caplog: pytest.LogCaptureFixture,
 ) -> None:  # L28
-    owner = ScriptedOwner(answers=[LARGE_ANSWER])
+    owner = ScriptedOwner(answers=[ANSWER_BEYOND_THE_SOCKET_BUFFERS])
 
     async def scenario(relay: Relay, clock: StepClock) -> None:
         client = await RawClient.connect(port_of(relay))

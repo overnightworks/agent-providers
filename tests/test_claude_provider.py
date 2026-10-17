@@ -3930,7 +3930,7 @@ def test_stream_reap_completes_before_a_twice_cancelled_closer_returns(monkeypat
             await closer
         assert reaper_finished.is_set()
 
-    asyncio.run(_run())
+    _run_bounded(_run())
 
 
 def test_closing_a_claude_stream_keeps_its_private_home_until_confirmed_reap(
@@ -3985,11 +3985,11 @@ def test_closing_a_claude_stream_keeps_its_private_home_until_confirmed_reap(
         await closer
         assert not home_seen.exists()
 
-    asyncio.run(run())
+    _run_bounded(run())
 
 
 REAPER_CHECKPOINTS = 5
-MOST_SHIELD_CALLS_OF_ONE_REAP = 3
+MOST_SHIELD_CALLS_OF_ONE_REAP = 2
 
 
 @pytest.mark.parametrize(

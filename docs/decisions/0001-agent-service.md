@@ -513,7 +513,8 @@ SDK's default would have to be defeated.
 
 **c3 The automatic GET stream.** After `initialized`, 2.3.0 opens a GET stream with
 its own reconnect (`streamable_http.py:224-273`). The inspected SDK's
-`handle_get_stream` returns immediately without a session ID, so the automatic
+`handle_get_stream` returns immediately without a session ID
+(`mcp/client/streamable_http.py:232`, mcp 2.3.0), so the automatic
 GET applies only when a session ID exists. No parameter disables it. A hook
 failure inside a request task ends the whole transport task group.
 
@@ -535,9 +536,9 @@ failure inside a request task ends the whole transport task group.
 
 - `mcp` 2.3.0 adds four dependencies that are not locked: `mcp-types`,
   `jsonschema`, `sse-starlette` and `python-multipart`. Fact 12 of #115 named
-  `opentelemetry-api` where `python-multipart` belongs. Its `httpx2` is locked only through the core's
-  optional `api` extra (`anthropic`, `pyproject.toml:17-18`), not as a service
-  dependency. 1.30.0 needs `httpx<1`, `httpx-sse` and `pydantic-settings`.
+  `opentelemetry-api` where `python-multipart` belongs. `mcp`'s `httpx2` is locked
+  only through the core's optional `api` extra (`anthropic`,
+  `pyproject.toml:17-18`), not as a service dependency. 1.30.0 needs `httpx<1`, `httpx-sse` and `pydantic-settings`.
 - PyPI metadata of 2.3.0 (17.10.2026) lists, besides those: `opentelemetry-api`,
   `anyio`, `httpx2`, `pyjwt[crypto]`, `starlette`, `typing-inspection`, `uvicorn`,
   `pydantic` and `typing-extensions`. At `9b78f3a`, `uv.lock` has no package named

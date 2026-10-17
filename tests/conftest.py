@@ -93,8 +93,8 @@ def _service_hardening_never_touches_the_kernel():
     be undone after the other autouse patches and restore their mocks into later tests.
     """
     with (
-        patch("agent_service.process_hardening.set_not_dumpable", lambda: None),
-        patch("agent_service.process_hardening.effective_user_id", lambda: 1000),
+        patch("agent_service.process_hardening.set_not_dumpable", return_value=None),
+        patch("agent_service.process_hardening.effective_user_id", return_value=1000),
     ):
         yield
 

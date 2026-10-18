@@ -25,11 +25,20 @@ import shlex
 import stat
 import tempfile
 import threading
+import time
 import traceback
 import types
 from collections import deque
-from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Collection,
+    Iterator,
+    Mapping,
+    Sequence,
+)
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
@@ -344,15 +353,73 @@ class ClaudeCliStreamReader:
 
 
 @dataclass(frozen=True)
-class EventGate:
-    """Holds one child call open until the test sets ``release``."""
+class ScenarioDeadline:
+    """The one clock every hold of a scenario draws on.
 
+    Built at the top of a test body, so that however many holds a scenario runs
+    in sequence, together they wait at most ``TEST_WAIT_SECONDS``.
+    """
+
+    expires_at: float = field(default_factory=lambda: time.monotonic() + TEST_WAIT_SECONDS)
+
+    def remaining(self) -> float:
+        return max(0.0, self.expires_at - time.monotonic())
+
+
+@dataclass(frozen=True)
+class EventGate:
+    """Holds one child call open until the test sets ``release`` or the deadline passes.
+
+    A hold that outlives its deadline sets ``missed`` and lets go, because a
+    fake reap that holds inside the shielded reap absorbs the runner's own
+    cancellation: only the gate can end it.
+    """
+
+    deadline: ScenarioDeadline
     started: asyncio.Event = field(default_factory=asyncio.Event)
     release: asyncio.Event = field(default_factory=asyncio.Event)
+    missed: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def pass_through(self) -> None:
         self.started.set()
-        await self.release.wait()
+        try:
+            await asyncio.wait_for(self.release.wait(), self.deadline.remaining())
+        except TimeoutError:
+            self.missed.set()
+
+
+@asynccontextmanager
+async def scenario_holds(
+    gates: Sequence[EventGate],
+    tasks: Sequence[asyncio.Future[Any]],
+    asserted_faults: Collection[asyncio.Future[Any]],
+) -> AsyncIterator[None]:
+    """Open every gate and drain every task of a scenario, whatever its body did.
+
+    The scenario appends each task it creates to ``tasks`` at once and adds an
+    expected-fault task to ``asserted_faults`` only after its test has validated
+    the fault. A body that raised keeps its own exception; after a normal body a
+    task fault, or a gate that missed its deadline, fails the scenario.
+    """
+    try:
+        yield
+    finally:
+        for gate in gates:
+            gate.release.set()
+        outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+    faults = [
+        outcome
+        for task, outcome in zip(tasks, outcomes, strict=True)
+        if isinstance(outcome, BaseException)
+        and not isinstance(outcome, asyncio.CancelledError)
+        and task not in asserted_faults
+    ]
+    if len(faults) == 1:
+        raise faults[0]
+    if faults:
+        raise BaseExceptionGroup("tasks of the scenario failed", faults)
+    if any(gate.missed.is_set() for gate in gates):
+        pytest.fail("a hold of the scenario outlived its deadline")
 
 
 def _gated_answer(

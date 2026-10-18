@@ -18,13 +18,20 @@ from __future__ import annotations
 import ast
 import asyncio
 import textwrap
+from collections.abc import Awaitable, Callable
+from contextlib import AbstractContextManager, nullcontext
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import pytest
+from anchored_support import TEST_WAIT_SECONDS
 from provider_test_support import (
     EventGate,
+    ScenarioDeadline,
     a_claude_cli_child,
     install_claude_cli_children,
+    scenario_holds,
 )
 
 from agent_providers.claude import provider
@@ -36,7 +43,6 @@ GUARDED_MODULES = (
     "test_claude_provider_streaming.py",
 )
 PATCHING_CALLS = frozenset({"setattr", "patch", "object"})
-GATE_DEADLINE_SECONDS = 5
 GUARDED_DOOR_NAMES = frozenset({"create_subprocess_exec", "open_async_pipes"})
 
 
@@ -176,22 +182,158 @@ def test_the_builder_reader_refuses_a_line_beyond_the_limit_it_was_built_with() 
 
 @pytest.mark.parametrize("gated_call", ["communicate", "wait"])
 def test_a_gated_child_call_completes_only_after_its_release(gated_call: str) -> None:
-    gate = EventGate()
+    deadline = ScenarioDeadline()
+    gate = EventGate(deadline)
     child = a_claude_cli_child(**{f"{gated_call}_gate": gate})
     call = getattr(child, gated_call)
 
     async def drive() -> None:
-        pending = asyncio.ensure_future(call(b"") if gated_call == "communicate" else call())
-        try:
-            async with asyncio.timeout(GATE_DEADLINE_SECONDS):
-                await gate.started.wait()
-                assert not pending.done()
-                gate.release.set()
-                await pending
-        finally:
-            pending.cancel()
+        calls: list[asyncio.Future[Any]] = []
+        async with scenario_holds([gate], calls, set()), asyncio.timeout(deadline.remaining()):
+            pending = asyncio.ensure_future(call(b"") if gated_call == "communicate" else call())
+            calls.append(pending)
+            await gate.started.wait()
+            assert not pending.done()
+            gate.release.set()
+            await pending
 
     asyncio.run(drive())
+
+
+class _TaskFault(Exception):
+    """A registered task's own failure."""
+
+
+@dataclass
+class _HeldScenario:
+    """One scenario of ``scenario_holds``: a real gate and the tasks held on it."""
+
+    gate: EventGate
+    tasks: list[asyncio.Future[Any]] = field(default_factory=list)
+    asserted_faults: set[asyncio.Future[Any]] = field(default_factory=set)
+    body_failure: AssertionError = field(
+        default_factory=lambda: AssertionError("the scenario body failed"),
+    )
+
+    def register_task_ending_with(self, outcome: BaseException | None) -> asyncio.Task[None]:
+        task = asyncio.create_task(self._end_after_the_hold(outcome))
+        self.tasks.append(task)
+        return task
+
+    async def _end_after_the_hold(self, outcome: BaseException | None) -> None:
+        await self.gate.pass_through()
+        if outcome is not None:
+            raise outcome
+
+
+@dataclass(frozen=True)
+class _HoldsCase:
+    body: Callable[[_HeldScenario], Awaitable[None]]
+    expected_failure: Callable[[_HeldScenario], type[BaseException] | None]
+    reported: Callable[[_HeldScenario, BaseException], bool]
+
+
+async def _body_fails_while_tasks_pend_and_a_gate_missed(held: _HeldScenario) -> None:
+    held.register_task_ending_with(_TaskFault("first"))
+    held.register_task_ending_with(None)
+    held.gate.missed.set()
+    raise held.body_failure
+
+
+async def _body_completes_while_two_tasks_fault(held: _HeldScenario) -> None:
+    held.register_task_ending_with(_TaskFault("first"))
+    held.register_task_ending_with(_TaskFault("second"))
+    held.register_task_ending_with(None)
+
+
+async def _body_cancels_a_task_and_asserts_an_expected_fault(held: _HeldScenario) -> None:
+    held.register_task_ending_with(None).cancel()
+    expected_fault = held.register_task_ending_with(_TaskFault("expected"))
+    held.gate.release.set()
+    with pytest.raises(_TaskFault):
+        await expected_fault
+    held.asserted_faults.add(expected_fault)
+
+
+async def _body_completes_with_a_missed_gate(held: _HeldScenario) -> None:
+    held.gate.missed.set()
+
+
+async def _body_fails_before_asserting_an_expected_fault(held: _HeldScenario) -> None:
+    held.register_task_ending_with(_TaskFault("expected"))
+    raise held.body_failure
+
+
+async def _body_completes_without_asserting_an_expected_fault(held: _HeldScenario) -> None:
+    held.register_task_ending_with(_TaskFault("expected"))
+
+
+def _the_body_failure_itself(held: _HeldScenario, raised: BaseException) -> bool:
+    return raised is held.body_failure
+
+
+def _every_task_fault_in_one_group(held: _HeldScenario, raised: BaseException) -> bool:
+    return isinstance(raised, ExceptionGroup) and sorted(
+        str(fault) for fault in raised.exceptions
+    ) == ["first", "second"]
+
+
+def _the_unasserted_fault(held: _HeldScenario, raised: BaseException) -> bool:
+    return isinstance(raised, _TaskFault) and str(raised) == "expected"
+
+
+def _the_recorded_miss(held: _HeldScenario, raised: BaseException) -> bool:
+    return "outlived its deadline" in str(raised)
+
+
+HOLDS_CASES = {
+    "body_fails_with_pending_tasks": _HoldsCase(
+        _body_fails_while_tasks_pend_and_a_gate_missed,
+        lambda _held: AssertionError,
+        _the_body_failure_itself,
+    ),
+    "body_completes_with_two_task_faults": _HoldsCase(
+        _body_completes_while_two_tasks_fault, lambda _held: ExceptionGroup,
+        _every_task_fault_in_one_group,
+    ),
+    "cancelled_and_asserted_tasks_are_not_faults": _HoldsCase(
+        _body_cancels_a_task_and_asserts_an_expected_fault, lambda _held: None,
+        lambda _held, _raised: True,
+    ),
+    "body_completes_with_a_missed_gate": _HoldsCase(
+        _body_completes_with_a_missed_gate, lambda _held: pytest.fail.Exception,
+        _the_recorded_miss,
+    ),
+    "body_fails_before_asserting_the_expected_fault": _HoldsCase(
+        _body_fails_before_asserting_an_expected_fault, lambda _held: AssertionError,
+        _the_body_failure_itself,
+    ),
+    "body_completes_without_asserting_the_expected_fault": _HoldsCase(
+        _body_completes_without_asserting_an_expected_fault, lambda _held: _TaskFault,
+        _the_unasserted_fault,
+    ),
+}
+
+
+@pytest.mark.parametrize("case", HOLDS_CASES.values(), ids=HOLDS_CASES)
+def test_scenario_holds_drains_every_task_without_masking_the_body(case: _HoldsCase) -> None:
+    held = _HeldScenario(EventGate(ScenarioDeadline()))
+    expected_failure = case.expected_failure(held)
+    expectation: AbstractContextManager[Any] = (
+        nullcontext() if expected_failure is None else pytest.raises(expected_failure)
+    )
+
+    async def drive() -> None:
+        async with asyncio.timeout(2 * TEST_WAIT_SECONDS):
+            async with scenario_holds([held.gate], held.tasks, held.asserted_faults):
+                await case.body(held)
+
+    with expectation as raised:
+        asyncio.run(drive())
+
+    assert all(task.done() for task in held.tasks)
+    assert held.gate.release.is_set()
+    assert expected_failure is None or case.reported(held, raised.value)
 
 
 def test_a_stalled_child_stdout_stays_pending_after_its_lines() -> None:

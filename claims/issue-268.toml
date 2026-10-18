@@ -1,0 +1,8 @@
+claim_id = "86cb9413b62d40acba21efde83323f1c"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "b1c696848c952b3243ec7780cee1d350f8c9fcd8"
+branch = "claude/issue-268-codex-block"
+scope = ["README.md", "src/agent_providers/catalog.py", "src/agent_providers/codex/image.py", "src/agent_providers/codex/pool.py", "src/agent_providers/codex/protocol.py", "src/agent_providers/config.py", "src/agent_providers/dispatch.py", "src/agent_providers/grok/transport.py", "src/agent_providers/process.py", "tests/conftest.py", "tests/provider_test_support.py", "tests/test_catalog.py", "tests/test_codex_cli_adapter.py", "tests/test_codex_process_pool.py", "tests/test_config.py", "tests/test_dispatch.py", "tests/test_grok_cli_adapter.py", "tests/test_process.py"]
+opened_commit = "a9efd22d577a1de69227b5ef630cb7da45e393aa"
+whole_reason = "One public config cut: the Codex block, turns.codex, their readers and every pinning test change together or the tree does not import; the follow-ups ride on the same files"

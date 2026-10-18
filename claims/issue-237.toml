@@ -1,8 +1,0 @@
-claim_id = "f8a4642e22114c8086e1509e4c8f3c30"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "baee866f3aa65fb2062aaa645aa0478a5618ea84"
-branch = "claude/issue-237-closed-connection-ends"
-scope = ["README.md", "docs/decisions/0001-agent-service.md", "packages/agent-service/src/agent_service/tool_relay.py", "tests/relay_support.py", "tests/test_service_tool_relay.py", "tests/test_service_tool_relay_barrier.py", "tests/test_service_tool_relay_lifecycle.py"]
-opened_commit = "c704d8debb77235ac6ac133bd23ac5ae2a0b348a"
-whole_reason = "One listener method's concurrency: the owner's answer as a directly awaited child and a connection watch that cancels it in the step it sees an end, the close and bytes rules, the bound over all retained bytes and the cleanup under the relay's close, with three test controls, rows in three relay test modules, one README row and one ADR bullet. The barrier it drives is A1b-10b1b1's and is not touched."

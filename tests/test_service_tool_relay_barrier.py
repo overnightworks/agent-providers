@@ -371,6 +371,17 @@ async def accepted_after_its_cancellation_was_requested(rig: Rig) -> None:
     assert rig.app.calls == []
 
 
+async def handed_out_call_ended_before_the_next_arrives(rig: Rig) -> None:
+    first = arrive(rig.barrier, EDIT_SONG, 1)
+    assert (await rig.barrier.next_event()).tool_use_id == "call-1"
+    first.cancel()
+    await asyncio.gather(first, return_exceptions=True)
+    arrive(rig.barrier, EDIT_SONG, 2)
+
+    async with asyncio.timeout(WAIT_SECONDS):
+        assert (await rig.barrier.next_event()).tool_use_id == "call-2"
+
+
 async def asked_by_two_waiters_at_once(rig: Rig) -> None:
     asking = [asyncio.create_task(rig.barrier.next_event()) for _ in range(2)]
     await asyncio.sleep(0)
@@ -389,6 +400,7 @@ async def asked_by_two_waiters_at_once(rig: Rig) -> None:
     [
         another_call_is_accepted,
         accepted_after_its_cancellation_was_requested,
+        handed_out_call_ended_before_the_next_arrives,
         asked_by_two_waiters_at_once,
     ],
 )
@@ -691,7 +703,7 @@ def test_a_forwards_outcome_is_retrieved_exactly_once_and_settle_waits_for_it(
     with caplog.at_level(logging.ERROR):
         drive_barrier(scenario, gated_app(ending.failure))
     assert [kind for _, kind, _ in failure_lines(caplog)] == list(ending.logged_classes)
-    assert "never retrieved" not in caplog.text
+    assert reports == []
 
 
 @pytest.mark.parametrize(

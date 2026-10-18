@@ -9,6 +9,7 @@ import gc
 import json
 import logging
 import uuid
+from collections import Counter
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
@@ -30,6 +31,7 @@ from relay_support import (
     Delivery,
     RawClient,
     close_bounded,
+    count_retrievals,
     json_rpc,
     port_of,
     post_message,
@@ -44,29 +46,41 @@ from service_support import (
 )
 
 from agent_client.tools import ToolEffect
-from agent_client.wire import Failed, FailureCode, RunStarted, ToolCall
-from agent_providers.events import ToolCallEvent
+from agent_client.wire import (
+    Failed,
+    FailureCode,
+    RunStarted,
+    Succeeded,
+    ToolCall,
+    ToolResult,
+)
+from agent_providers.events import FinalEvent, ToolCallEvent, ToolResultEvent
 from agent_service.app_tools import open_app_tools
 from agent_service.config import RunConfig
 from agent_service.mcp_wire import (
     CallToolParams,
+    JsonRpcError,
     Reply,
     RequestId,
     ToolDefinition,
     ToolOutcome,
+    tool_result_response,
 )
 from agent_service.run_events import RUNNER_FAILED_MESSAGE, TOO_MANY_TOOL_CALLS_MESSAGE, run_frames
 from agent_service.run_liveness import LoopClock
 from agent_service.run_records import RunRecords
 from agent_service.runners import AdmittedRun
 from agent_service.tool_relay import (
+    CALL_GIVEN_UP_TEXT,
     MAX_PENDING_TOOL_CALLS,
     MAX_RELAY_CONNECTIONS,
+    UNANSWERED,
     AppTools,
     McpRelayOwner,
     Relay,
     ToolCallBarrier,
     ToolCallsMisused,
+    Unanswered,
 )
 
 SUPPORTED = "2025-11-25"
@@ -74,7 +88,6 @@ CLAIMED = ("edit_song", "read_song", "list_songs")
 OFFERED = ("edit_song", "read_song", "delete_song")
 REFUSAL = {"code": -32602, "message": "Invalid params"}
 UPSTREAM_TEXT = "ran edit_song"
-SETTLE_TURNS = 3
 
 
 class UpstreamBroke(Exception):
@@ -115,28 +128,55 @@ class EnteringCalls:
         self.entered: list[RequestId] = []
         self._barrier = barrier
 
-    async def call(self, request_id: RequestId, params: CallToolParams) -> Reply:
+    async def call(self, request_id: RequestId, params: CallToolParams) -> Reply | Unanswered:
         self.entered.append(request_id)
         return await self._barrier.call(request_id, params)
+
+    def cancel(self, request_id: RequestId) -> None:
+        self._barrier.cancel(request_id)
 
     def unoffered(self) -> None:
         self._barrier.unoffered()
 
 
 class BarrierRunner:
-    """The fake of the CLI runner's loop: hand out, yield, accept once resumed, then stop."""
+    """The fake of the CLI runner's loop: hand out, yield, accept once resumed, then stop.
 
-    def __init__(self, barrier: ToolCallBarrier) -> None:
+    ``accept_gate`` holds each acceptance of a call until the test opens it, and
+    ``final_after`` ends the run with a final event once that many calls were accepted.
+    """
+
+    def __init__(
+        self,
+        barrier: ToolCallBarrier,
+        accept_gate: asyncio.Event | None = None,
+        final_after: int | None = None,
+    ) -> None:
         self.asks = 0
+        self.at_gate = asyncio.Event()
         self._barrier = barrier
+        self._accept_gate = accept_gate
+        self._final_after = final_after
 
-    async def run(self, admitted: AdmittedRun) -> AsyncIterator[ToolCallEvent]:
+    async def run(
+        self, admitted: AdmittedRun
+    ) -> AsyncIterator[ToolCallEvent | ToolResultEvent | FinalEvent]:
+        accepted = 0
         try:
             while True:
                 self.asks += 1
                 event = await self._barrier.next_event()
                 yield event
+                if not isinstance(event, ToolCallEvent):
+                    continue
+                if self._accept_gate is not None:
+                    self.at_gate.set()
+                    await self._accept_gate.wait()
                 self._barrier.accept(event)
+                accepted += 1
+                if accepted == self._final_after:
+                    yield FinalEvent(text="done")
+                    return
         finally:
             self._barrier.stop()
             await self._barrier.settle()
@@ -175,10 +215,23 @@ class Rig:
         await yield_until(lambda: len(self.entries.entered) > entered)
         return connected
 
+    async def cancel(self, request_id: RequestId, client: RawClient | None = None) -> RawClient:
+        connected = client or await RawClient.connect(port_of(self.relay))
+        body = json_rpc("notifications/cancelled", None, {"requestId": request_id})
+        await connected.send(post_message(self.relay, body, SUPPORTED))
+        assert (await connected.answer()).status == HTTPStatus.ACCEPTED
+        return connected
+
     async def hand_out_and_accept(self) -> ToolCallEvent:
         event = await self.barrier.next_event()
+        assert isinstance(event, ToolCallEvent)
         self.barrier.accept(event)
         return event
+
+    @property
+    def fake(self) -> GatedApp:
+        assert isinstance(self.app, GatedApp)
+        return self.app
 
 
 def offered(names: Sequence[str]) -> list[ToolDefinition]:
@@ -211,11 +264,14 @@ def drive_barrier(
                 async with asyncio.timeout(WAIT_SECONDS * 3):
                     await scenario(Rig(relay, barrier, entries, app))
             finally:
-                barrier.stop()
-                if isinstance(app, GatedApp):
-                    app.release()
-                await barrier.settle()
-                await close_bounded(relay)
+                try:
+                    barrier.stop()
+                    if isinstance(app, GatedApp):
+                        app.release()
+                    async with asyncio.timeout(WAIT_SECONDS):
+                        await barrier.settle()
+                finally:
+                    await close_bounded(relay)
 
     asyncio.run(main())
 
@@ -238,10 +294,12 @@ def result_of(request_id: RequestId, text: str = UPSTREAM_TEXT) -> dict[str, Any
     }
 
 
-async def waiting_next_event(barrier: ToolCallBarrier) -> asyncio.Task[ToolCallEvent]:
+async def waiting_next_event(
+    barrier: ToolCallBarrier,
+) -> asyncio.Task[ToolCallEvent | ToolResultEvent]:
     asking = asyncio.Event()
 
-    async def ask() -> ToolCallEvent:
+    async def ask() -> ToolCallEvent | ToolResultEvent:
         asking.set()
         return await barrier.next_event()
 
@@ -253,11 +311,58 @@ async def waiting_next_event(barrier: ToolCallBarrier) -> asyncio.Task[ToolCallE
 
 def arrive(
     barrier: ToolCallBarrier, params: CallToolParams, request_id: RequestId = 1
-) -> asyncio.Task[Reply]:
+) -> asyncio.Task[Reply | Unanswered]:
     """A call that has run to its first suspension when this returns."""
     return asyncio.Task(
         barrier.call(request_id, params), loop=asyncio.get_running_loop(), eager_start=True
     )
+
+
+def upstream_task(number: int) -> asyncio.Task[ToolOutcome]:
+    name = f"upstream:{RUN_ID}:call-{number}"
+    return next(task for task in asyncio.all_tasks() if task.get_name() == name)
+
+
+async def ending_of(call: asyncio.Task[Reply | Unanswered]) -> object:
+    (ending,) = await asyncio.gather(call, return_exceptions=True)
+    return ending
+
+
+def upstream_answer(request_id: RequestId) -> Reply:
+    return tool_result_response(request_id, ToolOutcome(UPSTREAM_TEXT, is_error=False))
+
+
+def capture_loop_reports() -> list[dict[str, Any]]:
+    reports: list[dict[str, Any]] = []
+    asyncio.get_running_loop().set_exception_handler(lambda _, context: reports.append(context))
+    return reports
+
+
+@dataclass(frozen=True)
+class SettledState:
+    logged_classes: list[str]
+    retrievals: int
+
+
+def settling_with_evidence(
+    rig: Rig, caplog: pytest.LogCaptureFixture, retrievals: Counter[str]
+) -> asyncio.Task[SettledState]:
+    """A ``settle()`` that has started; its task reads the evidence at ``settle()``'s return."""
+
+    async def settle_and_observe() -> SettledState:
+        await rig.barrier.settle()
+        return SettledState(
+            [kind for _, kind, _ in failure_lines(caplog)], retrievals[f"upstream:{RUN_ID}:call-1"]
+        )
+
+    return asyncio.Task(settle_and_observe(), loop=asyncio.get_running_loop(), eager_start=True)
+
+
+async def closed_without_unretrieved_reports(rig: Rig, reports: list[dict[str, Any]]) -> None:
+    rig.fake.forget_failure()
+    await close_bounded(rig.relay)
+    gc.collect()
+    assert reports == []
 
 
 def cancel_relay_connections() -> None:
@@ -359,29 +464,6 @@ async def another_call_is_accepted(rig: Rig) -> None:
     assert app.calls == [("edit_song", {"text": "a"})]
 
 
-async def accepted_after_its_cancellation_was_requested(rig: Rig) -> None:
-    assert isinstance(rig.app, GatedApp)
-    call = arrive(rig.barrier, EDIT_SONG)
-    event = await rig.barrier.next_event()
-    call.cancel()
-
-    with pytest.raises(ToolCallsMisused):
-        rig.barrier.accept(event)
-    await asyncio.gather(call, return_exceptions=True)
-    assert rig.app.calls == []
-
-
-async def handed_out_call_ended_before_the_next_arrives(rig: Rig) -> None:
-    first = arrive(rig.barrier, EDIT_SONG, 1)
-    assert (await rig.barrier.next_event()).tool_use_id == "call-1"
-    first.cancel()
-    await asyncio.gather(first, return_exceptions=True)
-    arrive(rig.barrier, EDIT_SONG, 2)
-
-    async with asyncio.timeout(WAIT_SECONDS):
-        assert (await rig.barrier.next_event()).tool_use_id == "call-2"
-
-
 async def asked_by_two_waiters_at_once(rig: Rig) -> None:
     asking = [asyncio.create_task(rig.barrier.next_event()) for _ in range(2)]
     await asyncio.sleep(0)
@@ -399,14 +481,351 @@ async def asked_by_two_waiters_at_once(rig: Rig) -> None:
     "scenario",
     [
         another_call_is_accepted,
-        accepted_after_its_cancellation_was_requested,
-        handed_out_call_ended_before_the_next_arrives,
         asked_by_two_waiters_at_once,
     ],
 )
 def test_accepting_the_handed_out_call_cannot_forward_another(
     scenario: Callable[[Rig], Awaitable[None]],
 ) -> None:  # A2
+    drive_barrier(scenario)
+
+
+@dataclass(frozen=True)
+class GiveUp:
+    apply: Callable[[ToolCallBarrier, asyncio.Task[Reply | Unanswered]], None]
+    unanswered: bool
+
+
+CANCEL = GiveUp(lambda barrier, call: barrier.cancel(1), unanswered=True)
+TASK_CANCELLATION = GiveUp(lambda barrier, call: call.cancel(), unanswered=False)
+
+
+def saturated(rig: Rig) -> list[asyncio.Task[Reply | Unanswered]]:
+    return [arrive(rig.barrier, EDIT_SONG, n) for n in range(1, MAX_PENDING_TOOL_CALLS + 1)]
+
+
+async def ended_as_given_up_and_admits_a_fourth(
+    rig: Rig, first: asyncio.Task[Reply | Unanswered], give_up: GiveUp
+) -> None:
+    ending = await ending_of(first)
+    if give_up.unanswered:
+        assert ending is UNANSWERED
+    else:
+        assert isinstance(ending, asyncio.CancelledError)
+    assert not arrive(rig.barrier, EDIT_SONG, MAX_PENDING_TOOL_CALLS + 1).done()
+
+
+async def waiting_call_given_up(rig: Rig, give_up: GiveUp) -> None:
+    calls = saturated(rig)
+
+    give_up.apply(rig.barrier, calls[0])
+    following = await rig.barrier.next_event()
+
+    assert following.tool_use_id == "call-2"
+    assert isinstance(following, ToolCallEvent)
+    rig.barrier.accept(following)
+    assert (await rig.barrier.next_event()).tool_use_id == "call-3"
+    await ended_as_given_up_and_admits_a_fourth(rig, calls[0], give_up)
+    assert rig.fake.calls == [("edit_song", {"text": "a"})]
+
+
+async def handed_out_call_given_up(rig: Rig, give_up: GiveUp) -> None:
+    calls = saturated(rig)
+    event = await rig.barrier.next_event()
+    assert isinstance(event, ToolCallEvent)
+
+    give_up.apply(rig.barrier, calls[0])
+    rig.barrier.accept(event)
+
+    await ended_as_given_up_and_admits_a_fourth(rig, calls[0], give_up)
+    assert rig.fake.calls == []
+    assert await rig.barrier.next_event() == ToolResultEvent(
+        tool_use_id="call-1", content=CALL_GIVEN_UP_TEXT, is_error=True
+    )
+    assert (await rig.barrier.next_event()).tool_use_id == "call-2"
+
+
+async def forwarded_call_given_up(rig: Rig, give_up: GiveUp) -> None:
+    calls = saturated(rig)
+    await rig.hand_out_and_accept()
+    await rig.fake.forwarded(1)
+    forward = upstream_task(1)
+
+    give_up.apply(rig.barrier, calls[0])
+
+    await ended_as_given_up_and_admits_a_fourth(rig, calls[0], give_up)
+    assert not forward.done()
+    rig.fake.release()
+    await rig.barrier.settle()
+    assert (forward.cancelled(), forward.result()) == (False, ToolOutcome(UPSTREAM_TEXT, False))
+    assert rig.fake.calls == [("edit_song", {"text": "a"})]
+
+
+@pytest.mark.parametrize(
+    "give_up", [pytest.param(CANCEL, id="cancel"), pytest.param(TASK_CANCELLATION, id="task")]
+)
+@pytest.mark.parametrize(
+    "state", [waiting_call_given_up, handed_out_call_given_up, forwarded_call_given_up]
+)
+def test_a_given_up_call_ends_by_its_state_at_once_and_frees_its_slot(
+    state: Callable[[Rig, GiveUp], Awaitable[None]], give_up: GiveUp
+) -> None:
+    """C4."""
+
+    async def scenario(rig: Rig) -> None:
+        await state(rig, give_up)
+
+    drive_barrier(scenario)
+
+
+def test_a_cancel_on_the_free_fourth_connection_frees_the_slot_the_next_call_takes() -> None:
+    """C5."""
+
+    async def scenario(rig: Rig) -> None:
+        clients = [await rig.pending(n, "edit_song", {"n": n}) for n in (1, 2, 3)]
+        fourth = await rig.cancel(2)
+
+        await rig.pending(4, "edit_song", {"n": 4}, client=fourth)
+
+        assert await clients[1].delivery() is Delivery.ABSENT
+        handed_out = [(await rig.hand_out_and_accept()).tool_use_id for _ in range(3)]
+        assert handed_out == ["call-1", "call-3", "call-4"]
+
+    drive_barrier(scenario)
+
+
+@dataclass(frozen=True)
+class Race:
+    forwarded: bool
+    interfere: Callable[[ToolCallBarrier, asyncio.Task[Reply | Unanswered]], None]
+    unanswered: bool
+
+
+def cancel_when_the_upstream_finishes(
+    barrier: ToolCallBarrier, call: asyncio.Task[Reply | Unanswered]
+) -> None:
+    upstream_task(1).add_done_callback(lambda _: barrier.cancel(1))
+
+
+def cancel_then_task_cancellation(
+    barrier: ToolCallBarrier, call: asyncio.Task[Reply | Unanswered]
+) -> None:
+    barrier.cancel(1)
+    call.cancel()
+
+
+def task_cancellation_then_cancel(
+    barrier: ToolCallBarrier, call: asyncio.Task[Reply | Unanswered]
+) -> None:
+    call.cancel()
+    barrier.cancel(1)
+
+
+def cancel_then_stop(barrier: ToolCallBarrier, call: asyncio.Task[Reply | Unanswered]) -> None:
+    barrier.cancel(1)
+    barrier.stop()
+
+
+def stop_then_cancel(barrier: ToolCallBarrier, call: asyncio.Task[Reply | Unanswered]) -> None:
+    barrier.stop()
+    barrier.cancel(1)
+
+
+@pytest.mark.parametrize(
+    "race",
+    [
+        pytest.param(Race(True, cancel_when_the_upstream_finishes, True), id="after-the-upstream"),
+        pytest.param(Race(True, cancel_then_task_cancellation, False), id="cancel-then-task"),
+        pytest.param(Race(False, cancel_then_stop, True), id="cancel-then-stop"),
+        pytest.param(Race(False, stop_then_cancel, True), id="stop-then-cancel"),
+        pytest.param(Race(True, task_cancellation_then_cancel, False), id="task-then-cancel"),
+    ],
+)
+def test_a_give_up_before_the_call_returns_leaves_its_request_unanswered(
+    race: Race, caplog: pytest.LogCaptureFixture
+) -> None:
+    """C6."""
+
+    async def scenario(rig: Rig) -> None:
+        reports = capture_loop_reports()
+        retrievals = count_retrievals()
+        call = arrive(rig.barrier, EDIT_SONG)
+        if race.forwarded:
+            await rig.hand_out_and_accept()
+            await rig.fake.forwarded(1)
+        settling = settling_with_evidence(rig, caplog, retrievals)
+
+        race.interfere(rig.barrier, call)
+        rig.fake.release()
+        async with asyncio.timeout(WAIT_SECONDS):
+            ending = await ending_of(call)
+            settled = await settling
+
+        if race.unanswered:
+            assert ending is UNANSWERED
+        else:
+            assert isinstance(ending, asyncio.CancelledError)
+        assert settled.logged_classes == (["UpstreamBroke"] if race.forwarded else [])
+        assert settled.retrievals == int(race.forwarded)
+        await closed_without_unretrieved_reports(rig, reports)
+
+    with caplog.at_level(logging.ERROR):
+        drive_barrier(scenario, gated_app(UPSTREAM_BROKE))
+
+
+async def next_event_before_accept(barrier: ToolCallBarrier, event: ToolCallEvent) -> None:
+    with pytest.raises(ToolCallsMisused):
+        await barrier.next_event()
+
+
+async def accept_after_stop(barrier: ToolCallBarrier, event: ToolCallEvent) -> None:
+    barrier.stop()
+    with pytest.raises(ToolCallsMisused):
+        barrier.accept(event)
+
+
+async def next_event_after_accept_and_stop(barrier: ToolCallBarrier, event: ToolCallEvent) -> None:
+    barrier.accept(event)
+    barrier.stop()
+    with pytest.raises(ToolCallsMisused):
+        await barrier.next_event()
+
+
+@pytest.mark.parametrize(
+    "misuse", [next_event_before_accept, accept_after_stop, next_event_after_accept_and_stop]
+)
+def test_the_hand_out_rule_holds_over_a_given_up_handed_out_call(
+    misuse: Callable[[ToolCallBarrier, ToolCallEvent], Awaitable[None]],
+) -> None:
+    """C7."""
+
+    async def scenario(rig: Rig) -> None:
+        call = arrive(rig.barrier, EDIT_SONG)
+        event = await rig.barrier.next_event()
+        assert isinstance(event, ToolCallEvent)
+        rig.barrier.cancel(1)
+
+        await misuse(rig.barrier, event)
+
+        await ending_of(call)
+        assert rig.fake.calls == []
+
+    drive_barrier(scenario)
+
+
+async def an_id_never_seen(rig: Rig) -> None:
+    call = arrive(rig.barrier, EDIT_SONG, 1)
+
+    rig.barrier.cancel(99)
+
+    await rig.hand_out_and_accept()
+    rig.fake.release()
+    assert await call == upstream_answer(1)
+
+
+async def a_repeated_cancel(rig: Rig) -> None:
+    first = arrive(rig.barrier, EDIT_SONG, 1)
+    second = arrive(rig.barrier, EDIT_SONG, 2)
+
+    rig.barrier.cancel(1)
+    rig.barrier.cancel(1)
+
+    assert await ending_of(first) is UNANSWERED
+    await rig.hand_out_and_accept()
+    rig.fake.release()
+    assert await second == upstream_answer(2)
+
+
+async def a_refused_duplicate(rig: Rig) -> None:
+    original = arrive(rig.barrier, EDIT_SONG, 7)
+    duplicate = arrive(rig.barrier, EDIT_SONG, 7)
+    assert isinstance(duplicate.result(), JsonRpcError)
+    assert duplicate.result().error.code == REFUSAL["code"]
+
+    rig.barrier.cancel(7)
+
+    assert await ending_of(original) is UNANSWERED
+
+
+async def a_reused_id(rig: Rig) -> None:
+    rig.fake.release()
+    first = arrive(rig.barrier, EDIT_SONG, 2)
+    await rig.hand_out_and_accept()
+    assert await first == upstream_answer(2)
+    reused = arrive(rig.barrier, EDIT_SONG, 2)
+
+    rig.barrier.cancel(2)
+
+    assert await ending_of(reused) is UNANSWERED
+    assert first.result() == upstream_answer(2)
+
+
+async def an_id_reused_in_the_step_of_its_cancel(rig: Rig) -> None:
+    first = arrive(rig.barrier, EDIT_SONG, 1)
+
+    rig.barrier.cancel(1)
+    second = arrive(rig.barrier, EDIT_SONG, 1)
+
+    assert not second.done()
+    assert await ending_of(first) is UNANSWERED
+    rig.barrier.cancel(1)
+    assert await ending_of(second) is UNANSWERED
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        an_id_never_seen,
+        a_repeated_cancel,
+        a_refused_duplicate,
+        a_reused_id,
+        an_id_reused_in_the_step_of_its_cancel,
+    ],
+)
+def test_a_cancel_ends_only_the_pending_call_with_that_id(
+    scenario: Callable[[Rig], Awaitable[None]],
+) -> None:
+    """C8."""
+    drive_barrier(scenario)
+
+
+def test_a_call_cancelled_before_its_accept_streams_an_error_result_and_never_runs() -> None:
+    """C9."""
+
+    async def scenario(rig: Rig) -> None:
+        gate = asyncio.Event()
+        runner = BarrierRunner(rig.barrier, accept_gate=gate, final_after=2)
+        stream = streamed(runner, RunConfig(max_tool_calls=2))
+        first = await rig.pending(1, "edit_song", {"n": 1})
+        async with asyncio.timeout(WAIT_SECONDS):
+            await runner.at_gate.wait()
+
+        second_connection = await rig.cancel(1)
+        gate.set()
+        await rig.pending(2, "edit_song", {"n": 2}, client=second_connection)
+        rig.fake.release()
+
+        started, first_call, given_up, second_call, succeeded = await settled_stream(stream)
+        assert isinstance(started, RunStarted)
+        assert isinstance(first_call, ToolCall)
+        assert (first_call.tool_use_id, first_call.name, first_call.effect) == (
+            "call-1",
+            "edit_song",
+            ToolEffect.SIDE_EFFECTING,
+        )
+        assert isinstance(given_up, ToolResult)
+        assert (given_up.tool_use_id, given_up.content, given_up.is_error) == (
+            "call-1",
+            CALL_GIVEN_UP_TEXT,
+            True,
+        )
+        assert isinstance(second_call, ToolCall)
+        assert second_call.tool_use_id == "call-2"
+        assert isinstance(succeeded, Succeeded)
+        assert rig.fake.calls == [("edit_song", {"n": 2})]
+        assert await first.delivery() is Delivery.ABSENT
+        assert await reply_of(second_connection) == result_of(2)
+
     drive_barrier(scenario)
 
 
@@ -601,9 +1020,22 @@ def test_stop_refuses_waiting_calls_and_wakes_the_runner_while_the_relay_is_open
 
 async def handed_out_when_closed(rig: Rig) -> None:
     event = await rig.barrier.next_event()
+    assert isinstance(event, ToolCallEvent)
     await close_bounded(rig.relay)
-    with pytest.raises(ToolCallsMisused):
-        rig.barrier.accept(event)
+    rig.barrier.accept(event)
+    assert await rig.barrier.next_event() == ToolResultEvent(
+        tool_use_id="call-1", content=CALL_GIVEN_UP_TEXT, is_error=True
+    )
+
+
+async def handed_out_when_its_connection_task_is_cancelled(rig: Rig) -> None:
+    event = await rig.barrier.next_event()
+    assert isinstance(event, ToolCallEvent)
+    cancel_relay_connections()
+    rig.barrier.accept(event)
+    assert await rig.barrier.next_event() == ToolResultEvent(
+        tool_use_id="call-1", content=CALL_GIVEN_UP_TEXT, is_error=True
+    )
 
 
 async def waiting_when_closed(rig: Rig) -> None:
@@ -614,7 +1046,10 @@ async def waiting_when_closed(rig: Rig) -> None:
     next_event.cancel()
 
 
-@pytest.mark.parametrize("closing", [handed_out_when_closed, waiting_when_closed])
+@pytest.mark.parametrize(
+    "closing",
+    [handed_out_when_closed, handed_out_when_its_connection_task_is_cancelled, waiting_when_closed],
+)
 def test_the_relays_close_ends_a_pending_call_so_nothing_of_it_is_forwarded(
     closing: Callable[[Rig], Awaitable[None]],
 ) -> None:  # A8b
@@ -636,6 +1071,7 @@ class ForwardEnding:
     failure: Callable[[], BaseException] | None
     logged_classes: tuple[str, ...]
     status: HTTPStatus | None
+    retrievals: int
     cancelled_on_completion: bool = False
 
 
@@ -645,65 +1081,56 @@ UPSTREAM_BROKE = partial(UpstreamBroke, "x")
 @pytest.mark.parametrize(
     "ending",
     [
-        ForwardEnding(True, None, (), None),
-        ForwardEnding(True, UPSTREAM_BROKE, ("UpstreamBroke",), None),
-        ForwardEnding(False, UPSTREAM_BROKE, ("UpstreamBroke",), HTTPStatus.INTERNAL_SERVER_ERROR),
-        ForwardEnding(True, asyncio.CancelledError, (), None),
+        ForwardEnding(True, None, (), None, 1),
+        ForwardEnding(True, UPSTREAM_BROKE, ("UpstreamBroke",), None, 1),
         ForwardEnding(
-            False, UPSTREAM_BROKE, ("UpstreamBroke",), None, cancelled_on_completion=True
+            False, UPSTREAM_BROKE, ("UpstreamBroke",), HTTPStatus.INTERNAL_SERVER_ERROR, 1
         ),
+        ForwardEnding(True, asyncio.CancelledError, (), None, 0),
+        ForwardEnding(False, asyncio.CancelledError, (), None, 0),
+        ForwardEnding(False, UPSTREAM_BROKE, ("UpstreamBroke",), None, 1, True),
     ],
     ids=[
         "cancelled-success",
         "cancelled-failure",
         "waiting-failure",
         "cancelled-forward",
+        "cancelled-forward-with-an-active-waiter",
         "cancelled-on-completion",
     ],
 )
 def test_a_forwards_outcome_is_retrieved_exactly_once_and_settle_waits_for_it(
     ending: ForwardEnding, caplog: pytest.LogCaptureFixture
 ) -> None:  # A8c
-    reports: list[dict[str, Any]] = []
-
-    async def exercise(rig: Rig) -> None:
-        app = rig.app
-        assert isinstance(app, GatedApp)
+    async def scenario(rig: Rig) -> None:
+        reports = capture_loop_reports()
+        retrievals = count_retrievals()
+        app = rig.fake
         client = await rig.pending(1, "edit_song", {"text": "a"})
         await rig.hand_out_and_accept()
         await app.forwarded(1)
         if ending.request_cancelled:
             await close_bounded(rig.relay)
 
-        settling = asyncio.create_task(rig.barrier.settle())
-        for _ in range(SETTLE_TURNS):
-            await asyncio.sleep(0)
+        settling = settling_with_evidence(rig, caplog, retrievals)
         assert not settling.done()
 
-        app.release()
         if ending.cancelled_on_completion:
-            await asyncio.sleep(0)
-            cancel_relay_connections()
+            upstream_task(1).add_done_callback(lambda _: cancel_relay_connections())
+        app.release()
         async with asyncio.timeout(WAIT_SECONDS):
-            await settling
+            settled = await settling
+
+        assert settled.logged_classes == list(ending.logged_classes)
+        assert settled.retrievals == ending.retrievals
         if ending.status is not None:
             answer = await client.answer()
             assert (answer.status, answer.body) == (ending.status, b"")
         assert app.calls == [("edit_song", {"text": "a"})]
-
-    async def scenario(rig: Rig) -> None:
-        asyncio.get_running_loop().set_exception_handler(lambda _, context: reports.append(context))
-        await exercise(rig)
-        assert isinstance(rig.app, GatedApp)
-        rig.app.forget_failure()
-        await close_bounded(rig.relay)
-        gc.collect()
-        assert reports == []
+        await closed_without_unretrieved_reports(rig, reports)
 
     with caplog.at_level(logging.ERROR):
         drive_barrier(scenario, gated_app(ending.failure))
-    assert [kind for _, kind, _ in failure_lines(caplog)] == list(ending.logged_classes)
-    assert reports == []
 
 
 @pytest.mark.parametrize(

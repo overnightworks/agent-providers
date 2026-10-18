@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 from capability_support import canary_token, capability_carrying
 from relay_support import (
+    ConnectionEnded,
     Delivery,
     RawClient,
     RelayWrites,
@@ -35,11 +36,13 @@ from agent_service.mcp_wire import (
     answer_for,
 )
 from agent_service.tool_relay import (
+    UNANSWERED,
     CapabilityReflected,
     McpRelayOwner,
     Relay,
     RelayRequest,
     RepeatedToolOffer,
+    Unanswered,
 )
 
 CLAIM = ("list_songs", "read_lyrics", "save_lyrics")
@@ -94,7 +97,7 @@ def owner_of(
 
 def answered(
     owner: McpRelayOwner, body: bytes, protocol_version: str | None = SUPPORTED
-) -> HttpAnswer:
+) -> HttpAnswer | Unanswered:
     return asyncio.run(owner.answer(RelayRequest(body, protocol_version)))
 
 
@@ -230,6 +233,30 @@ def test_answers_each_message_without_reaching_the_tool_port(
 
     assert answer == expected
     assert b"resources/list" not in answer.body
+    assert calls.calls == []
+
+
+@pytest.mark.parametrize(
+    ("params", "routed"),
+    [
+        ({"requestId": 4}, [4]),
+        ({"requestId": "a", "reason": "x"}, ["a"]),
+        (None, []),
+        ({"requestId": 1.5}, []),
+        ({"requestId": True}, []),
+    ],
+    ids=["number", "text-with-reason", "no-params", "fraction", "boolean"],
+)
+def test_a_cancel_reaches_the_tool_port_only_with_a_well_formed_request_id(
+    params: dict[str, Any] | None, routed: list[int | str]
+) -> None:
+    """C1."""
+    calls = ScriptedCalls()
+
+    answer = answered(owner_of(calls=calls), json_rpc("notifications/cancelled", None, params))
+
+    assert answer == ACKNOWLEDGEMENT
+    assert calls.cancelled_ids == routed
     assert calls.calls == []
 
 
@@ -422,10 +449,30 @@ def test_a_request_id_that_is_the_capability_gets_an_empty_500_and_one_log_line(
     assert SEGMENT not in caplog.text
 
 
+async def outcome_of(client: RawClient) -> tuple[HTTPStatus | Delivery, bytes]:
+    try:
+        answer = await client.answer()
+    except ConnectionEnded as ended:
+        return ended.delivery, b""
+    return HTTPStatus(answer.status), answer.body
+
+
+@pytest.mark.parametrize(
+    ("replies", "refused_lines", "in_flight_outcome"),
+    [
+        ([], 3, (HTTPStatus.INTERNAL_SERVER_ERROR, b"")),
+        ([UNANSWERED], 2, (Delivery.ABSENT, b"")),
+    ],
+    ids=["answered-call-gets-the-empty-500", "unanswered-call-stays-unanswered"],
+)
 def test_a_call_in_flight_when_another_connection_refuses_the_owner_gets_nothing(
+    replies: list[Unanswered],
+    refused_lines: int,
+    in_flight_outcome: tuple[HTTPStatus | Delivery, bytes],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    calls = ScriptedCalls(gated=True)
+    """C2."""
+    calls = ScriptedCalls(replies, gated=True)
     owner = owner_of(reflected_in_a_description(), calls=calls)
 
     async def scenario(relay: Relay) -> None:
@@ -437,8 +484,7 @@ def test_a_call_in_flight_when_another_connection_refuses_the_owner_gets_nothing
         listing = await other.answer()
         assert (listing.status, listing.body) == (HTTPStatus.INTERNAL_SERVER_ERROR, b"")
         calls.release()
-        resumed = await in_flight.answer()
-        assert (resumed.status, resumed.body) == (HTTPStatus.INTERNAL_SERVER_ERROR, b"")
+        assert await outcome_of(in_flight) == in_flight_outcome
         await other.send(message_for(relay, json_rpc("tools/call", 3, {"name": "save_lyrics"})))
         later = await other.answer()
         assert (later.status, later.body) == (HTTPStatus.INTERNAL_SERVER_ERROR, b"")
@@ -448,7 +494,7 @@ def test_a_call_in_flight_when_another_connection_refuses_the_owner_gets_nothing
 
     assert [(event, kind) for event, kind, _ in failure_lines(caplog)] == [
         (OWNER_FAILED, "CapabilityReflected")
-    ] * 3
+    ] * refused_lines
 
 
 def test_a_gated_call_sends_nothing_until_released_and_then_exactly_its_reply(

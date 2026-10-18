@@ -639,7 +639,22 @@ with no MCP SDK dependency.
   on a fourth admitted connection, but reserves no capacity, because idle keep-alive
   connections count toward the cap too (c2 measured one response's calls in series on
   one connection; whether that bounds a production run is not measured). A close and
-  `notifications/cancelled` both end a pending call (c8); A1b-10b1b builds them.
+  `notifications/cancelled` both end a pending call (c8); A1b-10b1b1 builds the cancel and A1b-10b1b2 the close.
+- *The CLI's cancel (A1b-10b1b1, 18.10.2026).* `notifications/cancelled` is routed to
+  pending ids only; others are ignored, as the MCP specification allows (E5 named the
+  call's id on another connection). A give-up, by a cancel or by the cancellation of
+  the call's task, is recorded before it returns, also through every task whose await
+  chain reaches the call through direct awaits, so an acceptance in the same step
+  forwards nothing. A call given up is never forwarded unless it already was, and its
+  request is closed without a byte (`Unanswered`), because the MCP specification asks a
+  receiver not to answer a cancelled request and the connection is needed for the next
+  call. A handed-out call gets an `is_error` `ToolResultEvent` at its acceptance, so
+  the app's client sees that it never ran. A forwarded call is not cancelled upstream
+  (design item 10); only its waiter ends (head ruling 18.10.2026, decision A), and its
+  outcome is retrieved exactly once before `settle()` returns. Inferred, not measured:
+  that the CLI would not read an answer written after its cancel; E5's pairing of the
+  cancel with the stream's timeout stays provisional (c8). Not measured: the CLI's
+  reaction to the closed connection (A1b-12b).
 - *H9.* Its import contract says "client → stdlib, pydantic, HTTP and the MCP SDK
   only". That sentence is about `agent-client` and is untouched; HD1 adds no
   MCP SDK to any package, so it stays true.

@@ -13,6 +13,7 @@ from relay_support import (
     OWNER_BODY,
     RUN_ID,
     RawClient,
+    RelayWrites,
     RequestHead,
     ScriptedOwner,
     chunk,
@@ -29,7 +30,13 @@ from relay_support import (
 from agent_client.wire import MAX_EVENT_BYTES
 from agent_service.mcp_wire import ACKNOWLEDGEMENT, JSON_MEDIA_TYPE, HttpAnswer
 from agent_service.run_liveness import LoopClock
-from agent_service.tool_relay import LOOPBACK_HOST, RECEIVE_CHUNK_BYTES, Relay
+from agent_service.tool_relay import (
+    LOOPBACK_HOST,
+    MAX_RELAY_CONNECTIONS,
+    RECEIVE_CHUNK_BYTES,
+    UNANSWERED,
+    Relay,
+)
 
 CANARY = "canary-4c9e1b7a"
 HEAD_LIMIT_BYTES = 16_384
@@ -953,6 +960,33 @@ def test_a_client_leaving_while_the_owner_works_ends_the_connection_quietly(
 
     drive(scenario, owner=owner)
     assert unlogged_beyond_asyncio_debug(caplog) == []
+
+
+def test_an_unanswered_request_closes_its_connection_without_a_byte_and_frees_the_slot(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """C3."""
+    caplog.set_level(logging.DEBUG, logger="agent_service")
+    relay_writes = RelayWrites(monkeypatch)
+    owner = ScriptedOwner([UNANSWERED])
+
+    async def scenario(relay: Relay) -> None:
+        clients = [await RawClient.connect(port_of(relay)) for _ in range(MAX_RELAY_CONNECTIONS)]
+        await yield_until(lambda: len(relay_tasks()) == MAX_RELAY_CONNECTIONS)
+        unanswered, *others = clients
+
+        await unanswered.send(post(relay, b"{}"))
+
+        assert await unanswered.at_eof()
+        await yield_until(lambda: len(relay_tasks()) == MAX_RELAY_CONNECTIONS - 1)
+        assert relay_writes.to(unanswered) == b""
+        fifth = await RawClient.connect(port_of(relay))
+        await fifth.send(post(relay, b"{}"))
+        assert (await fifth.answer()).body == OWNER_BODY
+        assert [relay_writes.to(other) for other in others] == [b""] * len(others)
+
+    drive(scenario, owner=owner)
+    assert [r for r in caplog.records if r.name.startswith("agent_service")] == []
 
 
 def test_close_cancels_a_cooperating_owner_and_leaves_no_task(

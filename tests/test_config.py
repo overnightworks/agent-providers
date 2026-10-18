@@ -36,6 +36,8 @@ from agent_providers.config import (
     WorkingRootViolation,
     configure,
     current_claude_runtime,
+    current_codex_runtime,
+    current_codex_turn_runtime,
     current_config,
     current_grok_runtime,
     current_grok_turn_runtime,
@@ -46,9 +48,7 @@ from agent_providers.config import (
 
 def _catalog_only_runtime(tmp_path: Path) -> ProviderRuntimeConfig:
     return ProviderRuntimeConfig(
-        codex_cli_binary="/bin/sh",
         cli_binary_search_path=(Path("/usr/bin"),),
-        codex_cli_auth_file=tmp_path / "codex.json",
         cli_working_directory_root=tmp_path,
     )
 
@@ -428,3 +428,57 @@ def test_a_host_with_a_removed_flat_prompt_file_field_is_refused_naming_the_fiel
 
     with pytest.raises(ValidationError, match=removed_flat_field):
         TurnRuntimeConfig(**facts)
+
+
+def test_a_codex_call_without_a_codex_block_names_the_provider(tmp_path: Path) -> None:
+    override_provider_runtime(**_catalog_only_runtime(tmp_path).model_dump())
+
+    with pytest.raises(ProviderNotConfiguredError) as refused:
+        current_codex_runtime()
+
+    assert (refused.value.provider, refused.value.block) == ("codex", "codex")
+    assert "codex" in str(refused.value)
+
+
+def test_a_codex_turn_without_a_codex_turn_block_names_the_provider() -> None:
+    override_turn_runtime(codex=None)
+
+    with pytest.raises(ProviderNotConfiguredError) as refused:
+        current_codex_turn_runtime()
+
+    assert (refused.value.provider, refused.value.block) == ("codex", "turns.codex")
+
+
+@pytest.mark.parametrize(
+    "removed_flat_field",
+    [
+        pytest.param("codex_cli_binary", id="binary"),
+        pytest.param("codex_cli_auth_file", id="auth-file"),
+    ],
+)
+def test_a_host_with_a_removed_flat_codex_field_is_refused_naming_the_field(
+    removed_flat_field: str, tmp_path: Path,
+) -> None:
+    facts = {**_catalog_only_runtime(tmp_path).model_dump(), removed_flat_field: "/bin/sh"}
+
+    with pytest.raises(ValidationError, match=removed_flat_field):
+        ProviderRuntimeConfig(**facts)
+
+
+@pytest.mark.parametrize(
+    "removed_flat_field",
+    [
+        pytest.param("codex_code_mode_host_binary", id="code-mode-host-binary"),
+        pytest.param("codex_resources_directory", id="resources-directory"),
+        pytest.param("codex_max_concurrent_processes", id="max-concurrent-processes"),
+        pytest.param("codex_max_concurrent_image_runs", id="max-concurrent-image-runs"),
+    ],
+)
+def test_a_host_with_a_removed_flat_codex_turn_field_is_refused_naming_the_field(
+    removed_flat_field: str,
+) -> None:
+    facts = {**current_turn_config().model_dump(), removed_flat_field: "/bin/sh"}
+
+    with pytest.raises(ValidationError, match=removed_flat_field):
+        TurnRuntimeConfig(**facts)
+

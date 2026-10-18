@@ -50,7 +50,7 @@ from agent_providers.codex.protocol import (
     run_reserved_codex_cli,
     top_level_error_message,
 )
-from agent_providers.config import current_config, current_turn_config
+from agent_providers.config import current_codex_runtime, current_codex_turn_runtime
 from agent_providers.errors import (
     ProviderUnavailableError,
     SafeRouteReasonCode,
@@ -172,11 +172,11 @@ class CodexImageQuotaError(CodexImageError):
 
 def codex_image_turn_is_available() -> bool:
     """Whether this process has every dependency for an image turn."""
-    turns = current_turn_config()
-    code_mode_host = turns.codex_code_mode_host_binary
-    resources = turns.codex_resources_directory
+    turns = current_codex_turn_runtime()
+    code_mode_host = turns.code_mode_host_binary
+    resources = turns.resources_directory
     return (
-        resolve_cli_binary(current_config().codex_cli_binary) is not None
+        resolve_cli_binary(current_codex_runtime().binary) is not None
         and code_mode_host.is_file()
         and os.access(code_mode_host, os.X_OK)
         and resources.is_dir()

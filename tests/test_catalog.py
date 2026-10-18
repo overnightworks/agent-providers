@@ -20,6 +20,7 @@ import pytest
 from provider_test_support import (
     A_CODEX_LOGIN_WITH_INVALID_UTF8,
     CLAUDE_MODEL_CATALOG_STDOUT,
+    CLI_RUNTIME_OVERRIDES,
     GROK_LOGGED_IN,
     a_codex_login,
     a_credential_destination_that_fails,
@@ -28,8 +29,7 @@ from provider_test_support import (
     call_within_deadline,
     fake_cli_executable,
     override_claude_runtime,
-    override_cli_binary,
-    override_login_source,
+    override_codex_runtime,
     override_provider_runtime,
 )
 from pydantic import SecretStr
@@ -61,6 +61,9 @@ from agent_providers.process import (
     CliEnvironmentUnavailableError,
     CliLoginUnusableError,
     clear_agent_cli_caches,
+    codex_cli_login,
+    codex_cli_login_is_usable,
+    codex_cli_model_catalog,
     grok_cli_status,
 )
 
@@ -104,7 +107,7 @@ def _configure_cli(
     calls_log: Path | None = None,
 ) -> None:
     binary = fake_cli_executable(tmp_path, answers, calls_log=calls_log)
-    override_cli_binary(provider, str(binary))
+    CLI_RUNTIME_OVERRIDES[provider](binary=str(binary))
 
 
 CLI_OFFERS = [
@@ -429,7 +432,9 @@ def test_an_api_key_makes_a_provider_ready_without_its_cli_block(
     provider: str, key_setting: str, environment_key: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(catalog, "_anthropic_sdk_available", lambda: True)
-    override_provider_runtime(claude=None, grok=None, **{key_setting: SecretStr("a-key")})
+    override_provider_runtime(
+        claude=None, grok=None, codex=None, **{key_setting: SecretStr("a-key")},
+    )
 
     configuration = provider_configuration(provider, frozenset())
 
@@ -450,10 +455,20 @@ def test_an_api_key_makes_a_provider_ready_without_its_cli_block(
             "grok", lambda: list_provider_models("grok", ProviderRoute.CLI), id="grok-models",
         ),
         pytest.param("grok", grok_cli_status, id="grok-status"),
+        pytest.param("codex", lambda: provider_configuration("codex", frozenset()), id="codex"),
+        pytest.param(
+            "codex", lambda: probe_provider_route("codex", ProviderRoute.CLI), id="codex-probe",
+        ),
+        pytest.param(
+            "codex", lambda: list_provider_models("codex", ProviderRoute.CLI), id="codex-models",
+        ),
+        pytest.param("codex", codex_cli_login, id="codex-login"),
+        pytest.param("codex", codex_cli_login_is_usable, id="codex-login-usable"),
+        pytest.param("codex", codex_cli_model_catalog, id="codex-model-catalog"),
     ],
 )
 def test_a_host_without_a_providers_block_is_refused_not_reported_as_logged_out(
-    provider: str, ask_catalog: Callable[[], object],
+    provider: str, ask_catalog: Callable[[], object], spawned_children: list[str],
 ) -> None:
     override_provider_runtime(**{provider: None})
 
@@ -461,6 +476,7 @@ def test_a_host_without_a_providers_block_is_refused_not_reported_as_logged_out(
         ask_catalog()
 
     assert (refused.value.provider, refused.value.block) == (provider, provider)
+    assert spawned_children == []
 
 
 SIGNED_IN_CLI_ANSWERS = {
@@ -482,7 +498,7 @@ def test_a_signed_in_cli_route_is_disturbed_once_its_binary_is_gone(
 ) -> None:
     fake_cli_executable(tmp_path, SIGNED_IN_CLI_ANSWERS[provider])
     override_provider_runtime(cli_binary_search_path=(tmp_path,))
-    override_cli_binary(provider, "fake-cli")
+    CLI_RUNTIME_OVERRIDES[provider](binary="fake-cli")
     with_binary = probe_provider_route(provider, ProviderRoute.CLI)
     (tmp_path / "fake-cli").unlink()
     clear_agent_cli_caches()
@@ -651,7 +667,7 @@ def test_the_grok_cli_listing_reads_a_probe_that_outlives_its_caller_budget_as_l
 def test_the_codex_cli_listing_needs_no_login(tmp_path: Path) -> None:
     _configure_cli(tmp_path, "codex", {CODEX_MODEL_COMMAND: _codex_models(("gpt-5.6", "list", 1))})
     current_codex_login = tmp_path / "no-such-codex-login.json"
-    override_provider_runtime(codex_cli_auth_file=current_codex_login)
+    override_codex_runtime(token_file=current_codex_login)
 
     assert list_provider_models("codex", ProviderRoute.CLI) == ["gpt-5.6"]
 
@@ -737,7 +753,7 @@ A_CODEX_LOGIN_WITHOUT_ITS_ID_TOKEN = b'{"auth_mode":"chatgpt","tokens":{"access_
 def _codex_setup(tmp_path: Path, document: bytes) -> object:
     auth_file = tmp_path / "codex-auth.json"
     auth_file.write_bytes(document)
-    override_provider_runtime(codex_cli_auth_file=auth_file)
+    override_codex_runtime(token_file=auth_file)
     return provider_configuration("codex", frozenset({ProviderSetupMethod.CODEX_CLI}))
 
 
@@ -846,8 +862,10 @@ def _a_cli_install(
         cli_binary_search_path=(tmp_path,),
         **{install.api_key_setting: SecretStr("a-key") if api_key else None},
     )
-    override_login_source(install.provider, auth_file)
-    override_cli_binary(install.provider, "absent-cli" if binary is _Binary.MISSING else "fake-cli")
+    CLI_RUNTIME_OVERRIDES[install.provider](
+        token_file=auth_file,
+        binary="absent-cli" if binary is _Binary.MISSING else "fake-cli",
+    )
     return calls_log
 
 
@@ -1023,7 +1041,7 @@ def test_codex_setup_does_not_follow_a_link_to_a_complete_login(tmp_path: Path) 
     target.write_bytes(a_codex_login())
     link = tmp_path / "codex-auth.json"
     link.symlink_to(target)
-    override_provider_runtime(codex_cli_auth_file=link)
+    override_codex_runtime(token_file=link)
 
     configuration = provider_configuration("codex", frozenset({ProviderSetupMethod.CODEX_CLI}))
 
@@ -1040,10 +1058,8 @@ def test_the_codex_login_probe_refuses_a_source_that_is_not_a_plain_file(
 ) -> None:
     calls_log = tmp_path / "calls"
     fake_cli_executable(tmp_path, {("login", "status"): CODEX_LOGGED_IN}, calls_log=calls_log)
-    override_provider_runtime(
-        cli_binary_search_path=(tmp_path,), codex_cli_binary="fake-cli",
-        codex_cli_auth_file=make_source(tmp_path),
-    )
+    override_provider_runtime(cli_binary_search_path=(tmp_path,))
+    override_codex_runtime(binary="fake-cli", token_file=make_source(tmp_path))
 
     snapshot = call_within_deadline(probe_provider_route, "codex", ProviderRoute.CLI)
 

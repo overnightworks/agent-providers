@@ -15,6 +15,7 @@ import asyncio
 import ctypes
 import gc
 import logging
+import subprocess
 import sys
 import threading
 import warnings
@@ -37,6 +38,8 @@ from provider_test_support import MCP_TOOL_NAMES, close_fake_cli_pipes
 from agent_providers import procfs
 from agent_providers.config import (
     ClaudeCliRuntime,
+    CodexCliRuntime,
+    CodexTurnRuntime,
     GrokCliRuntime,
     GrokTurnRuntime,
     McpServerSpec,
@@ -60,11 +63,13 @@ _SAMPLE_MCP_SERVER = McpServerSpec(
 )
 
 _SAMPLE_TURNS = TurnRuntimeConfig(
-    codex_code_mode_host_binary=_SAMPLE_ROOT / "codex" / "code-mode-host",
-    codex_resources_directory=_SAMPLE_ROOT / "codex" / "resources",
-    codex_max_concurrent_processes=4,
-    codex_max_concurrent_image_runs=2,
     mcp_server=_SAMPLE_MCP_SERVER,
+    codex=CodexTurnRuntime(
+        code_mode_host_binary=_SAMPLE_ROOT / "codex" / "code-mode-host",
+        resources_directory=_SAMPLE_ROOT / "codex" / "resources",
+        max_concurrent_processes=4,
+        max_concurrent_image_runs=2,
+    ),
     grok=GrokTurnRuntime(
         prompt_file_prefix="notes-cli-prompt-",
         prompt_file_placeholder="<notes-private-prompt>",
@@ -74,14 +79,13 @@ _SAMPLE_TURNS = TurnRuntimeConfig(
 _SAMPLE_RUNTIME = ProviderRuntimeConfig(
     # An absolute path that exists on every host, so binary resolution is a
     # real answer in the suite rather than a patched one.
-    codex_cli_binary="/bin/sh",
     cli_binary_search_path=(Path("/usr/local/bin"), Path("/usr/bin"), Path("/bin")),
-    codex_cli_auth_file=_SAMPLE_ROOT / "codex" / "auth.json",
     cli_working_directory_root=_SAMPLE_ROOT / "working-root",
     claude=ClaudeCliRuntime(
         binary="/bin/sh", token_file=_SAMPLE_ROOT / "claude" / "credentials.json",
     ),
     grok=GrokCliRuntime(binary="/bin/sh", token_file=_SAMPLE_ROOT / "grok" / "auth.json"),
+    codex=CodexCliRuntime(binary="/bin/sh", token_file=_SAMPLE_ROOT / "codex" / "auth.json"),
     turns=_SAMPLE_TURNS,
 )
 
@@ -101,13 +105,25 @@ def _configure_agent_provider_runtime(tmp_path: Path):
             update={
                 "claude": _SAMPLE_RUNTIME.claude.model_copy(update={"token_file": claude_auth}),
                 "grok": _SAMPLE_RUNTIME.grok.model_copy(update={"token_file": grok_auth}),
-                "codex_cli_auth_file": codex_auth,
+                "codex": _SAMPLE_RUNTIME.codex.model_copy(update={"token_file": codex_auth}),
                 "cli_working_directory_root": tmp_path,
             }
         )
     )
     yield
     reset_config()
+
+
+@pytest.fixture
+def spawned_children(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    spawned: list[str] = []
+
+    def refuse_spawn(*arguments, **_keywords):
+        spawned.append(str(arguments))
+        raise AssertionError("no child may be spawned")
+
+    monkeypatch.setattr(subprocess, "Popen", refuse_spawn)
+    return spawned
 
 
 def _worker_dumpable_flag() -> int:

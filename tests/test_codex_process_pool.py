@@ -3,21 +3,19 @@
 from __future__ import annotations
 
 import pytest
-from provider_test_support import override_turn_runtime
+from provider_test_support import override_codex_turn_runtime, override_turn_runtime
 
 from agent_providers.codex.pool import (
     CodexProcessKind,
     CodexProcessPool,
     get_codex_process_pool,
 )
+from agent_providers.config import ProviderNotConfiguredError
 from agent_providers.errors import CodexProcessPoolSaturatedError
 
 
 def test_the_process_wide_pool_admits_only_as_many_runs_as_the_runtime_allows() -> None:
-    override_turn_runtime(
-        codex_max_concurrent_processes=2,
-        codex_max_concurrent_image_runs=1,
-    )
+    override_codex_turn_runtime(max_concurrent_processes=2, max_concurrent_image_runs=1)
 
     pool = get_codex_process_pool()
     pool.reserve(CodexProcessKind.IMAGE)
@@ -87,3 +85,12 @@ def test_zombie_reservation_blocks_new_processes_until_background_reap() -> None
 
     pool.reap(reservation, 99)
     assert pool.reservation_count() == 0
+
+
+def test_the_process_wide_pool_without_a_turns_codex_block_is_refused_naming_it() -> None:
+    override_turn_runtime(codex=None)
+
+    with pytest.raises(ProviderNotConfiguredError) as refused:
+        get_codex_process_pool()
+
+    assert (refused.value.provider, refused.value.block) == ("codex", "turns.codex")

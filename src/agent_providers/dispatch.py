@@ -303,7 +303,7 @@ def call_provider_once(
             model=model,
             prompt=prompt, timeout=timeout, system=system,
         )
-    except ClaudeUnavailableError:
+    except (ClaudeUnavailableError, HostWiringError):
         raise
     except ProviderUnavailableError as exc:
         if exc.reason is not None:

@@ -6,7 +6,7 @@ import threading
 from dataclasses import dataclass
 from enum import StrEnum
 
-from agent_providers.config import current_turn_config
+from agent_providers.config import current_codex_turn_runtime
 from agent_providers.errors import CodexProcessPoolSaturatedError
 
 
@@ -107,9 +107,9 @@ def get_codex_process_pool() -> CodexProcessPool:
     global _process_pool
     with _process_pool_lock:
         if _process_pool is None:
-            turns = current_turn_config()
+            turns = current_codex_turn_runtime()
             _process_pool = CodexProcessPool(
-                maximum_processes=turns.codex_max_concurrent_processes,
-                maximum_image_runs=turns.codex_max_concurrent_image_runs,
+                maximum_processes=turns.max_concurrent_processes,
+                maximum_image_runs=turns.max_concurrent_image_runs,
             )
         return _process_pool

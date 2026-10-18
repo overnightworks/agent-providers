@@ -376,6 +376,7 @@ def test_grok_tool_transport_starts_then_resumes_in_one_private_credential_home(
         assert call.command[call.command.index("--deny") + 1] == "*"
         assert call.kwargs["stdin_payload"] is None
         assert call.kwargs["prompt_file_arg_index"] == 1
+        assert call.kwargs["prompt_file_prefix"] == "notes-cli-prompt-"
         assert call.kwargs["output_read_limit_bytes"] == (
             grok_cli_adapter.GROK_CLI_TURN_OUTPUT_READ_LIMIT_BYTES
         )

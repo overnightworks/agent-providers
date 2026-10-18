@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import json
 import os
 import pkgutil
 import re
-import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -15,9 +15,12 @@ from unittest.mock import MagicMock
 import pytest
 from provider_test_support import (
     A_CODEX_LOGIN_WITH_INVALID_UTF8,
+    CLAUDE_MODEL_CATALOG_STDOUT,
     a_codex_login,
     call_within_deadline,
     drive_turn,
+    fake_cli_executable,
+    override_codex_runtime,
     override_provider_runtime,
     override_turn_runtime,
 )
@@ -25,10 +28,19 @@ from pydantic import SecretStr
 
 import agent_providers
 from agent_providers import dispatch
-from agent_providers.catalog import ProviderRoute
+from agent_providers.catalog import ProviderRoute, ProviderRouteReadinessState, probe_provider_route
 from agent_providers.claude import adapter as claude_adapter
 from agent_providers.claude.provider import ClaudeResponse
-from agent_providers.config import ProviderNotConfiguredError, TurnRuntimeNotConfiguredError
+from agent_providers.config import (
+    ProviderNotConfiguredError,
+    ProviderRuntimeConfig,
+    ProviderRuntimeNotConfiguredError,
+    TurnRuntimeConfig,
+    TurnRuntimeNotConfiguredError,
+    current_codex_runtime,
+    current_config,
+    reset_config,
+)
 from agent_providers.dispatch import ImageCapability, call_provider_once, image_capability
 from agent_providers.errors import (
     ProviderUnavailableError,
@@ -55,16 +67,9 @@ def test_stream_turn_refuses_an_unknown_provider_before_any_route_runs(monkeypat
     assert routes_started == []
 
 
-@pytest.fixture
-def spawned_children(monkeypatch) -> list[str]:
-    spawned: list[str] = []
-
-    def refuse_spawn(*arguments, **_keywords):
-        spawned.append(str(arguments))
-        raise AssertionError("no child may be spawned")
-
-    monkeypatch.setattr(subprocess, "Popen", refuse_spawn)
-    return spawned
+def _remove_the_codex_turn_block_under_a_usable_login() -> None:
+    current_codex_runtime().token_file.write_bytes(a_codex_login())
+    override_turn_runtime(codex=None)
 
 
 @pytest.mark.parametrize(
@@ -79,6 +84,15 @@ def spawned_children(monkeypatch) -> list[str]:
         pytest.param(
             "grok", lambda: override_turn_runtime(grok=None), "turns.grok", id="turns-grok-block",
         ),
+        pytest.param(
+            "codex", lambda: override_provider_runtime(codex=None), "codex", id="codex-block",
+        ),
+        pytest.param(
+            "codex",
+            _remove_the_codex_turn_block_under_a_usable_login,
+            "turns.codex",
+            id="turns-codex-block",
+        ),
     ],
 )
 def test_a_turn_without_the_providers_block_raises_the_named_wiring_error(
@@ -91,6 +105,35 @@ def test_a_turn_without_the_providers_block_raises_the_named_wiring_error(
     assert type(turn.error) is ProviderNotConfiguredError
     assert (turn.error.provider, turn.error.block) == (provider, block)
     assert turn.events == []
+    assert spawned_children == []
+
+
+def test_a_one_shot_without_the_claude_block_raises_the_named_wiring_error_unwrapped(
+    spawned_children,
+):
+    override_provider_runtime(claude=None)
+
+    with pytest.raises(ProviderNotConfiguredError) as refused:
+        call_provider_once(provider="claude", model=None, prompt="hi", timeout=1)
+
+    assert (refused.value.provider, refused.value.block) == ("claude", "claude")
+    assert spawned_children == []
+
+
+@pytest.mark.parametrize("entry_point", ["stream_turn", "call_provider_once"])
+def test_a_provider_call_before_configure_raises_the_unconfigured_error_unwrapped(
+    entry_point, spawned_children,
+):
+    reset_config()
+
+    if entry_point == "stream_turn":
+        error = drive_turn("claude").error
+    else:
+        with pytest.raises(ProviderRuntimeNotConfiguredError) as refused:
+            call_provider_once(provider="claude", model=None, prompt="hi", timeout=1)
+        error = refused.value
+
+    assert type(error) is ProviderRuntimeNotConfiguredError
     assert spawned_children == []
 
 
@@ -224,6 +267,31 @@ def test_one_shot_without_a_key_runs_the_claude_cli_default(one_shot_claude_call
     assert [(call["api_key"], call["model"]) for call in one_shot_claude_calls] == [(None, None)]
 
 
+def test_a_claude_only_host_runs_catalog_and_turns_holding_no_codex_or_grok_value(
+    tmp_path: Path, one_shot_claude_calls,
+):
+    claude_only = ProviderRuntimeConfig(
+        cli_binary_search_path=(tmp_path,),
+        cli_working_directory_root=tmp_path,
+        claude=current_config().claude.model_copy(update={"binary": "fake-cli"}),
+        turns=TurnRuntimeConfig(mcp_server=None),
+    )
+    fake_cli_executable(tmp_path, {
+        ("auth", "status"): json.dumps({"loggedIn": True, "authMethod": "claude.ai"}),
+        ("-p", "/model"): CLAUDE_MODEL_CATALOG_STDOUT,
+    })
+    override_provider_runtime(**claude_only.model_dump())
+
+    installed = current_config()
+    snapshot = probe_provider_route("claude", ProviderRoute.CLI)
+    answer = call_provider_once(provider="claude", model=None, prompt="hi", timeout=1)
+
+    assert (installed.codex, installed.grok) == (None, None)
+    assert (installed.turns.codex, installed.turns.grok) == (None, None)
+    assert snapshot.readiness is ProviderRouteReadinessState.READY
+    assert answer == "answer"
+
+
 def test_one_shot_refuses_a_missing_model_on_claude_api_with_a_key(monkeypatch):
     override_provider_runtime(anthropic_api_key=SecretStr("sk-test"))
     sdk = MagicMock(APITimeoutError=Exception)
@@ -270,7 +338,7 @@ def test_image_capability_says_a_grok_cli_route_carries_no_image_tool():
 
 def _codex_image_failure(monkeypatch, auth_file: Path):
     monkeypatch.setattr(dispatch, "codex_image_turn_is_available", lambda: True)
-    override_provider_runtime(codex_cli_auth_file=auth_file)
+    override_codex_runtime(token_file=auth_file)
     return call_within_deadline(image_capability, "codex", ProviderRoute.CLI).failure
 
 

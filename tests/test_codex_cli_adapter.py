@@ -62,6 +62,8 @@ from provider_test_support import (
     fail_to_start_the_runner_thread,
     formatted_log_text,
     live_frames_holding,
+    override_codex_runtime,
+    override_codex_turn_runtime,
     override_provider_runtime,
     override_turn_runtime,
     shell_child,
@@ -75,9 +77,13 @@ from agent_providers.catalog import ProviderRoute, list_provider_models
 from agent_providers.codex import image as codex_image
 from agent_providers.codex import protocol as codex_protocol
 from agent_providers.codex import transport as codex_transport
-from agent_providers.codex.pool import CodexProcessKind, CodexProcessPool
+from agent_providers.codex.pool import (
+    CodexProcessKind,
+    CodexProcessPool,
+    get_codex_process_pool,
+)
 from agent_providers.codex_login import blanked_copy
-from agent_providers.config import current_config
+from agent_providers.config import ProviderNotConfiguredError, current_codex_runtime, current_config
 from agent_providers.errors import (
     CodexProcessPoolSaturatedError,
     ProviderModelCatalogUnavailableError,
@@ -139,10 +145,9 @@ def test_image_capability_requires_every_codex_mount(
         binary.write_text("#!/bin/sh\n")
         binary.chmod(0o755)
     resources.mkdir()
-    override_provider_runtime(codex_cli_binary=str(cli))
-    override_turn_runtime(
-        codex_code_mode_host_binary=code_mode_host,
-        codex_resources_directory=resources,
+    override_codex_runtime(binary=str(cli))
+    override_codex_turn_runtime(
+        code_mode_host_binary=code_mode_host, resources_directory=resources,
     )
 
     assert codex_image.codex_image_turn_is_available()
@@ -167,10 +172,9 @@ def test_image_capability_requires_the_installed_image_encoder(
         binary.write_text("#!/bin/sh\n")
         binary.chmod(0o755)
     resources.mkdir()
-    override_provider_runtime(codex_cli_binary=str(cli))
-    override_turn_runtime(
-        codex_code_mode_host_binary=code_mode_host,
-        codex_resources_directory=resources,
+    override_codex_runtime(binary=str(cli))
+    override_codex_turn_runtime(
+        code_mode_host_binary=code_mode_host, resources_directory=resources,
     )
     monkeypatch.setattr(codex_image, "image_encoder_is_installed", lambda: False)
 
@@ -201,7 +205,7 @@ def test_a_deployment_without_the_image_encoder_refuses_before_it_spawns(
 def codex_login_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     source = tmp_path / "auth.json"
     source.write_text(json.dumps(_A_CODEX_LOGIN))
-    override_provider_runtime(codex_cli_auth_file=source)
+    override_codex_runtime(token_file=source)
     process_pool = CodexProcessPool(maximum_processes=8, maximum_image_runs=1)
     use_codex_process_pool(monkeypatch, process_pool)
     return source
@@ -1820,7 +1824,7 @@ def test_codex_public_adapters_reject_unusable_logins(
     if document is not None:
         auth_file.write_text(json.dumps(document))
     turns = _an_empty_working_root(tmp_path)
-    override_provider_runtime(codex_cli_auth_file=auth_file)
+    override_codex_runtime(token_file=auth_file)
 
     with pytest.raises(codex_image.CodexImageLoginError):
         codex_image.generate_codex_image("prompt", policy=AN_IMAGE_POLICY, deadline=10_000_000)
@@ -2160,7 +2164,7 @@ def _a_malformed_login_judged_usable_or_not(codex_login_source: Path) -> BaseExc
 def _a_turn_refused_for_a_login_source(
     turn, codex_login_source: Path, make_source,
 ) -> BaseException:
-    override_provider_runtime(codex_cli_auth_file=make_source(codex_login_source.parent))
+    override_codex_runtime(token_file=make_source(codex_login_source.parent))
     return turn()
 
 
@@ -2521,9 +2525,8 @@ def test_codex_turns_refuse_a_login_that_is_not_a_plain_file(
     turns.mkdir(mode=0o700)
     sources = tmp_path / "sources"
     sources.mkdir()
-    override_provider_runtime(
-        codex_cli_auth_file=make_source(sources), cli_working_directory_root=turns,
-    )
+    override_provider_runtime(cli_working_directory_root=turns)
+    override_codex_runtime(token_file=make_source(sources))
     children: list = []
     monkeypatch.setattr(
         codex_protocol, "run_cli_bounded", cli_rounds_runner([[]], _outcome(), children),
@@ -2552,9 +2555,8 @@ def test_a_failed_turn_copy_keeps_no_credential_in_its_error(
 ) -> None:
     turns = tmp_path / "turns"
     turns.mkdir(mode=0o700)
-    override_provider_runtime(
-        codex_cli_auth_file=codex_login_source, cli_working_directory_root=turns,
-    )
+    override_provider_runtime(cli_working_directory_root=turns)
+    override_codex_runtime(token_file=codex_login_source)
     children: list = []
     monkeypatch.setattr(
         codex_protocol, "run_cli_bounded", cli_rounds_runner([[]], _outcome(), children),
@@ -2832,7 +2834,7 @@ def test_a_tool_round_that_raises_ends_the_turn_and_names_only_its_class(
 def test_a_tool_turn_without_a_binary_reserves_nothing(
     monkeypatch, image_turn, caplog, pool_is_saturated: bool,
 ) -> None:
-    override_provider_runtime(codex_cli_binary="no-such-codex-binary-7c1d")
+    override_codex_runtime(binary="no-such-codex-binary-7c1d")
     runner = Mock()
     monkeypatch.setattr(codex_protocol, "run_cli_bounded", runner)
     held_slots = [image_turn.process_pool.reserve(CodexProcessKind.TEXT) for _ in range(8)]
@@ -2853,8 +2855,69 @@ def test_a_tool_turn_without_a_binary_reserves_nothing(
     image_turn.watch.assert_nothing_leaked(turn.error)
 
 
+def _the_tool_turn_streams() -> object:
+    return asyncio.run(_collect_tool_responses(_transport()))
+
+
+@pytest.mark.parametrize(
+    ("remove_block", "block", "enter"),
+    [
+        pytest.param(
+            lambda: override_provider_runtime(codex=None),
+            "codex",
+            codex_image.codex_image_turn_is_available,
+            id="image-capability-codex-block",
+        ),
+        pytest.param(
+            lambda: override_turn_runtime(codex=None),
+            "turns.codex",
+            codex_image.codex_image_turn_is_available,
+            id="image-capability-turns-codex-block",
+        ),
+        pytest.param(
+            lambda: override_provider_runtime(codex=None),
+            "codex",
+            _generate_image,
+            id="image-turn-codex-block",
+        ),
+        pytest.param(
+            lambda: override_turn_runtime(codex=None),
+            "turns.codex",
+            _generate_image,
+            id="image-turn-turns-codex-block",
+        ),
+        pytest.param(
+            lambda: override_provider_runtime(codex=None),
+            "codex",
+            _the_tool_turn_streams,
+            id="tool-turn-codex-block",
+        ),
+        pytest.param(
+            lambda: override_turn_runtime(codex=None),
+            "turns.codex",
+            _the_tool_turn_streams,
+            id="tool-turn-turns-codex-block",
+        ),
+    ],
+)
+def test_a_codex_entry_point_without_its_block_is_refused_naming_it_and_spawns_nothing(
+    monkeypatch, remove_block, block: str, enter: Callable[[], object],
+    spawned_children: list[str],
+) -> None:
+    for module in (codex_image, codex_protocol, codex_transport):
+        monkeypatch.setattr(module, "get_codex_process_pool", get_codex_process_pool)
+    current_codex_runtime().token_file.write_bytes(a_codex_login())
+    remove_block()
+
+    with pytest.raises(ProviderNotConfiguredError) as refused:
+        enter()
+
+    assert (refused.value.provider, refused.value.block) == ("codex", block)
+    assert spawned_children == []
+
+
 def test_an_image_run_without_a_binary_fails_with_a_bare_cli_error(tmp_path: Path) -> None:
-    override_provider_runtime(codex_cli_binary="no-such-codex-binary-7c1d")
+    override_codex_runtime(binary="no-such-codex-binary-7c1d")
 
     with pytest.raises(codex_image.CodexImageCliError) as raised:
         _generate_image()
@@ -2965,7 +3028,7 @@ def test_the_turn_release_frees_the_slot_even_when_the_home_release_raises(
 def test_a_tool_consumer_ends_at_the_settle_instant(monkeypatch, image_turn) -> None:
     _settle_within_a_few_hundredths(monkeypatch)
     monkeypatch.setattr(codex_transport, "TURN_TIMEOUT_SECONDS", 1.0)
-    override_provider_runtime(codex_cli_binary="/bin/true")
+    override_codex_runtime(binary="/bin/true")
     monkeypatch.setattr(
         process.CliLineChannel, "_close", Mock(side_effect=RuntimeError(A_RUNNER_FAILURE_CANARY)),
     )

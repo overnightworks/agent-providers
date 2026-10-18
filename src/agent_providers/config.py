@@ -75,6 +75,17 @@ class GrokTurnRuntime(BaseModel):
     prompt_file_placeholder: str = Field(min_length=1)
 
 
+class CodexTurnRuntime(BaseModel):
+    """The Codex turn facts, present only on a host that runs Codex turns."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    code_mode_host_binary: Path
+    resources_directory: Path
+    max_concurrent_processes: int = Field(ge=1)
+    max_concurrent_image_runs: int = Field(ge=1)
+
+
 class TurnRuntimeConfig(BaseModel):
     """The deployment facts a turn needs and a catalog never reads.
 
@@ -84,14 +95,9 @@ class TurnRuntimeConfig(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    codex_code_mode_host_binary: Path
-    codex_resources_directory: Path
-
-    codex_max_concurrent_processes: int = Field(ge=1)
-    codex_max_concurrent_image_runs: int = Field(ge=1)
-
     mcp_server: McpServerSpec | None
 
+    codex: CodexTurnRuntime | None = None
     grok: GrokTurnRuntime | None = None
 
 
@@ -121,6 +127,19 @@ class GrokCliRuntime(BaseModel):
     token_file: Path
 
 
+class CodexCliRuntime(BaseModel):
+    """The deployment facts of the Codex CLI, present only on a host that runs it.
+
+    ``token_file`` is the provider's login source; Codex defines its format, an
+    ``auth.json`` whose copy is blanked, mode 0400.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    binary: str
+    token_file: Path
+
+
 class ProviderRuntimeConfig(BaseModel):
     """Every deployment fact the provider layer needs, as one immutable value.
 
@@ -141,7 +160,7 @@ class ProviderRuntimeConfig(BaseModel):
     against the parent's inherited ``PATH`` would put that choice back in the
     environment this layer closed.
 
-    ``claude.token_file``, ``grok.token_file`` and ``codex_cli_auth_file``
+    ``claude.token_file``, ``grok.token_file`` and ``codex.token_file``
     are each provider's login source: the credential files the catalog paths
     copy, mode 0400, into a private child home. The provider defines the
     format of its own file. Those children receive only that home, the provider's own home
@@ -160,10 +179,9 @@ class ProviderRuntimeConfig(BaseModel):
 
     grok: GrokCliRuntime | None = None
 
-    codex_cli_binary: str
-    cli_binary_search_path: tuple[Path, ...]
+    codex: CodexCliRuntime | None = None
 
-    codex_cli_auth_file: Path
+    cli_binary_search_path: tuple[Path, ...]
 
     cli_working_directory_root: Path
 
@@ -342,3 +360,19 @@ def current_grok_turn_runtime() -> GrokTurnRuntime:
     if grok is None:
         raise ProviderNotConfiguredError("grok", "turns.grok")
     return grok
+
+
+def current_codex_runtime() -> CodexCliRuntime:
+    """Return the installed Codex block, or refuse naming the missing provider."""
+    codex = current_config().codex
+    if codex is None:
+        raise ProviderNotConfiguredError("codex", "codex")
+    return codex
+
+
+def current_codex_turn_runtime() -> CodexTurnRuntime:
+    """Return the installed Codex turn block, or refuse naming the missing provider."""
+    codex = current_turn_config().codex
+    if codex is None:
+        raise ProviderNotConfiguredError("codex", "turns.codex")
+    return codex

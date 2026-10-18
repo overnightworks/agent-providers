@@ -1,0 +1,8 @@
+claim_id = "5bcf1d75e0444004a79ddfb042676d80"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "56eb0197230b66206fde8c2ddf45cc0a4f1083f3"
+branch = "claude/issue-301-p1-provider-neutral-cli"
+scope = ["README.md", "docs/decisions/0001-agent-service.md", "packages/agent-service/src/agent_service/claude_version.py", "packages/agent-service/src/agent_service/cli.py", "packages/agent-service/src/agent_service/cli_version.py", "packages/agent-service/src/agent_service/config.py", "tests/service_support.py", "tests/test_service_claude_version.py", "tests/test_service_cli_version.py", "tests/test_service_config.py", "tests/test_service_process_hardening.py", "tests/test_service_transport_logging.py"]
+opened_commit = "99687e17846a48bd2081330235ee400983413c7a"
+whole_reason = "One config contract and its one reader: the [cli.<provider>] shape has no proof without the probe that reads it, the probe's rename breaks every test helper that writes the old [cli], and the README and ADR state the same keys, so they land together."

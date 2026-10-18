@@ -313,6 +313,16 @@ def test_the_decoder_maps_each_block_and_ends_with_the_result() -> None:
     assert decoder.ending(0) == FinalEvent(text="done")
 
 
+def test_a_run_with_a_relay_config_starts_a_decoder_that_accepts_the_relays_tools(
+    tmp_path: Path,
+) -> None:
+    decoder = started(tmp_path, relay_config=tmp_path / "home" / "relay.json").decoder
+
+    steps = events_of_lines(decoder, RELAY_INIT, TEXT_LINE, SUCCESS_LINE)
+
+    assert (steps, decoder.ending(0)) == ([AssistantTextEvent(text="hi")], FinalEvent(text="done"))
+
+
 def test_a_run_without_a_result_line_fails() -> None:
     decoder = ClaudeStreamDecoder(relay_attached=False)
     events_of_lines(decoder, INIT_LINE, TEXT_LINE)
@@ -488,14 +498,19 @@ def refusal_of(decoder: ClaudeStreamDecoder, *lines: bytes) -> RunSurfaceRefused
 
 
 @pytest.mark.parametrize(
-    "relay_attached",
-    [pytest.param(True, id="with-a-relay"), pytest.param(False, id="without-a-relay")],
+    ("relay_attached", "tool"),
+    [
+        pytest.param(True, "Bash", id="built-in-with-a-relay"),
+        pytest.param(False, "Bash", id="built-in-without-a-relay"),
+        pytest.param(True, "mcp__notes__get_note", id="another-servers-tool-beside-the-relay"),
+        pytest.param(False, "mcp__relay__lookup", id="a-relay-tool-without-a-relay"),
+    ],
 )
-def test_a_built_in_tool_in_init_refuses_the_run(relay_attached: bool) -> None:
+def test_a_tool_beside_the_relay_in_init_refuses_the_run(relay_attached: bool, tool: str) -> None:
     relay_servers = [RELAY_ENTRY] if relay_attached else []
     decoder = ClaudeStreamDecoder(relay_attached=relay_attached)
 
-    refusal = refusal_of(decoder, an_init(tools=["Bash"], mcp_servers=relay_servers))
+    refusal = refusal_of(decoder, an_init(tools=[tool], mcp_servers=relay_servers))
 
     assert refusal.verdict is SurfaceVerdict.TOOL_BESIDE_RELAY
 

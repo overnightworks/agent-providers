@@ -1852,11 +1852,7 @@ def _parse_announced_surface(
     mcp: _AttachedMcpServer | None,
 ) -> _AnnouncedSurface:
     payload = _safe_json_loads(raw_line)
-    if (
-        payload is None
-        or payload.get("type") != _CLI_INIT_EVENT_TYPE
-        or payload.get("subtype") != _CLI_INIT_EVENT_SUBTYPE
-    ):
+    if payload is None or not _is_init_event(payload):
         raise_without_chain(UnavailableError(
             "Claude CLI did not open with the expected session init event",
         ))

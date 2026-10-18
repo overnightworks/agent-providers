@@ -1,8 +1,0 @@
-claim_id = "f65aa0ccaf8f4151bf8f18be94a906bd"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "c4561148e0a4919affbf25166aa74382f99f3468"
-branch = "claude/issue-217-tree-removal"
-scope = ["README.md", "src/agent_providers/process.py", "tests/provider_test_support.py", "tests/test_claude_provider.py", "tests/test_codex_cli_adapter.py", "tests/test_grok_cli_adapter.py", "tests/test_process.py"]
-opened_commit = "1ad23b009c91b8cad76690ceb09574078c868546"
-whole_reason = "One owner's repair (the qualified guarantee): the remover, its regression cells and its README sentence are one contract; the three caller test modules are in scope only so a pin the repair breaks is fixed in the same lane (head ruling), and they are expected unchanged."

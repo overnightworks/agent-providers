@@ -228,25 +228,33 @@ binary name is resolved against, the login sources, and the working root
 below which every private directory and temporary file is created. A provider
 the host runs through its CLI has its own block: `claude` holds
 `ClaudeCliRuntime(binary, binary_search_globs, token_file)` and `grok` holds
-`GrokCliRuntime(binary, token_file)`, and a host that does not run a provider
+`GrokCliRuntime(binary, token_file)`, and `codex` holds
+`CodexCliRuntime(binary, token_file)`; a host that does not run a provider
 leaves its block `None`. `token_file` is the provider's login
-source; the provider decides its format (Grok copies its `auth.json` whole).
-A Claude or Grok call under a configuration without its block raises `ProviderNotConfiguredError(provider, block)` naming
+source; the provider decides its format (Grok copies its `auth.json` whole, Codex
+copies its `auth.json` blanked).
+A Claude, Grok or Codex call under a configuration without its block raises `ProviderNotConfiguredError(provider, block)` naming
 the provider, in turns and in the catalog alike; the catalog never reports it as
 not logged in. A provider with an API key is ready without its block, and its
 CLI is not looked for. A host that
 also runs turns adds a `TurnRuntimeConfig` as `turns`: the
-Codex mounts and process caps, an optional `McpServerSpec` describing the
-host's MCP server, and the Grok prompt-file names in `turns.grok`
-(`GrokTurnRuntime(prompt_file_prefix, prompt_file_placeholder)`); a Grok turn
-without that block raises `ProviderNotConfiguredError("grok", "turns.grok")`. A catalog-only host passes no
+an optional `McpServerSpec` describing the host's MCP server, the Codex mounts
+and process caps in `turns.codex`
+(`CodexTurnRuntime(code_mode_host_binary, resources_directory,
+max_concurrent_processes, max_concurrent_image_runs)`), and the Grok prompt-file
+names in `turns.grok`
+(`GrokTurnRuntime(prompt_file_prefix, prompt_file_placeholder)`); a Codex or Grok
+turn without its block raises `ProviderNotConfiguredError("codex", "turns.codex")`
+or `ProviderNotConfiguredError("grok", "turns.grok")`. A Claude-only host sets
+neither block. A catalog-only host passes no
 `turns` at all and never invents a value it does not have; a host that runs no
 MCP server passes `mcp_server=None` inside `turns`. A host migrates at its pin bump: see [Migrating to 0.4.0](#migrating-to-040) and [Migrating to 0.3.0](#migrating-to-030).
 
 A turn path reached
 without `turns` raises `TurnRuntimeNotConfiguredError` instead of running against a
 guess. These errors and `ProviderRuntimeNotConfiguredError` share the base
-`HostWiringError`, and `dispatch.stream_turn` raises them unchanged instead of
+`HostWiringError`, and `dispatch.stream_turn`, `dispatch.call_provider_once` and
+`dispatch.image_capability` raise them unchanged instead of
 reporting `ROUTE_FAILED`, so a host sees which part of its wiring is missing.
 
 `configure()` refuses a `cli_working_directory_root` that is not private: it
@@ -304,8 +312,17 @@ the error names the field.
 | `grok_cli_auth_file` | `grok.token_file`, still a full `auth.json` copy |
 | `turns.cli_prompt_file_prefix` | `turns.grok.prompt_file_prefix` |
 | `turns.cli_prompt_file_placeholder` | `turns.grok.prompt_file_placeholder` |
-| `dispatch.stream_turn` raised `ProviderUnavailableError` with `ROUTE_FAILED` when the Claude or Grok block, or `turns`, was missing | it raises `ProviderNotConfiguredError(provider, block)` or `TurnRuntimeNotConfiguredError` unchanged, both `config.HostWiringError`s; a host that caught `ProviderUnavailableError` for a wiring fault catches `HostWiringError` too |
+| `codex_cli_binary` | `codex.binary` |
+| `codex_cli_auth_file` | `codex.token_file`, still an `auth.json` whose per-turn copy is blanked |
+| `turns.codex_code_mode_host_binary` | `turns.codex.code_mode_host_binary` |
+| `turns.codex_resources_directory` | `turns.codex.resources_directory` |
+| `turns.codex_max_concurrent_processes` | `turns.codex.max_concurrent_processes` |
+| `turns.codex_max_concurrent_image_runs` | `turns.codex.max_concurrent_image_runs` |
+| `dispatch.stream_turn` and `dispatch.call_provider_once` raised `ProviderUnavailableError` with `ROUTE_FAILED` when a provider block, `turns`, or the configuration itself was missing | both raise `ProviderNotConfiguredError(provider, block)`, `TurnRuntimeNotConfiguredError` or `ProviderRuntimeNotConfiguredError` unchanged, all `config.HostWiringError`s; a host that caught `ProviderUnavailableError` for a wiring fault catches `HostWiringError` too |
+| `dispatch.image_capability` for the Codex CLI route always answered with the Codex fields set | it raises `ProviderNotConfiguredError("codex", block)` when `codex` or `turns.codex` is missing |
+| `process.run_cli_bounded` read the Grok prompt-file prefix itself | the caller passes `prompt_file_prefix` together with `prompt_file_bytes` and `prompt_file_arg_index`; the Grok transport passes `turns.grok.prompt_file_prefix` |
 | `process.PrivateCredentialHomeReservation` | `process.PrivateHomeReservation`, the reservation of the base `PrivateHome`; no alias remains |
+| `codex.protocol.run_reserved_codex_cli(...)` looked the process pool up itself | `codex.protocol.run_reserved_codex_cli(process_pool, reservation, home_reservation, child, *, stdin_payload, deadline, channel)` takes the `CodexProcessPool` that issued the reservation as its first argument; pass that pool, so one turn reserves and reaps on one reference (no known host calls it) |
 
 ## Migrating to 0.3.0
 

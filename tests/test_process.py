@@ -32,6 +32,7 @@ import pytest
 from provider_test_support import (
     A_RUNNER_FAILURE_CANARY,
     ANOTHER_RUNNER_FAILURE_CANARY,
+    CLI_RUNTIME_OVERRIDES,
     CREDENTIAL_FILE_BOUND_BYTES,
     DESTINATION_FAULTS,
     GROK_LOGGED_IN,
@@ -55,10 +56,9 @@ from provider_test_support import (
     fail_the_work_directory,
     fail_to_start_the_runner_thread,
     order_the_thread_start_claims,
-    override_cli_binary,
+    override_claude_runtime,
+    override_codex_runtime,
     override_grok_runtime,
-    override_grok_turn_runtime,
-    override_login_source,
     override_provider_runtime,
     pool_callbacks,
     shell_child,
@@ -71,7 +71,7 @@ from agent_providers import process
 from agent_providers.codex.pool import CodexProcessKind, CodexProcessPool
 from agent_providers.codex.protocol import codex_child_process, create_codex_turn_home
 from agent_providers.codex_login import _blanked_document, assess_codex_login, blanked_copy
-from agent_providers.config import current_config
+from agent_providers.config import current_codex_runtime, current_config
 from agent_providers.constants import (
     CLAUDE_CLI_AUTH_METHOD_FIELD,
     CLAUDE_CLI_LOGGED_IN_FIELD,
@@ -1561,7 +1561,7 @@ def test_claude_does_not_accept_a_failed_or_incomplete_run(run: CliRun) -> None:
 
 
 def _codex_child_for_a_turn_home() -> None:
-    current_config().codex_cli_auth_file.write_bytes(a_codex_login())
+    current_codex_runtime().token_file.write_bytes(a_codex_login())
     turn_home = create_codex_turn_home(CODEX_TOOL_TURN_DIRECTORY_PREFIX)
     try:
         codex_child_process(("exec",), turn_home)
@@ -1593,7 +1593,7 @@ def test_a_missing_binary_is_an_environment_fault_naming_the_provider(
 ) -> None:
     configured_value = "a-secret-binary-name"
     override_provider_runtime(cli_binary_search_path=(tmp_path,))
-    override_cli_binary(provider, configured_value)
+    CLI_RUNTIME_OVERRIDES[provider](binary=configured_value)
 
     with pytest.raises(CliEnvironmentUnavailableError) as raised:
         ask()
@@ -1627,7 +1627,7 @@ def _prepare_catalog_credential(
     credential.write_text(auth_payload)
     monkeypatch.setenv("HOME", str(original_home))
     monkeypatch.setenv("CATALOG_ENV_LEAK", "should-not-appear")
-    override_login_source(provider, credential)
+    CLI_RUNTIME_OVERRIDES[provider](token_file=credential)
     return original_home, credential
 
 
@@ -3591,7 +3591,7 @@ def test_a_credential_path_that_names_nothing_is_reported_not_swallowed(
 ) -> None:
     """A typo in the configured path must not read as a logged-out provider."""
     missing = tmp_path / "typo" / "auth.json"
-    override_login_source("claude", missing)
+    override_claude_runtime(token_file=missing)
     caplog.set_level("WARNING", logger="agent_providers.process")
 
     run = run_claude_catalog_cli(Path("/bin/sh"), ("-c", ":"))
@@ -3644,19 +3644,19 @@ def test_a_private_prompt_file_is_written_below_the_host_named_root(
         deadline=time.monotonic() + 1,
         prompt_file_bytes=b"private prompt",
         prompt_file_arg_index=3,
+        prompt_file_prefix="private-prompt-",
     )
 
     assert outcome.complete is True
     assert Path(outcome.stdout).parent == working_root
 
 
-def test_the_host_named_prompt_file_prefix_starts_the_private_prompt_file_name(
+def test_the_caller_named_prompt_file_prefix_starts_the_private_prompt_file_name(
     tmp_path,
 ) -> None:
     working_root = tmp_path / "host-root"
     working_root.mkdir(mode=0o700)
     override_provider_runtime(cli_working_directory_root=working_root)
-    override_grok_turn_runtime(prompt_file_prefix="host-prefix-")
 
     outcome = run_cli_bounded(
         shell_child("-c", 'printf %s "$1"', "unused", "placeholder"),
@@ -3665,6 +3665,7 @@ def test_the_host_named_prompt_file_prefix_starts_the_private_prompt_file_name(
         deadline=time.monotonic() + 1,
         prompt_file_bytes=b"private prompt",
         prompt_file_arg_index=3,
+        prompt_file_prefix="host-prefix-",
     )
 
     assert Path(outcome.stdout).name.startswith("host-prefix-")
@@ -3840,6 +3841,7 @@ def test_bounded_runner_uses_and_removes_a_private_prompt_file() -> None:
             deadline=time.monotonic() + 1,
             prompt_file_bytes=b"private prompt",
             prompt_file_arg_index=3,
+            prompt_file_prefix="private-prompt-",
         )
 
     assert outcome.stdout == "private prompt"
@@ -3869,6 +3871,7 @@ def test_bounded_runner_treats_a_missing_prompt_file_as_already_removed(monkeypa
                 deadline=time.monotonic() + 1,
                 prompt_file_bytes=b"private prompt",
                 prompt_file_arg_index=3,
+                prompt_file_prefix="private-prompt-",
             )
     finally:
         for prompt_path in prompt_paths:
@@ -3911,6 +3914,7 @@ def test_bounded_runner_publishes_prompt_unlink_errors_to_waiting_consumers(monk
                 stdout_line_channel=channel,
                 prompt_file_bytes=b"private prompt",
                 prompt_file_arg_index=3,
+                prompt_file_prefix="private-prompt-",
             )
     finally:
         for prompt_path in prompt_paths:
@@ -3938,17 +3942,20 @@ def test_bounded_runner_creates_no_prompt_file_without_prompt_bytes() -> None:
 
 
 @pytest.mark.parametrize(
-    ("prompt_file_bytes", "prompt_file_arg_index", "message"),
+    ("prompt_file_bytes", "prompt_file_arg_index", "prompt_file_prefix", "message"),
     (
-        (None, 0, "requires prompt bytes"),
-        (b"private prompt", None, "require a prompt file index"),
-        (b"private prompt", -1, "outside the CLI command"),
-        (b"private prompt", 3, "outside the CLI command"),
+        (None, 0, None, "require prompt bytes"),
+        (None, None, "private-prompt-", "require prompt bytes"),
+        (b"private prompt", None, "private-prompt-", "require a prompt file index"),
+        (b"private prompt", 0, None, "require a prompt file prefix"),
+        (b"private prompt", -1, "private-prompt-", "outside the CLI command"),
+        (b"private prompt", 3, "private-prompt-", "outside the CLI command"),
     ),
 )
 def test_bounded_runner_rejects_an_invalid_private_prompt_contract(
     prompt_file_bytes: bytes | None,
     prompt_file_arg_index: int | None,
+    prompt_file_prefix: str | None,
     message: str,
 ) -> None:
     outcome = run_cli_bounded(
@@ -3958,6 +3965,7 @@ def test_bounded_runner_rejects_an_invalid_private_prompt_contract(
         deadline=time.monotonic() + 1,
         prompt_file_bytes=prompt_file_bytes,
         prompt_file_arg_index=prompt_file_arg_index,
+        prompt_file_prefix=prompt_file_prefix,
     )
 
     assert outcome.started is False
@@ -3992,6 +4000,7 @@ def test_bounded_runner_removes_a_private_prompt_file_when_writing_it_fails(
         deadline=time.monotonic() + 1,
         prompt_file_bytes=b"private prompt",
         prompt_file_arg_index=2,
+        prompt_file_prefix="private-prompt-",
     )
 
     assert outcome.started is False
@@ -4046,7 +4055,7 @@ def test_credential_probe_names_malformed_mounted_credentials(
         if checker == "grok"
         else process.codex_cli_login_is_usable
     )
-    override_login_source(checker, credential_file)
+    CLI_RUNTIME_OVERRIDES[checker](token_file=credential_file)
 
     with pytest.raises(CliLoginUnusableError, match=detail):
         function()
@@ -4134,7 +4143,7 @@ def test_a_codex_login_is_usable_only_when_a_child_can_start_with_it(
     auth_file = tmp_path / "codex-auth.json"
     if document is not None:
         auth_file.write_text(json.dumps(document))
-    override_provider_runtime(codex_cli_auth_file=auth_file)
+    override_codex_runtime(token_file=auth_file)
 
     assert process.codex_cli_login_is_usable() is usable
 
@@ -4161,7 +4170,7 @@ def test_an_unusable_codex_login_makes_the_probe_answer_logged_out(
     auth_file = tmp_path / "codex-auth.json"
     if payload is not None:
         auth_file.write_text(payload)
-    override_provider_runtime(codex_cli_auth_file=auth_file)
+    override_codex_runtime(token_file=auth_file)
     monkeypatch.setattr(process, "resolve_cli_binary", lambda _binary: Path(sys.executable))
     monkeypatch.setattr(
         process,
@@ -4329,7 +4338,7 @@ def _enter_through_the_login_decider(tmp_path: Path) -> bool:
 
 def _enter_through_a_private_credential_home(tmp_path: Path) -> str:
     PrivateCredentialHome(
-        current_config().codex_cli_auth_file,
+        current_codex_runtime().token_file,
         Path(".codex/auth.json"),
         prefix="private-home-",
         missing_credential_is_error=True,
@@ -4464,7 +4473,8 @@ def a_stored_codex_login(tmp_path: Path) -> None:
 def store_codex_login(tmp_path: Path, document: bytes) -> None:
     auth_file = tmp_path / "codex-auth.json"
     auth_file.write_bytes(document)
-    override_provider_runtime(codex_cli_auth_file=auth_file, cli_working_directory_root=tmp_path)
+    override_provider_runtime(cli_working_directory_root=tmp_path)
+    override_codex_runtime(token_file=auth_file)
 
 
 _EVERY_ENTRY_POINT = pytest.mark.parametrize(
@@ -4623,7 +4633,7 @@ def test_a_failed_codex_turn_home_layout_removes_the_home_and_leaves_no_chain(
 
 def _enter_a_private_home_copying_with(credential_copy) -> None:
     PrivateCredentialHome(
-        current_config().codex_cli_auth_file,
+        current_codex_runtime().token_file,
         Path(".codex/auth.json"),
         prefix="private-home-",
         missing_credential_is_error=True,
@@ -5145,6 +5155,7 @@ def test_a_failing_prompt_file_cleanup_is_published_as_an_io_error(
             deadline=time.monotonic() + 2,
             prompt_file_bytes=b"private prompt",
             prompt_file_arg_index=3,
+            prompt_file_prefix="private-prompt-",
             **callbacks,
         )
     finally:

@@ -55,11 +55,14 @@ from agent_providers.catalog import ProviderRoute
 from agent_providers.claude import provider as claude_provider
 from agent_providers.config import (
     ClaudeCliRuntime,
+    CodexCliRuntime,
+    CodexTurnRuntime,
     GrokCliRuntime,
     GrokTurnRuntime,
     HostWiringError,
     ProviderRuntimeConfig,
     configure,
+    current_codex_runtime,
     current_config,
     reset_config,
 )
@@ -481,24 +484,28 @@ def override_grok_runtime(**grok_facts: Any) -> None:
     override_provider_runtime(grok=replacement)
 
 
-def override_cli_binary(provider: str, binary: str) -> None:
-    """Point one provider's CLI binary at ``binary`` for the current test only."""
-    if provider == "claude":
-        override_claude_runtime(binary=binary)
-    elif provider == "grok":
-        override_grok_runtime(binary=binary)
-    else:
-        override_provider_runtime(**{f"{provider}_cli_binary": binary})
+def override_codex_runtime(**codex_facts: Any) -> None:
+    """Replace named Codex facts for the current test only, or give it a block."""
+    codex = current_config().codex
+    replacement = (
+        codex.model_copy(update=codex_facts)
+        if codex is not None
+        else CodexCliRuntime(**codex_facts)
+    )
+    override_provider_runtime(codex=replacement)
 
 
-def override_login_source(provider: str, login_source: Path) -> None:
-    """Point one provider's login source at ``login_source`` for the current test only."""
-    if provider == "claude":
-        override_claude_runtime(token_file=login_source)
-    elif provider == "grok":
-        override_grok_runtime(token_file=login_source)
-    else:
-        override_provider_runtime(**{f"{provider}_cli_auth_file": login_source})
+def remove_the_codex_turn_block_with_no_login_and_no_binary() -> None:
+    current_codex_runtime().token_file.unlink(missing_ok=True)
+    override_codex_runtime(binary="no-such-codex-binary-7c1d")
+    override_turn_runtime(codex=None)
+
+
+CLI_RUNTIME_OVERRIDES: dict[str, Callable[..., None]] = {
+    "claude": override_claude_runtime,
+    "grok": override_grok_runtime,
+    "codex": override_codex_runtime,
+}
 
 
 def call_within_deadline(
@@ -562,11 +569,24 @@ def override_grok_turn_runtime(**grok_turn_facts: Any) -> None:
     override_turn_runtime(grok=replacement)
 
 
+def override_codex_turn_runtime(**codex_turn_facts: Any) -> None:
+    """Replace named Codex turn facts for the current test only, or give it a block."""
+    turns = current_config().turns
+    assert turns is not None, "the sample runtime configures turns"
+    codex = turns.codex
+    replacement = (
+        codex.model_copy(update=codex_turn_facts)
+        if codex is not None
+        else CodexTurnRuntime(**codex_turn_facts)
+    )
+    override_turn_runtime(codex=replacement)
+
+
 def use_codex_process_pool(monkeypatch, process_pool) -> None:
     """Give every Codex module that admits a process the same test pool."""
-    from agent_providers.codex import image, protocol, transport
+    from agent_providers.codex import image, transport
 
-    for module in (image, protocol, transport):
+    for module in (image, transport):
         monkeypatch.setattr(module, "get_codex_process_pool", lambda: process_pool)
 
 

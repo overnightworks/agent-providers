@@ -31,9 +31,9 @@ from typing import Any, Final, Literal, NotRequired, Required, TypedDict, Unpack
 from agent_providers.codex_login import CodexLoginVerdict, assess_codex_login, blanked_copy
 from agent_providers.config import (
     current_claude_runtime,
+    current_codex_runtime,
     current_config,
     current_grok_runtime,
-    current_grok_turn_runtime,
 )
 from agent_providers.constants import (
     CLAUDE_CLI_AUTH_METHOD_FIELD,
@@ -606,6 +606,7 @@ class _CliRunKeywordArgs(TypedDict, total=False):
     stdout_line_channel: NotRequired[CliLineChannel | None]
     prompt_file_bytes: NotRequired[bytes | None]
     prompt_file_arg_index: NotRequired[int | None]
+    prompt_file_prefix: NotRequired[str | None]
 
 
 @dataclass(frozen=True)
@@ -621,6 +622,7 @@ class _CliRunRequest:
     stdout_line_channel: CliLineChannel | None
     prompt_file_bytes: bytes | None
     prompt_file_arg_index: int | None
+    prompt_file_prefix: str | None
 
 
 class ClaimedStartThread(threading.Thread):
@@ -672,6 +674,7 @@ def run_cli_bounded(
         stdout_line_channel=options.get("stdout_line_channel"),
         prompt_file_bytes=options.get("prompt_file_bytes"),
         prompt_file_arg_index=options.get("prompt_file_arg_index"),
+        prompt_file_prefix=options.get("prompt_file_prefix"),
     )
     state = _BoundedRunState()
     worker = ClaimedStartThread(
@@ -809,6 +812,7 @@ def _start_bounded_cli(
             child,
             request.prompt_file_bytes,
             request.prompt_file_arg_index,
+            request.prompt_file_prefix,
         )
         return open_pipes(prompted_child, stderr=request.stderr), prompt_file_path
     with failures.contained("on_spawn_failed"):
@@ -926,17 +930,20 @@ def _with_private_prompt_file(
     child: ChildProcess,
     prompt_file_bytes: bytes | None,
     prompt_file_arg_index: int | None,
+    prompt_file_prefix: str | None,
 ) -> tuple[ChildProcess, str | None]:
     if prompt_file_bytes is None:
-        if prompt_file_arg_index is not None:
-            raise ValueError("A prompt file index requires prompt bytes")
+        if prompt_file_arg_index is not None or prompt_file_prefix is not None:
+            raise ValueError("A prompt file index and prefix require prompt bytes")
         return child, None
     if prompt_file_arg_index is None:
         raise ValueError("Prompt bytes require a prompt file index")
+    if prompt_file_prefix is None:
+        raise ValueError("Prompt bytes require a prompt file prefix")
     if prompt_file_arg_index < 0 or prompt_file_arg_index >= len(child.arguments):
         raise ValueError("Prompt file index is outside the CLI command")
     descriptor, path = tempfile.mkstemp(
-        prefix=current_grok_turn_runtime().prompt_file_prefix,
+        prefix=prompt_file_prefix,
         dir=current_config().cli_working_directory_root,
     )
     try:
@@ -2049,7 +2056,7 @@ def codex_cli_login_is_usable() -> bool:
 
 
 def _codex_login_in_the_mirror_is_usable() -> bool:
-    document = _read_credential_file(current_config().codex_cli_auth_file)
+    document = _read_credential_file(current_codex_runtime().token_file)
     if document is None:
         return False
     verdict = assess_codex_login(document).verdict
@@ -2096,10 +2103,10 @@ def _grok_model_names_under(lines: list[str]) -> list[str]:
 
 def _probe_codex_login() -> CliLogin:
     output = _catalog_cli_output(
-        current_config().codex_cli_binary,
+        current_codex_runtime().binary,
         CODEX_CLI_STATUS_ARGS,
         credential_home_variable=_CODEX_CREDENTIAL_HOME_VARIABLE,
-        auth_file=current_config().codex_cli_auth_file,
+        auth_file=current_codex_runtime().token_file,
         missing_binary_detail=CODEX_CLI_BINARY_MISSING_DETAIL,
         credential_copy=blanked_copy,
     )
@@ -2111,13 +2118,13 @@ def _probe_codex_login() -> CliLogin:
 def codex_cli_model_catalog() -> str:
     """Return the current JSON catalog emitted by ``codex debug models``."""
     binary = require_cli_binary(
-        current_config().codex_cli_binary, CODEX_CLI_BINARY_MISSING_DETAIL,
+        current_codex_runtime().binary, CODEX_CLI_BINARY_MISSING_DETAIL,
     )
     run = _run_credentialed_catalog_cli(
         binary,
         CODEX_CLI_MODELS_ARGS,
         credential_home_variable=_CODEX_CREDENTIAL_HOME_VARIABLE,
-        auth_file=current_config().codex_cli_auth_file,
+        auth_file=current_codex_runtime().token_file,
         credential_copy=blanked_copy,
         stderr="devnull",
         output_read_limit_bytes=CODEX_CLI_MODEL_CATALOG_OUTPUT_READ_LIMIT_BYTES,

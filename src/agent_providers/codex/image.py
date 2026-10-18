@@ -24,6 +24,7 @@ from typing import Final
 
 from agent_providers.codex.pool import (
     CodexProcessKind,
+    CodexProcessPool,
     CodexProcessReservation,
     get_codex_process_pool,
 )
@@ -50,7 +51,7 @@ from agent_providers.codex.protocol import (
     run_reserved_codex_cli,
     top_level_error_message,
 )
-from agent_providers.config import current_config, current_turn_config
+from agent_providers.config import current_codex_runtime, current_codex_turn_runtime
 from agent_providers.errors import (
     ProviderUnavailableError,
     SafeRouteReasonCode,
@@ -172,11 +173,11 @@ class CodexImageQuotaError(CodexImageError):
 
 def codex_image_turn_is_available() -> bool:
     """Whether this process has every dependency for an image turn."""
-    turns = current_turn_config()
-    code_mode_host = turns.codex_code_mode_host_binary
-    resources = turns.codex_resources_directory
+    turns = current_codex_turn_runtime()
+    code_mode_host = turns.code_mode_host_binary
+    resources = turns.resources_directory
     return (
-        resolve_cli_binary(current_config().codex_cli_binary) is not None
+        resolve_cli_binary(current_codex_runtime().binary) is not None
         and code_mode_host.is_file()
         and os.access(code_mode_host, os.X_OK)
         and resources.is_dir()
@@ -213,6 +214,7 @@ def generate_codex_image(
         refuse_empty_model("codex", "cli", model)
     except ProviderUnavailableError:
         raise_without_chain(CodexImageCliError())
+    process_pool = get_codex_process_pool()
     if not image_encoder_is_installed():
         raise CodexImageEncoderUnavailableError(_IMAGE_ENCODER_MISSING_DETAIL)
     try:
@@ -229,6 +231,7 @@ def generate_codex_image(
                 turn_home=turn_home,
                 abort_signal=abort_signal,
                 model=model,
+                process_pool=process_pool,
             )
             _raise_for_codex_image_outcome(outcome)
             observed = _validate_codex_image_events(
@@ -258,6 +261,7 @@ def _run_codex_image_cli(
     turn_home: CodexTurnHome,
     abort_signal: threading.Event | None = None,
     model: str | None = None,
+    process_pool: CodexProcessPool,
 ) -> CliRunOutcome:
     """Reap the CLI promptly when its streamed events leave the image gate."""
     channel = CliLineChannel(CODEX_CLI_LINE_CHANNEL_CAPACITY)
@@ -272,11 +276,12 @@ def _run_codex_image_cli(
         raise CodexImageCliError() from None
     home_reservation = turn_home.home.reserve()
     try:
-        reservation = get_codex_process_pool().reserve(CodexProcessKind.IMAGE)
+        reservation = process_pool.reserve(CodexProcessKind.IMAGE)
     except BaseException:  # NOSONAR(S5754) the home token is released, re-raises
         home_reservation.release()
         raise
     _start_codex_image_runner(
+        process_pool=process_pool,
         reservation=reservation,
         home_reservation=home_reservation,
         child=child,
@@ -294,6 +299,7 @@ def _run_codex_image_cli(
 
 def _start_codex_image_runner(
     *,
+    process_pool: CodexProcessPool,
     reservation: CodexProcessReservation,
     home_reservation: PrivateHomeReservation,
     child: ChildProcess,
@@ -303,7 +309,7 @@ def _start_codex_image_runner(
 ) -> None:
     runner = ClaimedStartThread(
         target=run_reserved_codex_cli,
-        args=(reservation, home_reservation, child),
+        args=(process_pool, reservation, home_reservation, child),
         kwargs={
             "stdin_payload": stdin_payload,
             "deadline": deadline,
@@ -320,7 +326,7 @@ def _start_codex_image_runner(
     if not runner.take_start_claim():
         raise start_failure
     release_turn_reservations(
-        home_reservation, lambda: get_codex_process_pool().abandon_unspawned(reservation)
+        home_reservation, lambda: process_pool.abandon_unspawned(reservation)
     )
     if not isinstance(start_failure, Exception):
         raise start_failure

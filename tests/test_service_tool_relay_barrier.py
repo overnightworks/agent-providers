@@ -1160,6 +1160,8 @@ def test_a_forwards_outcome_is_retrieved_exactly_once_and_settle_waits_for_it(
         if ending.status is not None:
             answer = await client.answer()
             assert (answer.status, answer.body) == (ending.status, b"")
+        if ending.cancelled_on_completion:
+            assert await client.delivery() is Delivery.ABSENT
         assert app.calls == [("edit_song", {"text": "a"})]
         await closed_without_unretrieved_reports(rig, reports)
 
@@ -1223,19 +1225,17 @@ async def bring_call_1_to(rig: Rig, state: Call1) -> ToolCallEvent | None:
     return None
 
 
-async def accept_calls_up_to_call_4(
-    rig: Rig,
-) -> tuple[list[str], list[ToolCallEvent | ToolResultEvent]]:
-    accepted: list[str] = []
-    results: list[ToolCallEvent | ToolResultEvent] = []
-    while len(accepted) < 3:
+async def accept_calls_up_to_call_4(rig: Rig) -> list[str | ToolResultEvent]:
+    """The events in the order they came: an accepted call by its id, a result as itself."""
+    events: list[str | ToolResultEvent] = []
+    while sum(isinstance(event, str) for event in events) < 3:
         event = await rig.barrier.next_event()
         if isinstance(event, ToolCallEvent):
             rig.barrier.accept(event)
-            accepted.append(event.tool_use_id)
+            events.append(event.tool_use_id)
         else:
-            results.append(event)
-    return accepted, results
+            events.append(event)
+    return events
 
 
 CLI_CLOSES = [
@@ -1261,10 +1261,12 @@ def test_a_call_the_cli_closed_is_never_forwarded_and_frees_its_slot_while_satur
     async def scenario(rig: Rig) -> None:
         clients = [await rig.pending(number, "edit_song", {"n": number}) for number in (1, 2, 3)]
         handed_out = await bring_call_1_to(rig, state)
+        connection_task = task_named(CONNECTION_OF_CALL_1)
         await clients[0].send(pipelined)
         await reads.until_read(WATCH_OF_CALL_1, len(pipelined))
         end(clients[0])
         await yield_until(lambda: CONNECTION_OF_CALL_1 not in relay_tasks())
+        assert not connection_task.cancelled()
         if handed_out is not None:
             rig.barrier.accept(handed_out)
         await rig.pending(4, "edit_song", {"n": 4})
@@ -1272,12 +1274,22 @@ def test_a_call_the_cli_closed_is_never_forwarded_and_frees_its_slot_while_satur
         forwarded = [FORWARDED_CALL_1] if state is Call1.FORWARDED else []
         assert rig.fake.calls == forwarded
         assert upstream_task_names() == ([f"upstream:{RUN_ID}:call-1"] if forwarded else [])
-        accepted, results = await accept_calls_up_to_call_4(rig)
-        assert accepted == ["call-2", "call-3", "call-4"]
-        assert results == ([GIVEN_UP_RESULT] if state is Call1.HANDED_OUT else [])
+        given_up = [GIVEN_UP_RESULT] if state is Call1.HANDED_OUT else []
+        assert await accept_calls_up_to_call_4(rig) == [*given_up, "call-2", "call-3", "call-4"]
         rig.fake.release()
         await rig.barrier.settle()
         assert [call for call in rig.fake.calls if call[1] == {"n": 1}] == forwarded
+
+    drive_barrier(scenario)
+
+
+def test_a_cancelled_connection_task_ends_cancelled() -> None:
+    async def scenario(rig: Rig) -> None:
+        await rig.pending(1, "edit_song", {"n": 1})
+        connection_task = task_named(CONNECTION_OF_CALL_1)
+        connection_task.cancel()
+        await yield_until(connection_task.done)
+        assert connection_task.cancelled()
 
     drive_barrier(scenario)
 

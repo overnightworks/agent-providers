@@ -341,9 +341,9 @@ class Relay:
     async def _answered_while_watching(
         self, connection: h11.Connection, reader: asyncio.StreamReader, request: RelayRequest
     ) -> _Answered:
-        """Run the owner as a child awaited directly, with a watch that cancels it on a close.
+        """Run the owner as a child awaited through a forwarding gather, with a close-watch.
 
-        The direct await lets the relay's close cancel the owner within its own step, and the
+        The forwarding await lets the relay's close cancel the owner within its own step, and the
         watch cancels in the step it sees the end, so the barrier's give-up is recorded before
         the connection task resumes and a call the CLI closed is not forwarded in between.
         """
@@ -470,12 +470,12 @@ def _connection_task() -> asyncio.Task[Any]:
 
 
 async def _outcome_of(answer: asyncio.Task[HttpAnswer | Unanswered]) -> HttpAnswer | Unanswered:
-    try:
-        return await answer
-    except asyncio.CancelledError:
-        if _connection_task().cancelling():
-            raise
+    (outcome,) = await asyncio.gather(answer, return_exceptions=True)
+    if answer.cancelled():
         return UNANSWERED
+    if isinstance(outcome, BaseException):
+        raise outcome
+    return outcome
 
 
 async def _stopped(watch: asyncio.Task[_ClientEnd]) -> _ClientEnd | None:
@@ -519,9 +519,9 @@ class ToolCalls(Protocol):
     async def call(self, request_id: RequestId, params: CallToolParams) -> Reply | Unanswered:
         """Answer one parsed ``tools/call``, or ``Unanswered`` once the CLI gave it up.
 
-        It must let ``asyncio.CancelledError`` propagate. A caller must reach it through direct
-        awaits only, so that cancelling the caller's task records the give-up before
-        ``Task.cancel()`` returns.
+        It must let ``asyncio.CancelledError`` propagate. A caller must reach it through an await
+        chain that forwards ``Task.cancel()`` at once (a direct await or ``asyncio.gather``), so
+        that cancelling the caller's task records the give-up before ``Task.cancel()`` returns.
         """
         ...
 
@@ -594,8 +594,9 @@ class ToolCallBarrier:
     A call is given up by ``cancel(request_id)`` or by the cancellation of the task running
     ``call()``. Each is recorded, for a waiting or handed-out call, before it returns: ``call()``
     awaits its verdict future directly, so ``Task.cancel()`` of any task whose await chain reaches
-    ``call()`` through direct awaits (no ``asyncio.wait``, shield or ``wait_for``, no task not
-    awaited directly) cancels it at once, and ``accept`` and ``next_event()`` decide from that
+    ``call()`` through an await chain that forwards ``Task.cancel()`` at once (a direct await or
+    ``asyncio.gather``; no ``asyncio.wait``, shield or ``wait_for``, no task not awaited so)
+    cancels it at once, and ``accept`` and ``next_event()`` decide from that
     record. A given-up call leaves the pending set and its request is closed without a byte,
     whatever it would have answered: ``call()`` returns ``Unanswered`` after a cancel and raises
     ``CancelledError`` after a task cancellation. A waiting one is never handed out; a

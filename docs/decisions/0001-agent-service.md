@@ -644,7 +644,8 @@ with no MCP SDK dependency.
   pending ids only; others are ignored, as the MCP specification allows (E5 named the
   call's id on another connection). A give-up, by a cancel or by the cancellation of
   the call's task, is recorded before it returns, also through every task whose await
-  chain reaches the call through direct awaits, so an acceptance in the same step
+  chain reaches the call through awaits that forward `Task.cancel()` at once (a direct await or
+  `asyncio.gather`), so an acceptance in the same step
   forwards nothing. A call given up is never forwarded unless it already was, and its
   request is closed without a byte (`Unanswered`), because the MCP specification asks a
   receiver not to answer a cancelled request and the connection is needed for the next

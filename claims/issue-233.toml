@@ -1,0 +1,8 @@
+claim_id = "293482af2c9c47ceaed93868b1bd7fcc"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "d325678ff9506f3d9dbcc7825c44d41fc6ea78bf"
+branch = "claude/issue-233-kill-until-gone"
+scope = ["README.md", "src/agent_providers/spawn.py", "tests/anchored_kernel.py", "tests/test_anchored_kill_until_gone.py"]
+opened_commit = "3f7fc21d601d1aa121df93b31b469c4138fc1b07"
+whole_reason = "One async method and its result type on the spawn owner's async face with its clock seam and constant, the new test module that owns its rows, one recorder field in the harness, and the README sentence that states the bound; the harness moves are #230's, and splitting further would land the method without its virtual-clock or real-door proof."

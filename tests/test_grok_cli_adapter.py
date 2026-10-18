@@ -38,6 +38,7 @@ from provider_test_support import (
     formatted_log_text,
     grok_cli_outcome,
     grok_tool_round_lines,
+    install_cli_door,
     override_grok_runtime,
     override_grok_turn_runtime,
     override_provider_runtime,
@@ -416,7 +417,7 @@ def _grok_runner_that_fails_by(failure: str, monkeypatch):
         def spawn_that_raises(*_arguments, **_keywords):
             raise BaseException(A_RUNNER_FAILURE_CANARY)
 
-        monkeypatch.setattr(process, "open_pipes", spawn_that_raises)
+        install_cli_door(monkeypatch, spawn_that_raises)
 
 
 @pytest.mark.parametrize(

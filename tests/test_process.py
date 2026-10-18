@@ -57,6 +57,7 @@ from provider_test_support import (
     fail_the_home_chmod,
     fail_the_work_directory,
     fail_to_start_the_runner_thread,
+    install_cli_door,
     order_the_thread_start_claims,
     override_claude_runtime,
     override_codex_runtime,
@@ -845,21 +846,21 @@ def test_bounded_runner_returns_on_a_stalled_spawn_and_reaps_its_late_process() 
         os.killpg(started[0].pid, 0)
 
 
-def test_bounded_runner_reports_a_spawn_error() -> None:
+def test_bounded_runner_reports_a_spawn_error(monkeypatch) -> None:
     error = OSError("cannot start")
     spawned_process_ids: list[int] = []
     reaped_processes: list[tuple[int, bool]] = []
-    with patch("agent_providers.spawn.subprocess.Popen", side_effect=error):
-        outcome = run_cli_bounded(
-            shell_child("-c", ":"),
-            stdin_payload=None,
-            read="all",
-            deadline=time.monotonic() + 1,
-            on_spawned=spawned_process_ids.append,
-            on_reaped=lambda process_id, became_zombie: reaped_processes.append(
-                (process_id, became_zombie),
-            ),
-        )
+    install_cli_door(monkeypatch, _raising(error))
+    outcome = run_cli_bounded(
+        shell_child("-c", ":"),
+        stdin_payload=None,
+        read="all",
+        deadline=time.monotonic() + 1,
+        on_spawned=spawned_process_ids.append,
+        on_reaped=lambda process_id, became_zombie: reaped_processes.append(
+            (process_id, became_zombie),
+        ),
+    )
 
     assert outcome.started is False
     assert outcome.spawn_error is error
@@ -869,23 +870,23 @@ def test_bounded_runner_reports_a_spawn_error() -> None:
     assert reaped_processes == []
 
 
-def test_bounded_runner_reports_a_non_os_spawn_error_immediately() -> None:
+def test_bounded_runner_reports_a_non_os_spawn_error_immediately(monkeypatch) -> None:
     error = ValueError("empty argv")
     spawned_process_ids: list[int] = []
     reaped_processes: list[tuple[int, bool]] = []
     deadline = time.monotonic() + 1
 
-    with patch("agent_providers.spawn.subprocess.Popen", side_effect=error):
-        outcome = run_cli_bounded(
-            shell_child("-c", ":"),
-            stdin_payload=None,
-            read="all",
-            deadline=deadline,
-            on_spawned=spawned_process_ids.append,
-            on_reaped=lambda process_id, became_zombie: reaped_processes.append(
-                (process_id, became_zombie),
-            ),
-        )
+    install_cli_door(monkeypatch, _raising(error))
+    outcome = run_cli_bounded(
+        shell_child("-c", ":"),
+        stdin_payload=None,
+        read="all",
+        deadline=deadline,
+        on_spawned=spawned_process_ids.append,
+        on_reaped=lambda process_id, became_zombie: reaped_processes.append(
+            (process_id, became_zombie),
+        ),
+    )
 
     assert outcome.reason is CliRunReason.SPAWN_FAILED
     assert outcome.spawn_error is error
@@ -4974,7 +4975,7 @@ def test_a_spawn_failure_of_any_class_is_published_and_frees_the_reservation(
     monkeypatch, failure_watch, pooled_run, error_type,
 ) -> None:
     process_pool, callbacks = pooled_run
-    monkeypatch.setattr(process, "open_pipes", _raising(error_type(A_RUNNER_FAILURE_CANARY)))
+    install_cli_door(monkeypatch, _raising(error_type(A_RUNNER_FAILURE_CANARY)))
 
     outcome = _run_pooled(":", callbacks)
 
@@ -4989,7 +4990,7 @@ def test_a_failing_spawn_failure_callback_is_reported_and_keeps_the_reservation(
 ) -> None:
     process_pool, callbacks = pooled_run
     spawn_error = OSError("spawn refused")
-    monkeypatch.setattr(process, "open_pipes", _raising(spawn_error))
+    install_cli_door(monkeypatch, _raising(spawn_error))
     callbacks["on_spawn_failed"] = _raising(RuntimeError(ANOTHER_RUNNER_FAILURE_CANARY))
 
     outcome = _run_pooled(":", callbacks)
@@ -5315,11 +5316,10 @@ def test_a_spawn_that_returns_after_the_deadline_is_published_and_reaped_late(
     spawned: list[int] = []
     release_reservation = callbacks["on_reaped"]
     bind = callbacks["on_spawned"]
-    real_open_pipes = process.open_pipes
 
-    def late_open_pipes(*arguments, **keywords):
+    def late_door(*arguments, **keywords):
         release_spawn.wait(timeout=2)
-        return real_open_pipes(*arguments, **keywords)
+        return real_door(*arguments, **keywords)
 
     def record_spawn(process_id: int) -> None:
         spawned.append(process_id)
@@ -5331,7 +5331,7 @@ def test_a_spawn_that_returns_after_the_deadline_is_published_and_reaped_late(
 
     callbacks["on_spawned"] = record_spawn
     callbacks["on_reaped"] = record_release
-    monkeypatch.setattr(process, "open_pipes", late_open_pipes)
+    real_door = install_cli_door(monkeypatch, late_door)
     deadline = time.monotonic() + 0.05
 
     outcome = _run_pooled("true", callbacks, deadline=deadline, stdout_line_channel=channel)
@@ -5491,19 +5491,18 @@ def test_a_caller_that_adopts_a_consumers_overrun_still_requests_abort(
     release_spawn = threading.Event()
     reaped = threading.Event()
     release_reservation = callbacks["on_reaped"]
-    real_open_pipes = process.open_pipes
 
-    def late_open_pipes(*arguments, **keywords):
+    def late_door(*arguments, **keywords):
         if spawn_held_past_the_deadline:
             release_spawn.wait(timeout=2)
-        return real_open_pipes(*arguments, **keywords)
+        return real_door(*arguments, **keywords)
 
     def record_release(process_id: int, became_zombie: bool) -> None:
         release_reservation(process_id, became_zombie)
         reaped.set()
 
     callbacks["on_reaped"] = record_release
-    monkeypatch.setattr(process, "open_pipes", late_open_pipes)
+    real_door = install_cli_door(monkeypatch, late_door)
     consumed = channel.receive(settle_by=time.monotonic())
     deadline = time.monotonic() + (0.05 if spawn_held_past_the_deadline else 5)
 
@@ -5651,13 +5650,12 @@ def _releasing_both(
 
 def _record_pipe_openings(monkeypatch) -> list[object]:
     openings: list[object] = []
-    open_pipes = process.open_pipes
 
     def recording(*arguments, **keywords):
         openings.append(arguments)
-        return open_pipes(*arguments, **keywords)
+        return real_door(*arguments, **keywords)
 
-    monkeypatch.setattr(process, "open_pipes", recording)
+    real_door = install_cli_door(monkeypatch, recording)
     return openings
 
 

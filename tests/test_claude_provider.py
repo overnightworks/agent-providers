@@ -48,6 +48,7 @@ from provider_test_support import (
     fake_cli_process,
     held_claude_slots,
     install_claude_cli_children,
+    install_cli_door,
     lines_that_fail,
     operations,
     override_claude_runtime,
@@ -1986,11 +1987,11 @@ def _answer_with(monkeypatch, *lines: bytes) -> list[tuple[str, ...]]:
     commands: list[tuple[str, ...]] = []
     queued = list(lines)
 
-    def fake_popen(cmd, **_kw):
-        commands.append(tuple(cmd))
+    def fake_door(child, **_kw):
+        commands.append(tuple(child.command))
         return fake_cli_process(queued.pop(0))
 
-    monkeypatch.setattr(spawn.subprocess, "Popen", fake_popen)
+    install_cli_door(monkeypatch, fake_door)
     return commands
 
 
@@ -2247,7 +2248,7 @@ def test_tool_surface_probe_stops_the_session_it_started(
     def fake_popen(*_cmd, **_kw):
         return fake_cli_process(_init_line(_ALL_SAMPLE_TOOLS), still_running=True)
 
-    monkeypatch.setattr(spawn.subprocess, "Popen", fake_popen)
+    install_cli_door(monkeypatch, fake_popen)
     monkeypatch.setattr(provider.os, "killpg", lambda pid, _sig: killed.append(pid))
     monkeypatch.setattr(provider.process, "_process_group_exists", lambda _pid: False)
 
@@ -2361,7 +2362,7 @@ def test_tool_surface_single_flight_shares_one_successful_probe(
         release_probe.wait()
         return fake_cli_process(_init_line(_ALL_SAMPLE_TOOLS))
 
-    monkeypatch.setattr(spawn.subprocess, "Popen", fake_popen)
+    install_cli_door(monkeypatch, fake_popen)
 
     async def _race() -> tuple[str, str]:
         first = asyncio.create_task(verify_cli_tool_surface())
@@ -2408,7 +2409,7 @@ def test_tool_surface_single_flight_waits_for_the_real_result_not_a_placeholder(
         release_probe.wait()
         return fake_cli_process(b"not valid json\n")
 
-    monkeypatch.setattr(spawn.subprocess, "Popen", fake_popen)
+    install_cli_door(monkeypatch, fake_popen)
 
     real_await_follower = provider._await_follower_result_async
 
@@ -2836,9 +2837,8 @@ def test_zombie_probe_keeps_its_pool_slot_until_the_runner_confirms_reap(
     allow_background_reap = threading.Event()
     background_finished = threading.Event()
     set_claude_process_limit(monkeypatch, 1)
-    monkeypatch.setattr(
-        spawn.subprocess,
-        "Popen",
+    install_cli_door(
+        monkeypatch,
         lambda *_args, **_kwargs: fake_cli_process(_init_line([])),
     )
     monkeypatch.setattr(provider.process, "_reap_process_group", lambda _process: True)
@@ -2955,7 +2955,7 @@ def test_tool_surface_probe_normalizes_a_broken_pipe_during_write(
         proc._stdin_reader.close()
         return proc
 
-    monkeypatch.setattr(spawn.subprocess, "Popen", fake_popen)
+    install_cli_door(monkeypatch, fake_popen)
     monkeypatch.setattr(provider.process, "_reap_process_group", fake_reap)
     monkeypatch.setattr(provider, "CLAUDE_CLI_TOOL_SURFACE_TIMEOUT_SECONDS", 5.0)
 
@@ -2987,7 +2987,7 @@ def test_tool_surface_probe_rejects_a_newline_free_stream_at_its_read_limit(
         threading.Thread(target=write_stream, daemon=True).start()
         return proc
 
-    monkeypatch.setattr(spawn.subprocess, "Popen", fake_popen)
+    install_cli_door(monkeypatch, fake_popen)
 
     with pytest.raises(UnavailableError, match="exceeded its read limit"):
         verify_no_builtin_cli_tools()
@@ -3018,7 +3018,7 @@ def test_probe_runner_task_cancellation_gives_waiters_a_normal_error(
         release_runner.wait(999)
         return fake_cli_process(_init_line(_ALL_SAMPLE_TOOLS))
 
-    monkeypatch.setattr(spawn.subprocess, "Popen", fake_popen)
+    install_cli_door(monkeypatch, fake_popen)
 
     async def _race():
         waiter = asyncio.create_task(verify_cli_tool_surface())
@@ -3064,7 +3064,7 @@ def test_tool_surface_a_cancelled_leader_does_not_reopen_single_flight(
         release_probe.wait()
         return fake_cli_process(_init_line(_ALL_SAMPLE_TOOLS))
 
-    monkeypatch.setattr(spawn.subprocess, "Popen", fake_popen)
+    install_cli_door(monkeypatch, fake_popen)
 
     async def _race() -> str:
         first = asyncio.create_task(verify_cli_tool_surface())
@@ -3139,7 +3139,7 @@ def test_tool_surface_probe_stays_bounded_even_when_popen_itself_hangs(
         popen_returned.set()
         return proc
 
-    monkeypatch.setattr(spawn.subprocess, "Popen", fake_popen)
+    install_cli_door(monkeypatch, fake_popen)
     monkeypatch.setattr(provider, "CLAUDE_CLI_NO_TOOL_SURFACE_TIMEOUT_SECONDS", 0.05)
 
     try:
@@ -3198,9 +3198,8 @@ def test_delayed_probe_start_is_a_probe_failure_not_a_one_shot_timeout(
     spawned: list[object] = []
 
     monkeypatch.setattr(provider.time, "monotonic", lambda: 100.0)
-    monkeypatch.setattr(
-        spawn.subprocess,
-        "Popen",
+    install_cli_door(
+        monkeypatch,
         lambda *_args, **_kwargs: spawned.append(1),
     )
 
@@ -3301,7 +3300,7 @@ def test_probe_with_a_stalled_pipe_reaps_and_releases_its_admission(
         reaped.set()
         return False
 
-    monkeypatch.setattr(spawn.subprocess, "Popen", fake_popen)
+    install_cli_door(monkeypatch, fake_popen)
     monkeypatch.setattr(provider.process, "_reap_process_group", fake_reap)
     monkeypatch.setattr(provider.process.selectors, "DefaultSelector", StalledPipeSelector)
     monkeypatch.setattr(provider, "CLAUDE_CLI_NO_TOOL_SURFACE_TIMEOUT_SECONDS", 5.0)
@@ -3360,7 +3359,7 @@ def test_async_probe_returns_a_zombie_after_cleanup_crosses_its_answer_deadline(
         assert release_cleanup.wait(timeout=1)
         return True
 
-    monkeypatch.setattr(spawn.subprocess, "Popen", fake_popen)
+    install_cli_door(monkeypatch, fake_popen)
     monkeypatch.setattr(provider.process, "_reap_process_group", fake_reap)
 
     async def verify_after_cleanup() -> None:
@@ -3424,7 +3423,7 @@ def test_probe_reaps_a_process_whose_popen_call_returns_after_the_deadline(
         probe_threads.append(thread)
         return thread
 
-    monkeypatch.setattr(spawn.subprocess, "Popen", fake_popen)
+    install_cli_door(monkeypatch, fake_popen)
     monkeypatch.setattr(provider.process, "_reap_process_group", fake_reap)
     monkeypatch.setattr(provider, "CLAUDE_CLI_NO_TOOL_SURFACE_TIMEOUT_SECONDS", 0.02)
     set_claude_process_limit(monkeypatch, 1)
@@ -3497,9 +3496,8 @@ def test_a_tool_surface_probe_is_refused_while_retained_groups_fill_the_pool(
     monkeypatch.setattr(provider, "_write_mcp_config", lambda _spec, _user_id: "unused")
     monkeypatch.setattr(provider, "_unlink_quiet", lambda _path: None)
     spawned: list[object] = []
-    monkeypatch.setattr(
-        spawn.subprocess,
-        "Popen",
+    install_cli_door(
+        monkeypatch,
         lambda *_a, **_kw: spawned.append(1) or MagicMock(),
     )
     children = [
@@ -3705,7 +3703,7 @@ def test_a_probe_whose_cleanup_overruns_fails_at_the_settle_instant_not_the_asyn
         slot_released.set()
 
     monkeypatch.setattr(provider.CLAUDE_CLI_PROCESS_POOL, "release", release_and_signal)
-    monkeypatch.setattr(spawn.subprocess, "Popen", lambda *_cmd, **_kw: fake_cli_process(None))
+    install_cli_door(monkeypatch, lambda *_cmd, **_kw: fake_cli_process(None))
     monkeypatch.setattr(
         provider.process,
         "_reap_process_group",
@@ -4782,7 +4780,7 @@ def test_no_builtin_gate_sync_twin_kills_a_still_running_probe(
     def fake_popen(_cmd, **_kw):
         return fake_cli_process(_init_line([]), still_running=True)
 
-    monkeypatch.setattr(spawn.subprocess, "Popen", fake_popen)
+    install_cli_door(monkeypatch, fake_popen)
     monkeypatch.setattr(provider.os, "killpg", lambda pid, _sig: killed.append(pid))
     monkeypatch.setattr(provider.process, "_process_group_exists", lambda _pid: False)
 
@@ -4821,7 +4819,7 @@ def test_no_builtin_gate_sync_single_flight_waits_for_the_real_result_not_a_plac
         release_probe.wait()
         return fake_cli_process(b"not valid json\n")
 
-    monkeypatch.setattr(spawn.subprocess, "Popen", fake_popen)
+    install_cli_door(monkeypatch, fake_popen)
 
     real_claim = provider._claim_or_join_inflight_sync
 

@@ -227,22 +227,27 @@ carries what the catalog path reads — the CLI binaries, the search path a bare
 binary name is resolved against, the login sources, and the working root
 below which every private directory and temporary file is created. A provider
 the host runs through its CLI has its own block: `claude` holds
-`ClaudeCliRuntime(binary, binary_search_globs, token_file)`, and a host that
-does not run Claude leaves it `None`. `token_file` is the provider's login
-source; the provider decides its format. A Claude call under a configuration
-without the block raises `ProviderNotConfiguredError(provider, block)` naming
+`ClaudeCliRuntime(binary, binary_search_globs, token_file)` and `grok` holds
+`GrokCliRuntime(binary, token_file)`, and a host that does not run a provider
+leaves its block `None`. `token_file` is the provider's login
+source; the provider decides its format (Grok copies its `auth.json` whole).
+A Claude or Grok call under a configuration without its block raises `ProviderNotConfiguredError(provider, block)` naming
 the provider, in turns and in the catalog alike; the catalog never reports it as
 not logged in. A provider with an API key is ready without its block, and its
 CLI is not looked for. A host that
 also runs turns adds a `TurnRuntimeConfig` as `turns`: the
-Codex mounts and process caps, the prompt-file names, and an optional
-`McpServerSpec` describing the host's MCP server. A catalog-only host passes no
+Codex mounts and process caps, an optional `McpServerSpec` describing the
+host's MCP server, and the Grok prompt-file names in `turns.grok`
+(`GrokTurnRuntime(prompt_file_prefix, prompt_file_placeholder)`); a Grok turn
+without that block raises `ProviderNotConfiguredError("grok", "turns.grok")`. A catalog-only host passes no
 `turns` at all and never invents a value it does not have; a host that runs no
 MCP server passes `mcp_server=None` inside `turns`. A host migrates at its pin bump: see [Migrating to 0.4.0](#migrating-to-040) and [Migrating to 0.3.0](#migrating-to-030).
 
 A turn path reached
 without `turns` raises `TurnRuntimeNotConfiguredError` instead of running against a
-guess.
+guess. These errors and `ProviderRuntimeNotConfiguredError` share the base
+`HostWiringError`, and `dispatch.stream_turn` raises them unchanged instead of
+reporting `ROUTE_FAILED`, so a host sees which part of its wiring is missing.
 
 `configure()` refuses a `cli_working_directory_root` that is not private: it
 must be an absolute path to an existing directory, not a symlink, owned by the
@@ -290,11 +295,17 @@ A host migrates at its pin bump to 0.4.0; the configuration model refuses
 unknown fields, so a host that still sets a removed name fails at startup and
 the error names the field.
 
-| Before (`ProviderRuntimeConfig`) | Now |
+| Before | Now |
 |---|---|
 | `claude_cli_binary` | `claude.binary` |
 | `claude_cli_binary_search_globs` | `claude.binary_search_globs` |
 | `claude_cli_auth_file` | `claude.token_file`, still the credentials file until the setup-token contract lands |
+| `grok_cli_binary` | `grok.binary` |
+| `grok_cli_auth_file` | `grok.token_file`, still a full `auth.json` copy |
+| `turns.cli_prompt_file_prefix` | `turns.grok.prompt_file_prefix` |
+| `turns.cli_prompt_file_placeholder` | `turns.grok.prompt_file_placeholder` |
+| `dispatch.stream_turn` raised `ProviderUnavailableError` with `ROUTE_FAILED` when the Claude or Grok block, or `turns`, was missing | it raises `ProviderNotConfiguredError(provider, block)` or `TurnRuntimeNotConfiguredError` unchanged, both `config.HostWiringError`s; a host that caught `ProviderUnavailableError` for a wiring fault catches `HostWiringError` too |
+| `process.PrivateCredentialHomeReservation` | `process.PrivateHomeReservation`, the reservation of the base `PrivateHome`; no alias remains |
 
 ## Migrating to 0.3.0
 

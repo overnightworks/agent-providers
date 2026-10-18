@@ -1042,7 +1042,7 @@ class _HomeReleases:
     def __init__(self, monkeypatch) -> None:
         self._released = threading.Semaphore(0)
         self.token_releases = 0
-        release_token = process.PrivateCredentialHomeReservation.release
+        release_token = process.PrivateHomeReservation.release
         release_turn = codex_protocol.release_turn_reservations
 
         def count_a_token_release(token) -> None:
@@ -1056,7 +1056,7 @@ class _HomeReleases:
                 self._released.release()
 
         monkeypatch.setattr(
-            process.PrivateCredentialHomeReservation, "release", count_a_token_release,
+            process.PrivateHomeReservation, "release", count_a_token_release,
         )
         monkeypatch.setattr(codex_protocol, "release_turn_reservations", release_and_signal)
 

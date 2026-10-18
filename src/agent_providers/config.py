@@ -66,6 +66,15 @@ class McpServerSpec(BaseModel):
     tool_names: frozenset[str] = Field(min_length=1)
 
 
+class GrokTurnRuntime(BaseModel):
+    """The Grok turn facts, present only on a host that runs Grok turns."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    prompt_file_prefix: str = Field(min_length=1)
+    prompt_file_placeholder: str = Field(min_length=1)
+
+
 class TurnRuntimeConfig(BaseModel):
     """The deployment facts a turn needs and a catalog never reads.
 
@@ -81,10 +90,9 @@ class TurnRuntimeConfig(BaseModel):
     codex_max_concurrent_processes: int = Field(ge=1)
     codex_max_concurrent_image_runs: int = Field(ge=1)
 
-    cli_prompt_file_prefix: str = Field(min_length=1)
-    cli_prompt_file_placeholder: str = Field(min_length=1)
-
     mcp_server: McpServerSpec | None
+
+    grok: GrokTurnRuntime | None = None
 
 
 class ClaudeCliRuntime(BaseModel):
@@ -97,6 +105,19 @@ class ClaudeCliRuntime(BaseModel):
 
     binary: str
     binary_search_globs: tuple[str, ...] = ()
+    token_file: Path
+
+
+class GrokCliRuntime(BaseModel):
+    """The deployment facts of the Grok CLI, present only on a host that runs it.
+
+    ``token_file`` is the provider's login source; Grok defines its format, an
+    ``auth.json`` copied whole, mode 0400.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    binary: str
     token_file: Path
 
 
@@ -120,7 +141,7 @@ class ProviderRuntimeConfig(BaseModel):
     against the parent's inherited ``PATH`` would put that choice back in the
     environment this layer closed.
 
-    ``claude.token_file``, ``grok_cli_auth_file`` and ``codex_cli_auth_file``
+    ``claude.token_file``, ``grok.token_file`` and ``codex_cli_auth_file``
     are each provider's login source: the credential files the catalog paths
     copy, mode 0400, into a private child home. The provider defines the
     format of its own file. Those children receive only that home, the provider's own home
@@ -137,11 +158,11 @@ class ProviderRuntimeConfig(BaseModel):
 
     claude: ClaudeCliRuntime | None = None
 
-    grok_cli_binary: str
+    grok: GrokCliRuntime | None = None
+
     codex_cli_binary: str
     cli_binary_search_path: tuple[Path, ...]
 
-    grok_cli_auth_file: Path
     codex_cli_auth_file: Path
 
     cli_working_directory_root: Path
@@ -149,7 +170,11 @@ class ProviderRuntimeConfig(BaseModel):
     turns: TurnRuntimeConfig | None = None
 
 
-class ProviderRuntimeNotConfiguredError(RuntimeError):
+class HostWiringError(RuntimeError):
+    """The host did not install what a call needs; no call can fix it."""
+
+
+class ProviderRuntimeNotConfiguredError(HostWiringError):
     """A provider ran before its host installed a runtime configuration."""
 
 
@@ -157,7 +182,7 @@ class ProviderRuntimeAlreadyConfiguredError(RuntimeError):
     """A second, differing configuration was installed over a live one."""
 
 
-class ProviderNotConfiguredError(RuntimeError):
+class ProviderNotConfiguredError(HostWiringError):
     """A provider ran under a configuration that holds no block for it."""
 
     def __init__(self, provider: str, block: str) -> None:
@@ -172,7 +197,7 @@ class ProviderNotConfiguredError(RuntimeError):
         return (type(self), (self.provider, self.block))
 
 
-class TurnRuntimeNotConfiguredError(RuntimeError):
+class TurnRuntimeNotConfiguredError(HostWiringError):
     """A turn path ran under a configuration that covers only the catalog."""
 
 
@@ -301,3 +326,19 @@ def current_claude_runtime() -> ClaudeCliRuntime:
     if claude is None:
         raise ProviderNotConfiguredError("claude", "claude")
     return claude
+
+
+def current_grok_runtime() -> GrokCliRuntime:
+    """Return the installed Grok block, or refuse naming the missing provider."""
+    grok = current_config().grok
+    if grok is None:
+        raise ProviderNotConfiguredError("grok", "grok")
+    return grok
+
+
+def current_grok_turn_runtime() -> GrokTurnRuntime:
+    """Return the installed Grok turn block, or refuse naming the missing provider."""
+    grok = current_turn_config().grok
+    if grok is None:
+        raise ProviderNotConfiguredError("grok", "turns.grok")
+    return grok

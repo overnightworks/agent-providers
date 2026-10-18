@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from agent_providers.config import current_config, current_turn_config
+from agent_providers.config import current_grok_runtime, current_grok_turn_runtime
 from agent_providers.constants import (
     GROK_CLI_LINE_CHANNEL_CAPACITY,
     GROK_CLI_STREAMING_OUTPUT_FORMAT,
@@ -33,7 +33,7 @@ from agent_providers.process import (
     CliLoginUnusableError,
     CliRunOutcome,
     PrivateCredentialHome,
-    PrivateCredentialHomeReservation,
+    PrivateHomeReservation,
     cli_settle_deadline,
     resolve_cli_binary,
     run_cli_bounded,
@@ -105,7 +105,7 @@ class GrokCliToolTransport:
         self._catalog = catalog
         try:
             self._home = PrivateCredentialHome(
-                current_config().grok_cli_auth_file,
+                current_grok_runtime().token_file,
                 Path(".grok/auth.json"),
                 prefix=GROK_CLI_TURN_DIRECTORY_PREFIX,
                 missing_credential_is_error=True,
@@ -129,7 +129,7 @@ class GrokCliToolTransport:
         self._closed = False
 
     def _child_for(self, arguments: tuple[str, ...]) -> ChildProcess:
-        binary = resolve_cli_binary(current_config().grok_cli_binary)
+        binary = resolve_cli_binary(current_grok_runtime().binary)
         if binary is None:
             raise ProviderUnavailableError(
                 "grok",
@@ -237,7 +237,7 @@ def _run_grok_round(
     prompt: bytes,
     deadline: float,
     channel: CliLineChannel,
-    home_reservation: PrivateCredentialHomeReservation,
+    home_reservation: PrivateHomeReservation,
 ) -> None:
     run_publishing_failures(
         channel,
@@ -343,7 +343,7 @@ def _grok_cli_tool_arguments(
 ) -> tuple[str, ...]:
     command = [
         "--prompt-file",
-        current_turn_config().cli_prompt_file_placeholder,
+        current_grok_turn_runtime().prompt_file_placeholder,
         "--output-format",
         GROK_CLI_STREAMING_OUTPUT_FORMAT,
         "--deny",

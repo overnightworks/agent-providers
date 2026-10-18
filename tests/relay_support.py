@@ -93,6 +93,7 @@ class ScriptedCalls:
         self.calls: list[tuple[RequestId, CallToolParams]] = []
         self.entered = asyncio.Event()
         self.cancelled = False
+        self.unoffered_count = 0
         self._replies = list(replies)
         self._gate = asyncio.Event()
         if not gated:
@@ -110,6 +111,9 @@ class ScriptedCalls:
             self.cancelled = True
             raise
         return self._replies.pop(0) if self._replies else clean_reply(request_id)
+
+    def unoffered(self) -> None:
+        self.unoffered_count += 1
 
     async def wait_entered(self) -> None:
         async with asyncio.timeout(WAIT_SECONDS):

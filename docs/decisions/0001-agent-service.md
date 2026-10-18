@@ -629,6 +629,17 @@ with no MCP SDK dependency.
   17); the relay answers the CLI's `tools/call` only after the runner has been
   resumed past that call's `ToolResultEvent`, and a refusal, cancellation or close
   prevents the answer. HD3: the init check detects; it does not gate (line 18).
+- *The execution barrier (A1b-10b1a, 18.10.2026).* Only a call whose acceptance the
+  service confirmed by resuming the runner past it is forwarded (line 17, ADR item
+  20). Refusals answer `-32602` (`Invalid params`), the shape after which the pinned
+  CLI continued (A1b-0e c7). The duplicate rule covers pending ids only, because ids
+  restart on a new connection after a new `initialize`; such a request is a new call
+  that needs its own acceptance (c5). At most `MAX_RELAY_CONNECTIONS - 1` calls are
+  pending, because each holds a connection; that keeps the `-32602` refusal reachable
+  on a fourth admitted connection, but reserves no capacity, because idle keep-alive
+  connections count toward the cap too (c2 measured one response's calls in series on
+  one connection; whether that bounds a production run is not measured). A close and
+  `notifications/cancelled` both end a pending call (c8); A1b-10b1b builds them.
 - *H9.* Its import contract says "client → stdlib, pydantic, HTTP and the MCP SDK
   only". That sentence is about `agent-client` and is untouched; HD1 adds no
   MCP SDK to any package, so it stays true.

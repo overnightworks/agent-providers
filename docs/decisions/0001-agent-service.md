@@ -685,10 +685,31 @@ with no MCP SDK dependency.
   withholds only the answer, because the call ran. `stop()` refuses with `-32602` every
   call whose result was not released, a running forward included, which keeps running
   upstream (design item 10); the pinned CLI continued after that refusal and after an
-  `isError` result (A1b-0e c7). A call holds its pending slot until it is released,
-  refused or given up; a forward's completion alone never frees it, and a cancelled call
-  never releases a result (line 22). Not measured: the pinned CLI against the release
-  (A1b-12b). The bounded close is A1b-10b2b's.
+  `isError` result (A1b-0e c7). A call holds its pending slot until its `call()`
+  returns: released (once `accept` of its result resolved the reply), refused, or given
+  up. `cancel()` frees it at once; a forward's completion alone never does, and a
+  cancelled call never releases a result (line 22). Not measured: the pinned CLI against
+  the release (A1b-12b).
+- *The bounded close (A1b-10b2b, 18.10.2026).* `agent_service.run_tools` opens a run's
+  tool set (the app's client, the barrier, the relay) and closes it in five steps (relay
+  design item 13 without the retired DELETE): the listener and the barrier stopped; the
+  injected reap, on its own bound; the forwards cancelled and `settle()` awaited within
+  `UPSTREAM_CLOSE_SECONDS` (2 s); `open_app_tools` left within `UPSTREAM_ABORT_SECONDS`
+  (0.5 s); the relay's connections within `RELAY_CLOSE_SECONDS` (1 s). Each deadline is
+  read on the run's clock when its step starts, and the bound is the owner's wait for the
+  step's task, never a cancel scope: httpcore's cleanup inside `AsyncShieldCancellation`
+  can delay that task but not the close, because at the deadline the task is cancelled
+  once and not awaited again. On the pinned httpcore 1.0.9 and anyio 4.15.1 that cleanup
+  awaits no peer (TLS without the closing handshake; the socket closed with `write_eof`,
+  `close` and `abort`), so a clean close needs no clock time. An overrun or a failing
+  step is logged by class and the close goes on; only the reap's exception (its
+  `ContainmentLost`) is raised, after the last step, so when it reaches the caller every
+  step has made its bounded attempt (line 20). A finished attempt is not every resource
+  closed: a cleanup stalled below httpx keeps its socket until the stall ends, and its
+  kept task closes it then; on the pinned stack none stalls. The close is one attempt
+  that outlasts its caller's cancellations, AnyIO's level one included, and delivers
+  them after its outcome. Not measured: the pinned CLI against it (A1b-12b). Whether an
+  overrun holds the place: A1b-8.
 - *H9.* Its import contract says "client → stdlib, pydantic, HTTP and the MCP SDK
   only". That sentence is about `agent-client` and is untouched; HD1 adds no
   MCP SDK to any package, so it stays true.

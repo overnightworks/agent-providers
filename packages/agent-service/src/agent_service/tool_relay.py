@@ -47,7 +47,7 @@ from agent_service.mcp_wire import (
     tool_result_response,
     tools_list_response,
 )
-from agent_service.run_liveness import RunClock, log_failure
+from agent_service.run_liveness import RunClock, log_failure, unfinished_by
 
 log = logging.getLogger(__name__)
 
@@ -190,10 +190,6 @@ class _ReceiveDeadline:
         self._transport.abort()
 
 
-def _unfinished(tasks: set[asyncio.Task[None]]) -> set[asyncio.Task[None]]:
-    return {task for task in tasks if not task.done()}
-
-
 class Relay:
     def __init__(self, run_id: str, secret: str, owner: RelayOwner, clock: RunClock) -> None:
         self._run_id = run_id
@@ -239,11 +235,19 @@ class Relay:
         if not attempt.cancelled():
             attempt.exception()
 
+    def stop_listening(self) -> None:
+        """Close the listening socket now; the connections stay served until ``close()``.
+
+        The old port refuses connections and one accepted from here on is aborted. This is
+        the first step of ``RunTools.close``; ``close()`` calls it again harmlessly.
+        """
+        self._closing = True
+        self._server.close()
+
     async def _close_once(self) -> None:
         loop = asyncio.get_running_loop()
         deadline = self._clock() + RELAY_CLOSE_SECONDS
-        self._closing = True
-        self._server.close()
+        self.stop_listening()
         connections = dict(self._connections)
         for transport in connections.values():
             transport.abort()
@@ -252,18 +256,16 @@ class Relay:
         wait_closed = loop.create_task(
             self._server.wait_closed(), name=f"relay:{self._run_id}:wait-closed"
         )
-        expiry = loop.create_task(
-            self._clock.wait_until(deadline), name=f"relay:{self._run_id}:close-deadline"
-        )
-        observed = {*connections, wait_closed}
         try:
-            while not expiry.done() and (outstanding := _unfinished(observed)):
-                await asyncio.wait({expiry, *outstanding}, return_when=asyncio.FIRST_COMPLETED)
-            outstanding = _unfinished(observed)
+            outstanding = await unfinished_by(
+                self._clock,
+                deadline,
+                {*connections, wait_closed},
+                f"relay:{self._run_id}:close-deadline",
+            )
         finally:
-            for own in (expiry, wait_closed):
-                own.cancel()
-            await asyncio.gather(expiry, wait_closed, return_exceptions=True)
+            wait_closed.cancel()
+            await asyncio.gather(wait_closed, return_exceptions=True)
         if outstanding:
             raise_without_chain(RelayCleanupIncomplete(len(outstanding)))
         self._closed = True
@@ -621,10 +623,11 @@ class ToolCallBarrier:
     A give-up withholds only the reply: the call ran, so its result is still handed out and
     its accept releases nothing. ``stop()`` refuses with ``-32602`` every admitted call whose
     reply was not released, a running forward, a queued result and a handed-out result
-    included; a running forward keeps running upstream. A call holds its pending slot until it
-    is released, refused or given up; a forward's completion alone never frees it, and
-    ``cancel()`` frees it at once. The bound reserves no connection, because idle keep-alive
-    connections count toward the listener's cap too.
+    included; a running forward keeps running upstream. A call holds its pending slot until its
+    ``call()`` returns: released (once ``accept`` of its result resolved the reply), refused, or
+    given up. ``cancel()`` frees it at once; a forward's completion alone never does.
+    The bound reserves no connection, because idle keep-alive connections count toward the
+    listener's cap too.
 
     The listener cancels the task running ``call()`` when the CLI closes the connection of a
     pending call, in the step it sees the close.
@@ -706,6 +709,11 @@ class ToolCallBarrier:
         self._ready.clear()
         self._handed_out = None
         self._changed.set()
+
+    def abort_forwards(self) -> None:
+        """Cancel every running forward once; ``RunTools.close`` calls it, ``stop()`` never does."""
+        for forward in self._forwards:
+            forward.cancel()
 
     async def settle(self) -> None:
         while self._forwards:

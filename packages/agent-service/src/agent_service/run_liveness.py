@@ -30,13 +30,21 @@ import logging
 import math
 import traceback
 import weakref
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine, Iterator, Sequence
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterator,
+    Callable,
+    Collection,
+    Coroutine,
+    Iterator,
+    Sequence,
+)
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
 from types import TracebackType
-from typing import Final, Protocol
+from typing import Any, Final, Protocol
 from uuid import UUID
 
 import anyio
@@ -217,7 +225,7 @@ class _FrameSlot:
         return frame
 
 
-async def _finished(task: asyncio.Task[object]) -> asyncio.CancelledError | None:
+async def wait_outlasting_cancellation(task: asyncio.Task[object]) -> asyncio.CancelledError | None:
     """Wait until ``task`` is done, however often the waiter is cancelled meanwhile.
 
     Returns the first cancellation of the waiter, for the caller to raise once
@@ -233,6 +241,24 @@ async def _finished(task: asyncio.Task[object]) -> asyncio.CancelledError | None
         except asyncio.CancelledError as cancelled:  # NOSONAR(S7497) returned once done (rule 10)
             interrupted = interrupted or cancelled
     return interrupted
+
+
+async def unfinished_by(
+    clock: RunClock, deadline: float, tasks: Collection[asyncio.Task[Any]], expiry_name: str
+) -> set[asyncio.Task[Any]]:
+    """Wait until every task is done or ``clock`` reached ``deadline``; return those still running.
+
+    The tasks are never cancelled or awaited past the deadline. The wait's own expiry
+    task is named ``expiry_name``.
+    """
+    expiry = asyncio.get_running_loop().create_task(clock.wait_until(deadline), name=expiry_name)
+    try:
+        while not expiry.done() and (outstanding := {task for task in tasks if not task.done()}):
+            await asyncio.wait({expiry, *outstanding}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        expiry.cancel()
+        await asyncio.gather(expiry, return_exceptions=True)
+    return {task for task in tasks if not task.done()}
 
 
 class FailedPart(Enum):
@@ -458,7 +484,7 @@ async def _stopped(
         task.cancel()
     interrupted: asyncio.CancelledError | None = None
     for task in tasks:
-        waiter_cancelled = await _finished(task)
+        waiter_cancelled = await wait_outlasting_cancellation(task)
         interrupted = interrupted or waiter_cancelled
     failures = [failure for task in tasks if (failure := _failure_of(task)) is not None]
     return interrupted, failures
@@ -548,7 +574,7 @@ class SupervisedRun:
     ) -> None:
         """Leave once the runner is closed, raising or logging what ``_exit_of`` decides."""
         self._supervisor.cancel()
-        waited = await _finished(self._supervisor)
+        waited = await wait_outlasting_cancellation(self._supervisor)
         reaped = await self._reaped()
         if (failure := _failure_of(self._supervisor)) is not None:
             self._failures.add(FailedPart.SUPERVISION, failure)
@@ -771,7 +797,7 @@ class SupervisedRun:
         return self._cleanup
 
     async def _reaped(self) -> asyncio.CancelledError | None:
-        return await _finished(self._reaping())
+        return await wait_outlasting_cancellation(self._reaping())
 
     async def _reap(self) -> None:
         self._stopping = True

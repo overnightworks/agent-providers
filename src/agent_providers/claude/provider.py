@@ -1652,28 +1652,25 @@ def _probe_cli_surface_sync(
     if deadline <= time.monotonic():
         raise UnavailableError("Claude CLI probe preflight budget was already exhausted")
     home = _claude_private_home()
-    home_reservation = home.reserve()
-    reservation = CLAUDE_CLI_PROCESS_POOL.reserve()
-    if reservation is None:
-        home_reservation.release()
-        home.close()
-        raise _ClaudeCliProcessPoolSaturated(CLAUDE_CLI_PROCESS_POOL.limit_message())
-
-    released = False
-
-    def on_reaped(_process_id: int, _became_zombie: bool) -> None:
-        nonlocal released
-        CLAUDE_CLI_PROCESS_POOL.release(reservation)
-        home_reservation.release()
-        released = True
-
-    def on_spawn_failed() -> None:
-        on_reaped(0, False)
-
     try:
+        child = _claude_child_process(binary, _tool_surface_probe_arguments(mcp=mcp), home.path)
+        stdin_payload = _TOOL_SURFACE_PROBE_PROMPT.encode()
+        home_reservation = home.reserve()
+        reservation = CLAUDE_CLI_PROCESS_POOL.reserve()
+        if reservation is None:
+            home_reservation.release()
+            raise _ClaudeCliProcessPoolSaturated(CLAUDE_CLI_PROCESS_POOL.limit_message())
+
+        def on_reaped(_process_id: int, _became_zombie: bool) -> None:
+            CLAUDE_CLI_PROCESS_POOL.release(reservation)
+            home_reservation.release()
+
+        def on_spawn_failed() -> None:
+            on_reaped(0, False)
+
         outcome = process.run_cli_bounded(
-            _claude_child_process(binary, _tool_surface_probe_arguments(mcp=mcp), home.path),
-            stdin_payload=_TOOL_SURFACE_PROBE_PROMPT.encode(),
+            child,
+            stdin_payload=stdin_payload,
             read="first_line",
             deadline=deadline,
             stderr="devnull",
@@ -1681,17 +1678,9 @@ def _probe_cli_surface_sync(
             on_spawn_failed=on_spawn_failed,
             on_reaped=on_reaped,
         )
-    except BaseException:
-        if not released:
-            CLAUDE_CLI_PROCESS_POOL.release(reservation)
-            home_reservation.release()
-        raise
     finally:
         home.close()
     if outcome.reason is process.CliRunReason.SPAWN_FAILED:
-        if not released:
-            CLAUDE_CLI_PROCESS_POOL.release(reservation)
-            home_reservation.release()
         raise UnavailableError("Claude CLI probe failed to run")
     if outcome.reason is process.CliRunReason.DEADLINE_BEFORE_SPAWN:
         raise UnavailableError("Claude CLI probe did not start within its budget")

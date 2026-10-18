@@ -54,6 +54,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable, Mapping
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -742,24 +743,38 @@ class _DoorPipes:
         return asyncio.StreamWriter(transport, protocol, None, loop)
 
     def close_child_ends(self) -> None:
-        child_ends, self._child_ends = self._child_ends, []
-        for child_end in child_ends:
-            os.close(child_end)
+        with ExitStack() as every_close:
+            self.queue_child_end_closes(every_close)
 
     def close_parent_side(self, loop: asyncio.AbstractEventLoop) -> None:
-        transports, self._transports = self._transports, []
-        if not loop.is_closed():
-            for transport in transports:
-                self._close_transport(transport)
-        self.close_parent_files()
+        with ExitStack() as every_close:
+            self.queue_parent_side_closes(every_close, loop)
 
     def close_parent_files(self) -> None:
+        with ExitStack() as every_close:
+            self.queue_parent_file_closes(every_close)
+
+    def queue_child_end_closes(self, every_close: ExitStack) -> None:
+        child_ends, self._child_ends = self._child_ends, []
+        for child_end in child_ends:
+            every_close.callback(os.close, child_end)
+
+    def queue_parent_side_closes(
+        self, every_close: ExitStack, loop: asyncio.AbstractEventLoop
+    ) -> None:
+        transports, self._transports = self._transports, []
+        self.queue_parent_file_closes(every_close)
+        if not loop.is_closed():
+            for transport in reversed(transports):
+                every_close.callback(self._close_transport, transport)
+
+    def queue_parent_file_closes(self, every_close: ExitStack) -> None:
         parent_files, self._parent_files = self._parent_files, []
         unwrapped_ends, self._unwrapped_parent_ends = self._unwrapped_parent_ends, []
         for unwrapped_end in unwrapped_ends:
-            os.close(unwrapped_end)
+            every_close.callback(os.close, unwrapped_end)
         for parent_file in parent_files:
-            parent_file.close()
+            every_close.callback(parent_file.close)
 
     def _close_transport(self, transport: _ParentTransport) -> None:
         if transport is not self._write_transport:
@@ -965,7 +980,9 @@ async def open_anchored_pipes(
     and the handle is returned with no ``await`` after it.
 
     Any ``BaseException`` before the return, cancellation included, is answered
-    synchronously and re-raised unchanged: every transport that is not closing is
+    synchronously and re-raised unchanged unless a close of the door's own raises;
+    then every close is still attempted, and a close error propagates with the
+    start's error in its chain. Every transport that is not closing is
     closed, every parent file object and every child end is closed, so the door's
     descriptors are closed when the caller's handler runs. That holds when the
     cleanup itself completed and, for a raise from the watcher launch, when the
@@ -994,9 +1011,10 @@ async def open_anchored_pipes(
             leader, exit_published, pipes, loop, stdin=stdin, stdout=stdout, stderr=stderr
         )
     except BaseException:
-        pipes.close_child_ends()
-        pipes.close_parent_side(loop)
-        raise
+        with ExitStack() as rollback:
+            pipes.queue_parent_side_closes(rollback, loop)
+            pipes.queue_child_end_closes(rollback)
+            raise
 
 
 class BlockingAnchoredChild:
@@ -1088,7 +1106,8 @@ def open_blocking_anchored_pipes(
     The blocking twin of :func:`open_anchored_pipes`: stdin and stdout are pipes, stderr
     is a pipe for ``"capture"`` and ``/dev/null`` for ``"devnull"``. Any ``BaseException``
     before the return closes every parent file object and child end and is re-raised
-    unchanged, the start's own rollback errors included.
+    unchanged unless a close of the door's own raises; then every close is still
+    attempted, and a close error propagates with the start's error in its chain.
     """
     exit_published = threading.Event()
     pipes = _DoorPipes()
@@ -1112,6 +1131,7 @@ def open_blocking_anchored_pipes(
             leader, exit_published, pipes, stdin=stdin_file, stdout=stdout_file, stderr=stderr_file
         )
     except BaseException:
-        pipes.close_child_ends()
-        pipes.close_parent_files()
-        raise
+        with ExitStack() as rollback:
+            pipes.queue_parent_file_closes(rollback)
+            pipes.queue_child_end_closes(rollback)
+            raise

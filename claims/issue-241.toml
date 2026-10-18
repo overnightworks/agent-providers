@@ -1,7 +1,0 @@
-claim_id = "b5f3610e8c2e42d28808cd94fce7bbbd"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "e98de39b2da2db58bfadd45cc2c1f21b95d9541f"
-branch = "claude/issue-241-missing-binary-and-pool-lock"
-scope = ["src/agent_providers/claude/provider.py", "tests/test_claude_adapter.py", "tests/test_claude_provider.py"]
-opened_commit = "fd6ee3fe536c93dfcaeccb102cc22a8108711bf9"

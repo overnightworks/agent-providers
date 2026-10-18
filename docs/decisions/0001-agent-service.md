@@ -1893,7 +1893,7 @@ scripts below; every `codex` process ran inside `bwrap`, with `HOME` and
 `CODEX_HOME` in scratch. The earlier logs `all1.log`, `all2.log` and `v2.log`
 are development runs of the same scripts; whether they held
 `/tmp/probe-stack.lock` or passed the load check is not recorded (the `flock` is in
-`both.sh`, which postdates those logs, and the logs show no lock or load line) (one `B1` run died on a harness
+`both.sh`, which postdates those logs, and the logs show no lock or load line; one `B1` run died on a harness
 `AttributeError`, fixed before the series); the evidence below is the two passes
 of the locked series.
 
@@ -2119,6 +2119,11 @@ timeout 600 python3 -I $S/bin/cells.py $1; rc=$?
 echo "cell $1 rc=$rc survivors=$(pgrep -fc "$S/bin/drive.py")"
 ```
 
+`<native-codex>` is the package-relative path
+`<npm-global>/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex`,
+found by resolving the shim with `readlink -f "$(command -v codex)"` and reading
+the `node_modules/@openai/codex-linux-x64` layout next to it.
+
 `series.sh` (one pass over all cells) and `both.sh` (the lock wrapper that ran
 two passes), with the scratch path replaced by `<scratch>`:
 
@@ -2332,16 +2337,11 @@ bwrap --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/lib /lib \
   DISABLE_AUTOUPDATER=1 /opt/claude ARGS
 ```
 
-`<native-codex>` is the package-relative path
-`<npm-global>/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex`,
-found by resolving the shim with `readlink -f "$(command -v codex)"` and reading
-the `node_modules/@openai/codex-linux-x64` layout next to it.
-
 Unless a cell says otherwise, `ARGS` is `-p --input-format stream-json
 --output-format stream-json --verbose`, and a small driver writes one
 `{"type":"user","message":{"role":"user","content":"hello"}}` line to stdin 0.5 s
 after the start and closes stdin 5 s later. "Init" is the `system/init` event.
-Every run of the locked series held `/tmp/probe-stack.lock`. The fake servers and proxies of the
+Every run held `/tmp/probe-stack.lock`. The fake servers and proxies of the
 cells below are scratch scripts on `127.0.0.1` inside the same unshared network.
 
 **Driver.** `python3 -I drive.py DELAY -- /opt/claude ARGS` (`DELAY` is 0.5 unless

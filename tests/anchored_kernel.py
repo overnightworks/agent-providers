@@ -346,6 +346,7 @@ class CensusRecorder(list[int]):
         super().__init__()
         self.log: EventLog | None = None
         self.answer: GroupCensus | None = None
+        self.answers: deque[GroupCensus] = deque()
         self.failure: Exception | None = None
         self.during: Callable[[], None] | None = None
 
@@ -357,6 +358,8 @@ class CensusRecorder(list[int]):
             self.during()
         if self.failure is not None:
             raise self.failure
+        if self.answers:
+            return self.answers.popleft()
         if self.answer is not None:
             return self.answer
         return group_census(view, pgid)

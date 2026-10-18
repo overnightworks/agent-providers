@@ -2,7 +2,7 @@ import asyncio
 import base64
 import logging
 import signal
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from http import HTTPStatus
 
@@ -12,7 +12,11 @@ from relay_support import (
     OWNER_ANSWER,
     OWNER_BODY,
     RUN_ID,
+    AbsorbingOwner,
+    Delivery,
+    HoldingSteppedLoop,
     RawClient,
+    RelayReads,
     RelayWrites,
     RequestHead,
     ScriptedOwner,
@@ -21,9 +25,11 @@ from relay_support import (
     close_bounded,
     connection_numbers,
     drive,
+    holding_loop,
     port_of,
     post,
     relay_tasks,
+    task_named,
     yield_until,
 )
 
@@ -32,6 +38,7 @@ from agent_service.mcp_wire import ACKNOWLEDGEMENT, JSON_MEDIA_TYPE, HttpAnswer
 from agent_service.run_liveness import LoopClock
 from agent_service.tool_relay import (
     LOOPBACK_HOST,
+    MAX_PIPELINED_BYTES,
     MAX_RELAY_CONNECTIONS,
     RECEIVE_CHUNK_BYTES,
     UNANSWERED,
@@ -944,22 +951,243 @@ def test_a_client_leaving_mid_body_never_reaches_the_owner(
     assert unlogged_beyond_asyncio_debug(caplog) == []
 
 
-def test_a_client_leaving_while_the_owner_works_ends_the_connection_quietly(
+CONNECTION = f"relay:{RUN_ID}:conn-1"
+WATCH = f"{CONNECTION}:watch"
+ANSWER = f"{CONNECTION}:answer"
+PARTIAL_NEXT_HEAD = b"POST /mcp HTTP/1.1\r\nHost: x\r\n"
+
+CLIENT_ENDS = [
+    pytest.param(RawClient.disconnect, False, id="fin"),
+    pytest.param(RawClient.finish_sending, True, id="half-close"),
+    pytest.param(RawClient.reset, False, id="reset"),
+]
+
+
+async def client_while_owner_works(
+    relay: Relay, owner: ScriptedOwner, reads: RelayReads, pipelined: bytes = b""
+) -> RawClient:
+    client = await RawClient.connect(port_of(relay))
+    await client.send(post(relay, b"{}"))
+    await owner.wait_entered()
+    baseline = reads.read_by(WATCH)
+    await client.send(pipelined)
+    await reads.until_read(WATCH, baseline + len(pipelined))
+    return client
+
+
+@pytest.mark.parametrize("pipelined", [b"", PARTIAL_NEXT_HEAD], ids=["alone", "after-bytes"])
+@pytest.mark.parametrize(("end", "can_still_read"), CLIENT_ENDS)
+def test_a_close_while_the_owner_works_cancels_it_and_writes_nothing(
+    end: Callable[[RawClient], None],
+    can_still_read: bool,
+    pipelined: bytes,
+    monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """W1 a to c, W2."""
     caplog.set_level(logging.DEBUG)
+    writes = RelayWrites(monkeypatch)
+    reads = RelayReads(monkeypatch)
     owner = ScriptedOwner(gated=True)
+
+    async def scenario(relay: Relay) -> None:
+        client = await client_while_owner_works(relay, owner, reads, pipelined)
+        end(client)
+        await yield_until(lambda: owner.cancelled)
+        await yield_until(lambda: relay_tasks() == [])
+        assert writes.to(client) == b""
+        if can_still_read:
+            assert await client.delivery() is Delivery.ABSENT
+
+    drive(scenario, owner=owner)
+    assert unlogged_beyond_asyncio_debug(caplog) == []
+
+
+def test_an_answer_produced_after_the_close_cancelled_the_owner_is_not_written(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """W1 d."""
+    caplog.set_level(logging.DEBUG)
+    writes = RelayWrites(monkeypatch)
+    owner = AbsorbingOwner()
 
     async def scenario(relay: Relay) -> None:
         client = await RawClient.connect(port_of(relay))
         await client.send(post(relay, b"{}"))
         await owner.wait_entered()
-        client.reset()
+        client.disconnect()
+        await yield_until(lambda: WATCH not in relay_tasks())
         owner.release()
         await yield_until(lambda: relay_tasks() == [])
+        assert writes.to(client) == b""
 
     drive(scenario, owner=owner)
     assert unlogged_beyond_asyncio_debug(caplog) == []
+
+
+def test_a_whole_next_request_sent_while_the_owner_works_is_answered_after_the_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """W3."""
+    reads = RelayReads(monkeypatch)
+    owner = ScriptedOwner([ACKNOWLEDGEMENT, OWNER_ANSWER], gated=True)
+
+    async def scenario(relay: Relay) -> None:
+        client = await client_while_owner_works(relay, owner, reads, post(relay, b"{}"))
+        owner.release()
+        assert (await client.answer()).status == HTTPStatus.ACCEPTED
+        assert (await client.answer()).status == HTTPStatus.OK
+        assert owner.bodies == [b"{}", b"{}"]
+
+    drive(scenario, owner=owner)
+
+
+BoundSender = Callable[[Relay, ScriptedOwner, RelayReads], Awaitable[RawClient]]
+PIPELINED_TAIL_BYTES = 4_096
+
+
+async def send_exactly_the_bound(
+    relay: Relay, owner: ScriptedOwner, reads: RelayReads
+) -> RawClient:
+    return await client_while_owner_works(relay, owner, reads, b"x" * MAX_PIPELINED_BYTES)
+
+
+async def send_one_byte_over_the_bound(
+    relay: Relay, owner: ScriptedOwner, reads: RelayReads
+) -> RawClient:
+    return await client_while_owner_works(relay, owner, reads, b"x" * (MAX_PIPELINED_BYTES + 1))
+
+
+async def send_over_the_bound_after_bytes_read_before_the_owner(
+    relay: Relay, owner: ScriptedOwner, reads: RelayReads
+) -> RawClient:
+    request = post(relay, b"{}")
+    reads.aggregate_first_read(CONNECTION, len(request) + PIPELINED_TAIL_BYTES)
+    client = await RawClient.connect(port_of(relay))
+    await client.send(request + b"x" * PIPELINED_TAIL_BYTES)
+    await owner.wait_entered()
+    assert reads.read_by(CONNECTION) == len(request) + PIPELINED_TAIL_BYTES
+    remainder = MAX_PIPELINED_BYTES - PIPELINED_TAIL_BYTES + 1
+    await client.send(b"x" * remainder)
+    await reads.until_read(WATCH, remainder)
+    return client
+
+
+async def send_over_the_bound_after_bytes_an_earlier_request_left(
+    relay: Relay, owner: ScriptedOwner, reads: RelayReads
+) -> RawClient:
+    second = post(relay, b"{}")
+    client = await client_while_owner_works(
+        relay, owner, reads, second + b"x" * (MAX_PIPELINED_BYTES - len(second))
+    )
+    owner.release()
+    owner.hold()
+    first_answer = await client.answer()
+    assert first_answer.status == HTTPStatus.ACCEPTED
+    await yield_until(lambda: len(owner.requests) == 2)
+    baseline = reads.read_by(WATCH)
+    await client.send(b"x" * (len(second) + 1))
+    await reads.until_read(WATCH, baseline + len(second) + 1)
+    return client
+
+
+BOUND_CASES = [
+    pytest.param(send_exactly_the_bound, False, id="exactly-the-bound"),
+    pytest.param(send_one_byte_over_the_bound, True, id="one-byte-over"),
+    pytest.param(send_over_the_bound_after_bytes_read_before_the_owner, True, id="prebuffered"),
+    pytest.param(send_over_the_bound_after_bytes_an_earlier_request_left, True, id="successive"),
+]
+
+
+@pytest.mark.parametrize(("send", "ends_the_request"), BOUND_CASES)
+def test_pipelined_bytes_beyond_the_bound_over_everything_retained_end_the_request(
+    send: BoundSender, ends_the_request: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W4."""
+    reads = RelayReads(monkeypatch)
+    owner = ScriptedOwner([ACKNOWLEDGEMENT, OWNER_ANSWER], gated=True)
+
+    async def scenario(relay: Relay) -> None:
+        client = await send(relay, owner, reads)
+        if ends_the_request:
+            await yield_until(lambda: owner.cancelled)
+            await yield_until(lambda: relay_tasks() == [])
+            assert await client.delivery() is Delivery.ABSENT
+        else:
+            owner.release()
+            assert (await client.answer()).status == HTTPStatus.ACCEPTED
+
+    drive(scenario, owner=owner)
+
+
+def test_an_answer_that_completed_before_a_half_close_is_written_and_the_connection_ends() -> None:
+    """W5 a."""
+    owner = ScriptedOwner(gated=True)
+
+    async def scenario(relay: Relay) -> None:
+        loop = holding_loop()
+        client = await RawClient.connect(port_of(relay))
+        await client.send(post(relay, b"{}"))
+        await owner.wait_entered()
+        loop.hold_wakeups(CONNECTION)
+        owner.release()
+        await yield_until(lambda: ANSWER not in relay_tasks())
+        client.finish_sending()
+        await yield_until(lambda: WATCH not in relay_tasks())
+        loop.release_wakeups()
+        assert (await client.answer()).status == HTTPStatus.OK
+        assert await client.at_eof()
+
+    drive(scenario, owner=owner, loop_factory=HoldingSteppedLoop)
+
+
+def test_pipelined_bytes_a_cancelled_watch_read_had_not_taken_stay_the_next_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """W5 b."""
+    reads = RelayReads(monkeypatch)
+    owner = ScriptedOwner([ACKNOWLEDGEMENT, OWNER_ANSWER], gated=True)
+
+    async def scenario(relay: Relay) -> None:
+        loop = holding_loop()
+        next_request = post(relay, b"{}")
+        half = len(next_request) // 2
+        client = await client_while_owner_works(relay, owner, reads, next_request[:half])
+        loop.hold_wakeups(WATCH)
+        await client.send(next_request[half:])
+        await yield_until(lambda: loop.held_wakeups == 1)
+        owner.release()
+        await yield_until(lambda: task_named(WATCH).cancelling() > 0)
+        loop.release_wakeups()
+        assert (await client.answer()).status == HTTPStatus.ACCEPTED
+        assert (await client.answer()).status == HTTPStatus.OK
+
+    drive(scenario, owner=owner, loop_factory=HoldingSteppedLoop)
+
+
+def test_an_answer_that_completed_before_an_overflow_is_written_and_no_next_request_is_served(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """W5 c."""
+    owner = ScriptedOwner([ACKNOWLEDGEMENT, OWNER_ANSWER], gated=True)
+
+    async def scenario(relay: Relay) -> None:
+        loop = holding_loop()
+        client = await RawClient.connect(port_of(relay))
+        await client.send(post(relay, b"{}"))
+        await owner.wait_entered()
+        loop.hold_wakeups(CONNECTION)
+        owner.release()
+        await yield_until(lambda: ANSWER not in relay_tasks())
+        next_request = post(relay, b"{}")
+        await client.send(next_request + b"x" * (MAX_PIPELINED_BYTES + 1 - len(next_request)))
+        await yield_until(lambda: WATCH not in relay_tasks())
+        loop.release_wakeups()
+        assert (await client.answer()).status == HTTPStatus.ACCEPTED
+        assert await client.delivery() is Delivery.ABSENT
+        assert owner.bodies == [b"{}"]
+
+    drive(scenario, owner=owner, loop_factory=HoldingSteppedLoop)
 
 
 def test_an_unanswered_request_closes_its_connection_without_a_byte_and_frees_the_slot(

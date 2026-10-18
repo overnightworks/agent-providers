@@ -53,6 +53,7 @@ log = logging.getLogger(__name__)
 LOOPBACK_HOST: Final = "127.0.0.1"
 MAX_HEAD_BYTES: Final = 16_384
 RECEIVE_CHUNK_BYTES: Final = 8_192
+MAX_PIPELINED_BYTES: Final = MAX_HEAD_BYTES + MAX_EVENT_BYTES
 MAX_RELAY_CONNECTIONS: Final = 4
 HEAD_RECEIVE_SECONDS: Final = 5.0
 BODY_RECEIVE_SECONDS: Final = 10.0
@@ -136,6 +137,17 @@ def _protocol_version(request: h11.Request) -> str | None:
 
 def _empty(status: HTTPStatus) -> HttpAnswer:
     return HttpAnswer(status, None, b"")
+
+
+class _ClientEnd(Enum):
+    WHILE_PENDING = "while the answer was pending"
+    AFTER_ANSWER = "after the answer completed"
+
+
+@dataclass(frozen=True)
+class _Answered:
+    answer: HttpAnswer | Unanswered
+    client_ended: bool
 
 
 class _ReceiveDeadline:
@@ -301,12 +313,14 @@ class Relay:
             return False
         if body is None:
             return False
-        answer = await self._owner_answer(RelayRequest(body, _protocol_version(request)))
-        if answer is UNANSWERED:
+        answered = await self._answered_while_watching(
+            connection, reader, RelayRequest(body, _protocol_version(request))
+        )
+        if answered.answer is UNANSWERED:
             return False
         mixed_framing = _declares_both_framings(request)
-        await self._answer(connection, writer, answer, closing=mixed_framing)
-        return not mixed_framing and _ready_for_next_cycle(connection)
+        await self._answer(connection, writer, answered.answer, closing=mixed_framing)
+        return not (mixed_framing or answered.client_ended) and _ready_for_next_cycle(connection)
 
     async def _refuse(
         self,
@@ -323,6 +337,27 @@ class Relay:
         allowed = [(b"allow", b"POST")] if status is HTTPStatus.METHOD_NOT_ALLOWED else []
         await self._answer(connection, writer, _empty(status), allowed, closing=not can_stay)
         return can_stay and _ready_for_next_cycle(connection)
+
+    async def _answered_while_watching(
+        self, connection: h11.Connection, reader: asyncio.StreamReader, request: RelayRequest
+    ) -> _Answered:
+        """Run the owner as a child awaited directly, with a watch that cancels it on a close.
+
+        The direct await lets the relay's close cancel the owner within its own step, and the
+        watch cancels in the step it sees the end, so the barrier's give-up is recorded before
+        the connection task resumes and a call the CLI closed is not forwarded in between.
+        """
+        loop = asyncio.get_running_loop()
+        name = _connection_task().get_name()
+        answer = loop.create_task(self._owner_answer(request), name=f"{name}:answer")
+        watch = loop.create_task(_watch(connection, reader, answer), name=f"{name}:watch")
+        try:
+            outcome = await _outcome_of(answer)
+        finally:
+            end = await _stopped(watch)
+        if end is _ClientEnd.WHILE_PENDING:
+            return _Answered(UNANSWERED, client_ended=True)
+        return _Answered(outcome, client_ended=end is not None)
 
     async def _owner_answer(self, request: RelayRequest) -> HttpAnswer | Unanswered:
         try:
@@ -428,6 +463,54 @@ class Relay:
         await writer.drain()
 
 
+def _connection_task() -> asyncio.Task[Any]:
+    task = asyncio.current_task()
+    assert task is not None
+    return task
+
+
+async def _outcome_of(answer: asyncio.Task[HttpAnswer | Unanswered]) -> HttpAnswer | Unanswered:
+    try:
+        return await answer
+    except asyncio.CancelledError:
+        if _connection_task().cancelling():
+            raise
+        return UNANSWERED
+
+
+async def _stopped(watch: asyncio.Task[_ClientEnd]) -> _ClientEnd | None:
+    watch.cancel()
+    await asyncio.gather(watch, return_exceptions=True)
+    return None if watch.cancelled() else watch.result()
+
+
+async def _watch(
+    connection: h11.Connection,
+    reader: asyncio.StreamReader,
+    answer: asyncio.Task[HttpAnswer | Unanswered],
+) -> _ClientEnd:
+    """Read until the client ends, keeping pipelined bytes in order for the next request.
+
+    An end is cut off in the step it is seen, so the pending answer is cancelled before
+    anything else runs. The count covers every unparsed byte the connection retains, so
+    pipelining cannot grow the parser's buffer without bound.
+    """
+    retained = len(connection.trailing_data[0])
+    while True:
+        try:
+            chunk = await reader.read(RECEIVE_CHUNK_BYTES)
+        except ConnectionError:
+            chunk = b""
+        retained += len(chunk)
+        if not chunk or retained > MAX_PIPELINED_BYTES:
+            if answer.done():
+                return _ClientEnd.AFTER_ANSWER
+            if not answer.cancelling():
+                answer.cancel()
+            return _ClientEnd.WHILE_PENDING
+        connection.receive_data(chunk)
+
+
 def _ready_for_next_cycle(connection: h11.Connection) -> bool:
     return connection.our_state is h11.DONE and connection.their_state is h11.DONE
 
@@ -525,8 +608,9 @@ class ToolCallBarrier:
     otherwise the lost-outcome owner, which logs a failure once by class. ``settle()`` returns
     once every forward's outcome was retrieved.
 
-    Not yet held: the reply is answered as soon as the upstream outcome exists (A1b-10b2), and
-    a close of the CLI's connection is seen only when the answer is written (A1b-10b1b2).
+    The listener cancels the task running ``call()`` when the CLI closes the connection of a
+    pending call, in the step it sees the close. Not yet held: the reply is answered as soon as
+    the upstream outcome exists (A1b-10b2).
     """
 
     def __init__(self, run_id: str, app: AppTools) -> None:

@@ -145,12 +145,10 @@ def _private_working_root(value: object) -> PrivateWorkingRoot:
 class CliConfig(_Section):
     """The Claude program this installation runs, its pinned version and its private root."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid", arbitrary_types_allowed=True)
-
     claude_binary: Annotated[Path, BeforeValidator(_claude_program)]
     claude_version: PinnedClaudeVersion
     working_root: Annotated[PrivateWorkingRoot, PlainValidator(_private_working_root)] = Field(
-        exclude=True
+        exclude=True, repr=False
     )
 
 
@@ -430,7 +428,8 @@ def load_config(path: Path) -> ServiceConfig:
     try:
         return ServiceConfig.model_validate(document)
     except ValidationError as error:
-        raise ConfigError(f"{shown_text(str(path))}: {_named_fields(error)}") from error
+        refusal = f"{shown_text(str(path))}: {_named_fields(error)}"
+    raise ConfigError(refusal)
 
 
 def _named_fields(error: ValidationError) -> str:

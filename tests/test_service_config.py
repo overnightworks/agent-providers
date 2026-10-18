@@ -52,6 +52,7 @@ SIGNING_SECTION = f"[signing]\n{SIGNING_KEY_LINE}\n\n"
 TOKEN_FILE_LINE = f"token_file = {json.dumps(str(process_token_file()))}"
 CLAUDE_BINARY_LINE = f"claude_binary = {json.dumps(str(process_claude_cli()))}"
 CLAUDE_VERSION_LINE = f'claude_version = "{PINNED_CLAUDE_VERSION}"'
+ROOT_MARKER = "synthetic-private-root-marker"
 WORKING_ROOT_LINE = f"working_root = {json.dumps(str(process_working_root().path))}"
 
 
@@ -1223,6 +1224,30 @@ def test_a_private_working_root_loads_into_the_cli_section(tmp_path):
     config = load_config(_written(tmp_path, VALID_CONFIG))
 
     assert config.cli.working_root == process_working_root()
+
+
+def _config_naming_a_marked_root(tmp_path: Path, make_the_root: bool) -> Path:
+    marked_root = tmp_path / ROOT_MARKER
+    if make_the_root:
+        _private_directory(marked_root)
+    program = fake_cli_executable(tmp_path, {("--version",): "any"})
+    return _written(tmp_path, _cli_naming_the_working_root(_root_line(str(marked_root)), program))
+
+
+def test_a_loaded_config_shows_no_working_root_in_its_repr_or_str(tmp_path):
+    config = load_config(_config_naming_a_marked_root(tmp_path, make_the_root=True))
+
+    shown = [repr(config), str(config), repr(config.cli), str(config.cli)]
+
+    assert [ROOT_MARKER in text for text in shown] == [False] * len(shown)
+
+
+def test_a_refused_working_root_leaves_no_validation_error_behind_to_leak_it(tmp_path):
+    with pytest.raises(ConfigError) as refusal:
+        load_config(_config_naming_a_marked_root(tmp_path, make_the_root=False))
+
+    assert (refusal.value.__cause__, refusal.value.__context__) == (None, None)
+    assert ROOT_MARKER not in str(refusal.value)
 
 
 def test_a_cli_section_without_a_working_root_is_refused_before_any_probe(tmp_path, capsys):

@@ -1575,7 +1575,8 @@ def test_a_background_reap_ends_at_its_bound_and_keeps_what_it_holds(
 
     def on_reaped(process_id: int, became_zombie: bool) -> None:
         release_pool(process_id, became_zombie)
-        home_reservation.on_reaped(process_id, became_zombie)
+        runner_releases = process.released_when_the_runner_ends(home_reservation)
+        runner_releases["on_reaped"](process_id, became_zombie)
 
     caplog.set_level(logging.ERROR, logger=process.__name__)
 
@@ -1649,7 +1650,7 @@ def test_a_home_stays_held_when_logging_fails_at_the_reap_bound(
     home = _build_home(_a_source_login(tmp_path))
     home_path = home.path
     child = _a_group_that_never_dies()
-    on_reaped = home.reserve().on_reaped
+    on_reaped = process.released_when_the_runner_ends(home.reserve())["on_reaped"]
 
     process._reap_in_background(child, on_reaped)
     home.close()
@@ -1684,7 +1685,8 @@ home = PrivateCredentialHome(
 )
 home_path = home.path
 child = fake_cli_process(None, gone=(KillUntilGoneResult(GroupCensus.LIVE, True),))
-process._reap_in_background(child, home.reserve().on_reaped)
+runner_releases = process.released_when_the_runner_ends(home.reserve())
+process._reap_in_background(child, runner_releases["on_reaped"])
 home.close()
 del home, child
 gc.collect()
@@ -1999,7 +2001,7 @@ def test_private_credential_home_keeps_its_copy_until_the_last_reap(tmp_path: Pa
     assert stat.S_IMODE(copy.parent.stat().st_mode) == 0o700
     assert source.read_text() == _CATALOG_AUTH_PAYLOAD
 
-    reservation.on_reaped(123, True)
+    process.released_when_the_runner_ends(reservation)["on_reaped"](123, True)
 
     assert not home.path.exists()
 
@@ -3591,8 +3593,9 @@ def test_a_reservation_is_released_once(tmp_path: Path, callbacks: tuple[str, st
     reservation = home.reserve()
     home.close()
     with _LedgerOfRemovals() as ledger:
-        getattr(reservation, callbacks[0])(*_CALLBACK_ARGUMENTS[callbacks[0]])
-        getattr(reservation, callbacks[1])(*_CALLBACK_ARGUMENTS[callbacks[1]])
+        release_ways = _ways_to_release(reservation)
+        release_ways[callbacks[0]]()
+        release_ways[callbacks[1]]()
 
         assert ledger.removals == 0
         other_reservation.release()
@@ -3601,7 +3604,13 @@ def test_a_reservation_is_released_once(tmp_path: Path, callbacks: tuple[str, st
     assert not home.path.exists()
 
 
-_CALLBACK_ARGUMENTS = {"release": (), "on_spawn_failed": (), "on_reaped": (1, True)}
+def _ways_to_release(reservation: process.HomeReservation) -> dict[str, Callable[[], None]]:
+    released_with_the_runner = process.released_when_the_runner_ends(reservation)
+    return {
+        "release": reservation.release,
+        "on_spawn_failed": released_with_the_runner["on_spawn_failed"],
+        "on_reaped": lambda: released_with_the_runner["on_reaped"](1, True),
+    }
 
 
 def test_the_home_registry_forgets_every_closed_or_collected_home(

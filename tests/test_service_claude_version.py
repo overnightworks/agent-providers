@@ -139,7 +139,7 @@ def test_a_program_reporting_the_pinned_version_starts_the_service_without_a_cor
     tmp_path, working_root, served
 ):
     reset_config()
-    program = _script(tmp_path, f'echo "$HOME" > "{tmp_path}/home"; printf "{PRINTS_THE_PIN}"')
+    program = _script(tmp_path, f'printf "{PRINTS_THE_PIN}"')
 
     assert main(["--config", str(_config_file_naming(tmp_path, program))]) == 0
 
@@ -236,6 +236,18 @@ def test_output_that_is_not_the_version_line_refuses_the_start_showing_what_was_
     refusal = _refused_leaving_the_root_empty(tmp_path, capsys, program)
 
     assert refusal == _no_version_line(program, reason)
+    assert served == []
+
+
+def test_a_program_printing_its_home_refuses_the_start_without_the_working_root(
+    tmp_path, working_root, capsys, served
+):
+    program = _script(tmp_path, 'echo "$HOME"')
+
+    refusal = _refused_leaving_the_root_empty(tmp_path, capsys, program)
+
+    assert str(working_root) not in refusal
+    assert "printed <working root>/agent-run-" in refusal
     assert served == []
 
 
@@ -376,12 +388,11 @@ def test_a_run_tree_whose_rollback_fails_still_refuses_the_start_as_unstarted(
     with rmtree_refused(monkeypatch):
         refusal = _refused_on_one_line(config_file, capsys)
 
-    leftover = the_only_tree(working_root)
+    the_only_tree(working_root)
     assert refusal == _the_unstarted_refusal(program)
     assert removal_errors(caplog) == [REMOVAL_FAILED]
     assert str(working_root) not in caplog.text
     assert served == []
-    remove_the_leftover(leftover)
 
 
 def test_a_probe_tree_that_cannot_be_removed_is_logged_once_and_the_start_still_serves(
@@ -393,12 +404,11 @@ def test_a_probe_tree_that_cannot_be_removed_is_logged_once_and_the_start_still_
     with rmtree_refused(monkeypatch):
         exit_status = main(["--config", str(config_file)])
 
-    leftover = the_only_tree(working_root)
+    the_only_tree(working_root)
     assert exit_status == 0
     assert removal_errors(caplog) == [REMOVAL_FAILED]
     assert str(working_root) not in caplog.text
     assert len(served) == 1
-    remove_the_leftover(leftover)
 
 
 @pytest.mark.parametrize(
@@ -417,10 +427,9 @@ def test_a_probe_tree_that_cannot_be_removed_never_replaces_the_probe_refusal(
     with rmtree_refused(monkeypatch):
         printed = _refused_on_one_line(config_file, capsys)
 
-    leftover = the_only_tree(working_root)
+    the_only_tree(working_root)
     assert printed == expected_refusal(program)
     assert served == []
-    remove_the_leftover(leftover)
 
 
 def test_a_probe_tree_stays_below_the_working_root_until_its_group_is_confirmed_gone(

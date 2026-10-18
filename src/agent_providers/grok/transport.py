@@ -35,6 +35,7 @@ from agent_providers.process import (
     PrivateCredentialHome,
     PrivateHomeReservation,
     cli_settle_deadline,
+    released_when_the_runner_ends,
     resolve_cli_binary,
     run_cli_bounded,
     run_publishing_failures,
@@ -252,8 +253,7 @@ def _run_grok_round(
             prompt_file_bytes=prompt,
             prompt_file_arg_index=_PROMPT_FILE_ARGUMENT_INDEX,
             prompt_file_prefix=current_grok_turn_runtime().prompt_file_prefix,
-            on_spawn_failed=home_reservation.on_spawn_failed,
-            on_reaped=home_reservation.on_reaped,
+            **released_when_the_runner_ends(home_reservation),
         ),
     )
 

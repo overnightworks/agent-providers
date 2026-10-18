@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Annotated, Final
@@ -61,10 +62,21 @@ def _unusable_run(run: CliRun | None) -> str | None:
     return None
 
 
+def _without_the_working_root(text: str, working_root: PrivateWorkingRoot) -> str:
+    spellings = {
+        str(working_root.path),
+        os.path.abspath(working_root.path),
+        os.path.realpath(working_root.path),
+    }
+    for spelling in sorted(spellings, key=len, reverse=True):
+        text = text.replace(spelling, WORKING_ROOT_PLACEHOLDER)
+    return text
+
+
 def _what_was_printed(stdout: str, working_root: PrivateWorkingRoot) -> str:
     if not stdout:
         return "printed nothing"
-    first_line = stdout.splitlines()[0].replace(str(working_root.path), WORKING_ROOT_PLACEHOLDER)
+    first_line = _without_the_working_root(stdout, working_root).splitlines()[0]
     return f"printed {shown_text(first_line[:SHOWN_OUTPUT_CHARACTERS])}"
 
 

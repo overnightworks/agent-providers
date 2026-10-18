@@ -239,15 +239,55 @@ def test_output_that_is_not_the_version_line_refuses_the_start_showing_what_was_
     assert served == []
 
 
-def test_a_program_printing_its_home_refuses_the_start_without_the_working_root(
-    tmp_path, working_root, capsys, served
+PRIVATE_MARKER = "private-marker"
+
+
+def _plain_root(tmp_path: Path) -> tuple[Path, Path]:
+    physical = tmp_path / PRIVATE_MARKER
+    return physical, physical
+
+
+def _root_with_a_parent_component(tmp_path: Path) -> tuple[Path, Path]:
+    physical = tmp_path / PRIVATE_MARKER
+    (tmp_path / "base").mkdir()
+    return tmp_path / "base" / ".." / PRIVATE_MARKER, physical
+
+
+def _root_behind_a_symlinked_parent(tmp_path: Path) -> tuple[Path, Path]:
+    (tmp_path / "physical").mkdir()
+    (tmp_path / "alias").symlink_to(tmp_path / "physical")
+    return tmp_path / "alias" / PRIVATE_MARKER, tmp_path / "physical" / PRIVATE_MARKER
+
+
+def _root_named_with_a_newline(tmp_path: Path) -> tuple[Path, Path]:
+    physical = tmp_path / f"{PRIVATE_MARKER}\nrest"
+    return physical, physical
+
+
+@pytest.mark.parametrize(
+    ("root_layout", "program_body"),
+    [
+        pytest.param(_plain_root, 'echo "$HOME"', id="home"),
+        pytest.param(_root_with_a_parent_component, 'echo "$HOME"', id="parent-component"),
+        pytest.param(_root_behind_a_symlinked_parent, "pwd -P", id="symlinked-parent"),
+        pytest.param(_root_named_with_a_newline, 'echo "$HOME"', id="newline-in-the-root-name"),
+    ],
+)
+def test_a_program_printing_where_it_runs_refuses_the_start_without_the_working_root(
+    tmp_path, capsys, served, root_layout, program_body
 ):
-    program = _script(tmp_path, 'echo "$HOME"')
+    configured, physical = root_layout(tmp_path)
+    physical.mkdir()
+    physical.chmod(0o700)
+    program = _script(tmp_path, program_body)
 
-    refusal = _refused_leaving_the_root_empty(tmp_path, capsys, program)
+    refusal = _refused_on_one_line(
+        _written(tmp_path, _document_naming(program, configured)), capsys
+    )
 
-    assert str(working_root) not in refusal
+    assert PRIVATE_MARKER not in refusal
     assert "printed <working root>/agent-run-" in refusal
+    assert list(physical.iterdir()) == []
     assert served == []
 
 

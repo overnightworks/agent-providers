@@ -828,7 +828,7 @@ FAILURE_LINE = re.compile(r"(?P<event>.+?): (?P<kind>\w+) at (?P<positions>.+)")
 POSITION = re.compile(r"[\w.]+\.py:\d+:[\w<>]+")
 QUARANTINE_LOGGER: Final = "agent_service.quarantine"
 QUARANTINE_LINE = re.compile(
-    r"Not confirmed gone after SIGKILL: process groups? (?P<pgids>\d+(?:, \d+)*)"
+    r"Not confirmed gone after SIGKILL: process (?P<noun>groups?) (?P<pgids>\d+(?:, \d+)*)"
     r" of run (?P<run_id>[0-9a-f-]{36}); the run's place stays taken until then"
 )
 
@@ -860,7 +860,9 @@ def quarantine_lines(caplog: pytest.LogCaptureFixture) -> list[tuple[uuid.UUID, 
         assert (record.exc_info, record.stack_info) == (None, None)
         line = QUARANTINE_LINE.fullmatch(record.getMessage())
         assert line is not None, record.getMessage()
-        lines.append((uuid.UUID(line["run_id"]), [int(pgid) for pgid in line["pgids"].split(", ")]))
+        pgids = [int(pgid) for pgid in line["pgids"].split(", ")]
+        assert line["noun"] == ("group" if len(pgids) == 1 else "groups"), record.getMessage()
+        lines.append((uuid.UUID(line["run_id"]), pgids))
     return lines
 
 
@@ -1048,6 +1050,10 @@ async def respond_through_the_app(
     """Post a run to the real app on the drive's runner, clock and store; its response task.
 
     ``runners`` replace the drive's runner, as ``Runners()`` serves a run without one.
+
+    The app builds its own quarantine on ``drive.clock`` with its own
+    ``ScriptedConfirmation``, so a custom ``confirm`` and ``drive.quarantine_clock``
+    do not reach it.
 
     The token checks leave the loop for a worker thread, so this returns only
     once the app has begun to answer: from then on the run waits on the clock alone.

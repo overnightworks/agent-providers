@@ -558,8 +558,10 @@ def test_a_failed_start_closes_every_descriptor_and_keeps_its_error_in_the_chain
 ) -> None:
     start_failure, raised_by_closes = fail_the_start_after_arming(monkeypatch, faults)
 
+    described = leaders.describe()
+
     with pytest.raises(OSError) as raised:
-        open_the_door(door_runner, leaders.describe())
+        open_the_door(door_runner, described)
     door_runner.run(asyncio.sleep(0))
 
     chain = exception_chain(raised.value)

@@ -10,9 +10,11 @@ import asyncio
 import contextlib
 import errno
 import gc
+import inspect
 import json
 import ssl
 import threading
+import weakref
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
@@ -55,7 +57,7 @@ from service_support import (
 )
 
 from agent_providers.errors import ContainmentLost, RetainedGroup
-from agent_service.app_tools import UpstreamRefused, open_app_tools
+from agent_service.app_tools import AppToolsSession, UpstreamRefused, open_app_tools
 from agent_service.mcp_wire import CallToolParams
 from agent_service.run_tools import (
     UPSTREAM_ABORT_SECONDS,
@@ -64,7 +66,9 @@ from agent_service.run_tools import (
 )
 from agent_service.tool_relay import (
     RELAY_CLOSE_SECONDS,
+    McpRelayOwner,
     Relay,
+    RelayAccess,
     RepeatedToolOffer,
     ToolCallBarrier,
 )
@@ -110,6 +114,14 @@ def held_after_the_head(_gate: threading.Event) -> Mapping[str, Responder]:
     return {"tools/call": respond}
 
 
+def listing_held(gate: threading.Event) -> Mapping[str, Responder]:
+    def respond(request: Any) -> FakeResponse:
+        gate.wait(WAIT_SECONDS)
+        return rpc_result(request, tool_listing(OFFERED))
+
+    return {"tools/list": respond}
+
+
 def task_names(prefix: str) -> list[str]:
     return sorted(
         name for task in asyncio.all_tasks() if (name := task.get_name()).startswith(prefix)
@@ -134,10 +146,16 @@ def injected_reap(
 
 
 class Stall:
-    """Absorbs every cancellation of the target's first call until released, then runs it."""
+    """Absorbs every cancellation of the target's first call until released, then runs it.
 
-    def __init__(self, monkeypatch: pytest.MonkeyPatch, owner: type, name: str) -> None:
-        self.gate = asyncio.Event()
+    A weakly held stall keeps its gate reachable only from the stalled coroutine's frame.
+    """
+
+    def __init__(
+        self, monkeypatch: pytest.MonkeyPatch, owner: type, name: str, *, weakly: bool = False
+    ) -> None:
+        self._gate: weakref.ref[asyncio.Event] | None = None
+        self._strong_gate: asyncio.Event | None = None
         self.pending = False
         self.original_ran = False
         self.cancelling = 0
@@ -148,16 +166,24 @@ class Stall:
             if self._claimed:
                 return await original(*args, **kwargs)
             self._claimed = True
+            gate = asyncio.Event()
+            self._gate = weakref.ref(gate)
+            self._strong_gate = None if weakly else gate
             self.pending = True
-            while not self.gate.is_set():
+            while not gate.is_set():
                 with contextlib.suppress(asyncio.CancelledError):
-                    await self.gate.wait()
+                    await gate.wait()
             self.pending = False
             self.cancelling = cast(asyncio.Task[Any], asyncio.current_task()).cancelling()
             self.original_ran = True
             return await original(*args, **kwargs)
 
         monkeypatch.setattr(owner, name, stalled)
+
+    def release(self) -> None:
+        gate = self._gate() if self._gate is not None else None
+        if gate is not None:
+            gate.set()
 
 
 class ListenerRecorder:
@@ -228,13 +254,14 @@ class Scene:
         self.clock = StepClock()
         self.listeners = ListenerRecorder(monkeypatch)
         self.stalls: list[Stall] = []
+        self.stalls_held_weakly = False
         self._releases: list[Callable[[], None]] = []
 
     async def open(self) -> RunTools:
         return await RunTools.open(RUN_ID, self.fake.origin, CAPABILITY, self.context, self.clock)
 
     def stall(self, owner: type, name: str) -> Stall:
-        stall = Stall(self.monkeypatch, owner, name)
+        stall = Stall(self.monkeypatch, owner, name, weakly=self.stalls_held_weakly)
         self.stalls.append(stall)
         return stall
 
@@ -252,7 +279,7 @@ class Scene:
         self.app_gate.set()
         self.fake.tail_released.set()
         for stall in self.stalls:
-            stall.gate.set()
+            stall.release()
         for release in self._releases:
             release()
         current = asyncio.current_task()
@@ -328,10 +355,19 @@ def start_close(tools: RunTools, reap: Callable[[], Awaitable[None]]) -> asyncio
     return asyncio.get_running_loop().create_task(tools.close(reap), name="test:closer")
 
 
+@dataclass(frozen=True)
+class RelayDoor:
+    access: RelayAccess
+
+
+def door_of(tools: RunTools) -> Relay:
+    return cast(Relay, RelayDoor(tools.access))
+
+
 def cli_call(tools: RunTools, request_id: int) -> bytes:
     params = {"name": "edit_song", "arguments": {}}
     body = json_rpc("tools/call", request_id, params)
-    return post_message(cast(Relay, tools), body, SUPPORTED)
+    return post_message(door_of(tools), body, SUPPORTED)
 
 
 async def reply_of(client: RawClient) -> dict[str, Any]:
@@ -339,7 +375,7 @@ async def reply_of(client: RawClient) -> dict[str, Any]:
 
 
 async def forwarded_from_the_cli(scene: Scene, tools: RunTools) -> tuple[RawClient, RawClient]:
-    port = port_of(cast(Relay, tools))
+    port = port_of(door_of(tools))
     first, idle = await RawClient.connect(port), await RawClient.connect(port)
     await first.send(cli_call(tools, 1))
     event = await tools.calls.next_event()
@@ -414,7 +450,7 @@ def test_the_close_stops_before_the_reap_and_needs_neither_clock_time_nor_the_pe
         tools = await scene.open()
         client_exits = recording_client_exits(scene.monkeypatch)
         first, idle = await forwarded_from_the_cli(scene, tools)
-        port = port_of(cast(Relay, tools))
+        port = port_of(door_of(tools))
         seen_at_reap: list[list[str]] = []
 
         async def at_the_reap() -> None:
@@ -429,14 +465,15 @@ def test_the_close_stops_before_the_reap_and_needs_neither_clock_time_nor_the_pe
         assert await ending_of(closer) is None
 
         (running_at_reap,) = seen_at_reap
-        assert {
+        assert set(running_at_reap) >= {
             f"upstream:{RUN_ID}:call-1",
             f"relay:{RUN_ID}:conn-1",
             f"relay:{RUN_ID}:conn-2",
-        } <= set(running_at_reap)
+        }
         assert client_exits == [[f"upstream:{RUN_ID}:client"]]
         assert scene.clock.now == CLEAN_CLOSE_SECONDS
         assert not scene.app_gate.is_set()
+        assert not scene.fake.tail_released.is_set()
         await scene.assert_nothing_left()
         await scene.release_and_drain()
         assert len(scene.app_calls()) == 1
@@ -446,11 +483,13 @@ def test_the_close_stops_before_the_reap_and_needs_neither_clock_time_nor_the_pe
     run_scene(scenario, authority, monkeypatch, caplog, app_holds)
 
 
+@pytest.mark.parametrize("weakly", [False, True], ids=["gate-kept", "gate-in-the-frame-only"])
 @pytest.mark.parametrize("plan", list(Stalls))
 def test_a_stalled_cleanup_ends_its_step_at_its_own_deadline_and_still_closes_after_it(
-    authority, monkeypatch, caplog, plan
+    authority, monkeypatch, caplog, plan, weakly
 ):
     async def scenario(scene: Scene) -> None:
+        scene.stalls_held_weakly = weakly
         tools = await stalled_tools(scene, plan)
         closer = start_close(tools, injected_reap())
 
@@ -459,12 +498,14 @@ def test_a_stalled_cleanup_ends_its_step_at_its_own_deadline_and_still_closes_af
         assert await ending_of(closer) is None
         assert scene.clock.now == PARKS[plan][-1]
         assert [stall.pending for stall in scene.stalls] == [True] * len(scene.stalls)
+        gc.collect()
         await scene.release_and_drain()
         assert [stall.cancelling for stall in scene.stalls] == [1] * len(scene.stalls)
         assert all(stall.original_ran for stall in scene.stalls)
         await scene.assert_nothing_left()
         await scene.app_saw_every_connection_end()
         assert scene.logged() == STALLED_LINES[plan]
+        assert "Task was destroyed" not in caplog.text
 
     run_scene(scenario, authority, monkeypatch, caplog, held_before_the_head)
 
@@ -473,10 +514,15 @@ def a_loss() -> ContainmentLost:
     return ContainmentLost(RetainedGroup(4242, 7))
 
 
-def test_a_containment_loss_is_raised_after_the_last_step_when_the_steps_are_clean(
-    authority, monkeypatch, caplog
+class Interrupt(BaseException):
+    pass
+
+
+@pytest.mark.parametrize("failure", [a_loss, Interrupt], ids=["an Exception", "a BaseException"])
+def test_a_reap_failure_of_any_class_is_raised_after_the_last_step_when_the_steps_are_clean(
+    authority, monkeypatch, caplog, failure
 ):
-    loss = a_loss()
+    loss = failure()
 
     async def scenario(scene: Scene) -> None:
         tools = await scene.open()
@@ -588,13 +634,6 @@ def test_a_failing_step_is_logged_by_class_and_leaks_no_token(authority, monkeyp
 
 
 def test_open_builds_the_tool_set_after_discovery(authority, monkeypatch, caplog):
-    def listing_held(gate: threading.Event) -> Mapping[str, Responder]:
-        def respond(request: Any) -> FakeResponse:
-            gate.wait(WAIT_SECONDS)
-            return rpc_result(request, tool_listing(OFFERED))
-
-        return {"tools/list": respond}
-
     async def scenario(scene: Scene) -> None:
         opening = asyncio.get_running_loop().create_task(scene.open(), name="test:opener")
         await yield_until(lambda: any(r.rpc_method == "tools/list" for r in scene.fake.requests))
@@ -605,8 +644,8 @@ def test_open_builds_the_tool_set_after_discovery(authority, monkeypatch, caplog
         tools = opening.result()
 
         assert len(scene.listeners.serving) == 1
-        client = await RawClient.connect(port_of(cast(Relay, tools)))
-        await client.send(post_message(cast(Relay, tools), json_rpc("tools/list", 1), SUPPORTED))
+        client = await RawClient.connect(port_of(door_of(tools)))
+        await client.send(post_message(door_of(tools), json_rpc("tools/list", 1), SUPPORTED))
         listed = await reply_of(client)
         assert [tool["name"] for tool in listed["result"]["tools"]] == ["edit_song"]
         await client.send(cli_call(tools, 2))
@@ -619,6 +658,32 @@ def test_open_builds_the_tool_set_after_discovery(authority, monkeypatch, caplog
     run_scene(scenario, authority, monkeypatch, caplog, listing_held)
 
 
+def remembering_raised(
+    monkeypatch: pytest.MonkeyPatch, owner: type, name: str
+) -> list[BaseException]:
+    raised: list[BaseException] = []
+    original = getattr(owner, name)
+
+    async def remembering_async(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return await original(*args, **kwargs)
+        except BaseException as failure:
+            raised.append(failure)
+            raise
+
+    def remembering(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return original(*args, **kwargs)
+        except BaseException as failure:
+            raised.append(failure)
+            raise
+
+    monkeypatch.setattr(
+        owner, name, remembering_async if inspect.iscoroutinefunction(original) else remembering
+    )
+    return raised
+
+
 @dataclass(frozen=True)
 class FailedOpen:
     expected: type[BaseException]
@@ -627,15 +692,19 @@ class FailedOpen:
     offers_twice: bool = False
     fails_transport_close: bool = False
     stalls_cleanup: bool = False
+    raised_by: tuple[type, str] | None = None
 
 
 FAILED_OPENS = {
-    "the listing is refused": FailedOpen(UpstreamRefused, [], refuses_listing=True),
+    "the listing is refused": FailedOpen(
+        UpstreamRefused, [], refuses_listing=True, raised_by=(AppToolsSession, "list_tools")
+    ),
     "an allowed tool is offered twice and the client's exit fails": FailedOpen(
         RepeatedToolOffer,
         [(CLIENT_EVENT, "UpstreamCallLost")],
         offers_twice=True,
         fails_transport_close=True,
+        raised_by=(McpRelayOwner, "__init__"),
     ),
     "the relay cannot listen and the client's cleanup stalls": FailedOpen(
         OSError, [(CLIENT_EVENT, "UpstreamCleanupIncomplete")], stalls_cleanup=True
@@ -653,6 +722,11 @@ def test_a_failed_open_leaves_the_client_and_keeps_its_own_failure(
 
     async def scenario(scene: Scene) -> None:
         address_in_use = OSError(errno.EADDRINUSE, "in use")
+        raised = (
+            remembering_raised(scene.monkeypatch, *case.raised_by)
+            if case.raised_by
+            else [address_in_use]
+        )
         if case.stalls_cleanup:
             scene.listeners.failure = address_in_use
             stall = scene.stall(httpcore_anyio.AnyIOStream, "aclose")
@@ -665,8 +739,8 @@ def test_a_failed_open_leaves_the_client_and_keeps_its_own_failure(
         ending = await ending_of(opening)
 
         assert isinstance(ending, case.expected)
+        assert ending is raised[0]
         if case.stalls_cleanup:
-            assert ending is address_in_use
             assert stall.pending
             await scene.release_and_drain()
             assert stall.original_ran
@@ -678,3 +752,46 @@ def test_a_failed_open_leaves_the_client_and_keeps_its_own_failure(
 
     pages = [tool_listing(["edit_song", "edit_song"])] if case.offers_twice else None
     run_scene(scenario, authority, monkeypatch, caplog, refusing_the_listing, pages)
+
+
+@pytest.mark.parametrize("cancellation", list(Cancellation))
+def test_a_cancelled_open_parks_its_stalled_client_cleanup_and_keeps_the_cancellation(
+    authority, monkeypatch, caplog, cancellation
+):
+    async def scenario(scene: Scene) -> None:
+        stall = scene.stall(httpx.AsyncHTTPTransport, "aclose")
+        scope = anyio.CancelScope()
+
+        async def opening_in_scope() -> RunTools | None:
+            with scope:
+                return await scene.open()
+            return None
+
+        opening = asyncio.get_running_loop().create_task(
+            opening_in_scope() if cancellation is Cancellation.LEVEL else scene.open(),
+            name="test:opener",
+        )
+        await yield_until(lambda: any(r.rpc_method == "tools/list" for r in scene.fake.requests))
+        if cancellation is Cancellation.LEVEL:
+            scope.cancel()
+        else:
+            opening.cancel()
+
+        await through_parks(scene, (UPSTREAM_ABORT_SECONDS,))
+        ending = await ending_of(opening)
+
+        if cancellation is Cancellation.LEVEL:
+            assert ending is None
+            assert scope.cancelled_caught
+        else:
+            assert isinstance(ending, asyncio.CancelledError)
+        assert scene.clock.now == UPSTREAM_ABORT_SECONDS
+        assert stall.pending
+        assert scene.listeners.serving == []
+        await scene.release_and_drain()
+        assert stall.original_ran
+        await scene.assert_nothing_left()
+        await scene.app_saw_every_connection_end()
+        assert scene.logged() == [(CLIENT_EVENT, "UpstreamCleanupIncomplete")]
+
+    run_scene(scenario, authority, monkeypatch, caplog, listing_held)

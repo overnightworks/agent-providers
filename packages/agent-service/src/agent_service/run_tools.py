@@ -109,7 +109,8 @@ class RunTools:
     by class and the close goes on. A returned close means each step's bounded attempt
     finished, not that a stalled cleanup's socket is closed.
 
-    Only the reap's exception is raised, as the same object, after step 5 and never logged.
+    Only the reap's exception, of any class, is raised, as the same object, after step 5 and
+    never logged; steps 3 to 5 run whatever the reap raised.
     A caller's cancellation, direct or AnyIO's level one, never cuts the attempt short: the
     close waits for the attempt, raises its exception, otherwise the direct cancellation,
     otherwise delivers the level cancellation, otherwise returns. ``close`` is called once.
@@ -147,7 +148,8 @@ class RunTools:
             barrier = ToolCallBarrier(run_id, session, capability)
             relay = await Relay.start(run_id, McpRelayOwner(capability, offered, barrier), clock)
         except BaseException:
-            await _leave_client(run_id, clock, upstream)
+            with anyio.CancelScope(shield=True):
+                await _leave_client(run_id, clock, upstream)
             raise
         return cls(run_id, clock, relay, barrier, upstream)
 
@@ -172,16 +174,12 @@ class RunTools:
     async def _close_once(self, reap: Callable[[], Awaitable[None]]) -> None:
         self._relay.stop_listening()
         self._barrier.stop()
-        reap_failure: Exception | None = None
         try:
             await reap()
-        except Exception as failure:
-            reap_failure = failure
-        await self._close_upstream_calls()
-        await _leave_client(self._run_id, self._clock, self._upstream)
-        await self._close_relay()
-        if reap_failure is not None:
-            raise reap_failure
+        finally:
+            await self._close_upstream_calls()
+            await _leave_client(self._run_id, self._clock, self._upstream)
+            await self._close_relay()
 
     async def _close_upstream_calls(self) -> None:
         self._barrier.abort_forwards()

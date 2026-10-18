@@ -57,7 +57,9 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_BAD_CONFIG
     try:
         if config.cli is not None:
-            require_pinned_version(config.cli.claude_binary, config.cli.claude_version)
+            require_pinned_version(
+                config.cli.claude_binary, config.cli.claude_version, config.cli.working_root
+            )
     except ClaudeVersionRefused as error:
         print(
             f"agent-service: refusing to start: {shown_text(str(arguments.config))}: {error}",

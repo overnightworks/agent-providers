@@ -1,0 +1,8 @@
+claim_id = "e2fc77aed6f5460d93cadb08466d2b2b"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "a239cb77d52d8751c770ae9f284b223332be82e2"
+branch = "claude/issue-259-secret-file-into-core"
+scope = ["README.md", "packages/agent-service/src/agent_service/claude_version.py", "packages/agent-service/src/agent_service/cli.py", "packages/agent-service/src/agent_service/config.py", "packages/agent-service/src/agent_service/secret_file.py", "packages/agent-service/src/agent_service/signing.py", "src/agent_providers/secret_file.py"]
+opened_commit = "2cd1baa907c566b254161fb54beb2ff565db98e9"
+whole_reason = "One module move: git mv plus its four importers and the module table rows; a partial move does not import"

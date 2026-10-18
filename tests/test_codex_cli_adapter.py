@@ -16,6 +16,7 @@ import time
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -61,6 +62,7 @@ from provider_test_support import (
     fail_the_work_directory,
     fail_to_start_the_runner_thread,
     formatted_log_text,
+    install_cli_door,
     live_frames_holding,
     override_codex_runtime,
     override_codex_turn_runtime,
@@ -689,7 +691,7 @@ def test_a_codex_tool_turn_whose_spawn_raises_a_base_exception_ends_with_a_named
     def spawn_that_raises(*_arguments, **_keywords):
         raise BaseException(A_RUNNER_FAILURE_CANARY)
 
-    monkeypatch.setattr(process, "open_pipes", spawn_that_raises)
+    install_cli_door(monkeypatch, spawn_that_raises)
     events = _codex_tool_events(_transport(), lambda _name, _arguments: ToolOutcome("{}", False))
     turn = asyncio.wait_for(_collect_tool_events(events), timeout=5)
 
@@ -1178,7 +1180,7 @@ def _record_channels(monkeypatch) -> list[process.CliLineChannel]:
 def test_a_failed_spawn_ends_the_image_turn_with_a_cli_error(
     monkeypatch, image_turn, spawn_error: BaseException,
 ) -> None:
-    monkeypatch.setattr(process, "open_pipes", Mock(side_effect=spawn_error))
+    install_cli_door(monkeypatch, Mock(side_effect=spawn_error))
     _the_child_plays(monkeypatch, ":")
 
     turn = image_turn.drive(_TURN_SECONDS)
@@ -2634,16 +2636,26 @@ _BOTH_CODEX_TURNS = pytest.mark.parametrize(
 )
 
 
-def _hold_until_opened(monkeypatch, module, name: str, *, then=None) -> Callable[[], None]:
-    """Make ``module.name`` wait for the returned gate, then run ``then`` or the real function."""
+def _replacing_process_function(monkeypatch, name: str) -> Callable[[Callable], Callable]:
+    def install(replacement: Callable) -> Callable:
+        replaced = getattr(process, name)
+        monkeypatch.setattr(process, name, replacement)
+        return replaced
+
+    return install
+
+
+def _hold_until_opened(
+    install: Callable[[Callable], Callable], *, then=None,
+) -> Callable[[], None]:
+    """Install a replacement that waits for the gate, then runs ``then`` or what it replaced."""
     gate = threading.Event()
-    real = getattr(module, name)
 
     def held(*arguments, **keywords):
         gate.wait(timeout=_HANG_BOUND_SECONDS)
-        return (then or real)(*arguments, **keywords)
+        return (then or replaced)(*arguments, **keywords)
 
-    monkeypatch.setattr(module, name, held)
+    replaced = install(held)
     return gate.set
 
 
@@ -2655,7 +2667,7 @@ def _a_child_that_exits(monkeypatch) -> Callable[[], None]:
 def _a_reap_that_outlasts_the_settle_instant(monkeypatch) -> Callable[[], None]:
     _settle_within_a_few_hundredths(monkeypatch)
     _the_child_plays(monkeypatch, "exec sleep 10")
-    return _hold_until_opened(monkeypatch, process, "_reap_process_group")
+    return _hold_until_opened(_replacing_process_function(monkeypatch, "_reap_process_group"))
 
 
 def _a_zombie_child(monkeypatch) -> Callable[[], None]:
@@ -2675,17 +2687,18 @@ def _a_zombie_child(monkeypatch) -> Callable[[], None]:
 
 def _a_spawn_held_past_the_deadline(monkeypatch) -> Callable[[], None]:
     _the_child_plays(monkeypatch, ":")
-    return _hold_until_opened(monkeypatch, process, "open_pipes")
+    return _hold_until_opened(partial(install_cli_door, monkeypatch))
 
 
 def _a_spawn_that_raises(monkeypatch) -> Callable[[], None]:
-    monkeypatch.setattr(process, "open_pipes", Mock(side_effect=OSError(errno.ENOENT, "gone")))
+    install_cli_door(monkeypatch, Mock(side_effect=OSError(errno.ENOENT, "gone")))
     return lambda: None
 
 
 def _a_spawn_held_past_the_deadline_that_then_raises(monkeypatch) -> Callable[[], None]:
     return _hold_until_opened(
-        monkeypatch, process, "open_pipes", then=Mock(side_effect=OSError(errno.ENOENT, "gone")),
+        partial(install_cli_door, monkeypatch),
+        then=Mock(side_effect=OSError(errno.ENOENT, "gone")),
     )
 
 

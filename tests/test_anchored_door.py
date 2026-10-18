@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import os
 import signal
 import sys
@@ -23,6 +24,7 @@ from anchored_kernel import (
 )
 from anchored_leaders import Leaders, asyncio_errors, bounded, open_door
 from anchored_support import GONE, SIGKILLED, ChildCleanup, Exited
+from provider_test_support import make_the_first_parent_close_of_a_door_fail
 
 from agent_providers import procfs, spawn
 from agent_providers.procfs import GroupCensus
@@ -455,6 +457,116 @@ def test_a_start_that_raises_leaves_the_caller_the_error_and_no_descriptor(
     assert watcher_names() <= watchers_before
     assert failure.descriptors_in_handler - descriptors_before_the_door == frozenset()
     assert asyncio_errors(caplog) == []
+
+
+def test_releasing_an_exited_child_closes_every_descriptor_though_one_close_raises(
+    door_runner: asyncio.Runner,
+    child_cleanup: ChildCleanup,
+    leaders: Leaders,
+    monkeypatch: pytest.MonkeyPatch,
+    descriptors_before_the_door: frozenset[int],
+) -> None:
+    fault = make_the_first_parent_close_of_a_door_fail(monkeypatch, armed=False)
+    opened = open_door(door_runner, child_cleanup, leaders.describe())
+
+    async def exit_the_child() -> None:
+        await send_line(opened.child, b"0\n")
+        await opened.child.exited()
+
+    door_runner.run(bounded(exit_the_child()))
+    fault.armed = True
+    with pytest.raises(OSError) as raised:
+        opened.child.release()
+    door_runner.run(asyncio.sleep(0))
+
+    assert raised.value is fault.failures[0]
+    assert descriptors() - descriptors_before_the_door - {opened.owned.pidfd} == frozenset()
+
+
+@dataclass(frozen=True)
+class CloseFaults:
+    child_ends: tuple[str, ...]
+    parent_file: bool
+
+
+def open_the_async_door(door_runner: asyncio.Runner, child: ChildProcess) -> None:
+    door_runner.run(bounded(spawn.open_anchored_pipes(child)))
+
+
+def open_the_blocking_door(_door_runner: asyncio.Runner, child: ChildProcess) -> None:
+    spawn.open_blocking_anchored_pipes(child, stderr="capture")
+
+
+def exception_chain(error: BaseException) -> list[BaseException]:
+    chain: list[BaseException] = []
+    link: BaseException | None = error
+    while link is not None:
+        chain.append(link)
+        link = link.__context__
+    return chain
+
+
+def fail_the_start_after_arming(
+    monkeypatch: pytest.MonkeyPatch,
+    faults: CloseFaults,
+) -> tuple[RuntimeError, list[OSError]]:
+    start_failure = RuntimeError("the start failed")
+    doomed_child_ends: set[int] = set()
+    raised_by_closes: list[OSError] = []
+    real_close = os.close
+
+    def close(descriptor: int) -> None:
+        real_close(descriptor)
+        if descriptor in doomed_child_ends:
+            doomed_child_ends.discard(descriptor)
+            failure = OSError(errno.EIO, f"close of {descriptor} failed")
+            raised_by_closes.append(failure)
+            raise failure
+
+    def start_that_raises(_child: ChildProcess, *, on_exit: object, **child_ends: int) -> None:
+        doomed_child_ends.update(child_ends[name] for name in faults.child_ends)
+        raise start_failure
+
+    if faults.parent_file:
+        parent_fault = make_the_first_parent_close_of_a_door_fail(monkeypatch)
+        raised_by_closes = parent_fault.failures
+    monkeypatch.setattr(os, "close", close)
+    monkeypatch.setattr(spawn, "start_anchored_leader", start_that_raises)
+    return start_failure, raised_by_closes
+
+
+@pytest.mark.parametrize(
+    "open_the_door",
+    [open_the_async_door, open_the_blocking_door],
+    ids=["async_door", "blocking_door"],
+)
+@pytest.mark.parametrize(
+    "faults",
+    [
+        CloseFaults(("stdout",), parent_file=False),
+        CloseFaults(("stdin", "stdout"), parent_file=True),
+    ],
+    ids=["one_child_end", "two_child_ends_and_a_parent_file"],
+)
+def test_a_failed_start_closes_every_descriptor_and_keeps_its_error_in_the_chain_of_a_close_error(
+    door_runner: asyncio.Runner,
+    leaders: Leaders,
+    monkeypatch: pytest.MonkeyPatch,
+    descriptors_before_the_door: frozenset[int],
+    open_the_door: Callable[[asyncio.Runner, ChildProcess], None],
+    faults: CloseFaults,
+) -> None:
+    start_failure, raised_by_closes = fail_the_start_after_arming(monkeypatch, faults)
+
+    with pytest.raises(OSError) as raised:
+        open_the_door(door_runner, leaders.describe())
+    door_runner.run(asyncio.sleep(0))
+
+    chain = exception_chain(raised.value)
+    assert descriptors() - descriptors_before_the_door == frozenset()
+    assert start_failure in chain
+    assert all(failure in chain for failure in raised_by_closes)
+    assert len(raised_by_closes) == len(faults.child_ends) + faults.parent_file
 
 
 def test_a_closed_loop_still_lets_the_anchored_child_be_released(

@@ -2022,7 +2022,8 @@ def _recording_runner(
 
 
 def _probe_runner(stdout: str) -> object:
-    def run_cli_bounded(_child, **_kwargs):
+    def run_cli_bounded(_child, **kwargs):
+        kwargs["on_reaped"](0, False)
         return _outcome(stdout=stdout)
 
     return run_cli_bounded
@@ -2240,9 +2241,12 @@ def test_the_codex_catalog_probe_starts_without_an_unusable_login(
     monkeypatch.setattr(process, "resolve_cli_binary", lambda _binary: Path("/usr/bin/codex"))
     clear_agent_cli_caches()
     copies: list[tuple[tuple[str, ...], str]] = []
-    failing_child = _recording_runner(
-        copies, lambda _child, **_kwargs: _outcome(returncode=1), [],
-    )
+
+    def failed_run(_child, **kwargs):
+        kwargs["on_reaped"](0, False)
+        return _outcome(returncode=1)
+
+    failing_child = _recording_runner(copies, failed_run, [])
     monkeypatch.setattr(process, "run_cli_bounded", failing_child)
 
     with pytest.raises(ProviderModelCatalogUnavailableError) as raised:

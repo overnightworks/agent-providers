@@ -14,6 +14,7 @@ import threading
 import time
 import weakref
 from collections.abc import Awaitable, Callable, Coroutine
+from contextlib import nullcontext
 from dataclasses import dataclass
 from enum import Enum, auto
 from functools import partial
@@ -23,6 +24,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import anyio
+import provider_test_support
 import pytest
 from provider_test_support import (
     A_RUNNER_FAILURE_CANARY,
@@ -34,6 +36,7 @@ from provider_test_support import (
     SECRET_ENV_KEYS,
     ClaudeCliSpawns,
     EventGate,
+    Hold,
     RunnerFailureWatch,
     ScenarioDeadline,
     ScriptedClaudeChild,
@@ -115,7 +118,8 @@ from agent_providers.errors import (
 from agent_providers.events import AssistantTextEvent, FinalEvent, StreamEvent
 from agent_providers.grok import transport as grok_transport
 from agent_providers.process import CliRun, CliRunOutcome, CliRunReason
-from agent_providers.spawn import AnchorStateError, ChildIdentityLost
+from agent_providers.procfs import GroupCensus
+from agent_providers.spawn import AnchorStateError, ChildIdentityLost, KillUntilGoneResult
 from agent_providers.tool_loop import ToolOutcome, stream_tool_loop
 
 ROUTE_FAILED = SafeRouteReasonCode.ROUTE_FAILED
@@ -123,6 +127,8 @@ ROUTE_FAILED = SafeRouteReasonCode.ROUTE_FAILED
 # The exact string a tool turn command line must carry, written out rather
 # than derived from the code under test.
 SAMPLE_ALLOWED_TOOLS = "mcp__notes__*"
+
+failure_watch = provider_test_support.failure_watch
 
 
 def _configured_mcp_server():
@@ -1725,6 +1731,54 @@ def test_claude_surface_probe_keeps_its_home_until_late_runner_confirmation(
     assert source.read_text() == "{}"
 
 
+def _probe_the_surface_once() -> provider._AnnouncedSurface:
+    return provider._probe_cli_surface_sync(
+        Path("/usr/bin/claude"), mcp=None, deadline=time.monotonic() + 1,
+    )
+
+
+def test_a_tool_surface_probe_whose_runner_raises_leaves_its_slot_and_home_to_the_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_claude_process_limit(monkeypatch, 2)
+    captured: dict[str, Any] = {}
+
+    def run_cli_bounded(child, **kwargs):
+        captured.update(kwargs, home=child.working_directory)
+        raise RuntimeError("the claimed start failed")
+
+    monkeypatch.setattr(provider.process, "run_cli_bounded", run_cli_bounded)
+
+    with pytest.raises(RuntimeError, match="the claimed start failed"):
+        _probe_the_surface_once()
+    after_the_raise = (held_claude_slots(), captured["home"].exists())
+    captured["on_reaped"](2468, False)
+
+    assert after_the_raise == (1, True)
+    assert (held_claude_slots(), captured["home"].exists()) == (0, False)
+
+
+def test_a_tool_surface_probe_that_fails_before_the_runner_holds_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_claude_process_limit(monkeypatch, 2)
+    homes: list[Path] = []
+    ran = []
+
+    def refuse_to_build(_binary, _arguments, home):
+        homes.append(home)
+        raise RuntimeError("the child could not be described")
+
+    monkeypatch.setattr(provider, "_claude_child_process", refuse_to_build)
+    monkeypatch.setattr(provider.process, "run_cli_bounded", lambda *_a, **_k: ran.append(True))
+
+    with pytest.raises(RuntimeError, match="could not be described"):
+        _probe_the_surface_once()
+
+    assert ran == []
+    assert (held_claude_slots(), homes[0].exists()) == (0, False)
+
+
 # ── _find_claude_binary ─────────────────────────────────────────────
 
 
@@ -2840,39 +2894,50 @@ def test_tool_surface_a_clean_read_followed_by_a_zombie_is_not_trusted(
         assert not provider._tool_surface_verdicts
 
 
-def test_zombie_probe_keeps_its_pool_slot_until_the_runner_confirms_reap(
+_A_LIVE_GROUP = KillUntilGoneResult(GroupCensus.LIVE, ended_in_time=True)
+_AN_EMPTY_GROUP = KillUntilGoneResult(GroupCensus.EMPTY, ended_in_time=True)
+
+
+@pytest.mark.parametrize(
+    ("groups_counted", "expected_failure", "slots_and_home_at_the_return"),
+    (
+        ((), nullcontext(), (0, False)),
+        (
+            (_A_LIVE_GROUP, _AN_EMPTY_GROUP),
+            pytest.raises(provider._ZombieProbeError, match="not confirmed gone after SIGKILL"),
+            (1, True),
+        ),
+    ),
+    ids=("confirmed", "confirmed-only-in-the-background"),
+)
+def test_a_tool_surface_probe_frees_its_slot_and_home_only_when_the_runner_confirms(
     claude_binary,
     monkeypatch,
+    failure_watch,
+    groups_counted,
+    expected_failure,
+    slots_and_home_at_the_return,
 ) -> None:
-    background_started = threading.Event()
-    allow_background_reap = threading.Event()
-    background_finished = threading.Event()
-    set_claude_process_limit(monkeypatch, 1)
-    install_cli_door(
-        monkeypatch,
-        lambda *_args, **_kwargs: fake_cli_process(_init_line([])),
-    )
-    monkeypatch.setattr(provider.process, "_reap_process_group", lambda _process: True)
+    set_claude_process_limit(monkeypatch, 2)
+    hold = Hold()
+    child = fake_cli_process(_init_line(_ALL_SAMPLE_TOOLS), gone=groups_counted, hold=hold)
+    homes: list[Path] = []
 
-    def await_background_reap(process, callback) -> None:
-        background_started.set()
-        assert allow_background_reap.wait(timeout=1)
-        process.release()
-        provider.process._notify_reaped(callback, process.pid, became_zombie=True)
-        background_finished.set()
+    def door(started_child, *, stderr):
+        homes.append(started_child.working_directory)
+        return child
 
-    monkeypatch.setattr(provider.process, "_reap_in_background", await_background_reap)
+    install_cli_door(monkeypatch, door)
 
-    with pytest.raises(provider._ZombieProbeError):
-        verify_no_builtin_cli_tools()
+    with expected_failure:
+        asyncio.run(verify_cli_tool_surface())
+    [home] = homes
+    at_the_return = (held_claude_slots(), home.exists())
+    hold.proceed.set()
+    failure_watch.wait_for_the_runner_threads_to_end()
 
-    assert background_started.wait(timeout=1)
-    assert provider.CLAUDE_CLI_PROCESS_POOL.reserve() is None
-    allow_background_reap.set()
-    assert background_finished.wait(timeout=1)
-    reservation = provider.CLAUDE_CLI_PROCESS_POOL.reserve()
-    assert reservation is not None
-    provider.CLAUDE_CLI_PROCESS_POOL.release(reservation)
+    assert at_the_return == slots_and_home_at_the_return
+    assert (held_claude_slots(), home.exists()) == (0, False)
 
 
 def test_tool_surface_a_clean_read_followed_by_a_zombie_gets_the_zombie_ttl(

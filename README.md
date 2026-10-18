@@ -187,7 +187,7 @@ releasing failed with another error. The slot and home stay held until
 exit sweep removes the home. The 1 s and 5 s are the Claude pool's `ReapBounds`
 (`CLI_TERMINATION_GRACE_SECONDS`, `CLI_GROUP_CONFIRMATION_SECONDS`).
 A bounded run (`process.run_cli_bounded`) sends SIGTERM to a leader that still runs and waits up to 1 s, then on every exit SIGKILLs its group and counts it in `/proc` until none is left or 5 s from that first SIGKILL have passed. It calls `on_reaped` only after an empty count within those 5 s, the leader's exit published (within another 5 s) and the leader released by `lost_groups.release_leader_if_gone`. Otherwise it keeps the unreaped leader and kills and recounts it in the background for up to 60 s; a group still not confirmed, or one `/proc` cannot count, is logged once, and its reservation and home stay held until the process exits, when the exit sweep removes the home. `cli_settle_deadline(deadline)` is the deadline plus 11.1 s. A catalog home
-lasts for its bounded probe. Each Codex turn uses a fresh private home below
+stays until its probe's process group is confirmed gone, as a turn's home does, including a delayed spawn, an overran settle or a background reap. A resource failure after the start and before the door returns the handle is the exception: it frees the home beside a running child, and is a host obligation (see **Interruptions**). Each Codex turn uses a fresh private home below
 `cli_working_directory_root`, with its blanked login copy at mode 0600. Removal is
 requested when the image turn returns or at the tool turn's `aclose`; like an async Claude
 turn's or a Grok turn's home, the home remains until the turn's process group is confirmed gone. A host

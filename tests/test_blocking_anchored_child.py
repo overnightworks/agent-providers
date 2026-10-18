@@ -28,6 +28,7 @@ from anchored_kernel import (
 from anchored_leaders import Leaders
 from anchored_support import GONE, SIGKILLED, TEST_WAIT_SECONDS, ChildCleanup, Exited, OwnedChild
 from descendant_support import DescendantRow, Handshake, lingering_descendant, process_identity
+from provider_test_support import make_the_first_parent_close_of_a_door_fail
 
 from agent_providers import spawn
 from agent_providers.procfs import GroupCensus
@@ -299,6 +300,22 @@ def test_a_door_that_fails_leaves_no_descriptor_thread_or_running_child(
         assert refusal.value is A_WATCHER_LAUNCH_FAILURE
         (owned,) = child_cleanup.listed()
         assert child_cleanup.state(owned) == GONE
+
+
+def test_closing_the_streams_closes_every_descriptor_though_one_close_raises(
+    leaders: Leaders, child_cleanup: ChildCleanup, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    descriptors_before = _open_descriptors()
+    fault = make_the_first_parent_close_of_a_door_fail(monkeypatch)
+    child, _owned = open_door(child_cleanup, leaders.describe())
+
+    with pytest.raises(OSError) as raised:
+        child.close_streams()
+
+    held_by_the_cleanup = {str(owned.pidfd) for owned in child_cleanup.listed()}
+    assert raised.value is fault.failures[0]
+    assert all(stream.closed for stream in (child.stdin, child.stdout, child.stderr))
+    assert _open_descriptors() - held_by_the_cleanup == descriptors_before
 
 
 def test_a_running_leader_is_refused_its_release_and_keeps_its_streams(

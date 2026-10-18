@@ -1424,6 +1424,7 @@ def test_a_failed_step_reported_to_a_dead_log_sink_still_hands_the_group_to_the_
     assert outcome.became_zombie is True
     assert [group.process for group in held] == [child]
     assert child.kill_bounds[-1] == process._BACKGROUND_REAP_LIMIT_SECONDS
+    assert failure_watch.unhandled_thread_errors == []
 
 
 def test_the_settle_margin_covers_the_grace_the_count_bound_and_the_exit_wait() -> None:
@@ -1600,6 +1601,45 @@ class _FailingLogHandler(logging.Handler):
         raise OSError("log sink is gone")
 
 
+class _FailingOnTheHeldGroupLine(logging.Handler):
+    def emit(self, record: logging.LogRecord) -> None:
+        if "outlived its background reap" in record.getMessage():
+            raise OSError("log sink is gone")
+
+
+class _RecordingHandler(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.messages.append(record.getMessage())
+
+
+def test_a_failing_held_group_line_neither_skips_the_step_report_nor_escapes(
+    monkeypatch, held_bounded_groups,
+) -> None:
+    recorder = _RecordingHandler()
+    monkeypatch.setattr(process.log, "handlers", [recorder, _FailingOnTheHeldGroupLine()])
+    monkeypatch.setattr(process.log, "propagate", False)
+    reaped: list[int] = []
+
+    def on_reaped(process_id: int, _became_zombie: bool) -> None:
+        reaped.append(process_id)
+
+    child = fake_cli_process(None, gone=(RuntimeError("count failed"),))
+
+    process._reap_in_background(child, on_reaped)
+
+    assert [(group.process, group.on_reaped) for group in held_bounded_groups] == [
+        (child, on_reaped),
+    ]
+    assert recorder.messages[-1] == (
+        "agent CLI runner step failed: background reap of agent CLI process group RuntimeError"
+    )
+    assert reaped == []
+
+
 def test_a_home_stays_held_when_logging_fails_at_the_reap_bound(
     tmp_path: Path, a_background_reap_over_a_group_that_never_dies, monkeypatch,
 ) -> None:
@@ -1611,8 +1651,7 @@ def test_a_home_stays_held_when_logging_fails_at_the_reap_bound(
     child = _a_group_that_never_dies()
     on_reaped = home.reserve().on_reaped
 
-    with pytest.raises(OSError, match="log sink is gone"):
-        process._reap_in_background(child, on_reaped)
+    process._reap_in_background(child, on_reaped)
     home.close()
     del home
     gc.collect()
@@ -4460,8 +4499,9 @@ def test_the_grok_probe_hands_its_child_the_login_byte_for_byte(tmp_path, monkey
     monkeypatch.setattr(process, "resolve_cli_binary", lambda _binary: Path("/usr/bin/grok"))
     copies: list[bytes] = []
 
-    def run_cli_bounded(child, **_kwargs):
+    def run_cli_bounded(child, **kwargs):
         copies.append((Path(child.environment["GROK_HOME"]) / "auth.json").read_bytes())
+        kwargs["on_reaped"](0, False)
         return CliRunOutcome(
             started=True, spawn_error=None, returncode=0, stdout=GROK_LOGGED_IN, stderr="",
             complete=True, became_zombie=False, reason=CliRunReason.COMPLETE,

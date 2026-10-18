@@ -53,7 +53,7 @@ import pytest
 from anchored_support import TEST_WAIT_SECONDS
 
 from agent_client.tools import ToolDeclaration
-from agent_providers import anchored_turn, lost_groups, process
+from agent_providers import anchored_turn, lost_groups, process, spawn
 from agent_providers.anchored_turn import ReapBounds
 from agent_providers.catalog import ProviderRoute
 from agent_providers.claude import provider as claude_provider
@@ -1557,7 +1557,8 @@ class FakeBlockingChild:
     scripted ``gone`` answers (the last repeats, an exception is raised) a
     ``kill_until_gone`` counts the group ``EMPTY`` in time, and a running leader's exit follows
     ``exit_on_kill``. ``signal_failure`` is raised by the first ``signal_group``; each of
-    ``release_failures`` by one ``release``. Like the real handle it refuses ``release()``
+    ``release_failures`` by one ``release``. A ``hold`` parks the second ``kill_until_gone``, the
+    background one, until the test lets it go. Like the real handle it refuses ``release()``
     while the leader runs. Nothing here reaches a real process.
     """
 
@@ -1574,8 +1575,10 @@ class FakeBlockingChild:
         exit_on_kill: ExitOnKill = ExitOnKill.PUBLISHED,
         signal_failure: Exception | None = None,
         release_failures: Sequence[Exception] = (),
+        hold: Hold | None = None,
     ) -> None:
         self.operations: list[tuple[Any, ...]] = []
+        self._hold = hold
         self.kill_bounds: list[float] = []
         self.released = False
         self.returncode: int | None = None if still_running else 0
@@ -1617,6 +1620,9 @@ class FakeBlockingChild:
     def kill_until_gone(self, *, within: float) -> KillUntilGoneResult:
         self.operations.append(("kill_until_gone", within))
         self.kill_bounds.append(within)
+        if self._hold is not None and len(self.kill_bounds) == 2:
+            self._hold.entered.set()
+            assert self._hold.proceed.wait(TEST_WAIT_SECONDS), "the held kill was never released"
         if not self._gone:
             return self._empty_group_after_the_kill()
         answer = self._gone[0] if len(self._gone) == 1 else self._gone.popleft()
@@ -1672,6 +1678,49 @@ class FakeBlockingChild:
     def _publish_exit(self, returncode: int) -> None:
         self.returncode = returncode
         self._exit_published.set()
+
+
+@dataclass
+class FirstParentCloseFault:
+    """The first parent file a door opens closes, then raises once while ``armed``."""
+
+    armed: bool = True
+    failures: list[OSError] = field(default_factory=list)
+
+    def wrap(self, close: Callable[[], None]) -> Callable[[], None]:
+        def closing() -> None:
+            close()
+            if self.armed:
+                self.armed = False
+                failure = OSError(errno.EIO, "close failed after releasing its descriptor")
+                self.failures.append(failure)
+                raise failure
+
+        return closing
+
+
+def make_the_first_parent_close_of_a_door_fail(
+    monkeypatch: pytest.MonkeyPatch, *, armed: bool = True,
+) -> FirstParentCloseFault:
+    fault = FirstParentCloseFault(armed=armed)
+    open_pipe = spawn._DoorPipes.open_pipe
+    pipes_opened = 0
+
+    def open_first_pipe_failing(self, *, parent_reads: bool):
+        nonlocal pipes_opened
+        parent_file, child_end = open_pipe(self, parent_reads=parent_reads)
+        if pipes_opened == 0:
+            monkeypatch.setattr(parent_file, "close", fault.wrap(parent_file.close))
+        pipes_opened += 1
+        return parent_file, child_end
+
+    monkeypatch.setattr(spawn._DoorPipes, "open_pipe", open_first_pipe_failing)
+    return fault
+
+
+@pytest.fixture
+def failure_watch(monkeypatch, caplog, capfd) -> RunnerFailureWatch:
+    return RunnerFailureWatch(monkeypatch, caplog, capfd)
 
 
 @pytest.fixture

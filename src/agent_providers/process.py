@@ -558,13 +558,18 @@ class CachedProbe[T]:
 def run_catalog_cli(
     child: ChildProcess,
     *,
+    home: PrivateHome | None = None,
     stderr: StderrPolicy = "capture",
     output_read_limit_bytes: int | None = None,
 ) -> CliRun | None:
-    """Run one catalog probe under its own answer budget."""
+    """Run one catalog probe under its own answer budget.
+
+    A ``home`` stays reserved from here until the runner's callback frees it.
+    """
     limit = (
         CLI_OUTPUT_READ_LIMIT_BYTES if output_read_limit_bytes is None else output_read_limit_bytes
     )
+    reservation = None if home is None else home.reserve()
     outcome = run_cli_bounded(
         child,
         stdin_payload=None,
@@ -572,6 +577,8 @@ def run_catalog_cli(
         deadline=time.monotonic() + PROBE_TIMEOUT_SECONDS,
         stderr=stderr,
         output_read_limit_bytes=limit,
+        on_spawn_failed=None if reservation is None else reservation.on_spawn_failed,
+        on_reaped=None if reservation is None else reservation.on_reaped,
     )
     return _cli_run_from_outcome(outcome)
 
@@ -593,14 +600,15 @@ def run_claude_catalog_cli(
     with _catalog_credential_home(
         current_claude_runtime().token_file,
         _CLAUDE_CATALOG_CREDENTIAL_PATH,
-    ) as home:
+    ) as owner:
         return run_catalog_cli(
             ChildProcess(
                 binary=binary,
                 arguments=args,
-                environment=closed_environment(home),
-                working_directory=home,
+                environment=closed_environment(owner.path),
+                working_directory=owner.path,
             ),
+            home=owner,
             stderr=stderr,
             output_read_limit_bytes=output_read_limit_bytes,
         )
@@ -1351,17 +1359,20 @@ def _run_credentialed_catalog_cli(
 ) -> CliRun | None:
     with _catalog_credential_home(
         auth_file, _CATALOG_AUTH_FILE_PATH, credential_copy=credential_copy,
-    ) as home:
+    ) as owner:
         # Grok resolves the invoking account's profile when HOME is absent,
         # even with GROK_HOME set (measured on grok 1.0.4). HOME is containment.
-        environment = closed_environment(home, **{credential_home_variable: str(home)})
+        environment = closed_environment(
+            owner.path, **{credential_home_variable: str(owner.path)},
+        )
         return run_catalog_cli(
             ChildProcess(
                 binary=binary,
                 arguments=args,
                 environment=environment,
-                working_directory=home,
+                working_directory=owner.path,
             ),
+            home=owner,
             stderr=stderr,
             output_read_limit_bytes=output_read_limit_bytes,
         )
@@ -1812,7 +1823,7 @@ def _catalog_credential_home(
     relative_destination: Path,
     *,
     credential_copy: CredentialCopy | None = None,
-) -> Iterator[Path]:
+) -> Iterator[PrivateCredentialHome]:
     owner = PrivateCredentialHome(
         auth_file,
         relative_destination,
@@ -1821,7 +1832,7 @@ def _catalog_credential_home(
         credential_copy=credential_copy,
     )
     try:
-        yield owner.path
+        yield owner
     finally:
         owner.close()
 
@@ -2141,7 +2152,8 @@ def _reap_in_background(
             _notify_reaped(on_reaped, process.pid, became_zombie=True)
     else:
         _groups_held_until_exit.append(_HeldGroup(process, on_reaped))
-        log.error("agent CLI process group %s outlived its background reap", process.pid)
+        with failures.contained("report", reported=False):
+            log.error("agent CLI process group %s outlived its background reap", process.pid)
     failures.report()
 
 

@@ -12,6 +12,7 @@ from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import Mock
 
+import provider_test_support
 import pytest
 from provider_test_support import (
     A_RUNNER_FAILURE_CANARY,
@@ -21,6 +22,7 @@ from provider_test_support import (
     GROK_SESSION_ID,
     SAMPLE_TOOL_CATALOG,
     CliCall,
+    Hold,
     RunnerFailureWatch,
     a_call_nested_too_deeply_to_decode,
     a_call_to_a_declared_tool,
@@ -35,6 +37,7 @@ from provider_test_support import (
     cli_rounds_runner,
     drive_turn,
     fail_to_start_the_runner_thread,
+    fake_cli_process,
     formatted_log_text,
     grok_cli_outcome,
     grok_tool_round_lines,
@@ -62,6 +65,8 @@ from agent_providers.errors import (
 from agent_providers.events import AssistantTextEvent, FinalEvent, ToolCallEvent
 from agent_providers.grok import transport as grok_cli_adapter
 from agent_providers.process import CliRunOutcome, CliRunReason
+from agent_providers.procfs import GroupCensus
+from agent_providers.spawn import KillUntilGoneResult
 from agent_providers.text_tool_protocol import TextToolRejectionRule
 from agent_providers.tool_loop import (
     InitialTurn,
@@ -72,6 +77,8 @@ from agent_providers.tool_loop import (
     stream_tool_loop,
 )
 from agent_providers.tools import ToolCatalog, ToolProtocolMarkup
+
+failure_watch = provider_test_support.failure_watch
 
 
 def _transport() -> grok_cli_adapter.GrokCliToolTransport:
@@ -547,6 +554,41 @@ def test_grok_turn_keeps_its_private_home_until_late_runner_confirmation(
     else:
         captured[callback](2468, True)
     assert not home.exists()
+
+def test_grok_round_keeps_its_home_until_the_background_confirms_the_group(
+    monkeypatch, failure_watch,
+) -> None:
+    hold = Hold()
+    child = fake_cli_process(
+        b"".join(grok_tool_round_lines("done")),
+        gone=(
+            KillUntilGoneResult(GroupCensus.LIVE, ended_in_time=True),
+            KillUntilGoneResult(GroupCensus.EMPTY, ended_in_time=True),
+        ),
+        hold=hold,
+    )
+    homes: list[Path] = []
+
+    def door(started_child, *, stderr):
+        homes.append(started_child.working_directory)
+        return child
+
+    install_cli_door(monkeypatch, door)
+    transport = _transport()
+
+    async def round_then_close() -> None:
+        await _collect_transport_responses(transport)
+        await transport.aclose()
+
+    asyncio.run(round_then_close())
+    [home] = homes
+    present_after_aclose = home.exists()
+    hold.proceed.set()
+    failure_watch.wait_for_the_runner_threads_to_end()
+
+    assert present_after_aclose is True
+    assert home.exists() is False
+
 
 RECORDED_GROK_CATALOG = ToolCatalog(
     tools=(

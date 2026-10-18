@@ -21,9 +21,11 @@ from pydantic import BaseModel, SecretStr
 from agent_providers import dispatch
 from agent_providers.errors import (
     CodexProcessPoolSaturatedError,
+    ContainmentLost,
     ProviderError,
     ProviderModelCatalogUnavailableError,
     ProviderUnavailableError,
+    RetainedGroup,
     SafeRouteReasonCode,
     TextToolCallRejectedError,
     ToolProtocolRejectionCode,
@@ -291,6 +293,7 @@ _PLAIN_ERRORS = {
         "codex", "ignored", _TOOL_PROTOCOL_REASON,
     ),
     "pool-saturated": CodexProcessPoolSaturatedError(kind="turn", scope="host"),
+    "containment-lost": ContainmentLost(RetainedGroup(pgid=4242, generation=7)),
 }
 
 

@@ -54,6 +54,7 @@ import agent_service.signing as signing
 from agent_client.run_stream import StreamViolation, ViolationKind
 from agent_client.sse import RunStreamDecoder
 from agent_client.wire import RejectionCode, RunEvent, RunRejection, RunRequest, RunStatus
+from agent_providers.config import PrivateWorkingRoot
 from agent_providers.errors import RetainedGroup
 from agent_providers.events import AssistantTextEvent, StreamEvent, ToolCallEvent
 from agent_service.admission import AdmissionSlot
@@ -148,6 +149,13 @@ def _process_secret_directory() -> Path:
 
 
 @functools.cache
+def process_working_root() -> PrivateWorkingRoot:
+    directory = Path(tempfile.mkdtemp(prefix="agent-service-working-root-"))
+    atexit.register(shutil.rmtree, directory, ignore_errors=True)
+    return PrivateWorkingRoot(directory)
+
+
+@functools.cache
 def process_signing_key_file() -> Path:
     return written_key_file(_process_secret_directory(), generated_rsa_key())
 
@@ -186,6 +194,7 @@ def _service_config_document(
         "cli": {
             "claude_binary": str(process_claude_cli()),
             "claude_version": PINNED_CLAUDE_VERSION,
+            "working_root": str(process_working_root().path),
         },
         "signing": {"key_file": str(process_signing_key_file())},
         "profiles": {CLI_PROFILE: {"provider": "claude", "token_file": str(process_token_file())}},

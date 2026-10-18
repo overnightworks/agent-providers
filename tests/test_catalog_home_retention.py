@@ -18,16 +18,18 @@ from provider_test_support import (
 )
 
 from agent_providers import process
-from agent_providers.config import current_config
+from agent_providers.config import PrivateWorkingRoot, current_config
 from agent_providers.process import (
     CliRun,
     CliRunOutcome,
     CliRunReason,
     _run_credentialed_catalog_cli,
+    run_catalog_cli,
     run_claude_catalog_cli,
+    run_directories,
 )
 from agent_providers.procfs import GroupCensus
-from agent_providers.spawn import KillUntilGoneResult
+from agent_providers.spawn import ChildProcess, KillUntilGoneResult, closed_environment
 
 failure_watch = provider_test_support.failure_watch
 held_bounded_groups = provider_test_support.held_bounded_groups
@@ -74,8 +76,30 @@ _ENTRIES = {
 }
 
 
-@pytest.fixture(params=_ENTRIES)
-def entry(request: pytest.FixtureRequest) -> CatalogEntry:
+_RUN_DIRECTORIES = "run-directories"
+_RUN_FILE_NAME = "marker"
+
+
+def _run_directories_entry(root: PrivateWorkingRoot) -> CatalogEntry:
+    def call(binary: Path) -> CliRun | None:
+        with run_directories(root, {_RUN_FILE_NAME: b""}) as directories:
+            child = ChildProcess(
+                binary=binary,
+                arguments=(),
+                environment=closed_environment(directories.home),
+                working_directory=directories.working_directory,
+            )
+            return run_catalog_cli(child, home=directories)
+
+    return CatalogEntry(call, Path("..") / process.RUN_HOME_DIRECTORY_NAME / _RUN_FILE_NAME)
+
+
+@pytest.fixture(params=(*_ENTRIES, _RUN_DIRECTORIES))
+def entry(request: pytest.FixtureRequest, tmp_path: Path) -> CatalogEntry:
+    if request.param == _RUN_DIRECTORIES:
+        root = tmp_path / "working-root"
+        root.mkdir(mode=0o700)
+        return _run_directories_entry(PrivateWorkingRoot(root))
     return _ENTRIES[request.param]
 
 

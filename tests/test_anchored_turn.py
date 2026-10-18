@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 from provider_test_support import (
+    ExitOnKill,
     ScenarioDeadline,
     ScriptedClaudeChild,
     a_claude_cli_child,
@@ -213,7 +214,12 @@ NEVER_PUBLISHES_ON_KILL = {
     "returncode": None,
     "natural_exit": None,
     "survives": {signal.SIGTERM},
-    "publishes_on_kill": False,
+    "exit_on_kill": ExitOnKill.NONE,
+}
+
+COMMITS_WITHOUT_ANNOUNCING_ON_KILL = {
+    **NEVER_PUBLISHES_ON_KILL,
+    "exit_on_kill": ExitOnKill.COMMITTED_UNANNOUNCED,
 }
 
 
@@ -242,6 +248,26 @@ def test_a_confirmed_count_whose_exit_is_never_published_keeps_the_slot_without_
 ) -> None:
     pool = a_pool(confirmation_seconds=0)
     turn = a_turn(pool, **NEVER_PUBLISHES_ON_KILL)
+
+    async def scenario() -> None:
+        lost = await enter_a_turn_that_is_retained(turn)
+        try:
+            assert lost.__cause__ is None
+            assert [name for name, _pid in operations(turn.child.log)] == ["SIGTERM", KILL]
+            assert slot_is_held(pool)
+            assert turn.home_is_present()
+        finally:
+            await confirm_the_retention_then_check_the_slot_and_home_are_freed(turn, lost.group)
+
+    with killpg_forbidden(), recorded_census_workers(monkeypatch):
+        run_bounded(scenario())
+
+
+def test_a_confirmed_count_whose_exit_is_committed_but_not_published_keeps_the_slot(
+    a_turn, monkeypatch,
+) -> None:
+    pool = a_pool(confirmation_seconds=0)
+    turn = a_turn(pool, **COMMITS_WITHOUT_ANNOUNCING_ON_KILL)
 
     async def scenario() -> None:
         lost = await enter_a_turn_that_is_retained(turn)

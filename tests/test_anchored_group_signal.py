@@ -411,7 +411,7 @@ def running_leader(leaders: Leaders) -> Started:
         ),
     ],
 )
-def test_a_group_signal_that_meets_esrch_commits_the_loss_and_raises(
+def test_a_group_signal_that_meets_esrch_or_echild_commits_the_loss_and_raises(
     call: GroupCall,
     error: type[OSError],
     census_calls: CensusRecorder,
@@ -768,6 +768,7 @@ def test_a_rejoiner_is_killed_by_the_next_kill_and_census(
     leaders: Leaders,
     child_cleanup: ChildCleanup,
     thread_failures: list[threading.ExceptHookArgs],
+    census_calls: CensusRecorder,
 ) -> None:
     run = start_leaver(leaders, child_cleanup, SETPGID)
     assert kill_and_census_within_bound(run.started) is GroupCensus.EMPTY
@@ -778,6 +779,7 @@ def test_a_rejoiner_is_killed_by_the_next_kill_and_census(
     assert second in {GroupCensus.LIVE, GroupCensus.EMPTY}
     assert_gone_within_bound(run.leaver)
     assert kill_and_census_within_bound(run.started) is GroupCensus.EMPTY
+    assert census_calls == [run.started.owned.pid] * 3
     release_within_bound(run.started)
     assert child_cleanup.state(run.started.owned) == GONE
     assert thread_failures == []
@@ -847,5 +849,6 @@ def test_an_empty_count_publishes_nothing_while_the_watcher_is_held(
         assert started.leader.state is AnchorState.EXITED
         release_within_bound(started)
 
+    assert kernel.violations == []
     assert child_cleanup.state(started.owned) == GONE
     assert thread_failures == []

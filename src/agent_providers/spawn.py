@@ -472,8 +472,8 @@ class AnchoredLeader:
     signal: a process that left the group with ``setsid`` or ``setpgid`` is not
     counted, and a membership change during the scan may be missed, while every
     member the scan observes live with the group's number prevents ``EMPTY``.
-    ``EMPTY`` neither publishes the leader's exit nor releases it: the leader this
-    SIGKILL ended is a zombie the scan counts as dead while its watcher may not
+    ``EMPTY`` neither publishes the leader's exit nor releases it: the leader is then
+    a zombie the scan counts as dead while its watcher may not
     have committed the exit yet, so a caller awaits the exit before ``release()``,
     which refuses a running leader. A single ``LIVE`` is no failure, since a member
     that SIGKILL reached but that has not run its exit is live to the scan. The
@@ -481,8 +481,8 @@ class AnchoredLeader:
     processes and has no timeout; meanwhile ``release()``, the watcher's commit
     and the ``state`` and ``returncode`` reads wait.
 
-    A loss committed by ``signal_group`` can overtake a stop report the watcher
-    holds, so after each stop report the watcher reads the state under the lock
+    A loss committed by ``signal_group`` or ``kill_and_census`` can overtake a stop
+    report the watcher holds, so after each stop report the watcher reads the state under the lock
     and ends without a warning, a consume or a further wait unless it is still
     RUNNING.
 

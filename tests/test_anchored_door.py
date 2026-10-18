@@ -636,6 +636,7 @@ def test_the_door_delegates_the_kill_and_census_and_closes_no_pipe_during_it(
 
     async def scenario() -> tuple[GroupCensus, bool]:
         census = child.kill_and_census()
+        assert not child.stdin.is_closing()
         open_after_the_call = pipes <= descriptors()
         assert await child.exited() == SIGKILLED
         assert child_cleanup.state(opened.owned) == Exited(SIGKILLED)

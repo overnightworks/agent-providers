@@ -3,6 +3,6 @@ agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
 role = "builder"
 base = "cff5ee2e6ca110c0cb12a441d407d72cca56e590"
 branch = "claude/issue-222-async-door"
-scope = ["README.md", "src/agent_providers/spawn.py", "tests/test_anchored_door.py", "tests/test_async_claude_spawn_seam.py", "tests/test_spawn_owner.py"]
+scope = ["README.md", "src/agent_providers/spawn.py", "tests/anchored_leaders.py", "tests/test_anchored_door.py", "tests/test_async_claude_spawn_seam.py", "tests/test_spawn_owner.py"]
 opened_commit = "81df53d726630732196954bc93b3d8cb44af2550"
 whole_reason = "One public door in the spawn owner, its own test module, and the three places that name the spawn surface (the policy test, the seam guard's docstring, the README spawn row). communicate stays in this item (head ruling 18.10.2026): it is the only coherent split, and a separate lane's overhead outweighs its roughly twenty minutes of build; every other split would land the door without its failure-path proof."

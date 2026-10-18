@@ -356,11 +356,15 @@ def test_stream_timeout_ends_the_leader_through_its_anchor(monkeypatch) -> None:
     with pytest.raises(UnavailableError):
         run_bounded(collected)
 
-    assert operations(child.log) == [("SIGTERM", child.pid), ("release", child.pid)]
+    assert operations(child.log) == [
+        ("SIGTERM", child.pid), ("kill_until_gone", child.pid), ("release", child.pid),
+    ]
     provider.os.killpg.assert_not_called()
 
 
-def test_completed_stream_releases_its_leader_without_a_signal(monkeypatch) -> None:
+def test_a_completed_stream_kills_and_counts_its_group_before_releasing_its_leader(
+    monkeypatch,
+) -> None:
     reap_without_waiting(monkeypatch)
     monkeypatch.setattr(
         provider, "_require_claude_binary", lambda: "/bin/claude",
@@ -373,7 +377,7 @@ def test_completed_stream_releases_its_leader_without_a_signal(monkeypatch) -> N
     ))
 
     assert isinstance(events[-1], FinalEvent)
-    assert operations(child.log) == [("release", child.pid)]
+    assert operations(child.log) == [("kill_until_gone", child.pid), ("release", child.pid)]
     provider.os.killpg.assert_not_called()
 
 

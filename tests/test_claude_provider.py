@@ -3949,7 +3949,9 @@ def test_closing_a_claude_stream_keeps_its_private_home_until_confirmed_reap(
             assert not home_seen.exists()
 
     run_bounded(run())
-    assert operations(child.log) == [("SIGTERM", child.pid), ("release", child.pid)]
+    assert operations(child.log) == [
+        ("SIGTERM", child.pid), ("kill_until_gone", child.pid), ("release", child.pid),
+    ]
     assert killpg_signals == []
 
 
@@ -4177,7 +4179,9 @@ def test_a_successful_one_shot_holds_its_slot_and_home_until_the_reap_is_done(
             assert not turn_child.home.exists()
 
     run_bounded(scenario())
-    assert operations(turn_child.child.log) == [("release", turn_child.child.pid)]
+    assert operations(turn_child.child.log) == [
+        ("kill_until_gone", turn_child.child.pid), ("release", turn_child.child.pid),
+    ]
     assert killpg_signals == []
 
 
@@ -4204,7 +4208,7 @@ def test_a_failed_one_shot_reaps_once_then_releases_its_slot_and_home(
 
     run_bounded(scenario())
     assert operations(turn_child.child.log) == [
-        ("SIGTERM", A_PROCESS_PID), ("release", A_PROCESS_PID),
+        ("SIGTERM", A_PROCESS_PID), ("kill_until_gone", A_PROCESS_PID), ("release", A_PROCESS_PID),
     ]
     assert killpg_signals == []
 
@@ -4400,7 +4404,9 @@ def test_a_stream_that_ends_normally_reaps_once_and_releases_its_slot_and_home(
             assert not turn_child.home.exists()
 
     run_bounded(scenario())
-    assert operations(turn_child.child.log) == [("release", turn_child.child.pid)]
+    assert operations(turn_child.child.log) == [
+        ("kill_until_gone", turn_child.child.pid), ("release", turn_child.child.pid),
+    ]
     assert killpg_signals == []
 
 
@@ -4503,7 +4509,9 @@ def test_sigkill_ends_a_leader_that_survives_sigterm_before_its_slot_and_home_ar
     run_bounded(_end_the_turn_with_its_own_error(ending))
 
     pid = turn.child.pid
-    assert operations(turn.child.log) == [("SIGTERM", pid), ("SIGKILL", pid), ("release", pid)]
+    assert operations(turn.child.log) == [
+        ("SIGTERM", pid), ("kill_until_gone", pid), ("release", pid),
+    ]
     assert held_claude_slots() == 0
     assert not turn.home.exists()
     assert killpg_signals == []
@@ -4541,7 +4549,7 @@ def test_a_leader_that_outlives_sigkill_keeps_its_slot_and_home_until_its_group_
             assert group.pgid == pid
             assert lost.value.__cause__ is None
             assert isinstance(lost.value.__context__, ending.exit_of_the_turn)
-            assert operations(child.log) == [("SIGTERM", pid), ("SIGKILL", pid)]
+            assert operations(child.log) == [("SIGTERM", pid), ("kill_until_gone", pid)]
             assert held_claude_slots() == 1
             assert turn.home.exists()
             assert _provider_records_after(caplog, records_before_spawn[0]) == []
@@ -4550,7 +4558,7 @@ def test_a_leader_that_outlives_sigkill_keeps_its_slot_and_home_until_its_group_
             child.publish_exit(-signal.SIGKILL)
             assert await lost_groups.confirm_group_gone(group)
             assert operations(child.log) == [
-                ("SIGTERM", pid), ("SIGKILL", pid), ("kill", pid), ("release", pid),
+                ("SIGTERM", pid), ("kill_until_gone", pid), ("kill", pid), ("release", pid),
             ]
             assert held_claude_slots() == 0
             assert not turn.home.exists()

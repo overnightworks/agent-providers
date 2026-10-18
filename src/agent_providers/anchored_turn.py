@@ -3,14 +3,15 @@
 The pool bounds the CLI processes a host runs at once, shared by probes and real
 turns. ``anchored_turn_child`` reserves a slot, opens the child on its anchor and,
 whatever ends the turn, reaps the child behind a shield before the slot is freed.
-A leader that cannot be shown gone is retained by :mod:`agent_providers.lost_groups`
-and keeps its slot.
+A group that cannot be shown empty is retained by :mod:`agent_providers.lost_groups`
+and its leader keeps the slot.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import signal
 import threading
 from collections.abc import AsyncIterator
@@ -21,19 +22,9 @@ from functools import partial
 import anyio
 
 from agent_providers import process
-from agent_providers.constants import (
-    CLAUDE_CLI_SIGTERM_GRACE_SECONDS,
-    CLAUDE_CLI_ZOMBIE_REAP_TIMEOUT_SECONDS,
-)
 from agent_providers.errors import ContainmentLost
 from agent_providers.lost_groups import retain_lost_group
-from agent_providers.spawn import (
-    AnchoredChild,
-    AnchorStateError,
-    ChildIdentityLost,
-    ChildProcess,
-    open_anchored_pipes,
-)
+from agent_providers.spawn import AnchoredChild, ChildProcess, open_anchored_pipes
 
 log = logging.getLogger(__name__)
 
@@ -50,16 +41,32 @@ class CliProcessReservation:
     home_reservation: process.PrivateHomeReservation | None = None
 
 
+@dataclass(frozen=True)
+class ReapBounds:
+    """How long a turn's reap waits, stated once by the CLI that owns the pool."""
+
+    sigterm_grace_seconds: float
+    confirmation_seconds: float
+
+    def __post_init__(self) -> None:
+        for field_name in ("sigterm_grace_seconds", "confirmation_seconds"):
+            value = getattr(self, field_name)
+            if not (math.isfinite(value) and value >= 0):
+                raise ValueError(f"{field_name} must be finite and not negative, got {value!r}")
+
+
 class CliProcessPool:
     """The process-wide slots of one CLI, shared by probes and real turns.
 
     Its own lock, since probes touch it from plain threads as well as the event
-    loop.
+    loop. The probes' reap is the bounded runner's, so only anchored turns read
+    ``reap``.
     """
 
-    def __init__(self, *, limit: int, name: str) -> None:
+    def __init__(self, *, limit: int, name: str, reap: ReapBounds) -> None:
         self.limit = limit
         self.name = name
+        self.reap = reap
         self._lock = threading.Lock()
         self._reservations: set[CliProcessReservation] = set()
 
@@ -119,31 +126,41 @@ async def _outlast_direct_cancellations(reap_task: asyncio.Task[None]) -> None:
 
 
 async def _reap_process_group(child: AnchoredChild, reservation: CliProcessReservation) -> None:
-    """End the turn's leader through its anchor and free its pool slot, or retain it.
+    """Show the turn's process group empty and free its pool slot, or retain it.
 
-    A leader whose exit is published is released without a signal. A running one
-    gets SIGTERM, then SIGKILL after the grace, and is released once its exit is
-    published. The slot and the home are freed only after ``release()``. A leader
-    that has not exited by the bound after SIGKILL, whose anchor was lost, or
-    that the kernel did not reap is retained instead, nothing is freed, and
-    ``ContainmentLost`` names the retention: a slot freed beside a group whose end
-    nobody knows would put a new run next to it.
+    A running leader gets SIGTERM and the grace. Then, on every exit, the group
+    is SIGKILLed and counted within the confirmation bound from that first
+    SIGKILL. Only a count that found the group empty in time, the leader's
+    published exit and ``release()`` free the slot and the home. A live, late or
+    uncountable group, an exit that stays unpublished, a lost anchor or any
+    other failure of these steps retains the leader instead, nothing is freed,
+    and ``ContainmentLost`` names the retention: a slot freed beside a group
+    whose end nobody knows would put a new run next to it.
     """
     try:
-        if child.returncode is None and not await _end_running_leader(child):
-            raise _retain_unreleased_leader(child, reservation)
-        child.release()
-    except (ChildIdentityLost, AnchorStateError) as failure:
+        group_is_gone = await _confirm_group_gone_and_release(child, reservation.pool.reap)
+    except Exception as failure:
         raise _retain_unreleased_leader(child, reservation) from failure
+    if not group_is_gone:
+        raise _retain_unreleased_leader(child, reservation)
     reservation.pool.release(reservation)
 
 
-async def _end_running_leader(child: AnchoredChild) -> bool:
+async def _confirm_group_gone_and_release(child: AnchoredChild, bounds: ReapBounds) -> bool:
+    if child.returncode is None:
+        await _offer_sigterm(child, bounds.sigterm_grace_seconds)
+    result = await child.kill_until_gone(within=bounds.confirmation_seconds)
+    if not result.confirmed or not await _exit_published_within(
+        child, bounds.confirmation_seconds
+    ):
+        return False
+    child.release()
+    return True
+
+
+async def _offer_sigterm(child: AnchoredChild, grace_seconds: float) -> None:
     child.signal_group(signal.SIGTERM)
-    if await _exit_published_within(child, CLAUDE_CLI_SIGTERM_GRACE_SECONDS):
-        return True
-    child.signal_group(signal.SIGKILL)
-    return await _exit_published_within(child, CLAUDE_CLI_ZOMBIE_REAP_TIMEOUT_SECONDS)
+    await _exit_published_within(child, grace_seconds)
 
 
 async def _exit_published_within(child: AnchoredChild, seconds: float) -> bool:

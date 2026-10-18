@@ -52,6 +52,7 @@ from anchored_support import TEST_WAIT_SECONDS
 
 from agent_client.tools import ToolDeclaration
 from agent_providers import anchored_turn, lost_groups, process
+from agent_providers.anchored_turn import ReapBounds
 from agent_providers.catalog import ProviderRoute
 from agent_providers.claude import provider as claude_provider
 from agent_providers.config import (
@@ -83,6 +84,7 @@ from agent_providers.spawn import (
     AnchorStateError,
     ChildIdentityLost,
     ChildProcess,
+    KillUntilGoneResult,
     closed_environment,
 )
 from agent_providers.text_tool_protocol import TextToolRejectionRule
@@ -1441,8 +1443,11 @@ class ScriptedClaudeChild(ScriptedAnchoredChild):
         exit_gate: EventGate | None = None,
         signal_loss: ChildIdentityLost | None = None,
         exit_loss: ChildIdentityLost | None = None,
+        signal_failure: Exception | None = None,
         release_failures: Sequence[Exception] = (),
         censuses: Sequence[GroupCensus | BaseException] = (GroupCensus.EMPTY,),
+        gone: Sequence[KillUntilGoneResult | BaseException] = (),
+        publishes_on_kill: bool = True,
         communicate: tuple[bytes, bytes] | BaseException = (b"", b""),
         communicate_gate: EventGate | None = None,
         stream_lines: Sequence[bytes] = (),
@@ -1463,6 +1468,10 @@ class ScriptedClaudeChild(ScriptedAnchoredChild):
         self._exit_gate = exit_gate
         self._signal_loss = signal_loss
         self._exit_loss = exit_loss
+        self._signal_failure = signal_failure
+        self._gone = deque(gone)
+        self._publishes_on_kill = publishes_on_kill
+        self.kill_bounds: list[float] = []
         self._exit_published = asyncio.Event()
         if returncode is not None:
             self._exit_published.set()
@@ -1483,8 +1492,29 @@ class ScriptedClaudeChild(ScriptedAnchoredChild):
         if self._signal_loss is not None:
             self._remember_loss(self._signal_loss)
             raise self._signal_loss
+        if self._signal_failure is not None:
+            failure, self._signal_failure = self._signal_failure, None
+            raise failure
         if sig not in self._survives:
             self.publish_exit(-sig)
+
+    async def kill_until_gone(self, *, within: float) -> KillUntilGoneResult:
+        self._enter("kill_until_gone")
+        self.kill_bounds.append(within)
+        if not self._gone:
+            return self._group_reap_model()
+        answer = self._gone[0] if len(self._gone) == 1 else self._gone.popleft()
+        if isinstance(answer, BaseException):
+            self._remember_loss(answer)
+            raise answer
+        return answer
+
+    def _group_reap_model(self) -> KillUntilGoneResult:
+        if signal.SIGKILL in self._survives:
+            return KillUntilGoneResult(GroupCensus.LIVE, ended_in_time=True)
+        if self._publishes_on_kill and self.returncode is None:
+            self.publish_exit(-signal.SIGKILL)
+        return KillUntilGoneResult(GroupCensus.EMPTY, ended_in_time=True)
 
     async def exited(self) -> int:
         if self._exit_loss is not None:
@@ -1621,9 +1651,9 @@ def a_child_that_outlives_sigkill(**script: Any) -> ScriptedClaudeChild:
 
 def reap_without_waiting(monkeypatch: pytest.MonkeyPatch) -> None:
     """Give the reap's grace and bound no time, so an unpublished exit expires at once."""
-    for module in (anchored_turn, claude_provider):
-        monkeypatch.setattr(module, "CLAUDE_CLI_SIGTERM_GRACE_SECONDS", 0)
-        monkeypatch.setattr(module, "CLAUDE_CLI_ZOMBIE_REAP_TIMEOUT_SECONDS", 0)
+    monkeypatch.setattr(
+        claude_provider.CLAUDE_CLI_PROCESS_POOL, "reap", ReapBounds(0, 0)
+    )
 
 
 def reset_cli_process_pool_for_test() -> None:

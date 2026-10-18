@@ -7,6 +7,7 @@ import json
 import os
 import stat
 import tomllib
+import types
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,7 @@ from service_support import (
     process_claude_cli,
     process_signing_key_file,
     process_token_file,
+    process_working_root,
     reaches_private_key,
     reaches_text,
     record_signed_tokens,
@@ -50,13 +52,14 @@ SIGNING_SECTION = f"[signing]\n{SIGNING_KEY_LINE}\n\n"
 TOKEN_FILE_LINE = f"token_file = {json.dumps(str(process_token_file()))}"
 CLAUDE_BINARY_LINE = f"claude_binary = {json.dumps(str(process_claude_cli()))}"
 CLAUDE_VERSION_LINE = f'claude_version = "{PINNED_CLAUDE_VERSION}"'
+WORKING_ROOT_LINE = f"working_root = {json.dumps(str(process_working_root().path))}"
 
 
 def cli_section(*lines: str) -> str:
     return "".join(["[cli]\n", *(f"{line}\n" for line in lines if line), "\n"])
 
 
-CLI_SECTION = cli_section(CLAUDE_BINARY_LINE, CLAUDE_VERSION_LINE)
+CLI_SECTION = cli_section(CLAUDE_BINARY_LINE, CLAUDE_VERSION_LINE, WORKING_ROOT_LINE)
 TOOLS_LINE = 'tools = { read_song = "read_only" }'
 
 VALID_CONFIG = f"""
@@ -104,7 +107,9 @@ def test_loading_a_file_does_not_run_the_program_its_cli_section_names(tmp_path)
     probe_log = tmp_path / "probe-starts"
     program = fake_cli_executable(tmp_path, {("--version",): "any"}, calls_log=probe_log)
     binary_line = f"claude_binary = {json.dumps(str(program))}"
-    text = VALID_CONFIG.replace(CLI_SECTION, cli_section(binary_line, CLAUDE_VERSION_LINE))
+    text = VALID_CONFIG.replace(
+        CLI_SECTION, cli_section(binary_line, CLAUDE_VERSION_LINE, WORKING_ROOT_LINE)
+    )
 
     load_config(_written(tmp_path, text))
 
@@ -1131,7 +1136,7 @@ NOT_A_PROGRAM_PATH = (
 def test_a_claude_program_that_is_not_an_absolute_path_is_refused_by_field(
     tmp_path, capsys, binary_line, refusal
 ):
-    text = _with(CLI_SECTION, cli_section(binary_line, CLAUDE_VERSION_LINE))
+    text = _with(CLI_SECTION, cli_section(binary_line, CLAUDE_VERSION_LINE, WORKING_ROOT_LINE))
 
     assert _refused_on_one_line(_written(tmp_path, text), capsys) == refusal
 
@@ -1152,9 +1157,155 @@ def test_a_claude_program_that_is_not_an_absolute_path_is_refused_by_field(
 def test_a_pinned_version_that_is_not_three_integers_is_refused_by_field(
     tmp_path, capsys, version_line, refusal
 ):
-    text = _with(CLI_SECTION, cli_section(CLAUDE_BINARY_LINE, version_line))
+    text = _with(CLI_SECTION, cli_section(CLAUDE_BINARY_LINE, version_line, WORKING_ROOT_LINE))
 
     assert _refused_on_one_line(_written(tmp_path, text), capsys) == refusal
+
+
+def _cli_naming_the_working_root(root_line: str, program: Path) -> str:
+    binary_line = f"claude_binary = {json.dumps(str(program))}"
+    return _with(CLI_SECTION, cli_section(binary_line, CLAUDE_VERSION_LINE, root_line))
+
+
+def _root_line(root: str) -> str:
+    return f"working_root = {json.dumps(root)}"
+
+
+def _private_directory(path: Path, mode: int = 0o700) -> Path:
+    path.mkdir()
+    path.chmod(mode)
+    return path
+
+
+def _a_missing_root(tmp_path: Path) -> str:
+    return str(tmp_path / "absent-root")
+
+
+def _a_regular_file_as_root(tmp_path: Path) -> str:
+    path = tmp_path / "root-file"
+    path.write_text("")
+    return str(path)
+
+
+def _a_link_to_a_private_directory(tmp_path: Path) -> str:
+    link = tmp_path / "root-link"
+    link.symlink_to(_private_directory(tmp_path / "real-root"))
+    return str(link)
+
+
+def _a_root_open_to_the_group(tmp_path: Path) -> str:
+    return str(_private_directory(tmp_path / "open-root", 0o750))
+
+
+NOT_PRIVATE_ROOTS = (
+    pytest.param(lambda _tmp: "run/x", "relative", id="relative"),
+    pytest.param(lambda _tmp: "~/x", "relative", id="tilde"),
+    pytest.param(lambda _tmp: "", "relative", id="empty"),
+    pytest.param(_a_missing_root, "missing", id="absent"),
+    pytest.param(_a_regular_file_as_root, "missing", id="regular-file"),
+    pytest.param(_a_link_to_a_private_directory, "symlink", id="symlink"),
+    pytest.param(_a_root_open_to_the_group, "wrong_mode", id="mode-0750"),
+)
+
+
+def _core_config_seeing(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> None:
+    from agent_providers import config as core_config
+
+    seen = types.SimpleNamespace(**{"lstat": os.lstat, "geteuid": os.geteuid, **overrides})
+    monkeypatch.setattr(core_config, "os", seen)
+
+
+def _the_probe_never_started(probe_log: Path) -> bool:
+    return not probe_log.exists()
+
+
+def test_a_private_working_root_loads_into_the_cli_section(tmp_path):
+    config = load_config(_written(tmp_path, VALID_CONFIG))
+
+    assert config.cli.working_root == process_working_root()
+
+
+def test_a_cli_section_without_a_working_root_is_refused_before_any_probe(tmp_path, capsys):
+    probe_log = tmp_path / "probe-starts"
+    program = fake_cli_executable(tmp_path, {("--version",): "any"}, calls_log=probe_log)
+    text = _cli_naming_the_working_root("", program)
+
+    refusal = _refused_on_one_line(_written(tmp_path, text), capsys)
+
+    assert refusal == "cli.working_root: Field required"
+    assert _the_probe_never_started(probe_log)
+
+
+@pytest.mark.parametrize(("arrange", "violation"), NOT_PRIVATE_ROOTS)
+def test_a_working_root_that_is_not_private_stops_the_start_naming_only_its_violation(
+    tmp_path, capsys, arrange, violation
+):
+    probe_log = tmp_path / "probe-starts"
+    program = fake_cli_executable(tmp_path, {("--version",): "any"}, calls_log=probe_log)
+    root = arrange(tmp_path)
+    text = _cli_naming_the_working_root(_root_line(root), program)
+
+    refusal = _refused_on_one_line(_written(tmp_path, text), capsys)
+
+    assert refusal == f"cli.working_root: not private: {violation}"
+    assert _the_probe_never_started(probe_log)
+
+
+def test_a_working_root_owned_by_another_user_stops_the_start_naming_only_its_violation(
+    tmp_path, capsys, monkeypatch
+):
+    root = _private_directory(tmp_path / "foreign-root")
+    program = fake_cli_executable(tmp_path, {("--version",): "any"})
+    text = _cli_naming_the_working_root(_root_line(str(root)), program)
+    _core_config_seeing(monkeypatch, geteuid=lambda: os.stat(root).st_uid + 1)
+
+    refusal = _refused_on_one_line(_written(tmp_path, text), capsys)
+
+    assert refusal == "cli.working_root: not private: foreign_owner"
+
+
+def test_a_working_root_that_cannot_be_inspected_stops_the_start_without_the_failure_text(
+    tmp_path, capsys, monkeypatch
+):
+    root = _private_directory(tmp_path / "unreadable-root")
+    program = fake_cli_executable(tmp_path, {("--version",): "any"})
+    text = _cli_naming_the_working_root(_root_line(str(root)), program)
+
+    def refuse_to_inspect(_path):
+        raise PermissionError(errno.EACCES, "inspection-failure-text")
+
+    _core_config_seeing(monkeypatch, lstat=refuse_to_inspect)
+
+    refusal = _refused_on_one_line(_written(tmp_path, text), capsys)
+
+    assert refusal == "cli.working_root: not private: uninspectable"
+
+
+def test_a_working_root_that_is_not_a_string_is_refused_without_echoing_it(tmp_path, capsys):
+    program = fake_cli_executable(tmp_path, {("--version",): "any"})
+    text = _cli_naming_the_working_root("working_root = 7", program)
+
+    refusal = _refused_on_one_line(_written(tmp_path, text), capsys)
+
+    assert (
+        refusal
+        == "cli.working_root: must be an absolute path to the working root; ~ is not expanded"
+    )
+
+
+def test_a_bad_working_root_and_a_bad_token_file_are_both_named_on_one_line(tmp_path, capsys):
+    root = _a_missing_root(tmp_path)
+    unreadable = tmp_path / "unreadable.token"
+    program = fake_cli_executable(tmp_path, {("--version",): "any"})
+    text = _cli_naming_the_working_root(_root_line(root), program).replace(
+        TOKEN_FILE_LINE, f"token_file = {json.dumps(str(unreadable))}"
+    )
+
+    refusal = _refused_on_one_line(_written(tmp_path, text), capsys)
+
+    fields = [part.split(":", 1)[0] for part in refusal.split("; ")]
+    assert sorted(fields) == ["cli.working_root", TOKEN_FILE_FIELD]
+    assert root not in refusal.replace(str(unreadable), "")
 
 
 def test_a_claude_profile_without_the_cli_section_is_refused(tmp_path, capsys):

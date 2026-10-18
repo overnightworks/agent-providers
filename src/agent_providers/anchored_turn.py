@@ -18,12 +18,12 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from functools import partial
-from typing import Protocol
 
 import anyio
 
 from agent_providers.errors import ContainmentLost
 from agent_providers.lost_groups import release_leader_if_gone, retain_lost_group
+from agent_providers.process import ReleasedWithSlot
 from agent_providers.spawn import AnchoredChild, ChildProcess, open_anchored_pipes
 
 log = logging.getLogger(__name__)
@@ -31,10 +31,6 @@ log = logging.getLogger(__name__)
 
 class CliProcessPoolSaturated(Exception):
     """The pool was at its limit, so no child was started."""
-
-
-class ReleasedWithSlot(Protocol):
-    def release(self) -> None: ...
 
 
 @dataclass(eq=False)

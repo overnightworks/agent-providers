@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import re
-import shutil
-import tempfile
 from pathlib import Path
 from typing import Annotated, Final
 
 from pydantic import BeforeValidator
 
-from agent_providers.process import CliRun, run_catalog_cli
+from agent_providers.config import PrivateWorkingRoot
+from agent_providers.process import (
+    CliEnvironmentUnavailableError,
+    CliRun,
+    run_catalog_cli,
+    run_directories,
+)
 from agent_providers.secret_file import shown_text
 from agent_providers.spawn import ChildProcess, closed_environment
 
@@ -63,32 +67,19 @@ def _what_was_printed(stdout: str) -> str:
     return f"printed {shown_text(first_line[:SHOWN_OUTPUT_CHARACTERS])}"
 
 
-def _remove_home(home: Path) -> str | None:
-    """Why the probe's disposable home could not be removed, or ``None`` when it is gone."""
+def _probe(binary: Path, working_root: PrivateWorkingRoot) -> CliRun | None:
+    """The probe's run, or ``None`` when its tree could not be made or its start was refused."""
     try:
-        shutil.rmtree(home)
-    except OSError as failure:
-        return f"probe home could not be removed: {shown_text(failure.strerror or 'unknown')}"
-    return None
-
-
-def _probe(binary: Path) -> tuple[CliRun | None, str | None]:
-    """The probe's run and, separately, why its home could not be removed."""
-    try:
-        home = Path(tempfile.mkdtemp(prefix="agent-service-claude-version-"))
-    except OSError:
-        return None, None
-    try:
-        child = ChildProcess(
-            binary=binary,
-            arguments=("--version",),
-            environment=closed_environment(home),
-            working_directory=home,
-        )
-        run = run_catalog_cli(child)
-    finally:
-        removal_failure = _remove_home(home)
-    return run, removal_failure
+        with run_directories(working_root, {}) as directories:
+            child = ChildProcess(
+                binary=binary,
+                arguments=("--version",),
+                environment=closed_environment(directories.home),
+                working_directory=directories.working_directory,
+            )
+            return run_catalog_cli(child, home=directories)
+    except CliEnvironmentUnavailableError:
+        return None
 
 
 def _refusal(binary: Path, pinned: str, run: CliRun | None) -> str | None:
@@ -106,14 +97,12 @@ def _refusal(binary: Path, pinned: str, run: CliRun | None) -> str | None:
     return None
 
 
-def require_pinned_version(binary: Path, pinned: str) -> None:
-    """Run ``binary --version`` in a throwaway home and refuse unless it reports ``pinned``.
+def require_pinned_version(binary: Path, pinned: str, working_root: PrivateWorkingRoot) -> None:
+    """Run ``binary --version`` in a run tree below ``working_root``; refuse unless ``pinned``.
 
-    A home that cannot be removed never replaces the probe's own refusal.
+    The tree goes only once the probe's spawn failed or its group is confirmed gone; a tree
+    that cannot be removed is logged by the core and never changes the outcome.
     """
-    run, removal_failure = _probe(binary)
-    refusal = _refusal(binary, pinned, run)
+    refusal = _refusal(binary, pinned, _probe(binary, working_root))
     if refusal is not None:
         raise ClaudeVersionRefused(refusal)
-    if removal_failure is not None:
-        raise ClaudeVersionRefused(f"cli.claude_version: {removal_failure}")

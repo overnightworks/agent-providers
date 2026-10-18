@@ -2,11 +2,11 @@
 
 The service accepts at most one subscription profile, for Claude, which needs its
 token file and the ``[cli]`` section naming the absolute Claude program and the exact version
-it must report. An app that lists tools names its one https MCP origin; an origin is
-never shared between apps and needs the signing key. At load, every such app's
-capability is measured against the 8,192-character limit with a reserved subject
-size and timestamp width, so an app whose tools do not fit stops startup instead
-of failing its users.
+it must report and its private ``working_root``, checked at load. An app that lists tools
+names its one https MCP origin; an origin is never shared between apps and needs the signing
+key. At load, every such app's capability is measured against the 8,192-character limit with
+a reserved subject size and timestamp width, so an app whose tools do not fit stops startup
+instead of failing its users.
 
 A TOML file is read once at startup into frozen models that forbid unknown
 fields. A file the models refuse stops the service with an error naming the
@@ -29,6 +29,7 @@ from pydantic import (
     BeforeValidator,
     ConfigDict,
     Field,
+    PlainValidator,
     SecretStr,
     StrictFloat,
     StrictInt,
@@ -40,6 +41,7 @@ from webauth.https_client import is_https_url
 from agent_client.capability import MAX_CAPABILITY_CHARACTERS, McpOrigin
 from agent_client.tools import ToolEffect
 from agent_client.wire import MAX_EVENT_BYTES
+from agent_providers.config import PrivateWorkingRoot, WorkingRootNotPrivateError
 from agent_providers.secret_file import read_token_file, shown_text
 from agent_service.capability import (
     CapabilityScope,
@@ -91,9 +93,13 @@ class IdentityConfig(_Section):
     leeway_seconds: int = Field(default=0, ge=0, le=300)
 
 
+def _not_a_path_to(file_description: str) -> ValueError:
+    return ValueError(f"must be an absolute path to the {file_description}; ~ is not expanded")
+
+
 def _absolute_path_to(file_description: str, value: object) -> Path:
     if not isinstance(value, str):
-        raise ValueError(f"must be an absolute path to the {file_description}; ~ is not expanded")
+        raise _not_a_path_to(file_description)
     if not Path(value).is_absolute():
         raise ValueError(
             f"{shown_text(value)} must be an absolute path to the {file_description};"
@@ -126,11 +132,26 @@ def _claude_program(path: object) -> Path:
     return _absolute_path_to("claude program", path)
 
 
+def _private_working_root(value: object) -> PrivateWorkingRoot:
+    """Constructs the root the string names; only the closed violation reaches the message."""
+    if not isinstance(value, str):
+        raise _not_a_path_to("working root")
+    try:
+        return PrivateWorkingRoot(Path(value))
+    except WorkingRootNotPrivateError as error:
+        raise ValueError(f"not private: {error.violation.value}") from None
+
+
 class CliConfig(_Section):
-    """The Claude program this installation runs and the one version it must report."""
+    """The Claude program this installation runs, its pinned version and its private root."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", arbitrary_types_allowed=True)
 
     claude_binary: Annotated[Path, BeforeValidator(_claude_program)]
     claude_version: PinnedClaudeVersion
+    working_root: Annotated[PrivateWorkingRoot, PlainValidator(_private_working_root)] = Field(
+        exclude=True
+    )
 
 
 class ServerConfig(_Section):

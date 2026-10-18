@@ -26,7 +26,17 @@ from dataclasses import dataclass, field
 from enum import Enum, StrEnum
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Final, Literal, NotRequired, Required, TypedDict, Unpack, cast
+from typing import (
+    Any,
+    Final,
+    Literal,
+    NotRequired,
+    Protocol,
+    Required,
+    TypedDict,
+    Unpack,
+    cast,
+)
 
 from agent_providers import procfs
 from agent_providers.codex_login import CodexLoginVerdict, assess_codex_login, blanked_copy
@@ -555,10 +565,18 @@ class CachedProbe[T]:
         return self._value
 
 
+class ReleasedWithSlot(Protocol):
+    def release(self) -> None: ...
+
+
+class HeldHome(Protocol):
+    def reserve(self) -> ReleasedWithSlot: ...
+
+
 def run_catalog_cli(
     child: ChildProcess,
     *,
-    home: PrivateHome | None = None,
+    home: HeldHome | None = None,
     stderr: StderrPolicy = "capture",
     output_read_limit_bytes: int | None = None,
 ) -> CliRun | None:
@@ -577,8 +595,8 @@ def run_catalog_cli(
         deadline=time.monotonic() + PROBE_TIMEOUT_SECONDS,
         stderr=stderr,
         output_read_limit_bytes=limit,
-        on_spawn_failed=None if reservation is None else reservation.on_spawn_failed,
-        on_reaped=None if reservation is None else reservation.on_reaped,
+        on_spawn_failed=None if reservation is None else reservation.release,
+        on_reaped=None if reservation is None else lambda _pid, _zombie: reservation.release(),
     )
     return _cli_run_from_outcome(outcome)
 

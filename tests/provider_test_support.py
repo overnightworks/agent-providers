@@ -16,6 +16,7 @@ against values this package owns.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import errno
 import gc
 import json
@@ -24,7 +25,6 @@ import os
 import shlex
 import signal
 import stat
-import subprocess
 import sys
 import tempfile
 import threading
@@ -84,6 +84,7 @@ from agent_providers.process import CliRunOutcome, CliRunReason
 from agent_providers.procfs import GroupCensus
 from agent_providers.spawn import (
     AnchorStateError,
+    BlockingAnchoredChild,
     ChildIdentityLost,
     ChildProcess,
     KillUntilGoneResult,
@@ -99,7 +100,7 @@ from agent_providers.tool_loop import (
 )
 from agent_providers.tools import ToolCatalog, ToolProtocolMarkup
 
-_fake_cli_processes: list[MagicMock] = []
+_fake_cli_processes: list[FakeBlockingChild] = []
 
 CANARY_ACCESS_TOKEN = "canary-access-token"
 CANARY_ID_TOKEN = "canary-id-token"
@@ -296,56 +297,33 @@ def assert_private_credential_child(
 
 
 class CliDoor(Protocol):
-    def __call__(self, child: ChildProcess, *, stderr: StderrPolicy) -> subprocess.Popen[bytes]: ...
+    def __call__(
+        self, child: ChildProcess, *, stderr: StderrPolicy
+    ) -> BlockingAnchoredChild | FakeBlockingChild: ...
 
 
 def install_cli_door(monkeypatch: pytest.MonkeyPatch, door: CliDoor) -> CliDoor:
-    replaced = process.open_pipes
-    monkeypatch.setattr(process, "open_pipes", door)
+    replaced = process.open_blocking_anchored_pipes
+    monkeypatch.setattr(process, "open_blocking_anchored_pipes", door)
     return replaced
 
 
 def fake_cli_process(
     first_line: bytes | None, *, still_running: bool = False, stdin_blocked: bool = False,
-) -> MagicMock:
-    """Build a pipe-backed stand-in for the ``subprocess.Popen`` CLI handle."""
-    proc = MagicMock()
-    proc.pid = 4343
-    proc.poll.return_value = None if still_running else 0
-    stdin_reader, stdin_writer = os.pipe()
-    stdout_reader, stdout_writer = os.pipe()
-    stderr_reader, stderr_writer = os.pipe()
-    proc.stdin = os.fdopen(stdin_writer, "wb", buffering=0)
-    proc.stdout = os.fdopen(stdout_reader, "rb", buffering=0)
-    proc.stderr = os.fdopen(stderr_reader, "rb", buffering=0)
-    proc._stdin_reader = os.fdopen(stdin_reader, "rb", buffering=0)
-    proc._stdout_writer = os.fdopen(stdout_writer, "wb", buffering=0)
-    proc._stderr_writer = os.fdopen(stderr_writer, "wb", buffering=0)
-    proc._stderr_writer.close()
-    if stdin_blocked:
-        os.set_blocking(proc.stdin.fileno(), False)
-        try:
-            while True:
-                os.write(proc.stdin.fileno(), b"x" * 65536)
-        except BlockingIOError:
-            pass
-    if first_line is not None:
-        proc._stdout_writer.write(first_line)
-        proc._stdout_writer.close()
-    proc.wait.return_value = None
-    _fake_cli_processes.append(proc)
-    return proc
+    **script: Any,
+) -> FakeBlockingChild:
+    """Build a pipe-backed stand-in for the ``BlockingAnchoredChild`` CLI handle."""
+    child = FakeBlockingChild(
+        first_line, still_running=still_running, stdin_blocked=stdin_blocked, **script
+    )
+    _fake_cli_processes.append(child)
+    return child
 
 
 def close_fake_cli_pipes() -> None:
     """Close every pipe-backed fake CLI stream built during a test module."""
-    for proc in _fake_cli_processes:
-        for stream_name in (
-            "stdin", "stdout", "stderr", "_stdin_reader", "_stdout_writer", "_stderr_writer",
-        ):
-            stream = getattr(proc, stream_name)
-            if not stream.closed:
-                stream.close()
+    for child in _fake_cli_processes:
+        child.close_every_pipe()
     _fake_cli_processes.clear()
 
 
@@ -1444,11 +1422,11 @@ class ScriptedClaudeChild(ScriptedAnchoredChild):
 
     ``returncode`` is the committed exit (``None`` while the leader runs).
     ``publish_exit`` commits it, then announces it; ``exit_on_kill`` decides what
-    a kill of a running leader without a scripted answer does: announce the exit
-    (``PUBLISHED``), only commit it (``COMMITTED_UNANNOUNCED``) or leave it
-    (``NONE``). ``exited()`` passes ``exit_gate``, publishes ``natural_exit`` unless it is
-    ``None``, and then waits for a published exit, failing the test at the
-    scenario's deadline rather than hanging; ``signal_group(sig)``
+    ``kill_until_gone`` on a running leader without a scripted ``gone`` answer does:
+    announce the exit (``PUBLISHED``), only commit it (``COMMITTED_UNANNOUNCED``) or leave it
+    (``NONE``; a ``signal_group(SIGKILL)`` always publishes). ``exited()`` passes ``exit_gate``,
+    publishes ``natural_exit`` unless it is ``None``, and then waits for a published exit,
+    failing the test at the scenario's deadline rather than hanging; ``signal_group(sig)``
     publishes ``-sig`` unless the leader ``survives`` it. Like the real handle it
     refuses ``release()`` while the leader runs. Every group call is recorded in
     ``log``, and nothing here ever reaches a real process.
@@ -1568,6 +1546,143 @@ class ScriptedClaudeChild(ScriptedAnchoredChild):
             self._enter("release")
             raise AnchorStateError("the leader's exit is not published; it cannot be released")
         super().release()
+
+
+class FakeBlockingChild:
+    """The bounded runner's ``BlockingAnchoredChild`` double: pipe-backed streams and a log.
+
+    ``operations`` records each group call as ``(name, *arguments)`` in order; ``kill_bounds``
+    holds the bound of each ``kill_until_gone``. ``still_running`` leaves the leader running
+    until a signal ends it: SIGTERM publishes ``-SIGTERM`` unless ``survives_sigterm``. Without
+    scripted ``gone`` answers (the last repeats, an exception is raised) a
+    ``kill_until_gone`` counts the group ``EMPTY`` in time, and a running leader's exit follows
+    ``exit_on_kill``. ``signal_failure`` is raised by the first ``signal_group``; each of
+    ``release_failures`` by one ``release``. Like the real handle it refuses ``release()``
+    while the leader runs. Nothing here reaches a real process.
+    """
+
+    pid = 4343
+
+    def __init__(
+        self,
+        first_line: bytes | None,
+        *,
+        still_running: bool = False,
+        stdin_blocked: bool = False,
+        survives_sigterm: bool = False,
+        gone: Sequence[KillUntilGoneResult | BaseException] = (),
+        exit_on_kill: ExitOnKill = ExitOnKill.PUBLISHED,
+        signal_failure: Exception | None = None,
+        release_failures: Sequence[Exception] = (),
+    ) -> None:
+        self.operations: list[tuple[Any, ...]] = []
+        self.kill_bounds: list[float] = []
+        self.released = False
+        self.returncode: int | None = None if still_running else 0
+        self._exit_published = threading.Event()
+        if not still_running:
+            self._exit_published.set()
+        self._survives_sigterm = survives_sigterm
+        self._gone = deque(gone)
+        self._exit_on_kill = exit_on_kill
+        self._signal_failure = signal_failure
+        self._release_failures = deque(release_failures)
+        stdin_reader, stdin_writer = os.pipe()
+        stdout_reader, stdout_writer = os.pipe()
+        stderr_reader, stderr_writer = os.pipe()
+        self.stdin = os.fdopen(stdin_writer, "wb", buffering=0)
+        self.stdout = os.fdopen(stdout_reader, "rb", buffering=0)
+        self.stderr = os.fdopen(stderr_reader, "rb", buffering=0)
+        self._stdin_reader = os.fdopen(stdin_reader, "rb", buffering=0)
+        self._stdout_writer = os.fdopen(stdout_writer, "wb", buffering=0)
+        self._stderr_writer = os.fdopen(stderr_writer, "wb", buffering=0)
+        self._stderr_writer.close()
+        if stdin_blocked:
+            os.set_blocking(self.stdin.fileno(), False)
+            with contextlib.suppress(BlockingIOError):
+                while True:
+                    os.write(self.stdin.fileno(), b"x" * 65536)
+        if first_line is not None:
+            self._stdout_writer.write(first_line)
+            self._stdout_writer.close()
+
+    def signal_group(self, sig: signal.Signals) -> None:
+        self.operations.append(("signal_group", sig))
+        if self._signal_failure is not None:
+            failure, self._signal_failure = self._signal_failure, None
+            raise failure
+        if sig is not signal.SIGTERM or not self._survives_sigterm:
+            self._publish_exit(-sig)
+
+    def kill_until_gone(self, *, within: float) -> KillUntilGoneResult:
+        self.operations.append(("kill_until_gone", within))
+        self.kill_bounds.append(within)
+        if not self._gone:
+            return self._empty_group_after_the_kill()
+        answer = self._gone[0] if len(self._gone) == 1 else self._gone.popleft()
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+    def _empty_group_after_the_kill(self) -> KillUntilGoneResult:
+        if self.returncode is None:
+            if self._exit_on_kill is ExitOnKill.PUBLISHED:
+                self._publish_exit(-signal.SIGKILL)
+            elif self._exit_on_kill is ExitOnKill.COMMITTED_UNANNOUNCED:
+                self.returncode = -signal.SIGKILL
+        return KillUntilGoneResult(GroupCensus.EMPTY, ended_in_time=True)
+
+    def wait_for_exit(self, timeout: float) -> bool:
+        self.operations.append(("wait_for_exit", timeout))
+        return self._exit_published.is_set()
+
+    def close_streams(self) -> None:
+        self.operations.append(("close_streams",))
+        for stream in (self.stdin, self.stdout, self.stderr):
+            stream.close()
+
+    def release(self) -> None:
+        self.operations.append(("release",))
+        if self._release_failures:
+            raise self._release_failures.popleft()
+        if self.returncode is None:
+            raise AnchorStateError("the leader's exit is not published; it cannot be released")
+        self.released = True
+        for stream in (self.stdin, self.stdout, self.stderr):
+            stream.close()
+
+    def end_and_release(self) -> None:
+        if self.returncode is None:
+            self._publish_exit(-signal.SIGKILL)
+        self._release_failures.clear()
+        self.release()
+        self.close_every_pipe()
+
+    def close_every_pipe(self) -> None:
+        for stream in (
+            self.stdin,
+            self.stdout,
+            self.stderr,
+            self._stdin_reader,
+            self._stdout_writer,
+            self._stderr_writer,
+        ):
+            stream.close()
+
+    def _publish_exit(self, returncode: int) -> None:
+        self.returncode = returncode
+        self._exit_published.set()
+
+
+@pytest.fixture
+def held_bounded_groups(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[process._HeldGroup]]:
+    """A fresh list of the groups the bounded runner holds; teardown ends and releases each fake."""
+    held: list[process._HeldGroup] = []
+    monkeypatch.setattr(process, "_groups_held_until_exit", held)
+    yield held
+    for group in held:
+        assert isinstance(group.process, FakeBlockingChild), "a real handle was held at the end"
+        group.process.end_and_release()
 
 
 def a_claude_cli_child(*, pid: int = 2468, **script: Any) -> ScriptedClaudeChild:

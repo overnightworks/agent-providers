@@ -14,7 +14,7 @@ name as an attribute: not a spawning module under any spelling of its owner
 (``spawn.subprocess``, ``asyncio.subprocess``), not a spawning ``os`` name read
 from ``os``, from an alias of it or from any ``<x>.os``, not an AnyIO
 ``run_process`` or ``open_process``. The names outside :mod:`agent_providers.spawn`
-that type a child are ``spawn.PipedProcess`` and ``spawn.AnchoredChild``. So every
+that type a child are ``spawn.AnchoredChild`` and ``spawn.BlockingAnchoredChild``. So every
 child is described by a :class:`ChildProcess` first, and that value refuses a relative binary, a
 missing working directory and an unset ``HOME``.
 
@@ -50,7 +50,7 @@ from agent_providers.spawn import (
     ChildProcessSpecificationError,
     closed_environment,
     open_anchored_pipes,
-    open_pipes,
+    open_blocking_anchored_pipes,
     run_capturing,
     start_anchored_leader,
 )
@@ -320,7 +320,7 @@ def test_the_spawn_policy_flags_every_way_to_reach_a_process_primitive(source: s
         "import asyncio\nasyncio.run(main())",
         "import os\nos.getpid()\nos.environ",
         "from os import getpid",
-        "from agent_providers.spawn import PipedProcess",
+        "from agent_providers.spawn import BlockingAnchoredChild",
         "from agent_providers.spawn import AnchoredChild",
         "from agent_providers import spawn\ndef f(p: spawn.AnchoredChild) -> None: ...",
         "import os\noperating = os\noperating.getpid()",
@@ -331,11 +331,6 @@ def test_the_spawn_policy_flags_every_way_to_reach_a_process_primitive(source: s
 )
 def test_the_spawn_policy_accepts_code_that_starts_no_child(source: str) -> None:
     assert _spawn_policy_violations(ast.parse(source)) == []
-
-
-def test_the_spawn_owners_process_type_starts_nothing() -> None:
-    with pytest.raises(TypeError):
-        spawn.PipedProcess(["/bin/true"])
 
 
 OWNER_SPAWN_CALLS = frozenset({"Popen", "run", "create_subprocess_exec"})
@@ -468,10 +463,13 @@ def _stdout_of_run_capturing(child: ChildProcess) -> str:
     return run_capturing(child, stdin_text="", timeout_seconds=30).stdout
 
 
-def _stdout_of_open_pipes(child: ChildProcess) -> str:
-    process = open_pipes(child, stderr="devnull")
-    stdout, _ = process.communicate(b"")
-    return stdout.decode()
+def _stdout_of_open_blocking_anchored_pipes(child: ChildProcess) -> str:
+    process = open_blocking_anchored_pipes(child, stderr="devnull")
+    process.stdin.close()
+    output = process.stdout.read()
+    assert process.wait_for_exit(TEST_WAIT_SECONDS)
+    process.release()
+    return output.decode()
 
 
 def _run_descriptor_probe(tmp_path: Path, stdout_of: Callable[[ChildProcess], str]) -> None:
@@ -517,10 +515,10 @@ needs_proc_fd = pytest.mark.skipif(
     "stdout_of",
     [
         _stdout_of_run_capturing,
-        _stdout_of_open_pipes,
+        _stdout_of_open_blocking_anchored_pipes,
         _stdout_of_open_anchored_pipes,
     ],
-    ids=["run_capturing", "open_pipes", "open_anchored_pipes"],
+    ids=["run_capturing", "open_blocking_anchored_pipes", "open_anchored_pipes"],
 )
 def test_a_child_inherits_no_descriptor_the_parent_holds_open(
     tmp_path: Path, stdout_of: Callable[[ChildProcess], str],

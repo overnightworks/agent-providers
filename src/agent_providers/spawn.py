@@ -52,6 +52,7 @@ import os
 import signal
 import subprocess
 import threading
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
@@ -91,7 +92,6 @@ INHERITED_MACHINE_VARIABLES: Final[tuple[str, ...]] = (
 
 StderrPolicy = Literal["capture", "devnull"]
 
-type PipedProcess = subprocess.Popen[bytes]
 PipedProcessTimeout = subprocess.TimeoutExpired
 
 
@@ -155,23 +155,6 @@ class ChildProcess:
             environment=self.environment,
             working_directory=self.working_directory,
         )
-
-
-def open_pipes(child: ChildProcess, *, stderr: StderrPolicy) -> subprocess.Popen[bytes]:
-    """Start one child with pipes on every stream the caller reads.
-
-    Its own session, because the caller holds the handle that reaps that
-    whole group.
-    """
-    return subprocess.Popen(
-        child.command,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE if stderr == "capture" else subprocess.DEVNULL,
-        env=dict(child.environment),
-        cwd=str(child.working_directory),
-        start_new_session=True,
-    )
 
 
 def run_capturing(
@@ -382,6 +365,20 @@ class _CensusClock:
 
 def _census_clock() -> _CensusClock:
     return _CensusClock()
+
+
+class _BlockingCensusClock:
+    """The caller's thread clock, and the sleep that ends on it."""
+
+    def now(self) -> float:
+        return time.monotonic()
+
+    def wait_until(self, instant: float) -> None:
+        time.sleep(max(0.0, instant - self.now()))
+
+
+def _blocking_census_clock() -> _BlockingCensusClock:
+    return _BlockingCensusClock()
 
 
 class _WatcherOwnership(Enum):
@@ -719,6 +716,12 @@ class _DoorPipes:
         self._parent_files.append(parent_file)
         return parent_file, child_end
 
+    def open_devnull(self) -> int:
+        """Open ``/dev/null`` for writing as a child end the next cleanup closes."""
+        child_end = os.open(os.devnull, os.O_WRONLY)
+        self._child_ends.append(child_end)
+        return child_end
+
     async def attach_reader(
         self, loop: asyncio.AbstractEventLoop, pipe: IO[bytes], stream_buffer_limit: int | None
     ) -> asyncio.StreamReader:
@@ -745,13 +748,16 @@ class _DoorPipes:
 
     def close_parent_side(self, loop: asyncio.AbstractEventLoop) -> None:
         transports, self._transports = self._transports, []
+        if not loop.is_closed():
+            for transport in transports:
+                self._close_transport(transport)
+        self.close_parent_files()
+
+    def close_parent_files(self) -> None:
         parent_files, self._parent_files = self._parent_files, []
         unwrapped_ends, self._unwrapped_parent_ends = self._unwrapped_parent_ends, []
         for unwrapped_end in unwrapped_ends:
             os.close(unwrapped_end)
-        if not loop.is_closed():
-            for transport in transports:
-                self._close_transport(transport)
         for parent_file in parent_files:
             parent_file.close()
 
@@ -773,9 +779,14 @@ def _next_census_start(census: procfs.GroupCensus, ended: float, deadline: float
     return next_start if next_start < deadline else None
 
 
+def _require_usable_bound(within: float) -> None:
+    if not (math.isfinite(within) and within >= 0):
+        raise ValueError(f"the bound must be finite and not negative, not {within!r}")
+
+
 @dataclass(frozen=True)
 class KillUntilGoneResult:
-    """The last count of :meth:`AnchoredChild.kill_until_gone` and whether it ended in time.
+    """The last count of a ``kill_until_gone`` and whether it ended in time.
 
     Only :attr:`confirmed` means that the group is gone, in time: an ``EMPTY`` count
     that ended no later than the bound. Any other result means the group must be retained.
@@ -896,8 +907,7 @@ class AnchoredChild:
         return self._leader.kill_and_census()
 
     async def kill_until_gone(self, *, within: float) -> KillUntilGoneResult:
-        if not (math.isfinite(within) and within >= 0):
-            raise ValueError(f"the bound must be finite and not negative, not {within!r}")
+        _require_usable_bound(within)
         clock = _census_clock()
         deadline = clock.now() + within
         while True:
@@ -986,4 +996,122 @@ async def open_anchored_pipes(
     except BaseException:
         pipes.close_child_ends()
         pipes.close_parent_side(loop)
+        raise
+
+
+class BlockingAnchoredChild:
+    """The blocking face of an :class:`AnchoredLeader`: file objects, an exit event, no reaper.
+
+    Only :func:`open_blocking_anchored_pipes` creates one, for a caller that owns a
+    thread. ``pid``, ``returncode``, ``done_with_pid`` and ``signal_group`` are the leader's.
+    ``stdin`` and ``stdout`` are unbuffered file objects; ``stderr`` is one, or ``None`` when
+    the door sent it to ``/dev/null``. There is no ``wait``, ``poll`` or ``communicate``:
+    ``wait_for_exit`` answers whether the leader's exit is published, false for a lost
+    leader too, and never reaps.
+
+    ``kill_until_gone(within=)`` is :meth:`AnchoredChild.kill_until_gone` on the caller's
+    thread and on ``time.monotonic``: the same bound, the same attempt-again decision, the
+    same result. ``close_streams()`` closes the parent file objects once. ``release()``
+    reaps through the leader, which refuses a running one with :class:`AnchorStateError`
+    and then closes nothing; once the leader is released or lost, whatever its call
+    raised, the streams are closed. A second ``release()`` does nothing.
+    """
+
+    def __init__(
+        self,
+        leader: AnchoredLeader,
+        exit_published: threading.Event,
+        pipes: _DoorPipes,
+        *,
+        stdin: IO[bytes],
+        stdout: IO[bytes],
+        stderr: IO[bytes] | None,
+    ) -> None:
+        self.stdin = stdin
+        self.stdout = stdout
+        self.stderr = stderr
+        self._leader = leader
+        self._exit_published = exit_published
+        self._pipes = pipes
+
+    @property
+    def pid(self) -> int:
+        return self._leader.pid
+
+    @property
+    def returncode(self) -> int | None:
+        return self._leader.returncode
+
+    @property
+    def done_with_pid(self) -> bool:
+        return self._leader.done_with_pid
+
+    def signal_group(self, sig: signal.Signals) -> None:
+        self._leader.signal_group(sig)
+
+    def kill_until_gone(self, *, within: float) -> KillUntilGoneResult:
+        _require_usable_bound(within)
+        clock = _blocking_census_clock()
+        deadline = clock.now() + within
+        while True:
+            census = self._leader.kill_and_census()
+            ended = clock.now()
+            next_start = _next_census_start(census, ended, deadline)
+            if next_start is None:
+                break
+            clock.wait_until(next_start)
+            if clock.now() >= deadline:
+                break
+        return KillUntilGoneResult(census, ended_in_time=ended <= deadline)
+
+    def wait_for_exit(self, timeout: float) -> bool:
+        return self._exit_published.wait(timeout) and self._leader.returncode is not None
+
+    def close_streams(self) -> None:
+        self._pipes.close_parent_files()
+
+    def release(self) -> None:
+        try:
+            self._leader.release()
+        finally:
+            if self._leader.state not in _ANCHORED_STATES:
+                self.close_streams()
+
+
+def open_blocking_anchored_pipes(
+    child: ChildProcess,
+    *,
+    stderr: StderrPolicy,
+) -> BlockingAnchoredChild:
+    """Start one child with pipes on the streams the caller reads, anchored, for a thread.
+
+    The blocking twin of :func:`open_anchored_pipes`: stdin and stdout are pipes, stderr
+    is a pipe for ``"capture"`` and ``/dev/null`` for ``"devnull"``. Any ``BaseException``
+    before the return closes every parent file object and child end and is re-raised
+    unchanged, the start's own rollback errors included.
+    """
+    exit_published = threading.Event()
+    pipes = _DoorPipes()
+    try:
+        stdout_file, stdout_child_end = pipes.open_pipe(parent_reads=True)
+        stdin_file, stdin_child_end = pipes.open_pipe(parent_reads=False)
+        stderr_file: IO[bytes] | None = None
+        if stderr == "capture":
+            stderr_file, stderr_child_end = pipes.open_pipe(parent_reads=True)
+        else:
+            stderr_child_end = pipes.open_devnull()
+        leader = start_anchored_leader(
+            child,
+            stdin=stdin_child_end,
+            stdout=stdout_child_end,
+            stderr=stderr_child_end,
+            on_exit=exit_published.set,
+        )
+        pipes.close_child_ends()
+        return BlockingAnchoredChild(
+            leader, exit_published, pipes, stdin=stdin_file, stdout=stdout_file, stderr=stderr_file
+        )
+    except BaseException:
+        pipes.close_child_ends()
+        pipes.close_parent_files()
         raise

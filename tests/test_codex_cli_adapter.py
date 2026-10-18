@@ -9,7 +9,6 @@ import json
 import logging
 import os
 import shlex
-import signal
 import stat
 import threading
 import time
@@ -1076,6 +1075,7 @@ _HANG_BOUND_SECONDS = 20
 _START_THREADS_JOIN_SECONDS = 5
 _ALLOWANCE_SECONDS = 0.5
 _TINY_GRACE_SECONDS = 0.01
+_SHORT_CONFIRMATION_SECONDS = 0.2
 
 
 @dataclass(frozen=True)
@@ -1158,6 +1158,7 @@ def _the_child_prints_then_sleeps(monkeypatch, events: list[dict]) -> None:
 
 def _settle_within_a_few_hundredths(monkeypatch) -> None:
     monkeypatch.setattr(process, "CLI_TERMINATION_GRACE_SECONDS", _TINY_GRACE_SECONDS)
+    monkeypatch.setattr(process, "CLI_GROUP_CONFIRMATION_SECONDS", _SHORT_CONFIRMATION_SECONDS)
     monkeypatch.setattr(process, "CLI_PROBE_CALLER_TIMEOUT_MARGIN_SECONDS", _TINY_GRACE_SECONDS)
 
 
@@ -1499,7 +1500,6 @@ def test_a_zombie_child_ends_the_turn_while_its_reservation_waits_for_the_backgr
 
     def reap_once_released(child, on_reaped) -> None:
         release_background_reap.wait(timeout=_HANG_BOUND_SECONDS)
-        os.killpg(child.pid, signal.SIGKILL)
         real_background_reap(child, on_reaped)
 
     monkeypatch.setattr(process, "_reap_process_group", lambda _child: True)
@@ -2676,7 +2676,6 @@ def _a_zombie_child(monkeypatch) -> Callable[[], None]:
 
     def reap_once_opened(child, on_reaped) -> None:
         gate.wait(timeout=_HANG_BOUND_SECONDS)
-        os.killpg(child.pid, signal.SIGKILL)
         real_background_reap(child, on_reaped)
 
     monkeypatch.setattr(process, "_reap_process_group", lambda _child: True)

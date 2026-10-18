@@ -14,7 +14,8 @@ release, the entry's removal, then ``True``. Any other count, or an exit not yet
 committed, gives ``False`` and releases nothing; the next attempt kills and counts again.
 The attempt's exit evidence is the committed ``returncode``, not an awaited ``exited()``,
 which waits forever once the opening loop has closed. ``release_leader_if_gone`` is the one
-decider of the leader's release, for this attempt and for the turn's reap alike.
+decider of the leader's release, for this attempt, for the turn's reap and for the bounded
+runner's reap alike.
 
 **One attempt at a time.** A call for a group that has an attempt returns ``False`` at
 once and signals nothing. The attempt has up to two holders, the call and its census
@@ -50,11 +51,16 @@ import itertools
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Protocol
 
 from agent_providers.errors import RetainedGroup
 from agent_providers.process import ClaimedStartThread
 from agent_providers.procfs import GroupCensus
 from agent_providers.spawn import AnchoredChild
+
+
+class ReleasableLeader(Protocol):
+    def release(self) -> None: ...
 
 
 @dataclass
@@ -120,7 +126,9 @@ def _remove(group: RetainedGroup) -> None:
         del _lost_groups[group]
 
 
-def release_leader_if_gone(child: AnchoredChild, *, counted_empty: bool, exit_known: bool) -> bool:
+def release_leader_if_gone(
+    child: ReleasableLeader, *, counted_empty: bool, exit_known: bool
+) -> bool:
     if not (counted_empty and exit_known):
         return False
     child.release()

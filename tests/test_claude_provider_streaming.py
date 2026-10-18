@@ -218,8 +218,8 @@ def test_parse_payload_without_content_yields_no_events(payload) -> None:
 A_MARKER = "MARKER-7f3a9c"
 
 
-def _nested_object(depth: int) -> bytes:
-    return b'{"a":' * depth + b"1" + b"}" * depth
+def _nested_array(depth: int) -> bytes:
+    return b"[" * depth + b"]" * depth
 
 
 def _a_json_object_with_marker(encoding: str) -> bytes:
@@ -241,7 +241,7 @@ def assert_no_marker_in_failure(error: BaseException, caplog) -> None:
         (b"\xff" + _a_json_object_with_marker("utf-8"), "UnicodeDecodeError"),
         (_a_json_object_with_marker("utf-16"), "UnicodeDecodeError"),
         (_a_json_object_with_marker("utf-32"), "UnicodeDecodeError"),
-        (_nested_object(100_000), "RecursionError"),
+        (_nested_array(100_000), "RecursionError"),
         (_a_json_object_with_marker("utf-16-le"), "JSONDecodeError"),
         (_a_json_object_with_marker("utf-32-le"), "JSONDecodeError"),
     ],

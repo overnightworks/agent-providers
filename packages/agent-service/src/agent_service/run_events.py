@@ -222,7 +222,7 @@ class _WireRun:
         if isinstance(decided, _DecidedFailure):
             return self._sent(self._failed_event(decided))
         try:
-            return self._sent(decided.model_copy(update={"seq": self._seq}))
+            return self._sent(decided)
         except (_Unsendable, _OverBudget) as refusal:
             return self._sent(self._failed_event(_failure_of(refusal)))
 

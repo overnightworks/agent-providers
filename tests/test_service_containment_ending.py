@@ -45,7 +45,7 @@ from agent_client.wire import (
 from agent_providers.errors import ContainmentLost, RetainedGroup
 from agent_providers.events import AssistantTextEvent, FinalEvent, StreamEvent
 from agent_service.config import RunConfig
-from agent_service.run_events import RUNNER_FAILED_MESSAGE
+from agent_service.run_events import INVALID_EVENT_MESSAGE, RUNNER_FAILED_MESSAGE
 from agent_service.run_liveness import (
     RunFailures,
     RunnerOutcome,
@@ -57,7 +57,14 @@ from agent_service.run_liveness import (
 FIRST = RetainedGroup(pgid=4242, generation=1)
 SECOND = RetainedGroup(pgid=4343, generation=2)
 FINAL = FinalEvent(text="Done.")
+PROVIDER_CANARY = "GATE_SYNTHETIC_CANARY"
 TERMINAL_TYPES = frozenset({"succeeded", "failed", "cancelled"})
+
+
+def _final_with_assigned_payload() -> FinalEvent:
+    final = FinalEvent(text="Done.")
+    final.text = {"provider_payload": PROVIDER_CANARY}
+    return final
 
 
 def _lost(group: RetainedGroup = FIRST) -> ContainmentLost:
@@ -274,6 +281,7 @@ async def test_a_loss_at_a_step_ends_the_run_provider_error_after_the_close(
         pytest.param(RunConfig(), FINAL, id="a-final-answer"),
         pytest.param(RunConfig(max_bytes=10), FINAL, id="a-final-answer-over-the-byte-budget"),
         pytest.param(RunConfig(), FinalEvent(text="\ud800"), id="an-unsendable-final-answer"),
+        pytest.param(RunConfig(), _final_with_assigned_payload(), id="an-invalid-final-answer"),
     ],
 )
 @in_loop
@@ -547,6 +555,25 @@ async def test_a_loss_beside_a_cancellation_escaping_a_step_ends_provider_error_
     assert control.code is FailureCode.IDLE_TIMEOUT
     assert lossy.code is FailureCode.PROVIDER_ERROR
     assert replace(lossy, code=control.code) == control
+
+
+@in_loop
+async def test_a_final_answer_invalid_at_the_decision_ends_provider_error_without_provider_text(
+    caplog,
+):
+    runner = GatedRunner()
+    caplog.set_level(logging.DEBUG)
+    async with driven(runner) as drive:
+        runner.release(_final_with_assigned_payload())
+        await drive.run_to_end()
+        await drive.finished()
+
+    terminal = drive.terminal[1]
+    assert isinstance(terminal, Failed)
+    assert (terminal.code, terminal.message) == (FailureCode.PROVIDER_ERROR, INVALID_EVENT_MESSAGE)
+    _assert_recorded(drive.status(), RunState.FAILED, FailureCode.PROVIDER_ERROR, events=2, at=0)
+    visible = [repr(drive.terminal), repr(drive.status()), caplog.text]
+    assert [PROVIDER_CANARY in text for text in visible] == [False, False, False]
 
 
 class _AnswerBlankedAtClose(GatedRunner):

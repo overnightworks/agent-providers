@@ -102,11 +102,6 @@ class _DecidedFailure:
     message: str
 
 
-@dataclass(frozen=True)
-class _DecidedSuccess:
-    text: str
-
-
 def _failure_of(refusal: _Unsendable | _OverBudget) -> _DecidedFailure:
     code = (
         FailureCode.LIMIT_EXCEEDED
@@ -186,7 +181,7 @@ class _WireRun:
         self._seq = 0
         self._tool_calls = 0
         self._bytes = 0
-        self._decided: _DecidedSuccess | _DecidedFailure | None = None
+        self._decided: Succeeded | _DecidedFailure | None = None
         self._terminal_frame: bytes | None = None
 
     @property
@@ -223,13 +218,11 @@ class _WireRun:
         assert self._terminal_frame is not None
         return self._terminal_frame
 
-    def _committed_terminal(self, decided: _DecidedSuccess | _DecidedFailure) -> bytes:
+    def _committed_terminal(self, decided: Succeeded | _DecidedFailure) -> bytes:
         if isinstance(decided, _DecidedFailure):
             return self._sent(self._failed_event(decided))
         try:
-            succeeded = self._wire_event(FinalEvent(text=decided.text))
-            assert succeeded is not None
-            return self._sent(succeeded)
+            return self._sent(decided.model_copy(update={"seq": self._seq}))
         except (_Unsendable, _OverBudget) as refusal:
             return self._sent(self._failed_event(_failure_of(refusal)))
 
@@ -260,10 +253,19 @@ class _WireRun:
                 log_failure(log, f"The runner of run {self._run_id} failed", error)
                 self.decide_failure(FailureCode.PROVIDER_ERROR, RUNNER_FAILED_MESSAGE)
             case RunnerYielded(event=FinalEvent() as final):
-                self._decided = _DecidedSuccess(final.text)
+                self._decide_success(final)
             case RunnerYielded(event=core_event):
                 return self._frame_of_event(core_event)
         return None
+
+    def _decide_success(self, final: FinalEvent) -> None:
+        try:
+            succeeded = self._wire_event(final)
+        except _Unsendable as refusal:
+            self._decided = _failure_of(refusal)
+        else:
+            assert isinstance(succeeded, Succeeded)
+            self._decided = succeeded
 
     def _frame_of_event(self, core_event: StreamEvent) -> bytes | None:
         try:

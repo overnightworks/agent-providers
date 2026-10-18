@@ -525,9 +525,7 @@ class ToolCallBarrier:
         return handed_out.event
 
     def accept(self, event: ToolCallEvent) -> None:
-        pending = self._handed_out
-        if pending is None or pending.event.tool_use_id != event.tool_use_id:
-            raise_without_chain(ToolCallsMisused())
+        pending = self._handed_out_for(event)
         self._handed_out = None
         forward = asyncio.create_task(
             self._app.call_tool(pending.params.name, pending.params.arguments),
@@ -549,6 +547,12 @@ class ToolCallBarrier:
     async def settle(self) -> None:
         while self._forwards:
             await asyncio.wait(tuple(self._forwards))
+
+    def _handed_out_for(self, event: ToolCallEvent) -> _PendingCall:
+        pending = self._handed_out
+        if pending is not None and pending.event.tool_use_id == event.tool_use_id:
+            return pending
+        raise_without_chain(ToolCallsMisused())
 
     def _admits(self, request_id: RequestId) -> bool:
         return (

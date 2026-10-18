@@ -6,7 +6,7 @@ committed. Every request is recorded and answered by a responder the test
 supplies. Every wait carries a timeout and ``close`` releases every held
 response, so no handler outlives its test. Connections are HTTP/1.0 unless
 the server is started with ``keep_alive``; every accepted connection is
-counted before its TLS handshake.
+counted before its TLS handshake, and every ended connection once its handler is done.
 """
 
 from __future__ import annotations
@@ -302,6 +302,7 @@ class McpAppFake(ThreadingHTTPServer):
         self.keep_alive = keep_alive
         self.tail_released = threading.Event()
         self._accepted_connections = 0
+        self._ended_connections = 0
         self._recorded: list[RecordedRequest] = []
         self._lock = threading.Lock()
 
@@ -318,6 +319,16 @@ class McpAppFake(ThreadingHTTPServer):
     def accepted_connections(self) -> int:
         with self._lock:
             return self._accepted_connections
+
+    @property
+    def ended_connections(self) -> int:
+        with self._lock:
+            return self._ended_connections
+
+    def shutdown_request(self, request: Any) -> None:
+        super().shutdown_request(request)
+        with self._lock:
+            self._ended_connections += 1
 
     def get_request(self) -> Any:
         accepted = super().get_request()

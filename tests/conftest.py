@@ -33,6 +33,7 @@ from anchored_leaders import (
     unclosed_resources,
 )
 from anchored_support import ChildCleanup, ZombieAnchor, child_cleanup_scope, zombie_anchor_session
+from descendant_support import Handshake, open_handshake
 from provider_test_support import MCP_TOOL_NAMES, close_fake_cli_pipes
 
 from agent_providers import procfs
@@ -141,6 +142,11 @@ def zombie_anchor():
 def child_cleanup(zombie_anchor: ZombieAnchor):
     with child_cleanup_scope(zombie_anchor) as cleanup:
         yield cleanup
+
+
+@pytest.fixture
+def handshake(tmp_path: Path) -> Handshake:
+    return open_handshake(tmp_path)
 
 
 @pytest.fixture

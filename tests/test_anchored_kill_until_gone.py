@@ -217,6 +217,23 @@ def test_the_first_empty_count_in_time_confirms_and_ends_the_call(
     assert len(clock.waits) == 2
 
 
+@pytest.mark.parametrize(
+    ("census", "deadline", "next_start"),
+    [
+        (LIVE, ORIGIN + 1, ORIGIN + INTERVAL),
+        (LIVE, ORIGIN + INTERVAL, None),
+        (LIVE, ORIGIN + INTERVAL / 2, None),
+        (EMPTY, ORIGIN + 1, None),
+        *((census, ORIGIN + 1, None) for census in UNAVAILABLE),
+    ],
+    ids=lambda value: value.value if isinstance(value, GroupCensus) else None,
+)
+def test_the_next_census_starts_one_interval_later_only_while_the_group_is_live_and_time_remains(
+    census: GroupCensus, deadline: float, next_start: float | None,
+) -> None:
+    assert spawn._next_census_start(census, ORIGIN, deadline) == next_start
+
+
 @pytest.mark.parametrize("unavailable", UNAVAILABLE, ids=lambda census: census.value)
 def test_an_unavailable_count_ends_the_call_unchanged_and_never_confirms(
     unavailable: GroupCensus, virtual_rig: Rig, clock: VirtualCensusClock

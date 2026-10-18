@@ -24,6 +24,7 @@ import os
 import shlex
 import signal
 import stat
+import subprocess
 import sys
 import tempfile
 import threading
@@ -45,7 +46,7 @@ from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Protocol
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -86,6 +87,7 @@ from agent_providers.spawn import (
     ChildIdentityLost,
     ChildProcess,
     KillUntilGoneResult,
+    StderrPolicy,
     closed_environment,
 )
 from agent_providers.text_tool_protocol import TextToolRejectionRule
@@ -291,6 +293,16 @@ def assert_private_credential_child(
     assert stat.S_IMODE(copied_credential.stat().st_mode) == 0o400
     assert copied_credential.read_bytes() == source.read_bytes()
     return home
+
+
+class CliDoor(Protocol):
+    def __call__(self, child: ChildProcess, *, stderr: StderrPolicy) -> subprocess.Popen[bytes]: ...
+
+
+def install_cli_door(monkeypatch: pytest.MonkeyPatch, door: CliDoor) -> CliDoor:
+    replaced = process.open_pipes
+    monkeypatch.setattr(process, "open_pipes", door)
+    return replaced
 
 
 def fake_cli_process(
@@ -1430,8 +1442,11 @@ class ExitOnKill(Enum):
 class ScriptedClaudeChild(ScriptedAnchoredChild):
     """The Claude turns' ``AnchoredChild`` double: stream pipes, an exit model and a log.
 
-    ``returncode`` is the published exit (``None`` while the leader runs).
-    ``exited()`` passes ``exit_gate``, publishes ``natural_exit`` unless it is
+    ``returncode`` is the committed exit (``None`` while the leader runs).
+    ``publish_exit`` commits it, then announces it; ``exit_on_kill`` decides what
+    a kill of a running leader without a scripted answer does: announce the exit
+    (``PUBLISHED``), only commit it (``COMMITTED_UNANNOUNCED``) or leave it
+    (``NONE``). ``exited()`` passes ``exit_gate``, publishes ``natural_exit`` unless it is
     ``None``, and then waits for a published exit, failing the test at the
     scenario's deadline rather than hanging; ``signal_group(sig)``
     publishes ``-sig`` unless the leader ``survives`` it. Like the real handle it

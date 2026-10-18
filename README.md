@@ -293,7 +293,7 @@ A host migrates at its pin bump to 0.4.0; the configuration model refuses
 unknown fields, so a host that still sets a removed name fails at startup and
 the error names the field.
 
-| Before (`ProviderRuntimeConfig`) | Now |
+| Before | Now |
 |---|---|
 | `claude_cli_binary` | `claude.binary` |
 | `claude_cli_binary_search_globs` | `claude.binary_search_globs` |
@@ -302,6 +302,7 @@ the error names the field.
 | `grok_cli_auth_file` | `grok.token_file`, still a full `auth.json` copy |
 | `turns.cli_prompt_file_prefix` | `turns.grok.prompt_file_prefix` |
 | `turns.cli_prompt_file_placeholder` | `turns.grok.prompt_file_placeholder` |
+| `process.PrivateCredentialHomeReservation` | `process.PrivateHomeReservation`, the reservation of the base `PrivateHome`; no alias remains |
 
 ## Migrating to 0.3.0
 

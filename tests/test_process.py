@@ -2834,6 +2834,7 @@ _RESERVE_CODE_OF_A_HOME = (
 )
 _HOME_CODES = {
     "construction": (
+        process.PrivateHome.__init__,
         PrivateCredentialHome.__init__,
         process._discard_failed_home,
         process._remove_private_tree,
@@ -2841,7 +2842,7 @@ _HOME_CODES = {
     "reserve": _RESERVE_CODE_OF_A_HOME,
     "refused reserve": _RESERVE_CODE_OF_A_HOME,
     "release": (
-        process.PrivateCredentialHomeReservation.release,
+        process.PrivateHomeReservation.release,
         PrivateCredentialHome._release,
         PrivateCredentialHome._remove_if_unused,
         process._remove_private_tree,
@@ -3032,7 +3033,7 @@ def test_an_interrupted_construction_removes_its_home_once_and_forgets_it(tmp_pa
     position = 1
     with patch.object(process, "_remove_private_tree", remove_and_note_a_gone_tree):
         while _interrupted_by_a_keyboard_interrupt_at(
-            position, _code_of(PrivateCredentialHome.__init__), lambda: _build_home(source),
+            position, _home_code("construction"), lambda: _build_home(source),
         ):
             gc.collect()
             assert not list(tmp_path.glob("private-home-*")), f"line event {position}"
@@ -3041,6 +3042,23 @@ def test_an_interrupted_construction_removes_its_home_once_and_forgets_it(tmp_pa
 
     assert position > 1
     assert removals_of_a_gone_tree == 0
+
+
+def test_a_credential_less_private_home_is_a_private_empty_directory_kept_until_released(
+    tmp_path: Path,
+) -> None:
+    home = process.PrivateHome(prefix="plain-home-")
+
+    assert home.path.parent == tmp_path
+    assert home.path.name.startswith("plain-home-")
+    assert stat.S_IMODE(home.path.stat().st_mode) == 0o700
+    assert list(home.path.iterdir()) == []
+
+    reservation = home.reserve()
+    home.close()
+    assert home.path.exists()
+    reservation.release()
+    assert not home.path.exists()
 
 
 class _LedgerOfRemovals:
@@ -5606,7 +5624,7 @@ def _with_recorded_calls(callbacks: dict) -> tuple[dict, list[str]]:
 
 
 def _releasing_both(
-    token: process.PrivateCredentialHomeReservation, release_slot: Callable[[], None],
+    token: process.PrivateHomeReservation, release_slot: Callable[[], None],
 ) -> Callable[[], None]:
     def release() -> None:
         token.release()

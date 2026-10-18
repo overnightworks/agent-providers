@@ -1713,7 +1713,7 @@ def _probe_cli_surface_sync(
 async def _anchored_turn_child(
     child: ChildProcess,
     *,
-    home_reservation: process.PrivateCredentialHomeReservation,
+    home_reservation: process.PrivateHomeReservation,
     stream_buffer_limit: int | None = None,
 ) -> AsyncIterator[AnchoredChild]:
     """Claude's door to the neutral anchored turn: only its entry failures are translated.

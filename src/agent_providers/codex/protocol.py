@@ -25,7 +25,7 @@ from agent_providers.process import (
     CliEnvironmentUnavailableError,
     CliLineChannel,
     PrivateCredentialHome,
-    PrivateCredentialHomeReservation,
+    PrivateHomeReservation,
     require_cli_binary,
     run_cli_bounded,
     run_publishing_failures,
@@ -109,7 +109,7 @@ def codex_child_process(arguments: tuple[str, ...], turn_home: CodexTurnHome) ->
 
 
 def release_turn_reservations(
-    home_reservation: PrivateCredentialHomeReservation,
+    home_reservation: PrivateHomeReservation,
     release_slot: Callable[[], None],
 ) -> None:
     """Release a turn's home token and its pool slot, the slot even when the token raises."""
@@ -121,7 +121,7 @@ def release_turn_reservations(
 
 def run_reserved_codex_cli(
     reservation: CodexProcessReservation,
-    home_reservation: PrivateCredentialHomeReservation,
+    home_reservation: PrivateHomeReservation,
     child: ChildProcess,
     *,
     stdin_payload: bytes,

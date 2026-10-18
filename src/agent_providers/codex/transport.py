@@ -52,7 +52,7 @@ from agent_providers.process import (
     CliLineChannel,
     CliLoginUnusableError,
     CliRunOutcome,
-    PrivateCredentialHomeReservation,
+    PrivateHomeReservation,
     cli_settle_deadline,
 )
 from agent_providers.sandbox.paths import CODEX_TOOL_TURN_DIRECTORY_PREFIX
@@ -239,7 +239,7 @@ class CodexCliToolTransport:
 
     def _reserve_round(
         self, arguments: tuple[str, ...]
-    ) -> tuple[ChildProcess, PrivateCredentialHomeReservation, CodexProcessReservation]:
+    ) -> tuple[ChildProcess, PrivateHomeReservation, CodexProcessReservation]:
         try:
             child = codex_child_process(arguments, self._turn_home)
         except CliEnvironmentUnavailableError:

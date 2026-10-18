@@ -608,11 +608,12 @@ class ToolCallBarrier:
     forward's outcome was retrieved.
 
     ``call()`` awaits one response future from admission to its answer. It is resolved by the
-    release of the reply, by the refusal ``-32602`` (``stop()``, a duplicate pending id, a call
-    beyond ``MAX_PENDING_TOOL_CALLS``, every call after ``stop()``), or by ``Unanswered``
+    release of the reply, by the refusal ``-32602`` at ``stop()``, or by ``Unanswered``
     (``cancel()``, a cancelled forward, a capability hit), or cancelled by the cancellation of
-    the task running ``call()``. That task must reach ``call()`` through an await chain that
-    forwards ``Task.cancel()`` at once (a direct await or ``asyncio.gather``; no
+    the task running ``call()``. A duplicate pending id, a call beyond
+    ``MAX_PENDING_TOOL_CALLS`` and every call after ``stop()`` are refused ``-32602`` before
+    admission, so no future exists for them. That task must reach ``call()`` through an
+    await chain that forwards ``Task.cancel()`` at once (a direct await or ``asyncio.gather``; no
     ``asyncio.wait``, shield or ``wait_for``), so the give-up is recorded before
     ``Task.cancel()`` returns, in every phase. An explicit ``cancel()`` is recorded beside the
     future and wins over an earlier resolution: ``call()`` then returns ``Unanswered``.
@@ -659,6 +660,7 @@ class ToolCallBarrier:
         if pending is None:
             return
         self._pending.remove(pending)
+        self._drop_queued_call(pending)
         pending.cancelled_by_cli = True
         self._resolve(pending, UNANSWERED)
 
@@ -802,6 +804,14 @@ class ToolCallBarrier:
     def _end(self, pending: _PendingCall) -> None:
         if pending in self._pending:
             self._pending.remove(pending)
+        self._drop_queued_call(pending)
+
+    def _drop_queued_call(self, pending: _PendingCall) -> None:
+        self._ready = deque(
+            ready
+            for ready in self._ready
+            if ready.pending is not pending or isinstance(ready.event, ToolResultEvent)
+        )
 
     def _require_usable(self) -> None:
         if self._unoffered:

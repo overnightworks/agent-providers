@@ -11,6 +11,7 @@ import json
 import logging
 import re
 import uuid
+import weakref
 from collections import Counter
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
@@ -305,12 +306,14 @@ def drive_barrier(
                     await scenario(Rig(relay, barrier, entries, app))
             finally:
                 try:
-                    barrier.stop()
-                    if isinstance(app, GatedApp):
-                        app.release()
-                    release_held_wakeups()
-                    async with asyncio.timeout(WAIT_SECONDS):
-                        await barrier.settle()
+                    try:
+                        barrier.stop()
+                    finally:
+                        if isinstance(app, GatedApp):
+                            app.release()
+                        release_held_wakeups()
+                        async with asyncio.timeout(WAIT_SECONDS):
+                            await barrier.settle()
                 finally:
                     await close_bounded(relay)
 
@@ -861,6 +864,31 @@ def test_a_cancel_ends_only_the_pending_call_with_that_id(
     scenario: Callable[[Rig], Awaitable[None]],
 ) -> None:
     """C8."""
+    drive_barrier(scenario)
+
+
+@pytest.mark.parametrize("ending", ["cancelled_by_the_cli", "given_up_by_task_cancellation"])
+def test_a_call_that_ended_before_its_hand_out_leaves_nothing_queued_while_the_runner_is_parked(
+    ending: str,
+) -> None:
+    async def scenario(rig: Rig) -> None:
+        admitted = [
+            CallToolParams(name="edit_song", arguments={"n": number}) for number in range(1, 6)
+        ]
+        watchers = [weakref.ref(params) for params in admitted]
+        calls = [arrive(rig.barrier, params, number) for number, params in enumerate(admitted, 1)]
+        for number, call in enumerate(calls, 1):
+            if ending == "cancelled_by_the_cli":
+                rig.barrier.cancel(number)
+            else:
+                call.cancel()
+            await ending_of(call)
+        del admitted, calls, call
+        await asyncio.sleep(0)
+        gc.collect()
+
+        assert [watcher() for watcher in watchers] == [None] * len(watchers)
+
     drive_barrier(scenario)
 
 
@@ -1740,10 +1768,11 @@ def test_the_hand_out_rule_over_a_result_accepts_exactly_the_handed_out_event(
             await rig.barrier.next_event()
         with pytest.raises(ToolCallsMisused):
             rig.barrier.accept(call_event)
+        another_result = ToolResultEvent(
+            tool_use_id="call-2", content=UPSTREAM_TEXT, is_error=False
+        )
         with pytest.raises(ToolCallsMisused):
-            rig.barrier.accept(
-                ToolResultEvent(tool_use_id="call-2", content=UPSTREAM_TEXT, is_error=False)
-            )
+            rig.barrier.accept(another_result)
         assert writes.to(client) == b""
         assert len(rig.fake.calls) == 1
 

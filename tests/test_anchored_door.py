@@ -127,7 +127,7 @@ def failed_door(
             recorded.append(DoorFailure(failure, descriptors()))
             raise
 
-    with pytest.raises(BaseException):
+    with pytest.raises((asyncio.CancelledError, FileNotFoundError, InjectedStop)):
         child_cleanup.capture(lambda: runner.run(bounded(attempt())))
     (failure,) = recorded
     return failure
@@ -136,6 +136,11 @@ def failed_door(
 async def send_line(child: AnchoredChild, line: bytes) -> None:
     child.stdin.write(line)
     await child.stdin.drain()
+
+
+async def exited_at_once(child: AnchoredChild) -> int:
+    async with asyncio.timeout(0):
+        return await child.exited()
 
 
 def pipe_bytes_still_readable(holder: int) -> int:
@@ -374,8 +379,7 @@ def test_exited_serves_every_waiter_after_a_cancelled_or_timed_out_one(
 
     async def scenario() -> tuple[list[int], int]:
         with pytest.raises(TimeoutError):
-            async with asyncio.timeout(0):
-                await child.exited()
+            await exited_at_once(child)
         cancelled_waiter = asyncio.create_task(child.exited())
         await asyncio.sleep(0)
         cancelled_waiter.cancel()

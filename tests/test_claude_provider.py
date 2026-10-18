@@ -95,6 +95,7 @@ from agent_providers.claude.provider import (
 )
 from agent_providers.config import (
     McpServerSpec,
+    ProviderNotConfiguredError,
     current_claude_runtime,
     current_config,
     current_turn_config,
@@ -997,6 +998,35 @@ def test_a_catalog_only_host_runs_a_one_shot_on_the_cli_default(
 
     assert call_claude("hi").text == "ok"
     assert "--model" not in spawned_claude_children[0].arguments
+
+
+async def _drain_stream() -> None:
+    async for _event in provider.acall_claude_with_mcp_stream("hi", user_id="u-1"):
+        pass
+
+
+@pytest.mark.parametrize(
+    "run_turn",
+    [
+        pytest.param(lambda: call_claude("hi"), id="completion"),
+        pytest.param(lambda: asyncio.run(provider.acall_claude("hi")), id="async-completion"),
+        pytest.param(
+            lambda: asyncio.run(provider.acall_claude_with_mcp("hi", user_id="u-1")),
+            id="tool-turn",
+        ),
+        pytest.param(lambda: asyncio.run(_drain_stream()), id="streaming-turn"),
+    ],
+)
+def test_a_claude_turn_without_a_claude_block_is_refused_naming_the_provider(
+    run_turn: Callable[[], object], spawned_claude_children: list,
+) -> None:
+    override_provider_runtime(claude=None)
+
+    with pytest.raises(ProviderNotConfiguredError) as refused:
+        run_turn()
+
+    assert (refused.value.provider, refused.value.block) == ("claude", "claude")
+    assert spawned_claude_children == []
 
 
 @pytest.mark.parametrize("entry_point", ["call_claude", "acall_claude"])

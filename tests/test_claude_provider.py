@@ -1202,8 +1202,9 @@ def test_a_saturated_pool_refuses_a_turn_with_no_chained_cause_or_context(
     held = provider.CLAUDE_CLI_PROCESS_POOL.reserve()
     assert held is not None
 
+    turn = provider.acall_claude_with_mcp("hi", user_id="u-1")
     with pytest.raises(provider._ClaudeCliProcessPoolSaturated) as refusal:
-        asyncio.run(provider.acall_claude_with_mcp("hi", user_id="u-1"))
+        asyncio.run(turn)
 
     assert str(refusal.value) == (
         "Claude CLI process pool is at its concurrency limit (1); refusing to start another"

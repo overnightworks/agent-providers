@@ -17,7 +17,7 @@ stopped once and the stream ends without a terminal. Every
 ending stops the runner first and queues the terminal only after the
 runner's close has finished. The shielded wait for that close mirrors the
 provider core's reap of a streaming process
-(``agent_providers.claude.provider``) without importing it.
+(``agent_providers.anchored_turn``) without importing it.
 """
 
 from __future__ import annotations

@@ -12,10 +12,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from agent_providers.claude.provider import (
-    flatten_messages,
-    stdin_prompt,
-)
 from agent_providers.config import current_config, current_turn_config
 from agent_providers.constants import (
     GROK_CLI_LINE_CHANNEL_CAPACITY,
@@ -64,6 +60,7 @@ from agent_providers.tool_loop import (
     TransportResponse,
 )
 from agent_providers.tools import ToolCatalog
+from agent_providers.transcript import flatten_messages, stdin_prompt
 
 _AUTH_FAILURE_MARKERS: Final = ("401", "oidc", "unauthenticated")
 # "usage" is dropped with the rest: this transport reports no token deltas

@@ -12,23 +12,24 @@ import glob
 import json
 import logging
 import os
-import signal
 import tempfile
 import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
-from contextlib import asynccontextmanager, contextmanager, suppress
+from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
-from functools import partial
 from pathlib import Path
 from typing import Final, Literal
 
-import anyio
 from pydantic import SecretStr
 
 from agent_client.wire import TurnMessage
 from agent_providers import process
-from agent_providers.claude.lost_groups import retain_lost_group
+from agent_providers.anchored_turn import (
+    CliProcessPool,
+    CliProcessPoolSaturated,
+    anchored_turn_child,
+)
 from agent_providers.config import McpServerSpec, current_config, current_turn_config
 from agent_providers.constants import (
     CLAUDE_CLI_COMPLETION_TIMEOUT_SECONDS,
@@ -46,7 +47,6 @@ from agent_providers.constants import (
     PROBE_TIMEOUT_SECONDS,
 )
 from agent_providers.errors import (
-    ContainmentLost,
     ProviderUnavailableError,
     SafeRouteReasonCode,
     normalize_route_failure,
@@ -68,17 +68,19 @@ from agent_providers.process import (
 )
 from agent_providers.spawn import (
     AnchoredChild,
-    AnchorStateError,
-    ChildIdentityLost,
     ChildProcess,
     ChildProcessSpecificationError,
     PipedProcessTimeout,
     closed_environment,
-    open_anchored_pipes,
     run_capturing,
 )
+from agent_providers.transcript import flatten_messages, stdin_prompt
 
 log = logging.getLogger(__name__)
+
+CLAUDE_CLI_PROCESS_POOL: Final = CliProcessPool(
+    limit=CLAUDE_CLI_MAX_CONCURRENT_PROCESSES, name="Claude CLI"
+)
 
 _sync_clients: dict[str, object] = {}
 _async_clients: dict[str, object] = {}
@@ -646,17 +648,6 @@ def _build_api_kwargs(
     return kwargs
 
 
-def flatten_messages(prompt: str, messages: list[dict[str, str]] | None) -> str:
-    """Render a chat history as the single prompt a CLI turn reads from stdin."""
-    if messages is None:
-        return prompt
-    parts = []
-    for msg in messages:
-        prefix = "User" if msg["role"] == "user" else "Assistant"
-        parts.append(f"{prefix}: {msg['content']}")
-    return "\n\n".join(parts)
-
-
 @dataclass(frozen=True)
 class ClaudeRun:
     """One subscription run of the pinned CLI: its child and its one stdin line.
@@ -831,13 +822,6 @@ def _build_mcp_config(spec: McpServerSpec, user_id: str) -> str:
         },
     }
     return json.dumps(config)
-
-
-def stdin_prompt(system: str | None, prompt: str) -> str:
-    """Prepend the system instruction to the prompt a CLI turn reads from stdin."""
-    if system:
-        return f"{system}\n\n{prompt}"
-    return prompt
 
 
 def _write_mcp_config(spec: McpServerSpec, user_id: str) -> str:
@@ -1073,19 +1057,6 @@ _tool_surface_inflight_sync: dict[
 ] = {}
 
 
-@dataclass(eq=False)
-class _ZombieReservation:
-    """One pool slot, and the home reservation that is released with it."""
-
-    home_reservation: process.PrivateCredentialHomeReservation | None = None
-
-
-# The process-pool reservations are process-wide and shared by probes and real
-# turns — their own lock, since probes touch them from plain threads as well
-# as the event loop and must never be entangled with the tool-surface dicts'
-# lock.
-_zombie_registry_lock = threading.Lock()
-_zombie_reap_reservations: set[_ZombieReservation] = set()
 # The independent async tasks that actually run a probe — tracked the same
 # way, for the same two reasons: keep a reference so they cannot be
 # garbage-collected while still running, and give shutdown something to
@@ -1673,17 +1644,17 @@ def _probe_cli_surface_sync(
         raise UnavailableError("Claude CLI probe preflight budget was already exhausted")
     home = _claude_private_home()
     home_reservation = home.reserve()
-    reservation = _reserve_zombie_admission()
+    reservation = CLAUDE_CLI_PROCESS_POOL.reserve()
     if reservation is None:
         home_reservation.release()
         home.close()
-        raise _ClaudeCliProcessPoolSaturated(_claude_cli_process_pool_limit_message())
+        raise _ClaudeCliProcessPoolSaturated(CLAUDE_CLI_PROCESS_POOL.limit_message())
 
     released = False
 
     def on_reaped(_process_id: int, _became_zombie: bool) -> None:
         nonlocal released
-        _release_zombie_reservation(reservation)
+        CLAUDE_CLI_PROCESS_POOL.release(reservation)
         home_reservation.release()
         released = True
 
@@ -1703,14 +1674,14 @@ def _probe_cli_surface_sync(
         )
     except BaseException:
         if not released:
-            _release_zombie_reservation(reservation)
+            CLAUDE_CLI_PROCESS_POOL.release(reservation)
             home_reservation.release()
         raise
     finally:
         home.close()
     if outcome.reason is process.CliRunReason.SPAWN_FAILED:
         if not released:
-            _release_zombie_reservation(reservation)
+            CLAUDE_CLI_PROCESS_POOL.release(reservation)
             home_reservation.release()
         raise UnavailableError("Claude CLI probe failed to run")
     if outcome.reason is process.CliRunReason.DEADLINE_BEFORE_SPAWN:
@@ -1733,112 +1704,6 @@ def _probe_cli_surface_sync(
     return _parse_announced_surface(outcome.stdout.encode(), mcp=mcp)
 
 
-# ── reap: async ──────────────────────────────────────────────────────
-
-
-async def _reap_behind_shield(child: AnchoredChild, reservation: _ZombieReservation) -> None:
-    """Run the one bounded reap of ``child`` to completion, whatever cancels the caller.
-
-    The reap runs in its own task, started once, and is awaited behind an
-    AnyIO shield (ASGI cancel scopes) and ``asyncio.shield`` (direct
-    ``Task.cancel()``).  Every direct cancellation that arrives meanwhile is
-    absorbed until the task is done.  The reap's own exception then wins over
-    any cancellation; otherwise the cancellation is delivered afterwards.
-    """
-    reap_task = asyncio.create_task(_reap_process_group(child, reservation))
-    try:
-        with anyio.CancelScope(shield=True):
-            await asyncio.shield(reap_task)
-    except asyncio.CancelledError:
-        with anyio.CancelScope(shield=True):
-            await _outlast_direct_cancellations(reap_task)
-        raise
-    await anyio.lowlevel.checkpoint_if_cancelled()
-
-
-async def _outlast_direct_cancellations(reap_task: asyncio.Task[None]) -> None:
-    while not reap_task.done():
-        with suppress(asyncio.CancelledError):
-            await asyncio.shield(reap_task)
-    reap_task.result()
-
-
-async def _reap_process_group(child: AnchoredChild, reservation: _ZombieReservation) -> None:
-    """End the turn's leader through its anchor and free its pool slot, or retain it.
-
-    A leader whose exit is published is released without a signal. A running one
-    gets SIGTERM, then SIGKILL after the grace, and is released once its exit is
-    published. The slot and the home are freed only after ``release()``. A leader
-    that has not exited by the bound after SIGKILL, whose anchor was lost, or
-    that the kernel did not reap is retained instead, nothing is freed, and
-    ``ContainmentLost`` names the retention: a slot freed beside a group whose end
-    nobody knows would put a new run next to it.
-    """
-    try:
-        if child.returncode is None and not await _end_running_leader(child):
-            raise _retain_unreleased_leader(child, reservation)
-        child.release()
-    except (ChildIdentityLost, AnchorStateError) as failure:
-        raise _retain_unreleased_leader(child, reservation) from failure
-    _release_zombie_reservation(reservation)
-
-
-async def _end_running_leader(child: AnchoredChild) -> bool:
-    child.signal_group(signal.SIGTERM)
-    if await _exit_published_within(child, CLAUDE_CLI_SIGTERM_GRACE_SECONDS):
-        return True
-    child.signal_group(signal.SIGKILL)
-    return await _exit_published_within(child, CLAUDE_CLI_ZOMBIE_REAP_TIMEOUT_SECONDS)
-
-
-async def _exit_published_within(child: AnchoredChild, seconds: float) -> bool:
-    try:
-        async with asyncio.timeout(seconds):
-            await child.exited()
-    except TimeoutError:
-        return False
-    return True
-
-
-def _retain_unreleased_leader(
-    child: AnchoredChild, reservation: _ZombieReservation
-) -> ContainmentLost:
-    group = retain_lost_group(child, partial(_release_zombie_reservation, reservation))
-    return ContainmentLost(group)
-
-
-# ── zombie-reaper reservations, shared by both domains ───────────────
-
-
-def _claude_cli_process_pool_limit_message() -> str:
-    return (
-        "Claude CLI process pool is at its concurrency limit "
-        f"({CLAUDE_CLI_MAX_CONCURRENT_PROCESSES}); refusing to start another"
-    )
-
-
-def _reserve_zombie_admission(
-    home_reservation: process.PrivateCredentialHomeReservation | None = None,
-) -> _ZombieReservation | None:
-    """Reserve one shared CLI-process slot before spawning."""
-    reservation = _ZombieReservation(home_reservation=home_reservation)
-    with _zombie_registry_lock:
-        pool_is_full = len(_zombie_reap_reservations) >= CLAUDE_CLI_MAX_CONCURRENT_PROCESSES
-        if not pool_is_full:
-            _zombie_reap_reservations.add(reservation)
-    if pool_is_full:
-        log.error(_claude_cli_process_pool_limit_message())
-        return None
-    return reservation
-
-
-def _release_zombie_reservation(reservation: _ZombieReservation) -> None:
-    with _zombie_registry_lock:
-        _zombie_reap_reservations.discard(reservation)
-    if reservation.home_reservation is not None:
-        reservation.home_reservation.release()
-
-
 @asynccontextmanager
 async def _anchored_turn_child(
     child: ChildProcess,
@@ -1846,29 +1711,27 @@ async def _anchored_turn_child(
     home_reservation: process.PrivateCredentialHomeReservation,
     stream_buffer_limit: int | None = None,
 ) -> AsyncIterator[AnchoredChild]:
-    """Run one async turn's child on an anchor that holds a core pool slot.
+    """Claude's door to the neutral anchored turn: only its entry failures are translated.
 
-    The reservation never leaves this frame and nothing lies between the start
-    and the ``yield``. Whatever ends the body, the reap runs behind its shield,
-    so its own exception wins over the body's and a cancellation is delivered
-    after it.
+    Whatever the turn body or the reap raises after the child is open propagates
+    unchanged, so a ``FileNotFoundError`` from there is never a missing binary.
     """
-    reservation = _reserve_zombie_admission(home_reservation)
-    if reservation is None:
-        home_reservation.release()
-        raise _ClaudeCliProcessPoolSaturated(_claude_cli_process_pool_limit_message())
+    turn = AsyncExitStack()
     try:
-        anchored = await open_anchored_pipes(child, stream_buffer_limit=stream_buffer_limit)
+        anchored = await turn.enter_async_context(
+            anchored_turn_child(
+                CLAUDE_CLI_PROCESS_POOL,
+                child,
+                home_reservation=home_reservation,
+                stream_buffer_limit=stream_buffer_limit,
+            )
+        )
+    except CliProcessPoolSaturated as saturated:
+        raise _ClaudeCliProcessPoolSaturated(str(saturated)) from None
     except FileNotFoundError as missing_binary:
-        _release_zombie_reservation(reservation)
         raise CliUnavailableError(CLAUDE_CLI_BINARY_NOT_FOUND_DETAIL) from missing_binary
-    except BaseException:
-        _release_zombie_reservation(reservation)
-        raise
-    try:
+    async with turn:
         yield anchored
-    finally:
-        await _reap_behind_shield(anchored, reservation)
 
 
 def _parse_announced_surface(
@@ -2037,11 +1900,11 @@ def _call_cli(
         home.close()
         raise
 
-    reservation = _reserve_zombie_admission()
+    reservation = CLAUDE_CLI_PROCESS_POOL.reserve()
     if reservation is None:
         home_reservation.release()
         home.close()
-        raise _ClaudeCliProcessPoolSaturated(_claude_cli_process_pool_limit_message())
+        raise _ClaudeCliProcessPoolSaturated(CLAUDE_CLI_PROCESS_POOL.limit_message())
     try:
         try:
             proc = run_capturing(
@@ -2074,7 +1937,7 @@ def _call_cli(
     finally:
         # subprocess.run() returns only after its child has exited, including
         # after its own timeout cleanup, so this opaque handle is safe to free.
-        _release_zombie_reservation(reservation)
+        CLAUDE_CLI_PROCESS_POOL.release(reservation)
         home_reservation.release()
         home.close()
 

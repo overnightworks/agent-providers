@@ -11,10 +11,6 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Final
 
-from agent_providers.claude.provider import (
-    flatten_messages,
-    stdin_prompt,
-)
 from agent_providers.codex.pool import (
     CodexProcessKind,
     CodexProcessReservation,
@@ -81,6 +77,7 @@ from agent_providers.tool_loop import (
     TransportResponse,
 )
 from agent_providers.tools import ToolCatalog
+from agent_providers.transcript import flatten_messages, stdin_prompt
 
 _CODEX_TOOL_ISOLATION_CONFIGS: Final = (
     CODEX_APPROVAL_POLICY_NEVER_CONFIG,

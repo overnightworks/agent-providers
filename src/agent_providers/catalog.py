@@ -33,7 +33,7 @@ from agent_providers.claude.provider import (
 from agent_providers.claude.provider import (
     UnavailableError as ClaudeCliUnavailableError,
 )
-from agent_providers.config import ProviderRuntimeConfig, current_config
+from agent_providers.config import ProviderRuntimeConfig, current_config, current_grok_runtime
 from agent_providers.constants import (
     ANTHROPIC_API_VERSION,
     ANTHROPIC_MODELS_URL,
@@ -451,7 +451,7 @@ def _cli_setup_method(provider: str) -> ProviderSetupMethod | CliEnvironmentCaus
             return ProviderSetupMethod.CLAUDE_CLI
         if provider == ProviderName.GROK and grok_cli_token_is_present():
             require_cli_binary(
-                current_config().grok_cli_binary, GROK_CLI_BINARY_MISSING_DETAIL,
+                current_grok_runtime().binary, GROK_CLI_BINARY_MISSING_DETAIL,
             )
             return ProviderSetupMethod.GROK_CLI
         if provider == ProviderName.CODEX and codex_cli_login_is_usable():

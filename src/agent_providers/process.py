@@ -29,7 +29,12 @@ from types import TracebackType
 from typing import Any, Final, Literal, NotRequired, Required, TypedDict, Unpack, cast
 
 from agent_providers.codex_login import CodexLoginVerdict, assess_codex_login, blanked_copy
-from agent_providers.config import current_claude_runtime, current_config, current_turn_config
+from agent_providers.config import (
+    current_claude_runtime,
+    current_config,
+    current_grok_runtime,
+    current_grok_turn_runtime,
+)
 from agent_providers.constants import (
     CLAUDE_CLI_AUTH_METHOD_FIELD,
     CLAUDE_CLI_LOGGED_IN_FIELD,
@@ -931,7 +936,7 @@ def _with_private_prompt_file(
     if prompt_file_arg_index < 0 or prompt_file_arg_index >= len(child.arguments):
         raise ValueError("Prompt file index is outside the CLI command")
     descriptor, path = tempfile.mkstemp(
-        prefix=current_turn_config().cli_prompt_file_prefix,
+        prefix=current_grok_turn_runtime().prompt_file_prefix,
         dir=current_config().cli_working_directory_root,
     )
     try:
@@ -1997,11 +2002,12 @@ def _probe_claude_login(binary: Path) -> CliLogin:
 
 
 def _probe_grok_status() -> GrokCliStatus:
+    grok = current_grok_runtime()
     output = _catalog_cli_output(
-        current_config().grok_cli_binary,
+        grok.binary,
         GROK_CLI_STATUS_ARGS,
         credential_home_variable=_GROK_CREDENTIAL_HOME_VARIABLE,
-        auth_file=current_config().grok_cli_auth_file,
+        auth_file=grok.token_file,
         missing_binary_detail=GROK_CLI_BINARY_MISSING_DETAIL,
     )
     if output is None:
@@ -2015,7 +2021,7 @@ def _probe_grok_status() -> GrokCliStatus:
 def grok_cli_token_is_present() -> bool:
     """Whether the Grok CLI credential mirror contains a non-empty access token."""
     try:
-        document = json.loads(current_config().grok_cli_auth_file.read_text(encoding="utf-8"))
+        document = json.loads(current_grok_runtime().token_file.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return False
     except OSError as exc:

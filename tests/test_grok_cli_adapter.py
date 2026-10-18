@@ -38,13 +38,21 @@ from provider_test_support import (
     formatted_log_text,
     grok_cli_outcome,
     grok_tool_round_lines,
+    override_grok_runtime,
+    override_grok_turn_runtime,
     override_provider_runtime,
+    override_turn_runtime,
 )
 
 from agent_client.tools import ToolDeclaration
 from agent_providers import process
 from agent_providers.catalog import ProviderRoute
-from agent_providers.config import current_config, current_turn_config
+from agent_providers.config import (
+    ProviderNotConfiguredError,
+    current_config,
+    current_grok_runtime,
+    current_grok_turn_runtime,
+)
 from agent_providers.errors import (
     ProviderUnavailableError,
     SafeRouteReasonCode,
@@ -73,7 +81,7 @@ def _transport() -> grok_cli_adapter.GrokCliToolTransport:
 
 
 def test_grok_turn_without_a_configured_credential_is_logged_out(tmp_path: Path) -> None:
-    override_provider_runtime(grok_cli_auth_file=tmp_path / "missing.json")
+    override_grok_runtime(token_file=tmp_path / "missing.json")
 
     with pytest.raises(ProviderUnavailableError) as raised:
         _transport()
@@ -89,7 +97,7 @@ def test_grok_turn_without_a_configured_credential_is_logged_out(tmp_path: Path)
 def test_grok_turn_with_an_unusable_credential_is_logged_out(
     tmp_path: Path, make_source,
 ) -> None:
-    override_provider_runtime(grok_cli_auth_file=make_source(tmp_path))
+    override_grok_runtime(token_file=make_source(tmp_path))
 
     with pytest.raises(ProviderUnavailableError) as raised:
         _transport()
@@ -127,7 +135,7 @@ def test_grok_turn_that_cannot_make_its_home_finds_the_cli_unavailable(
 
 def test_grok_round_without_its_binary_finds_the_cli_unavailable() -> None:
     transport = _transport()
-    override_provider_runtime(grok_cli_binary="no-such-grok-binary-3b7e")
+    override_grok_runtime(binary="no-such-grok-binary-3b7e")
     collecting = _collect_transport_responses(transport)
 
     with pytest.raises(ProviderUnavailableError) as raised:
@@ -222,7 +230,7 @@ def test_grok_tool_command_pins_native_tool_and_web_isolation(model) -> None:
     session_id = "3e04bf5b-4e1c-4f26-8e1e-2f17c5f6d9cf"
     common = (
         "--prompt-file",
-        current_turn_config().cli_prompt_file_placeholder,
+        current_grok_turn_runtime().prompt_file_placeholder,
         "--output-format",
         "streaming-json",
         "--deny",
@@ -240,6 +248,32 @@ def test_grok_tool_command_pins_native_tool_and_web_isolation(model) -> None:
         "--resume",
         session_id,
     )
+
+
+def test_grok_tool_command_names_the_hosts_prompt_file_placeholder() -> None:
+    override_grok_turn_runtime(prompt_file_placeholder="<another-private-prompt>")
+
+    arguments = grok_cli_adapter._grok_cli_tool_arguments(None)
+
+    assert arguments[:2] == ("--prompt-file", "<another-private-prompt>")
+
+
+def test_grok_turn_without_a_grok_block_is_refused_naming_the_provider() -> None:
+    override_provider_runtime(grok=None)
+
+    with pytest.raises(ProviderNotConfiguredError) as refused:
+        _transport()
+
+    assert (refused.value.provider, refused.value.block) == ("grok", "grok")
+
+
+def test_grok_round_without_a_turns_grok_block_is_refused_naming_the_provider() -> None:
+    override_turn_runtime(grok=None)
+
+    with pytest.raises(ProviderNotConfiguredError) as refused:
+        grok_cli_adapter._grok_cli_tool_arguments(None)
+
+    assert (refused.value.provider, refused.value.block) == ("grok", "turns.grok")
 
 
 @pytest.mark.parametrize("model", [None, "grok-4.5"])
@@ -283,7 +317,7 @@ def test_grok_tool_transport_starts_then_resumes_in_one_private_credential_home(
 ) -> None:
     calls: list[CliCall] = []
     homes: list[Path] = []
-    source = current_config().grok_cli_auth_file
+    source = current_grok_runtime().token_file
 
     def assert_private_home(child) -> None:
         homes.append(assert_private_credential_child(
@@ -421,7 +455,7 @@ def test_a_tool_consumer_ends_at_the_settle_instant(monkeypatch, caplog, capfd) 
     monkeypatch.setattr(process, "CLI_TERMINATION_GRACE_SECONDS", tiny)
     monkeypatch.setattr(process, "CLI_PROBE_CALLER_TIMEOUT_MARGIN_SECONDS", tiny)
     monkeypatch.setattr(grok_cli_adapter, "TURN_TIMEOUT_SECONDS", 1.0)
-    override_provider_runtime(grok_cli_binary="/bin/true")
+    override_grok_runtime(binary="/bin/true")
     monkeypatch.setattr(
         process.CliLineChannel, "_close", Mock(side_effect=RuntimeError(A_RUNNER_FAILURE_CANARY)),
     )
@@ -467,7 +501,7 @@ def test_grok_turn_keeps_its_private_home_until_late_runner_confirmation(
         captured["home"] = assert_private_credential_child(
             child,
             root=tmp_path,
-            source=current_config().grok_cli_auth_file,
+            source=current_grok_runtime().token_file,
             destination=Path(".grok/auth.json"),
         )
         outcome = CliRunOutcome(
@@ -1027,7 +1061,7 @@ def test_closing_the_tool_loop_keeps_the_grok_home_until_confirmed_reap(
         captured["home"] = assert_private_credential_child(
             child,
             root=tmp_path,
-            source=current_config().grok_cli_auth_file,
+            source=current_grok_runtime().token_file,
             destination=Path(".grok/auth.json"),
         )
         channel = kwargs["stdout_line_channel"]

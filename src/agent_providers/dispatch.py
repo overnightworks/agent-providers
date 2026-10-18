@@ -25,7 +25,7 @@ from agent_providers.claude.provider import (
 )
 from agent_providers.codex.image import codex_image_turn_is_available
 from agent_providers.codex.transport import CodexCliToolTransport
-from agent_providers.config import current_config
+from agent_providers.config import HostWiringError, current_config
 from agent_providers.constants import (
     GROK_CHAT_URL,
     OPENAI_CHAT_URL,
@@ -118,6 +118,8 @@ async def stream_turn(
                 yield event
         finally:
             await stream.aclose()
+    except HostWiringError:
+        raise
     except ProviderUnavailableError as exc:
         if exc.reason is not None:
             raise

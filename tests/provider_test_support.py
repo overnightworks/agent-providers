@@ -55,6 +55,9 @@ from agent_providers.catalog import ProviderRoute
 from agent_providers.claude import provider as claude_provider
 from agent_providers.config import (
     ClaudeCliRuntime,
+    GrokCliRuntime,
+    GrokTurnRuntime,
+    HostWiringError,
     ProviderRuntimeConfig,
     configure,
     current_config,
@@ -469,10 +472,21 @@ def override_claude_runtime(**claude_facts: Any) -> None:
     override_provider_runtime(claude=replacement)
 
 
+def override_grok_runtime(**grok_facts: Any) -> None:
+    """Replace named Grok facts for the current test only, or give it a block."""
+    grok = current_config().grok
+    replacement = (
+        grok.model_copy(update=grok_facts) if grok is not None else GrokCliRuntime(**grok_facts)
+    )
+    override_provider_runtime(grok=replacement)
+
+
 def override_cli_binary(provider: str, binary: str) -> None:
     """Point one provider's CLI binary at ``binary`` for the current test only."""
     if provider == "claude":
         override_claude_runtime(binary=binary)
+    elif provider == "grok":
+        override_grok_runtime(binary=binary)
     else:
         override_provider_runtime(**{f"{provider}_cli_binary": binary})
 
@@ -481,6 +495,8 @@ def override_login_source(provider: str, login_source: Path) -> None:
     """Point one provider's login source at ``login_source`` for the current test only."""
     if provider == "claude":
         override_claude_runtime(token_file=login_source)
+    elif provider == "grok":
+        override_grok_runtime(token_file=login_source)
     else:
         override_provider_runtime(**{f"{provider}_cli_auth_file": login_source})
 
@@ -531,6 +547,19 @@ def override_turn_runtime(**turn_facts: Any) -> None:
     turns = current_config().turns
     assert turns is not None, "the sample runtime configures turns"
     override_provider_runtime(turns=turns.model_copy(update=turn_facts))
+
+
+def override_grok_turn_runtime(**grok_turn_facts: Any) -> None:
+    """Replace named Grok turn facts for the current test only, or give it a block."""
+    turns = current_config().turns
+    assert turns is not None, "the sample runtime configures turns"
+    grok = turns.grok
+    replacement = (
+        grok.model_copy(update=grok_turn_facts)
+        if grok is not None
+        else GrokTurnRuntime(**grok_turn_facts)
+    )
+    override_turn_runtime(grok=replacement)
 
 
 def use_codex_process_pool(monkeypatch, process_pool) -> None:
@@ -861,7 +890,7 @@ def drive_turn(
                 correlation_id=correlation_id,
             ):
                 events.append(event)
-        except ProviderUnavailableError as error:
+        except (ProviderUnavailableError, HostWiringError) as error:
             return error
         return None
 

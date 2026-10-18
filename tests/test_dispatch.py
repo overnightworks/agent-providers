@@ -7,6 +7,7 @@ import inspect
 import os
 import pkgutil
 import re
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -18,6 +19,7 @@ from provider_test_support import (
     call_within_deadline,
     drive_turn,
     override_provider_runtime,
+    override_turn_runtime,
 )
 from pydantic import SecretStr
 
@@ -26,6 +28,7 @@ from agent_providers import dispatch
 from agent_providers.catalog import ProviderRoute
 from agent_providers.claude import adapter as claude_adapter
 from agent_providers.claude.provider import ClaudeResponse
+from agent_providers.config import ProviderNotConfiguredError, TurnRuntimeNotConfiguredError
 from agent_providers.dispatch import ImageCapability, call_provider_once, image_capability
 from agent_providers.errors import (
     ProviderUnavailableError,
@@ -50,6 +53,55 @@ def test_stream_turn_refuses_an_unknown_provider_before_any_route_runs(monkeypat
     assert turn.events == []
     assert turn.executed == []
     assert routes_started == []
+
+
+@pytest.fixture
+def spawned_children(monkeypatch) -> list[str]:
+    spawned: list[str] = []
+
+    def refuse_spawn(*arguments, **_keywords):
+        spawned.append(str(arguments))
+        raise AssertionError("no child may be spawned")
+
+    monkeypatch.setattr(subprocess, "Popen", refuse_spawn)
+    return spawned
+
+
+@pytest.mark.parametrize(
+    ("provider", "remove_block", "block"),
+    [
+        pytest.param(
+            "claude", lambda: override_provider_runtime(claude=None), "claude", id="claude-block",
+        ),
+        pytest.param(
+            "grok", lambda: override_provider_runtime(grok=None), "grok", id="grok-block",
+        ),
+        pytest.param(
+            "grok", lambda: override_turn_runtime(grok=None), "turns.grok", id="turns-grok-block",
+        ),
+    ],
+)
+def test_a_turn_without_the_providers_block_raises_the_named_wiring_error(
+    provider, remove_block, block, spawned_children,
+):
+    remove_block()
+
+    turn = drive_turn(provider)
+
+    assert type(turn.error) is ProviderNotConfiguredError
+    assert (turn.error.provider, turn.error.block) == (provider, block)
+    assert turn.events == []
+    assert spawned_children == []
+
+
+def test_a_turn_without_the_turn_runtime_raises_the_wiring_error_unwrapped(spawned_children):
+    override_provider_runtime(turns=None)
+
+    turn = drive_turn("grok")
+
+    assert type(turn.error) is TurnRuntimeNotConfiguredError
+    assert turn.events == []
+    assert spawned_children == []
 
 
 def test_a_failing_route_logs_the_failed_turn_by_provider_route_and_class(monkeypatch, caplog):

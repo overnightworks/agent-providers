@@ -685,10 +685,31 @@ with no MCP SDK dependency.
   withholds only the answer, because the call ran. `stop()` refuses with `-32602` every
   call whose result was not released, a running forward included, which keeps running
   upstream (design item 10); the pinned CLI continued after that refusal and after an
-  `isError` result (A1b-0e c7). A call holds its pending slot until it is released,
-  refused or given up; a forward's completion alone never frees it, and a cancelled call
-  never releases a result (line 22). Not measured: the pinned CLI against the release
-  (A1b-12b). The bounded close is A1b-10b2b's.
+  `isError` result (A1b-0e c7). A call holds its pending slot until its `call()`
+  returns: released (once `accept` of its result resolved the reply), refused, or given
+  up. `cancel()` frees it at once; a forward's completion alone never does, and a
+  cancelled call never releases a result (line 22). Not measured: the pinned CLI against
+  the release (A1b-12b).
+- *The bounded close (A1b-10b2b, 18.10.2026).* `agent_service.run_tools` opens a run's
+  tool set (the app's client, the barrier, the relay) and closes it in five steps (relay
+  design item 13 without the retired DELETE): the listener and the barrier stopped; the
+  injected reap, on its own bound; the forwards cancelled and `settle()` awaited within
+  `UPSTREAM_CLOSE_SECONDS` (2 s); `open_app_tools` left within `UPSTREAM_ABORT_SECONDS`
+  (0.5 s); the relay's connections within `RELAY_CLOSE_SECONDS` (1 s). Each deadline is
+  read on the run's clock when its step starts, and the bound is the owner's wait for the
+  step's task, never a cancel scope: httpcore's cleanup inside `AsyncShieldCancellation`
+  can delay that task but not the close, because at the deadline the task is cancelled
+  once and not awaited again. On the pinned httpcore 1.0.9 and anyio 4.15.1 that cleanup
+  awaits no peer (TLS without the closing handshake; the socket closed with `write_eof`,
+  `close` and `abort`), so a clean close needs no clock time. An overrun or a failing
+  step is logged by class and the close goes on; only the reap's exception (its
+  `ContainmentLost`) is raised, after the last step, so when it reaches the caller every
+  step has made its bounded attempt (line 20). A finished attempt is not every resource
+  closed: a cleanup stalled below httpx keeps its socket until the stall ends, and its
+  kept task closes it then; on the pinned stack none stalls. The close is one attempt
+  that outlasts its caller's cancellations, AnyIO's level one included, and delivers
+  them after its outcome. Not measured: the pinned CLI against it (A1b-12b). Whether an
+  overrun holds the place: A1b-8.
 - *H9.* Its import contract says "client → stdlib, pydantic, HTTP and the MCP SDK
   only". That sentence is about `agent-client` and is untouched; HD1 adds no
   MCP SDK to any package, so it stays true.
@@ -747,10 +768,12 @@ run's ending is in its record (A1a2).
   (`_RunResponse`, A1a2 item 11). It never relies on finalization by Starlette,
   CPython or the garbage collector. The close stops the runner once; on the CLI
   route that kills and reaps the process group (A1b). A disconnect, drop or
-  supervision failure preserves an already accepted terminal. Only a run
-  without an accepted terminal uses `cancellation_terminal()`: `cancelled`, or
+  supervision failure preserves an already decided terminal. Only a run
+  without a decided terminal uses `cancellation_terminal()`: `cancelled`, or
   `failed: interrupted` once a side-effecting tool call was emitted (A0b wire
-  ruling (a)). `client_lost` independently records the first loss cause.
+  ruling (a)). `client_lost` independently records the first loss cause. A
+  containment loss the runner's pump met ends the run `failed: provider_error`
+  instead (line 19's exception, D1 (b), 18.10.2026).
 - Presentator's speech events (`sentence`, `audio`, `done`) stay in Presentator
   and are not added to this contract.
 
@@ -776,7 +799,10 @@ existing `agent_providers.events` is that contract.
 - (a) An explicit cancel follows the same interrupted rule as a disconnect.
   Whether a cut-short run ends as `cancelled` or `failed: interrupted` is
   decided by the effect class of its emitted tool calls (H9): one
-  side-effecting call, counted from its emission, makes it `interrupted`.
+  side-effecting call, counted from its emission, makes it `interrupted`,
+  unless the runner's pump met a containment loss; then the run ends `failed:
+  provider_error`, after a side-effecting call too, and `client_lost` still
+  records the first loss cause (line 19's exception; D-b, head, 18.10.2026).
 - (b) `not_enabled` and `busy` are HTTP rejections before admission, never
   stream events. The rejection body is typed (`RunRejection`), and its codes
   map to these statuses:
@@ -849,19 +875,20 @@ Piece 1 of A1a3 (`agent_service.run_liveness`):
    idle_timeout`.
 6. At the maximum the decision `failed: limit_exceeded` is taken and the
    runner's cancellation starts at once, even when the client does not read.
-   The terminal is queued after the runner's close has finished, to a client
-   that has not been dropped.
+   The terminal is encoded, accepted and recorded, and then queued, after the
+   runner's close has finished, to a client that has not been dropped.
 7. One step is outstanding at a time; a heartbeat never cancels or restarts it.
 8. At one instant: a client past its stall deadline is dropped first, then a
    runner event already yielded, then the maximum, then idle, then the
    heartbeat.
 9. Every ending closes the runner and waits for the close before the terminal
-   is queued; nothing but frames already encoded and the terminal follows the
-   decision. A dropped client gets no terminal and no new frame.
+   is encoded, accepted, recorded and queued; nothing but frames already
+   encoded and the terminal follows the decision. A dropped client gets no terminal and no new frame.
 10. Closing the stream stops the runner the same way, once, and returns only
     after the close has finished, however often the closer is cancelled.
 11. A close that raises is logged at ERROR with the run id and changes
-    nothing else. An unexpected error in the supervision stops the runner and
+    nothing else, unless it raises a containment loss: then the run ends
+    `failed: provider_error` (rule 9's terminal, or the cut run's record). An unexpected error in the supervision stops the runner and
     then cuts the stream, so a decoder sees it truncated.
 12. When a stream ends no task of the run is alive and the runner was closed
     once.
@@ -1022,11 +1049,13 @@ Rules:
 7. A record begins when `run_started` is accepted, and it counts every accepted
    event. `_WireRun` calls `begin` right after accepting `RunStarted` and hands
    each later accepted event to the recorder, after `RunStream.accept` passes
-   and before the frame is returned. A refused event reaches neither. A
+   and before the frame is returned; a terminal is handed to the recorder at
+   its commit, after the runner's close. A refused event reaches neither. A
    generator that is never advanced creates no record and never calls
    `runner.run`.
 8. A run is over when its runner is closed, and the store hears it at once.
-   The cleanup task (`_reap`) calls the writer's `run_over()` as soon as the
+   The cleanup task (`_reap`) calls the writer's `run_over(losses)`, which
+   commits the decided terminal first, as soon as the
    runner's close has finished or failed, exactly once, whoever waits and
    however often a waiter is cancelled, and before any wait for frame
    delivery. `_supervise`'s finalizer guarantees that the slot closes; it is
@@ -1050,9 +1079,10 @@ Rules:
    loss report, so none carries provider or user text; a runner's failure is
    logged through the one helper instead and never propagates. With no
    runner, the run is recorded complete before its first frame is handed out.
-9. The ending is the accepted terminal; `cancellation_terminal()` is used only
-   when there is none. `run_over()` passes no fallback when a terminal was
-   accepted. The fallback's state and code are all that is read: it is never
+9. The ending is the committed terminal, or `failed: provider_error` when the
+   pump met a loss; `cancellation_terminal()` is used only when no terminal was
+   decided and no loss was met. `run_over()` passes no fallback when a terminal
+   was decided. The fallback's state and code are all that is read: it is never
    sent, accepted or counted, and the record holds no provider text.
 10. Loss causes are latched when detected, and the first one wins. A drop calls
     `client_lost(dropped)` before it awaits the stop; a supervision failure

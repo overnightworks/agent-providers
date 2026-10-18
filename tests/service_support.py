@@ -54,7 +54,7 @@ import agent_service.signing as signing
 from agent_client.run_stream import StreamViolation, ViolationKind
 from agent_client.sse import RunStreamDecoder
 from agent_client.wire import RejectionCode, RunEvent, RunRejection, RunRequest, RunStatus
-from agent_providers.events import AssistantTextEvent, StreamEvent
+from agent_providers.events import AssistantTextEvent, StreamEvent, ToolCallEvent
 from agent_service.app import create_app
 from agent_service.config import RunConfig, ServiceConfig
 from agent_service.identity import Principal
@@ -669,21 +669,22 @@ def with_placeholder_run_id(raw: bytes) -> bytes:
 class GatedRunner:
     """A runner that yields what a test releases, and records how it was stopped.
 
-    ``log`` holds "closing" and "closed" as the runner's close goes through,
-    so a test can order them against what the client took. ``hold_close``
+    ``log`` holds "closing" and "closed" ("close raised" when ``close_error``
+    is set) as the runner's close goes through, so a test can order them against
+    what the client took. ``hold_close``
     keeps the close open until ``release_close``.
     """
 
     def __init__(self) -> None:
-        self._inbox: asyncio.Queue[StreamEvent | Exception | None] = asyncio.Queue()
+        self._inbox: asyncio.Queue[StreamEvent | BaseException | None] = asyncio.Queue()
         self._close_gate: asyncio.Event | None = None
-        self.close_error: Exception | None = None
+        self.close_error: BaseException | None = None
         self.steps = 0
         self.cancellations = 0
         self.closes = 0
         self.log: list[str] = []
 
-    def release(self, event: StreamEvent | Exception) -> None:
+    def release(self, event: StreamEvent | BaseException) -> None:
         self._inbox.put_nowait(event)
 
     def exhaust(self) -> None:
@@ -707,7 +708,7 @@ class GatedRunner:
                     raise
                 if event is None:
                     return
-                if isinstance(event, Exception):
+                if isinstance(event, BaseException):
                     raise event
                 yield event
         finally:
@@ -719,6 +720,7 @@ class GatedRunner:
         if self._close_gate is not None:
             await self._close_gate.wait()
         if self.close_error is not None:
+            self.log.append("close raised")
             raise self.close_error
         self.log.append("closed")
 
@@ -811,17 +813,48 @@ def in_loop(scenario: Callable[..., Coroutine[Any, Any, None]]) -> Callable[...,
 class BrokenClock(StepClock):
     """A clock whose wait fails, which makes the run's supervision fail.
 
-    Each wait raises a new failure from ``breaks_with``.
+    Each wait raises a new failure from ``breaks_with``. Unarmed, it waits like a
+    ``StepClock`` until ``arm()``.
     """
 
     def __init__(
-        self, breaks_with: Callable[[], BaseException] = lambda: RuntimeError("the clock broke")
+        self,
+        breaks_with: Callable[[], BaseException] = lambda: RuntimeError("the clock broke"),
+        *,
+        armed: bool = True,
     ) -> None:
         super().__init__()
         self._breaks_with = breaks_with
+        self._armed = armed
+
+    def arm(self) -> None:
+        self._armed = True
 
     async def wait_until(self, deadline: float) -> None:
+        if not self._armed:
+            await super().wait_until(deadline)
+            return
         raise self._breaks_with()
+
+
+def tool_call(tool_use_id: str, name: str = "read_song") -> ToolCallEvent:
+    return ToolCallEvent(tool_use_id=tool_use_id, name=name, input={})
+
+
+async def client_leaves_mid_run(drive: Drive) -> None:
+    drive.took(await anext(drive.frames))
+
+
+async def client_takes_nothing_until_dropped(drive: Drive) -> None:
+    drive.took(await anext(drive.frames))
+    await drive.run_to(45)
+
+
+async def supervision_fails(drive: Drive) -> None:
+    drive.took(await anext(drive.frames))
+    with pytest.raises(RuntimeError, match="the clock broke"):
+        await anext(drive.frames)
+    assert drive.end_of_stream() == [ViolationKind.TRUNCATED]
 
 
 class ClientSocket:
@@ -971,6 +1004,7 @@ class Drive:
         self.events: list[tuple[float, RunEvent]] = []
         self.frame_sizes: list[int] = []
         self._decoder = RunStreamDecoder()
+        self._end_of_stream: list[ViolationKind] | None = None
         self._may_read = asyncio.Event()
         self._may_read.set()
         self.reader = asyncio.create_task(self._read()) if read else None
@@ -997,8 +1031,13 @@ class Drive:
             self.took(frame)
 
     def end_of_stream(self) -> list[ViolationKind]:
-        """What the client's decoder reports about the stream's end: nothing for a clean one."""
-        return [violation.kind for violation in self._decoder.close()]
+        """What the client's decoder reports about the stream's end: nothing for a clean one.
+
+        The decoder closes once, so asking again answers the same.
+        """
+        if self._end_of_stream is None:
+            self._end_of_stream = [violation.kind for violation in self._decoder.close()]
+        return self._end_of_stream
 
     def status(self, run_id: uuid.UUID | None = None) -> RunStatus | None:
         """Alice's read of a run of the songmaker app: this drive's, unless another is named."""

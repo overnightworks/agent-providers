@@ -1,8 +1,0 @@
-claim_id = "7554588ce15e4676bdea112190c7bff9"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "7d410b818d869293ea2b82b45c9caa6f698eb4c9"
-branch = "claude/issue-283-runner-prep"
-scope = ["src/agent_providers/spawn.py", "tests/conftest.py", "tests/descendant_support.py", "tests/provider_test_support.py", "tests/test_anchored_kill_until_gone.py", "tests/test_claude_anchored_turns.py", "tests/test_claude_provider.py", "tests/test_codex_cli_adapter.py", "tests/test_grok_cli_adapter.py", "tests/test_process.py"]
-opened_commit = "b5084c4f471700cd56a81267a027321ebb524a10"
-whole_reason = "Three mechanical preparations for 3b1 that share its files: the census decision its blocking face reuses, the descendant pieces its real rows import, and the one seam its door rename repoints; each has a caller today and none changes behaviour."

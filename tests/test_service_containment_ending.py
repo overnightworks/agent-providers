@@ -40,6 +40,7 @@ from agent_client.wire import (
     FailureCode,
     RunState,
     RunStatus,
+    Succeeded,
 )
 from agent_providers.errors import ContainmentLost, RetainedGroup
 from agent_providers.events import AssistantTextEvent, FinalEvent, StreamEvent
@@ -507,7 +508,16 @@ async def test_a_loss_carried_by_another_error_counts_like_a_bare_one(ending, ki
     assert [line[1] for line in failure_lines(caplog)] == [kind]
 
 
-async def _observed_when_a_step_raises(members: list[BaseException], caplog) -> tuple:
+@dataclass(frozen=True)
+class _StepRaised:
+    types: list[str]
+    terminal_seq: int
+    outcome: list
+    failure_lines: list[tuple]
+    code: FailureCode
+
+
+async def _observed_when_a_step_raises(members: list[BaseException], caplog) -> _StepRaised:
     runner = GatedRunner()
     async with driven(runner) as drive:
         runner.release(BaseExceptionGroup("cleanup", members))
@@ -516,12 +526,12 @@ async def _observed_when_a_step_raises(members: list[BaseException], caplog) -> 
         drive.assert_nothing_left()
     terminal = drive.terminal[1]
     assert isinstance(terminal, Failed)
-    return (
-        drive.types[:-1],
-        drive.terminal[0],
-        outcome,
-        [(line[1], line[2]) for line in failure_lines(caplog)],
-        terminal.code,
+    return _StepRaised(
+        types=drive.types[:-1],
+        terminal_seq=drive.terminal[0],
+        outcome=outcome,
+        failure_lines=[(line[1], line[2]) for line in failure_lines(caplog)],
+        code=terminal.code,
     )
 
 
@@ -534,9 +544,31 @@ async def test_a_loss_beside_a_cancellation_escaping_a_step_ends_provider_error_
     caplog.clear()
     lossy = await _observed_when_a_step_raises([asyncio.CancelledError(), _lost()], caplog)
 
-    assert control[4] is FailureCode.IDLE_TIMEOUT
-    assert lossy[4] is FailureCode.PROVIDER_ERROR
-    assert lossy[:4] == control[:4]
+    assert control.code is FailureCode.IDLE_TIMEOUT
+    assert lossy.code is FailureCode.PROVIDER_ERROR
+    assert replace(lossy, code=control.code) == control
+
+
+class _AnswerBlankedAtClose(GatedRunner):
+    async def run(self, admitted) -> AsyncGenerator[StreamEvent, None]:
+        final = FinalEvent(text="original answer")
+        try:
+            yield final
+        finally:
+            final.text = ""
+            await self._closed()
+
+
+@in_loop
+async def test_a_final_answer_altered_by_the_runner_while_closing_still_succeeds_unchanged():
+    async with driven(_AnswerBlankedAtClose()) as drive:
+        await drive.run_to_end()
+        await drive.finished()
+
+    terminal = drive.terminal[1]
+    assert isinstance(terminal, Succeeded)
+    assert terminal.text == "original answer"
+    _assert_recorded(drive.status(), RunState.SUCCEEDED, None, events=2, at=0)
 
 
 @in_loop

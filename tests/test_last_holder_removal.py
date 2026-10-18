@@ -190,15 +190,17 @@ def test_the_closure_removes_only_when_no_reservation_is_held(
 
     closing_outcome = holders.close()
     attempts_after_the_first_closure = len(holders.attempts)
+    with pytest.raises(RuntimeError, match=RESERVATIONS_CLOSED):
+        holders.protocol.reserve()
     releasing_outcomes = [holders.release(name) for name in held]
+    outcomes = [closing_outcome, *releasing_outcomes]
     second_closure_outcome = holders.close()
     with pytest.raises(RuntimeError, match=RESERVATIONS_CLOSED):
         holders.protocol.reserve()
 
     assert attempts_after_the_first_closure == attempts_after_the_closure
-    assert [closing_outcome, *releasing_outcomes] == (
-        [None, holders.expected_failure()] if held else [holders.expected_failure()]
-    )
+    expected_outcomes = [None, holders.expected_failure()] if held else [holders.expected_failure()]
+    assert outcomes == expected_outcomes
     assert second_closure_outcome is None
     holders.assert_one_attempt_by_the_last_holder()
     assert holders.attempts[0].lock_was_free
@@ -213,15 +215,18 @@ class Race:
 
 @contextmanager
 def interleaved(paused: ThreadedOperation, other: ThreadedOperation, contended: threading.Event):
+    other_started = False
     try:
         paused.start()
         other.start(or_when=contended)
+        other_started = True
         yield
     finally:
         try:
             paused.finish()
         finally:
-            other.finish()
+            if other_started:
+                other.finish()
 
 
 def step_through(
@@ -365,18 +370,30 @@ class PauseThatExpiresAtOnce(ThreadedOperation):
         return False
 
 
+class PauseThatExpiresOnResume(ThreadedOperation):
+    def _wait_for_resume(self) -> bool:
+        self._resume.wait(TEST_WAIT_SECONDS)
+        return False
+
+
 def an_operation_with_lines() -> str:
     reached = "the end"
     return reached
 
 
-def test_an_expired_pause_fails_the_row_after_both_threads_are_joined() -> None:
+@pytest.mark.parametrize(
+    "expiring_pause",
+    (PauseThatExpiresAtOnce, PauseThatExpiresOnResume),
+    ids=("at-once", "on-resume"),
+)
+def test_an_expired_pause_fails_the_row_after_both_threads_are_joined(
+    expiring_pause: type[ThreadedOperation],
+) -> None:
     threads_before = threading.active_count()
-    operation = PauseThatExpiresAtOnce(
+    operation = expiring_pause(
         an_operation_with_lines, pause_in=code_of(an_operation_with_lines), at_line=1,
     )
     operation.start()
-    assert operation.expired.wait(TEST_WAIT_SECONDS)
 
     with pytest.raises(AssertionError, match="pause expired"):
         operation.finish()

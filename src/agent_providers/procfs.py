@@ -175,8 +175,8 @@ def _mount_verdict(view: ProcView) -> GroupCensus | None:
 
 
 def holds_mount_point(mountinfo: str, directory: str) -> bool:
-    for line in mountinfo.splitlines():
-        fields = line.split()
+    for line in mountinfo.split("\n"):
+        fields = line.split(" ")
         if MOUNTINFO_SEPARATOR not in fields or len(fields) <= MOUNTINFO_MOUNT_POINT_INDEX:
             continue
         mount_point = _unescape_mountinfo(fields[MOUNTINFO_MOUNT_POINT_INDEX])

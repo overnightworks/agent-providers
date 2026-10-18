@@ -811,3 +811,17 @@ def test_an_escaped_mount_point_is_matched_by_its_decoded_name(escape: str, deco
 
     assert holds_mount_point(line, f"/r/a{decoded}b")
     assert not holds_mount_point(line, f"/r/a{escape}b")
+
+
+@pytest.mark.parametrize(
+    "literal", [" ", "\r", "\x0b", "\x0c", " "],
+    ids=["no-break-space", "carriage-return", "vertical-tab", "form-feed", "em-space"],
+)
+def test_a_mount_point_with_an_unescaped_whitespace_character_is_matched_whole(
+    literal: str,
+) -> None:
+    mount_point = f"/r/a{literal}b"
+    line = mountinfo_line(mount_point=mount_point)
+
+    assert holds_mount_point(line, mount_point)
+    assert not holds_mount_point(line, "/r/a")

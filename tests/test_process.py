@@ -2464,8 +2464,13 @@ def test_a_credential_copy_that_makes_no_write_progress_leaves_no_home(
     real_write = os.write
     open_descriptors = len(os.listdir("/proc/self/fd"))
 
+    destination_writes = 0
+
     def write_nothing_to_the_destination(descriptor: int, data) -> int:
+        nonlocal destination_writes
         if os.readlink(f"/proc/self/fd/{descriptor}").endswith(destination_name):
+            destination_writes += 1
+            assert destination_writes == 1, "the copy wrote again after a write made no progress"
             return 0
         return real_write(descriptor, data)
 

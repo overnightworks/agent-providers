@@ -83,6 +83,7 @@ from agent_providers.claude.provider import (
     _cli_arguments,
     _find_claude_binary,
     _mcp_cli_arguments,
+    _parse_announced_surface,
     acall_claude,
     acall_claude_with_mcp_stream,
     averify_no_builtin_cli_tools,
@@ -2615,6 +2616,24 @@ def test_tool_surface_failure_is_cached_across_sequential_calls(
         asyncio.run(second_probe)
 
     assert len(commands) == 1
+
+
+@pytest.mark.parametrize(
+    "init_line",
+    [
+        b"\xff" + json.dumps({"type": "system", "subtype": "init"}).encode(),
+        json.dumps({"type": "system", "subtype": "init"}).encode("utf-16"),
+    ],
+    ids=["non-utf8", "utf16"],
+)
+def test_an_init_line_that_is_not_utf8_json_is_refused_with_the_closed_init_error(
+    init_line,
+) -> None:
+    with pytest.raises(UnavailableError) as refused:
+        _parse_announced_surface(init_line, mcp=None)
+
+    assert str(refused.value) == "Claude CLI did not open with the expected session init event"
+    assert (refused.value.__cause__, refused.value.__context__) == (None, None)
 
 
 def test_tool_surface_failure_cache_expires_so_a_repair_takes_effect(

@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 from provider_test_support import (
     a_claude_cli_child,
+    held_claude_slots,
     install_claude_cli_children,
     operations,
     reap_without_waiting,
@@ -127,19 +128,17 @@ def _a_tool_result_block(use_id: str, content: Any = "ok", **extra: Any) -> dict
 
 
 def test_parse_assistant_text_event() -> None:
-    chunks: list[str] = []
     [ev] = _parse_stream_event(
-        _assistant_payload({"type": "text", "text": "hello"}), chunks, A_CORRELATION_ID,
+        _assistant_payload({"type": "text", "text": "hello"}), A_CORRELATION_ID,
     )
     assert isinstance(ev, AssistantTextEvent)
     assert ev.text == "hello"
     assert ev.correlation_id == A_CORRELATION_ID
-    assert chunks == ["hello"]
 
 
 def test_parse_assistant_tool_use_event() -> None:
     [ev] = _parse_stream_event(
-        _assistant_payload(_a_tool_use_block("tu-1", x=1)), [], A_CORRELATION_ID,
+        _assistant_payload(_a_tool_use_block("tu-1", x=1)), A_CORRELATION_ID,
     )
     assert isinstance(ev, ToolCallEvent)
     assert ev.tool_use_id == "tu-1"
@@ -148,25 +147,21 @@ def test_parse_assistant_tool_use_event() -> None:
 
 
 def test_parse_assistant_text_and_two_tool_uses_yield_three_events_in_order() -> None:
-    chunks: list[str] = []
     events = _parse_stream_event(
         _assistant_payload(
             {"type": "text", "text": "looking"},
             _a_tool_use_block("tu-1"),
             _a_tool_use_block("tu-2"),
         ),
-        chunks,
         A_CORRELATION_ID,
     )
     assert [e.type for e in events] == ["assistant_text", "tool_call", "tool_call"]
     assert [e.tool_use_id for e in events[1:]] == ["tu-1", "tu-2"]
-    assert chunks == ["looking"]
 
 
 def test_parse_user_two_tool_results_yield_two_events_in_order() -> None:
     events = _parse_stream_event(
         _user_payload(_a_tool_result_block("tu-1", "a"), _a_tool_result_block("tu-2", "b")),
-        [],
         A_CORRELATION_ID,
     )
     assert [(e.type, e.tool_use_id, e.content) for e in events] == [
@@ -180,7 +175,6 @@ def test_parse_user_tool_result_event() -> None:
         _user_payload(_a_tool_result_block(
             "tu-1", [{"type": "text", "text": "ok"}], is_error=False,
         )),
-        [],
         A_CORRELATION_ID,
     )
     assert isinstance(ev, ToolResultEvent)
@@ -196,13 +190,13 @@ def test_parse_user_tool_result_event() -> None:
 )
 def test_parse_user_tool_result_content_shapes(content, expected) -> None:
     [ev] = _parse_stream_event(
-        _user_payload(_a_tool_result_block("tu-1", content)), [], A_CORRELATION_ID,
+        _user_payload(_a_tool_result_block("tu-1", content)), A_CORRELATION_ID,
     )
     assert ev.content == expected
 
 
 def test_parse_result_event_returns_final() -> None:
-    [ev] = _parse_stream_event({"type": "result", "result": "done"}, [], A_CORRELATION_ID)
+    [ev] = _parse_stream_event({"type": "result", "result": "done"}, A_CORRELATION_ID)
     assert isinstance(ev, FinalEvent)
     assert ev.text == "done"
 
@@ -218,7 +212,112 @@ def test_parse_result_event_returns_final() -> None:
     ids=["result-without-text", "empty-assistant", "empty-user", "unknown-type"],
 )
 def test_parse_payload_without_content_yields_no_events(payload) -> None:
-    assert _parse_stream_event(payload, [], A_CORRELATION_ID) == []
+    assert _parse_stream_event(payload, A_CORRELATION_ID) == []
+
+
+A_MARKER = "MARKER-7f3a9c"
+
+
+def _nested_object(depth: int) -> bytes:
+    return b'{"a":' * depth + b"1" + b"}" * depth
+
+
+def _a_json_object_with_marker(encoding: str) -> bytes:
+    return json.dumps({"type": "system", "note": A_MARKER}).encode(encoding)
+
+
+def assert_no_marker_in_failure(error: BaseException, caplog) -> None:
+    carried = [str(error), repr(error), repr(error.args)]
+    carried.append(repr(getattr(error, "obj", "")))
+    carried.append(repr(getattr(error, "object", "")))
+    assert [A_MARKER in text for text in carried] == [False] * len(carried)
+    assert (error.__cause__, error.__context__) == (None, None)
+    assert A_MARKER not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("line", "error_class"),
+    [
+        (b"\xff" + _a_json_object_with_marker("utf-8"), "UnicodeDecodeError"),
+        (_a_json_object_with_marker("utf-16"), "UnicodeDecodeError"),
+        (_a_json_object_with_marker("utf-32"), "UnicodeDecodeError"),
+        (_nested_object(100_000), "RecursionError"),
+        (_a_json_object_with_marker("utf-16-le"), "JSONDecodeError"),
+        (_a_json_object_with_marker("utf-32-le"), "JSONDecodeError"),
+    ],
+    ids=["non-utf8", "utf16-bom", "utf32-bom", "deeply-nested", "utf16le", "utf32le"],
+)
+def test_a_line_that_is_not_utf8_json_is_skipped_with_a_class_only_warning(
+    line, error_class, caplog,
+) -> None:
+    caplog.set_level("WARNING")
+
+    assert _safe_json_loads(line + b"\n") is None
+
+    [record] = caplog.records
+    assert "skipping malformed JSON line" in record.message
+    assert error_class in record.message
+    assert "bytes" in record.message
+    assert A_MARKER not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"type": "assistant", "message": A_MARKER},
+        _assistant_payload(A_MARKER),
+        _user_payload(A_MARKER),
+        _user_payload(_a_tool_result_block("tu-1")) | {"message": {"content": 7}},
+        _assistant_payload({"type": "text", "text": {"k": A_MARKER}}),
+        _assistant_payload(_a_tool_use_block("tu-1") | {"input": A_MARKER}),
+        _user_payload(_a_tool_result_block({"k": A_MARKER})),
+        _user_payload(_a_tool_result_block("tu-1", [{"text": 7.5}])),
+    ],
+    ids=[
+        "message-string", "assistant-block-string", "user-block-string",
+        "content-integer", "text-object", "tool-input-string",
+        "tool-use-id-object", "result-item-text-number",
+    ],
+)
+def test_a_refused_field_shape_fails_closed_and_unchained(payload, caplog) -> None:
+    caplog.set_level("WARNING")
+
+    with pytest.raises(UnavailableError) as refused:
+        _parse_stream_event(payload, A_CORRELATION_ID)
+
+    assert str(refused.value) == CLAUDE_CLI_UNAVAILABLE_DETAIL
+    assert_no_marker_in_failure(refused.value, caplog)
+    [record] = caplog.records
+    assert "refusing a malformed event" in record.message
+
+
+def _payload_of(event: StreamEvent) -> Any:
+    return {
+        "assistant_text": lambda: event.text,
+        "tool_call": lambda: event.input,
+        "tool_result": lambda: event.content,
+    }[event.type]()
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ({"type": "assistant", "message": 0}, []),
+        (_assistant_payload({"type": "text", "text": {}}), [("assistant_text", "")]),
+        (
+            _assistant_payload({"type": "tool_use", "id": "t", "name": "n", "input": []}),
+            [("tool_call", {})],
+        ),
+        (_user_payload(_a_tool_result_block("t", {"k": "v"})), [("tool_result", "")]),
+        ({"type": "result", "result": {"k": "v"}}, []),
+    ],
+    ids=["message-zero", "text-empty-object", "input-empty-list", "result-content-object",
+         "result-object"],
+)
+def test_a_tolerated_field_shape_is_normalized_as_before(payload, expected) -> None:
+    events = _parse_stream_event(payload, A_CORRELATION_ID)
+
+    assert [(e.type, _payload_of(e)) for e in events] == expected
 
 
 # ── acall_claude_with_mcp_stream integration ─────────────────────────
@@ -270,6 +369,54 @@ def test_stream_skips_malformed_lines(monkeypatch, caplog) -> None:
     ))
     assert [e.type for e in events] == ["assistant_text", "final"]
     assert any("malformed" in r.message.lower() for r in caplog.records)
+
+
+@pytest.mark.parametrize(
+    ("lines", "outcome"),
+    [
+        (
+            [b"\xff" + _a_json_object_with_marker("utf-8") + b"\n",
+             _assistant_line("hello"), _result_line("hello")],
+            ["assistant_text", "final"],
+        ),
+        (
+            [_assistant_line("hello"),
+             json.dumps(_assistant_payload({"type": "text", "text": {"k": A_MARKER}})).encode()
+             + b"\n"],
+            ["assistant_text", UnavailableError],
+        ),
+    ],
+    ids=["undecodable-line-skipped", "refused-shape-ends-the-stream"],
+)
+def test_the_old_stream_keeps_cli_bytes_out_of_a_malformed_lines_outcome(
+    lines, outcome, monkeypatch, caplog,
+) -> None:
+    monkeypatch.setattr(provider, "_require_claude_binary", lambda: "/bin/claude")
+    caplog.set_level("WARNING")
+    install_claude_cli_children(monkeypatch, a_claude_cli_child(stream_lines=lines))
+    seen: list[StreamEvent] = []
+
+    async def drain() -> None:
+        async for event in acall_claude_with_mcp_stream(prompt="hi", user_id="u"):
+            seen.append(event)
+
+    failure: UnavailableError | None = None
+    try:
+        asyncio.run(drain())
+    except UnavailableError as error:
+        failure = error
+
+    assert [e.type for e in seen] == [o for o in outcome if isinstance(o, str)]
+    assert A_MARKER not in repr(seen)
+    assert A_MARKER not in caplog.text
+    assert held_claude_slots() == 0
+    if UnavailableError in outcome:
+        assert failure is not None
+        assert str(failure) == CLAUDE_CLI_UNAVAILABLE_DETAIL
+        assert_no_marker_in_failure(failure, caplog)
+    else:
+        assert failure is None
+        assert seen[-1].text == "hello"
 
 
 def test_stream_regression_matches_non_streaming_final_text(monkeypatch) -> None:

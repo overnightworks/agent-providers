@@ -56,7 +56,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
-from typing import IO, Final, Literal, cast
+from typing import IO, Final, Literal, NoReturn, cast
+
+from agent_providers import procfs
 
 log = logging.getLogger(__name__)
 
@@ -359,6 +361,9 @@ def admit_release(state: AnchorState) -> bool:
 
 _IDENTITY_LOST: Final = object()
 
+# ESRCH or ECHILD from a kernel call naming the leader's pid or group: something else reaped it.
+_LEADER_LOSS_ERRORS: Final = (ProcessLookupError, ChildProcessError)
+
 
 def _wait_for_exit(pid: int) -> tuple[int, int]:
     reported = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT)
@@ -451,10 +456,30 @@ class AnchoredLeader:
     ``signal_group`` sends a signal to the leader's process group inside the
     lifecycle lock, only while the leader is anchored (RUNNING or EXITED), so no
     ``release()`` can free the number between the admission and the signal. After
-    RELEASED or LOST it refuses without a kernel call. ``ESRCH`` means that
-    something else reaped the leader: it is committed as a loss and raises
-    :class:`ChildIdentityLost`. Any other ``OSError`` propagates unchanged and
-    leaves the handle as it was. It waits for nothing and never reaps.
+    RELEASED or LOST it refuses without a kernel call. ``ESRCH`` or ``ECHILD``
+    means that something else reaped the leader: it is committed as a loss and
+    raises :class:`ChildIdentityLost`. Any other ``OSError`` propagates unchanged
+    and leaves the handle as it was. It waits for nothing and never reaps.
+
+    ``kill_and_census()`` admits, sends SIGKILL to the leader's process group and
+    counts the group's live members with :func:`procfs.group_census`, all inside
+    one hold of the lifecycle lock, so no ``release()`` can free the number
+    between the kill and the count; the count is returned unchanged. A kill that
+    meets ``ESRCH`` or ``ECHILD`` is a loss with no count; any other ``OSError``
+    and any exception from the count propagate unchanged, with no count after a
+    refused kill and the lock released. ``EMPTY`` describes the processes that
+    were in the group during this kill and that the kernel let the service
+    signal: a process that left the group with ``setsid`` or ``setpgid`` is not
+    counted, and a membership change during the scan may be missed, while every
+    member the scan observes live with the group's number prevents ``EMPTY``.
+    ``EMPTY`` neither publishes the leader's exit nor releases it: the leader this
+    SIGKILL ended is a zombie the scan counts as dead while its watcher may not
+    have committed the exit yet, so a caller awaits the exit before ``release()``,
+    which refuses a running leader. A single ``LIVE`` is no failure, since a member
+    that SIGKILL reached but that has not run its exit is live to the scan. The
+    lock is held for one ``/proc`` scan, which grows with the number of visible
+    processes and has no timeout; meanwhile ``release()``, the watcher's commit
+    and the ``state`` and ``returncode`` reads wait.
 
     A loss committed by ``signal_group`` can overtake a stop report the watcher
     holds, so after each stop report the watcher reads the state under the lock
@@ -513,7 +538,7 @@ class AnchoredLeader:
                     return
                 self._warn_once_that_the_leader_is_stopped()
                 _consume_stop_report(self.pid)
-        except ChildProcessError:
+        except _LEADER_LOSS_ERRORS:
             self._commit(LeaderGone())
             return
         self._commit(observation)
@@ -536,7 +561,7 @@ class AnchoredLeader:
                 raise AnchorStateError("the leader's exit is not published; it cannot be released")
             try:
                 event: LeaderEvent = reap_outcome(*_reap_exited(self.pid))
-            except ChildProcessError:
+            except _LEADER_LOSS_ERRORS:
                 event = LeaderGone()
             self._apply(event)
             if isinstance(event, LeaderNotReaped):
@@ -546,13 +571,27 @@ class AnchoredLeader:
 
     def signal_group(self, sig: signal.Signals) -> None:
         with self._lock:
-            admit_group_signal(self._status.state)
-            try:
-                os.killpg(self.pid, sig)
-                return
-            except ProcessLookupError:
-                transition = self._apply(LeaderGone())
-        self._announce_when(transition)
+            loss = self._send_to_group(sig)
+        if loss is not None:
+            self._report_loss(loss)
+
+    def kill_and_census(self) -> procfs.GroupCensus:
+        with self._lock:
+            loss = self._send_to_group(signal.SIGKILL)
+            if loss is None:
+                return procfs.group_census(procfs.RealProcView(), self.pid)
+        self._report_loss(loss)
+
+    def _send_to_group(self, sig: signal.Signals) -> LeaderTransition | None:
+        admit_group_signal(self._status.state)
+        try:
+            os.killpg(self.pid, sig)
+        except _LEADER_LOSS_ERRORS:
+            return self._apply(LeaderGone())
+        return None
+
+    def _report_loss(self, loss: LeaderTransition) -> NoReturn:
+        self._announce_when(loss)
         raise ChildIdentityLost("the leader was reaped elsewhere; its process group is gone")
 
     def _kill_and_reap(self) -> LeaderEvent:
@@ -560,7 +599,7 @@ class AnchoredLeader:
             try:
                 os.killpg(self.pid, signal.SIGKILL)
                 event: LeaderEvent = self._reap_until_terminal()
-            except (ProcessLookupError, ChildProcessError):
+            except _LEADER_LOSS_ERRORS:
                 event = LeaderGone()
             self._apply(event)
         return event
@@ -737,9 +776,9 @@ class AnchoredChild:
     """The async face of an :class:`AnchoredLeader`: three pipes, an exit event, no reaper.
 
     Only :func:`open_anchored_pipes` creates one. ``pid``, ``returncode``,
-    ``done_with_pid`` and ``signal_group`` are the leader's, unchanged; ``stdin`` is
-    a writer whose ``drain()`` and ``wait_closed()`` work as on asyncio's door,
-    ``stdout`` and ``stderr`` are readers.
+    ``done_with_pid``, ``signal_group`` and ``kill_and_census`` are the leader's,
+    unchanged; ``stdin`` is a writer whose ``drain()`` and ``wait_closed()`` work
+    as on asyncio's door, ``stdout`` and ``stderr`` are readers.
 
     ``exited()`` returns the leader's code once the exit is published. It
     waits on an event, so a cancelled or timed-out waiter harms nobody and every
@@ -816,6 +855,9 @@ class AnchoredChild:
 
     def signal_group(self, sig: signal.Signals) -> None:
         self._leader.signal_group(sig)
+
+    def kill_and_census(self) -> procfs.GroupCensus:
+        return self._leader.kill_and_census()
 
     async def exited(self) -> int:
         await self._exit_published.wait()

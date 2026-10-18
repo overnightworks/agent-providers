@@ -1,7 +1,0 @@
-claim_id = "230d87da96844994a1092553d36c98bf"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "baee866f3aa65fb2062aaa645aa0478a5618ea84"
-branch = "claude/issue-240-bounded-scenario-deadline"
-scope = ["tests/provider_test_support.py", "tests/test_async_claude_spawn_seam.py", "tests/test_claude_provider.py"]
-opened_commit = "262340634741c8f912e4e463e5a66b8e4dda6fc7"

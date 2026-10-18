@@ -17,12 +17,16 @@ def _base64url(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
 
 
-def canary_token() -> str:
-    """An RS256-shaped token built at run time: its signature segment holds ``-`` and ``_``."""
+def constructed_token(signature_bytes: bytes) -> str:
+    """An RS256-shaped token built at run time around the given signature bytes."""
     header = _base64url(json.dumps({"alg": "RS256", "typ": "JWT"}).encode())
-    payload = _base64url(json.dumps({"sub": "canary"}).encode())
-    signature = _base64url(bytes(range(256)) + bytes(reversed(range(128))))
-    return ".".join([header, payload, signature])
+    payload = _base64url(json.dumps({"sub": "constructed"}).encode())
+    return ".".join([header, payload, _base64url(signature_bytes)])
+
+
+def canary_token() -> str:
+    """A constructed token whose signature segment holds ``-`` and ``_``."""
+    return constructed_token(bytes(range(256)) + bytes(reversed(range(128))))
 
 
 def capability_carrying(token: str, tools: Sequence[str] = ("echo",)) -> Capability:

@@ -9,6 +9,7 @@ from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
+from functools import partial
 from http import HTTPStatus
 from itertools import count
 from typing import Any, Final, Protocol
@@ -66,6 +67,7 @@ _VERSION_FIELD: Final = b"mcp-protocol-version"
 _VERSION_SEPARATOR: Final = b", "
 _BODYLESS_REFUSALS: Final = frozenset({HTTPStatus.NOT_FOUND, HTTPStatus.METHOD_NOT_ALLOWED})
 CALL_GIVEN_UP_TEXT: Final = "The tool call ended before it ran."
+CALL_FAILED_TEXT: Final = "The tool call failed; it may have run."
 
 
 @dataclass(frozen=True)
@@ -560,104 +562,105 @@ class _PendingCall:
     request_id: RequestId
     params: CallToolParams
     event: ToolCallEvent
-    verdict: asyncio.Future[asyncio.Task[ToolOutcome] | None]
-    cancelled_by_cli: asyncio.Future[None]
+    response: asyncio.Future[Reply | Unanswered]
+    cancelled_by_cli: bool = False
+    outcome: ToolOutcome | None = None
 
     @property
     def given_up(self) -> bool:
-        return self.cancelled_by_cli.done() or self.verdict.cancelled()
+        return (
+            self.cancelled_by_cli
+            or self.response.cancelled()
+            or (self.response.done() and self.response.result() is UNANSWERED)
+        )
 
-    @property
-    def forward(self) -> asyncio.Task[ToolOutcome] | None:
-        if self.verdict.done() and not self.verdict.cancelled():
-            return self.verdict.result()
-        return None
+
+@dataclass(frozen=True)
+class _ReadyEvent:
+    pending: _PendingCall
+    event: ToolCallEvent | ToolResultEvent
 
 
 class ToolCallBarrier:
-    """The ``ToolCalls`` of a run: only a call whose acceptance the service confirmed is forwarded.
+    """The ``ToolCalls`` of a run: a call runs, and its result is released, only once accepted.
 
     Each admitted ``tools/call`` is one pending call under the relay-minted id ``call-<n>``,
-    numbered in arrival order. It is waiting, handed out, forwarded, or ended (answered,
-    refused, or given up). The service alone accepts: the runner takes one call at a time with
-    ``next_event()``, yields its event, and calls ``accept(event)`` only after the service
-    resumed it past that event. ``accept`` forwards exactly the handed-out call; any other
-    event, a repeated accept, or an accept after ``stop()`` raises ``ToolCallsMisused`` and
-    forwards nothing.
+    numbered in arrival order. It is waiting, handed out, forwarded, resulted, or ended
+    (released, refused, or given up). The service alone accepts: the runner takes one event at
+    a time with ``next_event()``, yields it, and calls ``accept(event)`` only after the service
+    resumed it past that event, that is after it checked, counted, recorded and queued it.
+    ``accept`` takes exactly the handed-out event, matched by kind and id: a call's event
+    forwards the call, its result's event releases the reply. Any other event, a repeated
+    accept, or an accept after ``stop()`` raises ``ToolCallsMisused`` and does nothing.
 
-    Refused at once with ``-32602`` and never forwarded: a duplicate pending id, a call beyond
-    ``MAX_PENDING_TOOL_CALLS``, and every call after ``stop()``. ``stop()`` also refuses every
-    waiting and handed-out call; a forwarded call keeps running. The bound counts only calls
-    the CLI still waits for and reserves no connection, because idle keep-alive connections
-    count toward the listener's cap too.
-
-    A call is given up by ``cancel(request_id)`` or by the cancellation of the task running
-    ``call()``. Each is recorded, for a waiting or handed-out call, before it returns: ``call()``
-    awaits its verdict future directly, so ``Task.cancel()`` of any task that reaches ``call()``
-    through an await chain forwarding ``Task.cancel()`` at once (a direct await or
-    ``asyncio.gather``; no ``asyncio.wait``, shield or ``wait_for``, and no task outside that
-    chain) cancels it at once, and ``accept`` and ``next_event()`` decide from that
-    record. A given-up call leaves the pending set and its request is closed without a byte,
-    whatever it would have answered: ``call()`` returns ``Unanswered`` after a cancel and raises
-    ``CancelledError`` after a task cancellation. A waiting one is never handed out; a
-    handed-out one stays the handed-out call, is never forwarded, and its ``accept`` makes the
-    next ``next_event()`` return an ``is_error`` ``ToolResultEvent`` with ``CALL_GIVEN_UP_TEXT``;
-    a forwarded one keeps running upstream while only its waiter ends.
+    ``next_event()`` hands out, in this order, the given-up result of the last accept, then
+    calls and results in the order they became ready (a call at its arrival, a result when its
+    forward ended). Every event stays handed out until ``accept`` takes it, so a second
+    ``next_event()`` before that raises ``ToolCallsMisused``.
 
     A forward runs as the task ``upstream:<run_id>:call-<n>``, which a give-up never cancels.
-    Its outcome is retrieved exactly once by one owner: ``call()`` while its request waits,
-    otherwise the lost-outcome owner, which logs a failure once by class. ``settle()`` returns
-    once every forward's outcome was retrieved.
+    One completion owner, attached to it at creation, retrieves its outcome exactly once,
+    whether or not the CLI still waits, and turns it into the call's one ``ToolResultEvent``:
+    an outcome as it is, an upstream failure as ``CALL_FAILED_TEXT`` with ``is_error`` after
+    one log line by class. A cancelled forward yields no result. An outcome whose decoded text
+    carries the run's capability yields no event and no reply: the barrier is refused for good
+    and ``next_event()`` raises ``CapabilityReflected``. ``settle()`` returns once every
+    forward's outcome was retrieved.
+
+    ``call()`` awaits one response future from admission to its answer. It is resolved by the
+    release of the reply, by the refusal ``-32602`` (``stop()``, a duplicate pending id, a call
+    beyond ``MAX_PENDING_TOOL_CALLS``, every call after ``stop()``), or by ``Unanswered``
+    (``cancel()``, a cancelled forward, a capability hit), or cancelled by the cancellation of
+    the task running ``call()``. That task must reach ``call()`` through an await chain that
+    forwards ``Task.cancel()`` at once (a direct await or ``asyncio.gather``; no
+    ``asyncio.wait``, shield or ``wait_for``), so the give-up is recorded before
+    ``Task.cancel()`` returns, in every phase. An explicit ``cancel()`` is recorded beside the
+    future and wins over an earlier resolution: ``call()`` then returns ``Unanswered``.
+
+    A give-up withholds only the reply: the call ran, so its result is still handed out and
+    its accept releases nothing. ``stop()`` refuses with ``-32602`` every admitted call whose
+    reply was not released, a running forward, a queued result and a handed-out result
+    included; a running forward keeps running upstream. A call holds its pending slot until it
+    is released, refused or given up; a forward's completion alone never frees it, and
+    ``cancel()`` frees it at once. The bound reserves no connection, because idle keep-alive
+    connections count toward the listener's cap too.
 
     The listener cancels the task running ``call()`` when the CLI closes the connection of a
-    pending call, in the step it sees the close. Not yet held: the reply is answered as soon as
-    the upstream outcome exists (A1b-10b2).
+    pending call, in the step it sees the close.
     """
 
-    def __init__(self, run_id: str, app: AppTools) -> None:
+    def __init__(self, run_id: str, app: AppTools, capability: Capability) -> None:
         self._run_id = run_id
         self._app = app
+        self._capability = capability
         self._numbers = count(1)
         self._pending: list[_PendingCall] = []
-        self._waiting: deque[_PendingCall] = deque()
-        self._handed_out: _PendingCall | None = None
-        self._given_up_result: ToolResultEvent | None = None
+        self._ready: deque[_ReadyEvent] = deque()
+        self._handed_out: _ReadyEvent | None = None
         self._forwards: set[asyncio.Task[ToolOutcome]] = set()
         self._changed = asyncio.Event()
         self._forward_released = asyncio.Event()
         self._stopped = False
         self._unoffered = False
+        self._reflected = False
 
     async def call(self, request_id: RequestId, params: CallToolParams) -> Reply | Unanswered:
         if not self._admits(request_id):
             return error_response(request_id, JsonRpcErrorCode.INVALID_PARAMS)
         pending = self._admit(request_id, params)
         try:
-            forward = await pending.verdict
-            if pending.given_up:
-                return UNANSWERED
-            if forward is None:
-                return error_response(request_id, JsonRpcErrorCode.INVALID_PARAMS)
-            await asyncio.wait(
-                (forward, pending.cancelled_by_cli), return_when=asyncio.FIRST_COMPLETED
-            )
-            if pending.given_up:
-                return UNANSWERED
-            outcome = self._retrieve(forward)
+            reply = await pending.response
         finally:
             self._end(pending)
-        return tool_result_response(request_id, outcome)
+        return UNANSWERED if pending.cancelled_by_cli else reply
 
     def cancel(self, request_id: RequestId) -> None:
         pending = self._pending_with(request_id)
         if pending is None:
             return
         self._pending.remove(pending)
-        if pending in self._waiting:
-            self._waiting.remove(pending)
-        pending.cancelled_by_cli.set_result(None)
-        if not pending.verdict.done():
-            pending.verdict.set_result(None)
+        pending.cancelled_by_cli = True
+        self._resolve(pending, UNANSWERED)
 
     def unoffered(self) -> None:
         self._unoffered = True
@@ -668,38 +671,38 @@ class ToolCallBarrier:
             if self._handed_out is not None:
                 raise_without_chain(ToolCallsMisused())
             self._require_usable()
-            if (result := self._given_up_result) is not None:
-                self._given_up_result = None
-                return result
-            if (pending := self._next_waiting()) is not None:
-                self._handed_out = pending
-                return pending.event
+            if (ready := self._next_ready()) is not None:
+                self._handed_out = ready
+                return ready.event
             self._changed.clear()
             await self._changed.wait()
 
-    def accept(self, event: ToolCallEvent) -> None:
-        pending = self._handed_out_for(event)
+    def accept(self, event: ToolCallEvent | ToolResultEvent) -> None:
+        handed_out = self._handed_out_for(event)
         self._handed_out = None
-        if pending.given_up:
-            self._given_up_result = ToolResultEvent(
-                tool_use_id=event.tool_use_id, content=CALL_GIVEN_UP_TEXT, is_error=True
+        pending = handed_out.pending
+        if isinstance(event, ToolResultEvent):
+            self._release(pending)
+        elif pending.given_up:
+            self._ready.appendleft(
+                _ReadyEvent(
+                    pending,
+                    ToolResultEvent(
+                        tool_use_id=event.tool_use_id, content=CALL_GIVEN_UP_TEXT, is_error=True
+                    ),
+                )
             )
-            return
-        forward = asyncio.create_task(
-            self._app.call_tool(pending.params.name, pending.params.arguments),
-            name=f"upstream:{self._run_id}:{event.tool_use_id}",
-        )
-        self._forwards.add(forward)
-        pending.verdict.set_result(forward)
+        else:
+            self._forward(pending, event)
 
     def stop(self) -> None:
         self._stopped = True
-        refused = [*self._waiting, *([self._handed_out] if self._handed_out else [])]
-        self._waiting.clear()
+        for pending in self._pending:
+            self._resolve(
+                pending, error_response(pending.request_id, JsonRpcErrorCode.INVALID_PARAMS)
+            )
+        self._ready.clear()
         self._handed_out = None
-        for pending in refused:
-            if not pending.verdict.done():
-                pending.verdict.set_result(None)
         self._changed.set()
 
     async def settle(self) -> None:
@@ -707,17 +710,69 @@ class ToolCallBarrier:
             self._forward_released.clear()
             await self._forward_released.wait()
 
-    def _handed_out_for(self, event: ToolCallEvent) -> _PendingCall:
-        pending = self._handed_out
-        if pending is not None and pending.event.tool_use_id == event.tool_use_id:
-            return pending
+    def _forward(self, pending: _PendingCall, event: ToolCallEvent) -> None:
+        forward = asyncio.create_task(
+            self._app.call_tool(pending.params.name, pending.params.arguments),
+            name=f"upstream:{self._run_id}:{event.tool_use_id}",
+        )
+        self._forwards.add(forward)
+        forward.add_done_callback(partial(self._completed, pending))
+
+    def _completed(self, pending: _PendingCall, forward: asyncio.Task[ToolOutcome]) -> None:
+        try:
+            if forward.cancelled():
+                self._resolve(pending, UNANSWERED)
+            else:
+                self._queue_result(pending, self._outcome_of(forward))
+        finally:
+            self._forwards.discard(forward)
+            self._forward_released.set()
+
+    def _outcome_of(self, forward: asyncio.Task[ToolOutcome]) -> ToolOutcome:
+        try:
+            return forward.result()
+        except Exception as failure:
+            log_failure(log, f"A forwarded call of run {self._run_id} failed", failure)
+            return ToolOutcome(CALL_FAILED_TEXT, is_error=True)
+
+    def _queue_result(self, pending: _PendingCall, outcome: ToolOutcome) -> None:
+        if self._capability.appears_in(outcome.content.encode("utf-8")):
+            self._reflected = True
+            self._resolve(pending, UNANSWERED)
+        else:
+            pending.outcome = outcome
+            result = ToolResultEvent(
+                tool_use_id=pending.event.tool_use_id,
+                content=outcome.content,
+                is_error=outcome.is_error,
+            )
+            self._ready.append(_ReadyEvent(pending, result))
+        self._changed.set()
+
+    def _release(self, pending: _PendingCall) -> None:
+        if pending.outcome is not None:
+            self._resolve(pending, tool_result_response(pending.request_id, pending.outcome))
+
+    @staticmethod
+    def _resolve(pending: _PendingCall, answer: Reply | Unanswered) -> None:
+        if not pending.response.done():
+            pending.response.set_result(answer)
+
+    def _handed_out_for(self, event: ToolCallEvent | ToolResultEvent) -> _ReadyEvent:
+        handed_out = self._handed_out
+        if (
+            handed_out is not None
+            and type(event) is type(handed_out.event)
+            and event.tool_use_id == handed_out.event.tool_use_id
+        ):
+            return handed_out
         raise_without_chain(ToolCallsMisused())
 
-    def _next_waiting(self) -> _PendingCall | None:
-        while self._waiting:
-            pending = self._waiting.popleft()
-            if not pending.given_up:
-                return pending
+    def _next_ready(self) -> _ReadyEvent | None:
+        while self._ready:
+            ready = self._ready.popleft()
+            if isinstance(ready.event, ToolResultEvent) or not ready.pending.given_up:
+                return ready
         return None
 
     def _admits(self, request_id: RequestId) -> bool:
@@ -736,47 +791,25 @@ class ToolCallBarrier:
             name=params.name,
             input=copy.deepcopy(params.arguments),
         )
-        loop = asyncio.get_running_loop()
         pending = _PendingCall(
-            request_id, params, event, loop.create_future(), loop.create_future()
+            request_id, params, event, asyncio.get_running_loop().create_future()
         )
         self._pending.append(pending)
-        self._waiting.append(pending)
+        self._ready.append(_ReadyEvent(pending, event))
         self._changed.set()
         return pending
 
     def _end(self, pending: _PendingCall) -> None:
         if pending in self._pending:
             self._pending.remove(pending)
-        if pending in self._waiting:
-            self._waiting.remove(pending)
-        if (forward := pending.forward) in self._forwards:
-            forward.add_done_callback(self._log_lost_failure)
 
     def _require_usable(self) -> None:
         if self._unoffered:
             raise_without_chain(UnofferedToolCalled())
+        if self._reflected:
+            raise_without_chain(CapabilityReflected())
         if self._stopped:
             raise_without_chain(ToolCallsMisused())
-
-    def _retrieve(self, forward: asyncio.Task[ToolOutcome]) -> ToolOutcome:
-        try:
-            if forward.cancelled():
-                raise asyncio.CancelledError
-            return forward.result()
-        finally:
-            self._release(forward)
-
-    def _log_lost_failure(self, forward: asyncio.Task[ToolOutcome]) -> None:
-        try:
-            if not forward.cancelled() and (failure := forward.exception()) is not None:
-                log_failure(log, f"A forwarded call of run {self._run_id} failed", failure)
-        finally:
-            self._release(forward)
-
-    def _release(self, forward: asyncio.Task[ToolOutcome]) -> None:
-        self._forwards.discard(forward)
-        self._forward_released.set()
 
 
 class CapabilityReflected(Exception):

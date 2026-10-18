@@ -1,0 +1,8 @@
+claim_id = "8eafc5c1e0c7412f93b3dd8a3085ca42"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "7f67e1ba2cdd063f2f9b5330c5d4dc83dc7c1580"
+branch = "claude/issue-299-5i-init-surface-verdict"
+scope = ["README.md", "docs/decisions/0001-agent-service.md", "src/agent_providers/claude/provider.py", "src/agent_providers/cli_run.py", "tests/test_claude_provider.py", "tests/test_claude_run.py", "tests/test_cli_run.py"]
+opened_commit = "584023cc4c73b74798c1cb330880e69b6cc950ac"
+whole_reason = "One verdict and its first adapter: the neutral type has no proof without Claude's extraction, and the extraction has no owner without the type, so the core, its tests and the two documents that state the verdict land together."

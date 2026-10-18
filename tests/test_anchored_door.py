@@ -14,13 +14,20 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-from anchored_kernel import KernelModel, install_kernel, join_watcher, watcher_thread
+from anchored_kernel import (
+    GroupSignalModel,
+    KernelModel,
+    install_kernel,
+    join_watcher,
+    watcher_thread,
+)
 from anchored_leaders import ALL_PHASES, Leaders, Phases, spawn_warnings
 from anchored_support import GONE, TEST_WAIT_SECONDS, ChildCleanup, Exited, OwnedChild
 from test_anchored_child import watcher_names
 from test_zombie_anchor import SIGKILLED
 
-from agent_providers import spawn
+from agent_providers import procfs, spawn
+from agent_providers.procfs import GroupCensus
 from agent_providers.spawn import (
     AnchoredChild,
     AnchorStateError,
@@ -600,3 +607,51 @@ def test_the_handle_is_returned_without_an_await_after_the_start_on_the_loop_thr
     door_runner.run(bounded(finish()))
 
     assert child_cleanup.state(owned) == GONE
+
+
+def test_the_door_delegates_the_kill_and_census_and_closes_no_pipe_during_it(
+    door_runner: asyncio.Runner,
+    child_cleanup: ChildCleanup,
+    leaders: Leaders,
+    descriptors_before_the_door: frozenset[int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    opened = open_door(door_runner, child_cleanup, leaders.describe(script=BLOCK_ON_STDIN))
+    child = opened.child
+    log: list[str] = []
+    counted_groups: list[int] = []
+    open_during_the_count: list[bool] = []
+    model = GroupSignalModel(during=lambda call: log.append("kill"))
+    model.bind(opened.owned.pid)
+    model.install(monkeypatch)
+    pipes = descriptors() - descriptors_before_the_door - {opened.owned.pidfd}
+
+    def scripted_census(view: procfs.ProcView, pgid: int) -> GroupCensus:
+        log.append("count")
+        counted_groups.append(pgid)
+        open_during_the_count.append(pipes <= descriptors())
+        return GroupCensus.LIVE
+
+    monkeypatch.setattr(procfs, "group_census", scripted_census)
+
+    async def scenario() -> tuple[GroupCensus, bool]:
+        census = child.kill_and_census()
+        assert not child.stdin.is_closing()
+        open_after_the_call = pipes <= descriptors()
+        assert await child.exited() == SIGKILLED
+        assert child_cleanup.state(opened.owned) == Exited(SIGKILLED)
+        child.release()
+        assert child_cleanup.state(opened.owned) == GONE
+        with pytest.raises(AnchorStateError):
+            child.kill_and_census()
+        return census, open_after_the_call
+
+    census, open_after_the_call = door_runner.run(bounded(scenario()))
+
+    assert len(pipes) == 3
+    assert census is GroupCensus.LIVE
+    assert log == ["kill", "count"]
+    assert counted_groups == [opened.owned.pid]
+    assert open_during_the_count == [True]
+    assert open_after_the_call
+    assert model.violations == []

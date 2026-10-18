@@ -11,6 +11,8 @@ import linecache
 import logging
 import os
 import pickle
+import resource
+import shutil
 import stat
 import subprocess
 import sys
@@ -58,6 +60,7 @@ from provider_test_support import (
     shell_child,
     start_then_raise,
     traceback_frames_hold,
+    tree_snapshot,
 )
 
 from agent_providers import process
@@ -1693,18 +1696,525 @@ def _credential_home(tmp_path: Path) -> PrivateCredentialHome:
     )
 
 
+@pytest.mark.parametrize("directory_mode", [0o500, 0o300, 0o100, 0o000])
 def test_private_credential_home_removes_a_read_only_directory_a_child_left(
-    tmp_path: Path,
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, directory_mode: int,
 ) -> None:
     home = _credential_home(tmp_path)
     child_directory = home.path / "child-made"
     child_directory.mkdir()
     (child_directory / "scratch.txt").write_text("scratch")
-    child_directory.chmod(0o500)
+    child_directory.chmod(directory_mode)
+    descriptors_before = _descriptor_count()
+    caplog.set_level(logging.ERROR, logger=process.__name__)
 
     home.close()
 
     assert not home.path.exists()
+    assert caplog.records == []
+    assert _descriptor_count() == descriptors_before
+
+
+@pytest.fixture
+def outside(tmp_path: Path) -> Iterator[Path]:
+    directory = tmp_path / "outside"
+    (directory / "inner").mkdir(parents=True)
+    secret = directory / "secret.txt"
+    secret.write_text("outside")
+    secret.chmod(0o400)
+    (directory / "inner").chmod(0o500)
+    directory.chmod(0o500)
+    yield directory
+    directory.chmod(0o700)
+    (directory / "inner").chmod(0o700)
+
+
+_WIDE_TREE_BREADTH = 200
+_DEEP_TREE_DEPTH = 300
+
+
+def _descriptor_count() -> int:
+    return len(os.listdir("/proc/self/fd"))
+
+
+def _held_directories_inside(home_path: Path) -> set[Path]:
+    held: set[Path] = set()
+    for descriptor in os.listdir("/proc/self/fd"):
+        try:
+            target = Path(os.readlink(Path("/proc/self/fd", descriptor)))
+        except FileNotFoundError:
+            continue
+        if target.is_relative_to(home_path):
+            held.add(target)
+    return held
+
+
+def _a_tree_needing_repair(home: PrivateCredentialHome, outside: Path) -> None:
+    (home.path / "a" / "b" / "c").mkdir(parents=True)
+    for sibling in ("d", "e", "f"):
+        (home.path / sibling).mkdir()
+    (home.path / "a" / "link").symlink_to(outside)
+    leaves = [home.path / "a" / "b" / "c", *(home.path / sibling for sibling in ("d", "e", "f"))]
+    for leaf in leaves:
+        (leaf / "scratch.txt").write_text("scratch")
+    for directory in (*leaves, home.path / "a" / "b", home.path / "a"):
+        directory.chmod(0o500)
+
+
+def _arm_after_the_first_removal_pass(
+    monkeypatch: pytest.MonkeyPatch, home_path: Path,
+) -> Callable[[], bool]:
+    remove_tree = process.shutil.rmtree
+    first_pass_failed: list[bool] = []
+
+    def failing_first_pass(path) -> None:
+        try:
+            remove_tree(path)
+        except OSError:
+            if Path(path) == home_path:
+                first_pass_failed.append(True)
+            raise
+
+    monkeypatch.setattr(process.shutil, "rmtree", failing_first_pass)
+    return lambda: bool(first_pass_failed)
+
+
+def test_private_credential_home_replaced_by_a_symlink_is_left_and_nothing_outside_changes(
+    tmp_path: Path, outside: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    home = _credential_home(tmp_path)
+    shutil.rmtree(home.path)
+    home.path.symlink_to(outside)
+    outside_before = tree_snapshot(outside)
+    descriptors_before = _descriptor_count()
+    caplog.set_level(logging.ERROR, logger=process.__name__)
+
+    home.close()
+
+    [record] = caplog.records
+    assert record.getMessage() == "private credential home removal failed (NotADirectoryError)"
+    assert home.path.is_symlink()
+    assert tree_snapshot(outside) == outside_before
+    assert _descriptor_count() == descriptors_before
+
+    home.path.unlink()
+    caplog.clear()
+    home.close()
+
+    assert not os.path.lexists(home.path)
+    assert caplog.records == []
+
+
+@pytest.mark.parametrize("swap_kind", ["before_acquisition", "after_acquisition", "vanished"])
+def test_private_credential_home_never_follows_an_inner_directory_swapped_for_a_symlink(
+    tmp_path: Path,
+    outside: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    swap_kind: str,
+) -> None:
+    after_acquisition = swap_kind == "after_acquisition"
+    home = _credential_home(tmp_path)
+    child_directory = home.path / "child-made"
+    for name in ("first", "second"):
+        (child_directory / name).mkdir(parents=True)
+        (child_directory / name / "scratch.txt").write_text("scratch")
+        (child_directory / name).chmod(0o500)
+    child_directory.chmod(0o500)
+    outside_before = tree_snapshot(outside)
+    descriptors_before = _descriptor_count()
+    caplog.set_level(logging.ERROR, logger=process.__name__)
+    remove_tree = process.shutil.rmtree
+    is_armed = _arm_after_the_first_removal_pass(monkeypatch, home.path)
+    real_open, real_chmod = os.open, os.chmod
+    first_opened: list[Path] = []
+    acquired: list[int] = []
+    swapped: list[bool] = []
+
+    def swap_for_a_symlink() -> None:
+        swapped.append(True)
+        [victim] = first_opened
+        if after_acquisition:
+            victim.rename(victim.with_name("moved-aside"))
+        else:
+            real_chmod(victim, 0o700)
+            remove_tree(victim)
+        if swap_kind != "vanished":
+            victim.symlink_to(outside)
+
+    def open_(path, flags, *args, dir_fd=None, **options):
+        names_a_child = (
+            is_armed()
+            and dir_fd is not None
+            and _resolved_inside(home.path, process._DESCRIPTOR_LINKS / str(dir_fd))
+            == child_directory
+        )
+        if names_a_child and not first_opened:
+            first_opened.append(child_directory / path)
+        entry_is_victim = names_a_child and child_directory / path == first_opened[0]
+        if entry_is_victim and not after_acquisition and not swapped:
+            swap_for_a_symlink()
+        descriptor = real_open(path, flags, *args, dir_fd=dir_fd, **options)
+        if entry_is_victim and not swapped:
+            acquired.append(descriptor)
+        return descriptor
+
+    def chmod(path, mode, **options):
+        if is_armed() and not swapped and first_opened:
+            names_the_victim_path = Path(path) == first_opened[0]
+            names_the_acquired_victim = bool(acquired) and Path(path) == (
+                process._DESCRIPTOR_LINKS / str(acquired[-1])
+            )
+            if names_the_victim_path or (after_acquisition and names_the_acquired_victim):
+                swap_for_a_symlink()
+        return real_chmod(path, mode, **options)
+
+    monkeypatch.setattr(os, "open", open_)
+    monkeypatch.setattr(os, "chmod", chmod)
+
+    home.close()
+
+    assert swapped == [True]
+    assert tree_snapshot(outside) == outside_before
+    assert not home.path.exists()
+    assert caplog.records == []
+    assert _descriptor_count() == descriptors_before
+
+
+def _break_the_descriptor_links(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(process, "_DESCRIPTOR_LINKS", tmp_path / "missing")
+
+
+def _break_o_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.delattr(os, "O_PATH")
+
+
+@pytest.mark.parametrize(
+    ("break_the_route", "error_class"),
+    [
+        pytest.param(_break_the_descriptor_links, "FileNotFoundError", id="descriptor_links"),
+        pytest.param(_break_o_path, "OSError", id="o_path"),
+    ],
+)
+def test_private_credential_home_needing_repair_is_left_without_a_path_fallback(
+    tmp_path: Path,
+    outside: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    break_the_route: Callable[[pytest.MonkeyPatch, Path], None],
+    error_class: str,
+) -> None:
+    home = _credential_home(tmp_path)
+    _a_tree_needing_repair(home, outside)
+    outside_before = tree_snapshot(outside)
+    descriptors_before = _descriptor_count()
+    caplog.set_level(logging.ERROR, logger=process.__name__)
+    break_the_route(monkeypatch, tmp_path)
+
+    home.close()
+
+    [record] = caplog.records
+    assert record.getMessage() == f"private credential home removal failed ({error_class})"
+    assert home.path.exists()
+    assert tree_snapshot(outside) == outside_before
+    assert _descriptor_count() == descriptors_before
+
+    monkeypatch.undo()
+    caplog.clear()
+    home.close()
+
+    assert not home.path.exists()
+    assert caplog.records == []
+    assert tree_snapshot(outside) == outside_before
+    assert _descriptor_count() == descriptors_before
+
+
+def test_private_credential_home_repair_passes_a_link_in_a_read_only_directory_unfollowed(
+    tmp_path: Path, outside: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    home = _credential_home(tmp_path)
+    _a_tree_needing_repair(home, outside)
+    outside_before = tree_snapshot(outside)
+    descriptors_before = _descriptor_count()
+    caplog.set_level(logging.ERROR, logger=process.__name__)
+
+    home.close()
+
+    assert not home.path.exists()
+    assert tree_snapshot(outside) == outside_before
+    assert caplog.records == []
+    assert _descriptor_count() == descriptors_before
+
+
+@pytest.mark.parametrize("flag", ["O_PATH", "O_NOFOLLOW", "O_DIRECTORY", "O_CLOEXEC"])
+def test_process_module_imports_where_os_lacks_a_repair_flag(flag: str) -> None:
+    source_root = Path(process.__file__).parents[1]
+    subprocess.run(
+        [
+            sys.executable, "-I", "-c",
+            "import os, sys; sys.path.insert(0, sys.argv[1]); delattr(os, sys.argv[2]);"
+            " import agent_providers.process",
+            str(source_root), flag,
+        ],
+        check=True,
+    )
+
+
+def _resolved_inside(home_path: Path, descriptor: str | Path) -> Path | None:
+    target = Path(os.readlink(descriptor))
+    return target if target.is_relative_to(home_path) else None
+
+
+def _fail_the_repair_at(
+    monkeypatch: pytest.MonkeyPatch, home_path: Path, step: str, error: BaseException,
+) -> list[set[Path]]:
+    is_armed = _arm_after_the_first_removal_pass(monkeypatch, home_path)
+    real_open, real_chmod, real_scandir = os.open, os.chmod, os.scandir
+    held_at_fault: list[set[Path]] = []
+
+    def is_descriptor_link(path) -> bool:
+        return str(path).startswith(str(process._DESCRIPTOR_LINKS))
+
+    def reach(kind: str, directory: Path | None) -> None:
+        below_the_home = directory is not None and directory != home_path
+        if is_armed() and not held_at_fault and kind == step and below_the_home:
+            held_at_fault.append(_held_directories_inside(home_path))
+            raise error
+
+    def open_(path, flags, *args, dir_fd=None, **options):
+        if dir_fd is not None:
+            reach("child", _resolved_inside(home_path, process._DESCRIPTOR_LINKS / str(dir_fd)))
+        elif is_descriptor_link(path) and not flags & os.O_PATH:
+            reach("listing", _resolved_inside(home_path, path))
+        return real_open(path, flags, *args, dir_fd=dir_fd, **options)
+
+    def chmod(path, mode, **options):
+        if is_descriptor_link(path):
+            reach("chmod", _resolved_inside(home_path, path))
+        return real_chmod(path, mode, **options)
+
+    def scandir(path=".", *args, **options):
+        if isinstance(path, int):
+            reach("scan", _resolved_inside(home_path, process._DESCRIPTOR_LINKS / str(path)))
+        return real_scandir(path, *args, **options)
+
+    monkeypatch.setattr(os, "open", open_)
+    monkeypatch.setattr(os, "chmod", chmod)
+    monkeypatch.setattr(os, "scandir", scandir)
+    return held_at_fault
+
+
+@pytest.mark.parametrize("step", ["chmod", "listing", "scan", "child"])
+@pytest.mark.parametrize(
+    "error", [OSError(5, "io"), KeyboardInterrupt()], ids=["os_error", "interrupt"],
+)
+def test_private_credential_home_closes_every_handle_when_the_repair_fails_midway(
+    tmp_path: Path,
+    outside: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    step: str,
+    error: BaseException,
+) -> None:
+    home = _credential_home(tmp_path)
+    _a_tree_needing_repair(home, outside)
+    outside_before = tree_snapshot(outside)
+    caplog.set_level(logging.ERROR, logger=process.__name__)
+    held_at_fault = _fail_the_repair_at(monkeypatch, home.path, step, error)
+    descriptors_before = _descriptor_count()
+
+    if isinstance(error, KeyboardInterrupt):
+        with pytest.raises(KeyboardInterrupt) as raised:
+            home.close()
+        assert raised.value is error
+    else:
+        home.close()
+        [record] = caplog.records
+        assert record.getMessage() == "private credential home removal failed (OSError)"
+        assert home.path.exists()
+
+    assert len(held_at_fault) == 1
+    assert len(held_at_fault[0]) >= 2
+    assert _descriptor_count() == descriptors_before
+    assert tree_snapshot(outside) == outside_before
+
+    monkeypatch.undo()
+    home.close()
+
+    assert not home.path.exists()
+
+
+class _FalseValuedError(Exception):
+    def __bool__(self) -> bool:
+        return False
+
+
+class _UntestableError(Exception):
+    def __bool__(self) -> bool:
+        raise AssertionError("an exception was truth-tested")
+
+
+
+class _NoteDroppingError(Exception):
+    def add_note(self, note: str) -> None:
+        return None
+
+
+class _NoteRaisingError(Exception):
+    def add_note(self, note: str) -> None:
+        raise RuntimeError("add_note overridden to raise")
+
+
+@pytest.mark.parametrize(
+    ("traversal_failure", "failing_closes", "later_classes"),
+    [
+        (RuntimeError, {4: KeyboardInterrupt}, ["KeyboardInterrupt"]),
+        (None, {1: KeyboardInterrupt, 2: OSError}, ["OSError"]),
+        (None, {4: KeyboardInterrupt, 5: OSError}, ["OSError"]),
+        (None, {4: _FalseValuedError, 5: _UntestableError}, ["_UntestableError"]),
+        (None, {4: _UntestableError, 5: _FalseValuedError}, ["_FalseValuedError"]),
+        (None, {4: _NoteDroppingError, 5: OSError}, ["OSError"]),
+        (None, {4: _NoteRaisingError, 5: OSError}, ["OSError"]),
+    ],
+    ids=[
+        "traversal_then_cleanup_close",
+        "handle_close_then_root_frame_close",
+        "popped_frame_close_then_ancestor_close",
+        "false_valued_then_untestable",
+        "untestable_then_false_valued",
+        "earliest_overrides_add_note_to_drop_it",
+        "earliest_overrides_add_note_to_raise",
+    ],
+)
+def test_the_earliest_failure_propagates_and_every_descriptor_is_still_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    traversal_failure: type[BaseException] | None,
+    failing_closes: dict[int, type[BaseException]],
+    later_classes: list[str],
+) -> None:
+    (tmp_path / "a" / "b").mkdir(parents=True)
+    real_close, real_scandir = os.close, os.scandir
+    raised_in_order: list[BaseException] = []
+    listings_opened = 0
+    closes_seen = 0
+
+    def scandir(path=".", *args, **options):
+        nonlocal listings_opened
+        listings_opened += 1
+        if traversal_failure is not None and listings_opened == 3:
+            raised_in_order.append(traversal_failure("listing read failed"))
+            raise raised_in_order[-1]
+        return real_scandir(path, *args, **options)
+
+    def close(descriptor: int) -> None:
+        nonlocal closes_seen
+        closes_seen += 1
+        real_close(descriptor)
+        if closes_seen in failing_closes:
+            raised_in_order.append(failing_closes[closes_seen]("close failed"))
+            raise raised_in_order[-1]
+
+    monkeypatch.setattr(os, "scandir", scandir)
+    monkeypatch.setattr(os, "close", close)
+    descriptors_before = _descriptor_count()
+
+    with pytest.raises(
+        (
+            RuntimeError,
+            KeyboardInterrupt,
+            OSError,
+            _FalseValuedError,
+            _UntestableError,
+            _NoteDroppingError,
+            _NoteRaisingError,
+        ),
+    ) as raised:
+        process._make_tree_removable(tmp_path)
+
+    assert raised.value is raised_in_order[0]
+    assert [note.rsplit("(", 1)[1].rstrip(")") for note in raised.value.__notes__] == later_classes
+    assert _descriptor_count() == descriptors_before
+
+
+@pytest.mark.parametrize(
+    ("step", "child_is_skipped"),
+    [("child", True), ("chmod", False), ("listing", False), ("scan", False)],
+)
+def test_private_credential_home_skips_a_vanished_child_only_at_its_acquisition(
+    tmp_path: Path,
+    outside: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    step: str,
+    child_is_skipped: bool,
+) -> None:
+    home = _credential_home(tmp_path)
+    _a_tree_needing_repair(home, outside)
+    if child_is_skipped:
+        for already_writable in (home.path / "a" / "b", home.path / "a" / "b" / "c"):
+            already_writable.chmod(0o700)
+    caplog.set_level(logging.ERROR, logger=process.__name__)
+    held_at_fault = _fail_the_repair_at(monkeypatch, home.path, step, FileNotFoundError(2, "gone"))
+    descriptors_before = _descriptor_count()
+
+    home.close()
+
+    assert len(held_at_fault) == 1
+    assert _descriptor_count() == descriptors_before
+    assert home.path.exists() is not child_is_skipped
+    assert [record.getMessage() for record in caplog.records] == (
+        [] if child_is_skipped
+        else ["private credential home removal failed (FileNotFoundError)"]
+    )
+
+
+def test_private_credential_home_with_more_subdirectories_than_descriptors_is_removed(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    home = _credential_home(tmp_path)
+    for number in range(_WIDE_TREE_BREADTH):
+        (home.path / f"sub{number}").mkdir()
+    home.path.chmod(0o500)
+    descriptors_before = _descriptor_count()
+    soft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
+    caplog.set_level(logging.ERROR, logger=process.__name__)
+    lowered_limit = descriptors_before + _WIDE_TREE_BREADTH // 2
+    resource.setrlimit(resource.RLIMIT_NOFILE, (lowered_limit, hard_limit))
+    try:
+        home.close()
+    finally:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft_limit, hard_limit))
+
+    assert not home.path.exists()
+    assert caplog.records == []
+    assert _descriptor_count() == descriptors_before
+
+
+def test_private_credential_home_deeper_than_half_the_descriptor_limit_is_removed(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    home = _credential_home(tmp_path)
+    descriptors_before = _descriptor_count()
+    soft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
+    lowered_limit = descriptors_before + _DEEP_TREE_DEPTH * 5 // 3
+    deepest = home.path
+    for level in range(_DEEP_TREE_DEPTH):
+        deepest = deepest / "d"
+        deepest.mkdir()
+    deepest.joinpath("scratch.txt").write_text("scratch")
+    for directory in [deepest, *deepest.parents][: _DEEP_TREE_DEPTH + 1]:
+        directory.chmod(0o500)
+    caplog.set_level(logging.ERROR, logger=process.__name__)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (lowered_limit, hard_limit))
+    try:
+        home.close()
+    finally:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft_limit, hard_limit))
+
+    assert not home.path.exists()
+    assert caplog.records == []
+    assert _descriptor_count() == descriptors_before
 
 
 def test_private_credential_home_logs_a_failed_removal_by_class_and_retries_it(

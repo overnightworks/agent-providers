@@ -8,6 +8,7 @@ import errno
 import functools
 import json
 import logging
+import operator
 import os
 import selectors
 import shutil
@@ -19,7 +20,7 @@ import threading
 import time
 import weakref
 from collections import deque
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum, StrEnum
@@ -377,6 +378,7 @@ _CATALOG_HOME_PREFIX: Final = "agent-cli-catalog-"
 _CATALOG_AUTH_FILE_PATH: Final = Path("auth.json")
 CredentialCopy = Callable[[bytes], bytes | None]
 _PRIVATE_HOME_COPY_MODE: Final = 0o400
+_DESCRIPTOR_LINKS: Final = Path("/proc/self/fd")
 _CREDENTIAL_COPY_FAILED_DETAIL: Final = "could not prepare the private CLI credential copy"
 # Measured on claude 2.1.266: the CLI reports its subscription login from
 # this file below HOME alone, without a network call.
@@ -1495,15 +1497,121 @@ def _remove_private_tree(root: Path) -> bool:
 
 
 def _make_tree_removable(root: Path) -> None:
-    """Reopen directories a child made read-only so their entries can be unlinked."""
-    pending = [root]
-    while pending:
-        directory = pending.pop()
-        os.chmod(directory, 0o700)
-        with os.scandir(directory) as entries:
-            pending.extend(
-                Path(entry.path) for entry in entries if entry.is_dir(follow_symlinks=False)
+    """Reopen directories a child made read-only so their entries can be unlinked.
+
+    Every directory is acquired without following a link and repaired on the
+    acquired object. This needs Linux's O_PATH and a mounted /proc/self/fd.
+    Each level on the current path keeps one open listing descriptor and the
+    names of its subdirectories, so the descriptors in use grow with the
+    tree's depth and not its width. Each level's frame is on the stack before
+    its listing descriptor is opened, so the stack's cleanup closes it from the
+    statement that receives it. Every acquired descriptor is passed to
+    os.close, and a close that raises does not stop the cleanup. The earliest
+    exception propagates, whether it came from the traversal or from a cleanup
+    close; every later close failure is attached to it as a note naming the
+    failure's class only. An exception raised instead of the real close is not
+    covered, because Linux releases the descriptor even when close fails. An
+    asynchronous interruption between two statements is the host obligation
+    the README's Interruptions paragraph states, and no claim is made about it.
+    """
+    acquisition_flags = _directory_flags("O_PATH", "O_NOFOLLOW", "O_DIRECTORY", "O_CLOEXEC")
+    listing_flags = _directory_flags("O_DIRECTORY", "O_CLOEXEC") | os.O_RDONLY
+    frames: list[_DirectoryFrame] = []
+    try:
+        _enter_directory(frames, str(root), acquisition_flags, listing_flags)
+        while frames:
+            if frames[-1].unvisited_subdirectories:
+                _enter_directory(
+                    frames, frames[-1].unvisited_subdirectories.pop(),
+                    acquisition_flags, listing_flags,
+                )
+            else:
+                frames.pop().close()
+    except BaseException as failure:
+        _close_all((frame.listing for frame in frames if frame.listing is not None), failure)
+        raise
+
+
+class _EarliestFailure:
+    """Absorb failures inside its blocks: the earliest is kept, later ones become its notes."""
+
+    def __init__(self, earlier: BaseException | None) -> None:
+        self.failure = earlier
+
+    def __enter__(self) -> "_EarliestFailure":
+        return self
+
+    def __exit__(self, kind: object, failure: BaseException | None, traceback: object) -> bool:
+        if failure is None:
+            return False
+        if self.failure is None:
+            self.failure = failure
+        else:
+            BaseException.add_note(
+                self.failure, f"a descriptor close also failed ({type(failure).__name__})"
             )
+        return True
+
+
+def _close_all(descriptors: Iterable[int], earlier_failure: BaseException | None = None) -> None:
+    """Close every descriptor, so none stays open whatever a close raises.
+
+    With an earlier failure the caller re-raises it and later failures become
+    its notes; without one, the first close failure is raised after the last
+    descriptor is closed.
+    """
+    absorbed = _EarliestFailure(earlier_failure)
+    for descriptor in descriptors:
+        with absorbed:
+            os.close(descriptor)
+    if earlier_failure is None and absorbed.failure is not None:
+        raise absorbed.failure
+
+
+def _directory_flags(*names: str) -> int:
+    missing = [name for name in names if not hasattr(os, name)]
+    if missing:
+        raise OSError(errno.ENOTSUP, f"the permission repair needs {', '.join(missing)}")
+    return functools.reduce(operator.or_, (getattr(os, name) for name in names))
+
+
+@dataclass
+class _DirectoryFrame:
+    listing: int | None = None
+    unvisited_subdirectories: list[str] = field(default_factory=list)
+
+    def close(self) -> None:
+        if self.listing is not None:
+            os.close(self.listing)
+
+
+def _enter_directory(
+    frames: list[_DirectoryFrame], name: str, acquisition_flags: int, listing_flags: int,
+) -> None:
+    """Push and fill the directory frame; skip a child that vanished or is no directory."""
+    parent_listing = frames[-1].listing if frames else None
+    try:
+        handle = os.open(name, acquisition_flags, dir_fd=parent_listing)
+    except (NotADirectoryError, FileNotFoundError):
+        if not frames:
+            raise
+        return
+    try:
+        frame = _DirectoryFrame()
+        frames.append(frame)
+        link = _DESCRIPTOR_LINKS / str(handle)
+        os.chmod(link, 0o700)
+        frame.listing = os.open(link, listing_flags)
+        frame.unvisited_subdirectories = _subdirectory_names(frame.listing)
+    except BaseException as failure:
+        _close_all([handle], failure)
+        raise
+    _close_all([handle])
+
+
+def _subdirectory_names(listing: int) -> list[str]:
+    with os.scandir(listing) as entries:
+        return [entry.name for entry in entries if entry.is_dir(follow_symlinks=False)]
 
 
 @contextmanager

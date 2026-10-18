@@ -174,6 +174,13 @@ stays under the host's root, logged at error level. A direct overwrite of a 0400
 rename a replacement in its disposable directory; that renewal vanishes at
 cleanup. This is not evidence that a CLI refreshes credentials in practice.
 
+The permission repair that makes a child's read-only
+directories removable never follows a child-controlled symlink and, once a
+directory is acquired, acts on that acquired object; it promises no containment
+against concurrent same-user relocation. A home whose own path was replaced by a symlink is logged and left. The repair
+needs Linux's `O_PATH` and a mounted `/proc/self/fd`, which import and a removal
+that needs no repair do not.
+
 ## Safe diagnostic codes
 
 The library logs closed diagnostic codes for rejected Grok tool-protocol and

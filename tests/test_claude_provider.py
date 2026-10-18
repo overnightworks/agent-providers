@@ -31,12 +31,14 @@ from provider_test_support import (
     MCP_TOOL_NAMES,
     SAMPLE_TOOL_CATALOG,
     SECRET_ENV_KEYS,
+    ClaudeCliSpawns,
     EventGate,
     RunnerFailureWatch,
     ScenarioDeadline,
     a_claude_cli_child,
     a_credential_destination_that_fails,
     assert_private_credential_child,
+    call_within_deadline,
     drive_turn,
     fail_to_start_the_runner_thread,
     fake_cli_process,
@@ -836,13 +838,7 @@ def test_acall_cli_surfaces_a_missing_or_failed_binary(
     monkeypatch.setattr(
         provider, "averify_no_builtin_cli_tools", AsyncMock(return_value=Path("/usr/bin/claude")),
     )
-    if failure == "missing":
-        spawn = AsyncMock(side_effect=FileNotFoundError())
-    else:
-        spawn = AsyncMock(
-            return_value=a_claude_cli_child(pid=1, returncode=1, communicate=(b"", b"failed")),
-        )
-    monkeypatch.setattr(provider, "_spawn_reserved_async_cli_process", spawn)
+    _install_a_start_that_ends(monkeypatch, failure)
 
     call = _acall_cli("hello")
     with pytest.raises(
@@ -863,13 +859,7 @@ def test_tool_turn_cli_surfaces_a_missing_or_failed_binary(
     )
     monkeypatch.setattr(provider, "_write_mcp_config", lambda _spec, _user_id: "unused")
     monkeypatch.setattr(provider, "_unlink_quiet", lambda _path: None)
-    if failure == "missing":
-        spawn = AsyncMock(side_effect=FileNotFoundError())
-    else:
-        spawn = AsyncMock(
-            return_value=a_claude_cli_child(pid=1, returncode=1, communicate=(b"", b"failed")),
-        )
-    monkeypatch.setattr(provider, "_spawn_reserved_async_cli_process", spawn)
+    _install_a_start_that_ends(monkeypatch, failure)
 
     call = provider.acall_claude_with_mcp("hello", user_id="user-1")
     with pytest.raises(UnavailableError, match="Claude CLI (binary not found|is unavailable)"):
@@ -1828,16 +1818,17 @@ def test_a_deployment_without_an_mcp_server_runs_the_tool_free_command_line(
         "_write_mcp_config",
         lambda *_args: pytest.fail("no MCP config may be written without a server"),
     )
-    process = a_claude_cli_child(pid=1, communicate=(b'{"result":"ok"}', b""))
-    spawn = AsyncMock(return_value=process)
-    monkeypatch.setattr(provider, "_spawn_reserved_async_cli_process", spawn)
+    spawns = install_claude_cli_children(
+        monkeypatch, a_claude_cli_child(pid=1, communicate=(b'{"result":"ok"}', b"")),
+    )
 
     response = asyncio.run(provider.acall_claude_with_mcp("hi", user_id="u-1", model="opus"))
 
     assert response.text == "ok"
-    assert list(spawn.await_args.args[0].arguments) == _cli_arguments("opus")
-    assert "--mcp-config" not in spawn.await_args.args[0].arguments
-    assert "--allowedTools" not in spawn.await_args.args[0].arguments
+    assert list(spawns.children[0].arguments) == _cli_arguments("opus")
+    assert "--mcp-config" not in spawns.children[0].arguments
+    assert "--allowedTools" not in spawns.children[0].arguments
+    assert _held_slots() == 0
 
 
 def test_a_deployment_without_an_mcp_server_streams_the_tool_free_command_line(
@@ -1852,10 +1843,7 @@ def test_a_deployment_without_an_mcp_server_streams_the_tool_free_command_line(
         "_write_mcp_config",
         lambda *_args: pytest.fail("no MCP config may be written without a server"),
     )
-    process = a_claude_cli_child(pid=1, has_stdin=False)
-    spawn = AsyncMock(return_value=process)
-    monkeypatch.setattr(provider, "_spawn_reserved_async_cli_process", spawn)
-    monkeypatch.setattr(provider, "_reap_behind_shield", AsyncMock())
+    spawns = install_claude_cli_children(monkeypatch, a_claude_cli_child(pid=1, has_stdin=False))
 
     async def one_final_event(_proc, _timeout, _correlation_id):
         yield FinalEvent(text="done")
@@ -1869,9 +1857,10 @@ def test_a_deployment_without_an_mcp_server_streams_the_tool_free_command_line(
         ]
 
     assert [event.text for event in asyncio.run(collect())] == ["done"]
-    assert list(spawn.await_args.args[0].arguments) == _cli_arguments("opus", stream=True)
-    assert "--mcp-config" not in spawn.await_args.args[0].arguments
-    assert "--allowedTools" not in spawn.await_args.args[0].arguments
+    assert list(spawns.children[0].arguments) == _cli_arguments("opus", stream=True)
+    assert "--mcp-config" not in spawns.children[0].arguments
+    assert "--allowedTools" not in spawns.children[0].arguments
+    assert _held_slots() == 0
 
 
 # ── tool-surface verification ───────────────────────────────────────
@@ -3891,21 +3880,19 @@ async def _collect_stream_events(stream) -> list[object]:
 
 
 def test_public_claude_stream_skips_malformed_cli_output(monkeypatch, caplog) -> None:
-    process = a_claude_cli_child(
-        stream_lines=[
-            b"not-json\n",
-            b'{"type":"assistant","message":{"content":[{"type":"text","text":"draft"}]}}\n',
-            b'{"type":"result","result":"final"}\n',
-        ],
+    install_claude_cli_children(
+        monkeypatch,
+        a_claude_cli_child(
+            stream_lines=[
+                b"not-json\n",
+                b'{"type":"assistant","message":{"content":[{"type":"text","text":"draft"}]}}\n',
+                b'{"type":"result","result":"final"}\n',
+            ],
+        ),
     )
-
-    async def spawn(*_command, **_kwargs):
-        return process
-
     monkeypatch.setattr(
         provider, "verify_cli_tool_surface", AsyncMock(return_value=Path("/usr/bin/claude")),
     )
-    monkeypatch.setattr(provider, "_spawn_reserved_async_cli_process", spawn)
     monkeypatch.setattr(provider, "_write_mcp_config", lambda _spec, _user_id: "unused")
     monkeypatch.setattr(provider, "_unlink_quiet", lambda _path: None)
     caplog.set_level("WARNING", logger="agent_providers.claude.provider")
@@ -3921,18 +3908,14 @@ def test_public_claude_stream_skips_malformed_cli_output(monkeypatch, caplog) ->
         FinalEvent(text="final"),
     ]
     assert "malformed JSON" in caplog.text
+    assert _held_slots() == 0
 
 
 def test_public_claude_stream_names_a_nonzero_cli_exit(monkeypatch) -> None:
-    process = a_claude_cli_child(returncode=2)
-
-    async def spawn(*_command, **_kwargs):
-        return process
-
+    install_claude_cli_children(monkeypatch, a_claude_cli_child(returncode=2))
     monkeypatch.setattr(
         provider, "verify_cli_tool_surface", AsyncMock(return_value=Path("/usr/bin/claude")),
     )
-    monkeypatch.setattr(provider, "_spawn_reserved_async_cli_process", spawn)
     monkeypatch.setattr(provider, "_write_mcp_config", lambda _spec, _user_id: "unused")
     monkeypatch.setattr(provider, "_unlink_quiet", lambda _path: None)
 
@@ -3940,16 +3923,14 @@ def test_public_claude_stream_names_a_nonzero_cli_exit(monkeypatch) -> None:
     events = _collect_stream_events(stream)
     with pytest.raises(UnavailableError, match="unavailable"):
         asyncio.run(events)
+    assert _held_slots() == 0
 
 
 def test_public_claude_stream_names_a_missing_binary(monkeypatch) -> None:
-    async def spawn(*_command, **_kwargs):
-        raise FileNotFoundError()
-
+    _install_a_start_that_raises(monkeypatch, FileNotFoundError())
     monkeypatch.setattr(
         provider, "verify_cli_tool_surface", AsyncMock(return_value=Path("/usr/bin/claude")),
     )
-    monkeypatch.setattr(provider, "_spawn_reserved_async_cli_process", spawn)
     monkeypatch.setattr(provider, "_write_mcp_config", lambda _spec, _user_id: "unused")
     monkeypatch.setattr(provider, "_unlink_quiet", lambda _path: None)
 
@@ -3957,6 +3938,7 @@ def test_public_claude_stream_names_a_missing_binary(monkeypatch) -> None:
     events = _collect_stream_events(stream)
     with pytest.raises(CliUnavailableError, match="not found"):
         asyncio.run(events)
+    assert _held_slots() == 0
 
 
 def test_stream_reap_completes_before_a_twice_cancelled_closer_returns(monkeypatch) -> None:
@@ -4183,6 +4165,24 @@ async def _reap_after_holds(
 def _held_slots() -> int:
     with provider._zombie_registry_lock:
         return len(provider._zombie_reap_reservations)
+
+
+def _install_a_start_that_raises(
+    monkeypatch: pytest.MonkeyPatch, error: BaseException,
+) -> ClaudeCliSpawns:
+    def fail_to_start(_child, _stream_buffer_limit):
+        raise error
+
+    return install_claude_cli_children(monkeypatch, factory=fail_to_start)
+
+
+def _install_a_start_that_ends(monkeypatch: pytest.MonkeyPatch, failure: str) -> ClaudeCliSpawns:
+    if failure == "missing":
+        return _install_a_start_that_raises(monkeypatch, FileNotFoundError())
+    return install_claude_cli_children(
+        monkeypatch,
+        a_claude_cli_child(pid=1, returncode=1, communicate=(b"", b"failed")),
+    )
 
 
 @dataclass
@@ -4917,17 +4917,23 @@ def _a_claude_binary_missing_at(site: str, monkeypatch: pytest.MonkeyPatch):
     if site == "require":
         monkeypatch.setattr(provider, "_find_claude_binary", lambda: None)
         return cli_model_catalog
+    _verify_the_claude_surfaces(monkeypatch)
+    _install_a_start_that_raises(monkeypatch, FileNotFoundError())
+    return _a_turn_at(site)
+
+
+def _verify_the_claude_surfaces(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         provider, "averify_no_builtin_cli_tools", AsyncMock(return_value=Path("/usr/bin/claude")),
     )
     monkeypatch.setattr(
         provider, "verify_cli_tool_surface", AsyncMock(return_value=Path("/usr/bin/claude")),
     )
-    monkeypatch.setattr(
-        provider, "_spawn_reserved_async_cli_process", AsyncMock(side_effect=FileNotFoundError()),
-    )
     monkeypatch.setattr(provider, "_write_mcp_config", lambda _spec, _user_id: "unused")
     monkeypatch.setattr(provider, "_unlink_quiet", lambda _path: None)
+
+
+def _a_turn_at(site: str) -> Callable[[], object]:
     if site == "acall-cli":
         return lambda: asyncio.run(_acall_cli("hello"))
     if site == "mcp":
@@ -4951,6 +4957,114 @@ def test_a_missing_claude_binary_raises_cli_unavailable(
 
     with pytest.raises(CliUnavailableError, match=detail):
         run()
+
+
+@pytest.mark.parametrize("site", ["acall-cli", "mcp", "mcp-stream"])
+def test_a_missing_claude_binary_frees_the_turns_slot_and_home(
+    site: str, _no_tool_gate_open, monkeypatch: pytest.MonkeyPatch, killpg_signals,
+) -> None:
+    _verify_the_claude_surfaces(monkeypatch)
+    spawns = _install_a_start_that_raises(monkeypatch, FileNotFoundError())
+    turn = _a_turn_at(site)
+
+    with pytest.raises(CliUnavailableError, match=CLAUDE_CLI_BINARY_NOT_FOUND_DETAIL) as raised:
+        turn()
+
+    assert isinstance(raised.value.__cause__, FileNotFoundError)
+    assert _held_slots() == 0
+    assert not spawns.children[0].working_directory.exists()
+    assert killpg_signals == []
+
+
+def test_another_start_failure_is_not_a_missing_binary_and_frees_the_turns_slot_and_home(
+    monkeypatch: pytest.MonkeyPatch, killpg_signals,
+) -> None:
+    _verify_the_claude_surfaces(monkeypatch)
+    spawns = _install_a_start_that_raises(monkeypatch, PermissionError())
+    turn = provider.acall_claude_with_mcp("hi", user_id="u-1")
+
+    with pytest.raises(PermissionError):
+        asyncio.run(turn)
+
+    assert _held_slots() == 0
+    assert not spawns.children[0].working_directory.exists()
+    assert killpg_signals == []
+
+
+class _PoolLockProbe:
+    """Tries the pool lock once per call without ever waiting on it.
+
+    A callout that runs while the pool lock is held finds the lock taken and
+    records that, instead of blocking the thread that would release it.
+    """
+
+    def __init__(self) -> None:
+        self.found_the_lock_free: list[bool] = []
+
+    def __call__(self) -> None:
+        acquired = provider._zombie_registry_lock.acquire(blocking=False)
+        self.found_the_lock_free.append(acquired)
+        if acquired:
+            provider._zombie_registry_lock.release()
+
+
+class _PoolLockProbingHandler(logging.Handler):
+    def __init__(self, probe: _PoolLockProbe) -> None:
+        super().__init__()
+        self.probe = probe
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.probe()
+        self.messages.append(record.getMessage())
+
+
+@pytest.mark.parametrize(
+    ("released_by", "releases_a_home"),
+    [("object", True), ("bound-pid", True), ("unknown-pid", False)],
+)
+def test_the_pool_lock_is_not_held_while_a_home_is_released(
+    released_by: str, releases_a_home: bool,
+) -> None:
+    probe = _PoolLockProbe()
+    home_reservation = MagicMock(spec_set=["release"])
+    home_reservation.release.side_effect = probe
+    reservation = provider._ZombieReservation(
+        pid=A_PROCESS_PID, home_reservation=home_reservation,
+    )
+    released = {
+        "object": reservation, "bound-pid": A_PROCESS_PID, "unknown-pid": A_PROCESS_PID + 1,
+    }[released_by]
+    with provider._zombie_registry_lock:
+        provider._zombie_reap_reservations.add(reservation)
+    try:
+        call_within_deadline(provider._release_zombie_reservation, released)
+
+        assert probe.found_the_lock_free == ([True] if releases_a_home else [])
+        assert _held_slots() == (0 if releases_a_home else 1)
+    finally:
+        with provider._zombie_registry_lock:
+            provider._zombie_reap_reservations.discard(reservation)
+
+
+def test_the_pool_lock_is_not_held_while_the_pool_limit_is_logged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(provider, "CLAUDE_CLI_MAX_CONCURRENT_PROCESSES", 1)
+    probe = _PoolLockProbe()
+    handler = _PoolLockProbingHandler(probe)
+    own_reservation = provider._reserve_zombie_admission()
+    assert own_reservation is not None
+    provider.log.addHandler(handler)
+    try:
+        refused = call_within_deadline(provider._reserve_zombie_admission)
+
+        assert refused is None
+        assert handler.messages == [provider._claude_cli_process_pool_limit_message()]
+        assert probe.found_the_lock_free == [True]
+    finally:
+        provider.log.removeHandler(handler)
+        provider._release_zombie_reservation(own_reservation)
 
 
 def _cli_root_removed(tmp_path: Path) -> None:

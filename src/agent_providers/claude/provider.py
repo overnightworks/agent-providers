@@ -276,14 +276,11 @@ async def acall_claude_with_mcp(
     home = _claude_private_home()
     try:
         with _mcp_turn_cli_arguments(model, user_id, stream=False) as arguments:
-            try:
-                child = _claude_child_process(binary, arguments, home.path)
-                proc = await _spawn_reserved_async_cli_process(
-                    child,
-                    home_reservation=home.reserve(),
-                )
-            except FileNotFoundError:
-                raise CliUnavailableError(CLAUDE_CLI_BINARY_NOT_FOUND_DETAIL)
+            child = _claude_child_process(binary, arguments, home.path)
+            proc = await _spawn_reserved_async_cli_process(
+                child,
+                home_reservation=home.reserve(),
+            )
             try:
                 stdout_bytes, stderr_bytes = await asyncio.wait_for(
                     proc.communicate(stdin_body.encode()),
@@ -345,15 +342,12 @@ async def acall_claude_with_mcp_stream(
     home = _claude_private_home()
     try:
         with _mcp_turn_cli_arguments(model, user_id, stream=True) as arguments:
-            try:
-                child = _claude_child_process(binary, arguments, home.path)
-                proc = await _spawn_reserved_async_cli_process(
-                    child,
-                    home_reservation=home.reserve(),
-                    stream_buffer_limit=_STREAM_BUFFER_LIMIT,
-                )
-            except FileNotFoundError:
-                raise CliUnavailableError(CLAUDE_CLI_BINARY_NOT_FOUND_DETAIL)
+            child = _claude_child_process(binary, arguments, home.path)
+            proc = await _spawn_reserved_async_cli_process(
+                child,
+                home_reservation=home.reserve(),
+                stream_buffer_limit=_STREAM_BUFFER_LIMIT,
+            )
             try:
                 if proc.stdin is not None:
                     proc.stdin.write(stdin_body.encode())
@@ -1880,11 +1874,13 @@ def _reserve_zombie_admission(
     """Reserve one shared CLI-process slot before spawning."""
     reservation = _ZombieReservation(home_reservation=home_reservation)
     with _zombie_registry_lock:
-        if len(_zombie_reap_reservations) >= CLAUDE_CLI_MAX_CONCURRENT_PROCESSES:
-            log.error(_claude_cli_process_pool_limit_message())
-            return None
-        _zombie_reap_reservations.add(reservation)
-        return reservation
+        pool_is_full = len(_zombie_reap_reservations) >= CLAUDE_CLI_MAX_CONCURRENT_PROCESSES
+        if not pool_is_full:
+            _zombie_reap_reservations.add(reservation)
+    if pool_is_full:
+        log.error(_claude_cli_process_pool_limit_message())
+        return None
+    return reservation
 
 
 def _bind_zombie_reservation(reservation: _ZombieReservation, pid: int | None) -> None:
@@ -1900,18 +1896,20 @@ def _release_zombie_reservation(reservation: _ZombieReservation | int | None) ->
         raise ValueError("Cannot release a Claude CLI process reservation without a PID")
     with _zombie_registry_lock:
         if isinstance(reservation, _ZombieReservation):
-            _zombie_reap_reservations.discard(reservation)
-            if reservation.home_reservation is not None:
-                reservation.home_reservation.release()
-            return
-        handle = next(
-            (candidate for candidate in _zombie_reap_reservations if candidate.pid == reservation),
-            None,
-        )
-        if handle is not None:
-            _zombie_reap_reservations.discard(handle)
-            if handle.home_reservation is not None:
-                handle.home_reservation.release()
+            released = reservation
+        else:
+            released = next(
+                (
+                    candidate
+                    for candidate in _zombie_reap_reservations
+                    if candidate.pid == reservation
+                ),
+                None,
+            )
+        if released is not None:
+            _zombie_reap_reservations.discard(released)
+    if released is not None and released.home_reservation is not None:
+        released.home_reservation.release()
 
 
 async def _spawn_reserved_async_cli_process(
@@ -1927,6 +1925,9 @@ async def _spawn_reserved_async_cli_process(
         raise _ClaudeCliProcessPoolSaturated(_claude_cli_process_pool_limit_message())
     try:
         proc = await open_async_pipes(child, stream_buffer_limit=stream_buffer_limit)
+    except FileNotFoundError as missing_binary:
+        _release_zombie_reservation(reservation)
+        raise CliUnavailableError(CLAUDE_CLI_BINARY_NOT_FOUND_DETAIL) from missing_binary
     except BaseException:
         _release_zombie_reservation(reservation)
         raise
@@ -2159,14 +2160,11 @@ async def _acall_cli(
     stdin_body = stdin_prompt(system, flat_prompt)
     home = _claude_private_home()
     try:
-        try:
-            child = _claude_child_process(binary, _cli_arguments(model), home.path)
-            proc = await _spawn_reserved_async_cli_process(
-                child,
-                home_reservation=home.reserve(),
-            )
-        except FileNotFoundError:
-            raise CliUnavailableError(CLAUDE_CLI_BINARY_NOT_FOUND_DETAIL)
+        child = _claude_child_process(binary, _cli_arguments(model), home.path)
+        proc = await _spawn_reserved_async_cli_process(
+            child,
+            home_reservation=home.reserve(),
+        )
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
                 proc.communicate(stdin_body.encode()),

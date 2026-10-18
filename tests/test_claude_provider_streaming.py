@@ -218,10 +218,6 @@ def test_parse_payload_without_content_yields_no_events(payload) -> None:
 A_MARKER = "MARKER-7f3a9c"
 
 
-def _nested_array(depth: int) -> bytes:
-    return b"[" * depth + b"]" * depth
-
-
 def _a_json_object_with_marker(encoding: str) -> bytes:
     return json.dumps({"type": "system", "note": A_MARKER}).encode(encoding)
 
@@ -241,11 +237,10 @@ def assert_no_marker_in_failure(error: BaseException, caplog) -> None:
         (b"\xff" + _a_json_object_with_marker("utf-8"), "UnicodeDecodeError"),
         (_a_json_object_with_marker("utf-16"), "UnicodeDecodeError"),
         (_a_json_object_with_marker("utf-32"), "UnicodeDecodeError"),
-        (_nested_array(100_000), "RecursionError"),
         (_a_json_object_with_marker("utf-16-le"), "JSONDecodeError"),
         (_a_json_object_with_marker("utf-32-le"), "JSONDecodeError"),
     ],
-    ids=["non-utf8", "utf16-bom", "utf32-bom", "deeply-nested", "utf16le", "utf32le"],
+    ids=["non-utf8", "utf16-bom", "utf32-bom", "utf16le", "utf32le"],
 )
 def test_a_line_that_is_not_utf8_json_is_skipped_with_a_class_only_warning(
     line, error_class, caplog,
@@ -258,6 +253,23 @@ def test_a_line_that_is_not_utf8_json_is_skipped_with_a_class_only_warning(
     assert "skipping malformed JSON line" in record.message
     assert error_class in record.message
     assert "bytes" in record.message
+    assert A_MARKER not in caplog.text
+
+
+def test_a_line_nested_beyond_the_interpreters_limit_is_skipped_with_a_class_only_warning(
+    monkeypatch, caplog,
+) -> None:
+    def too_deep(_text: str) -> None:
+        raise RecursionError(A_MARKER)
+
+    monkeypatch.setattr(provider.json, "loads", too_deep)
+    caplog.set_level("WARNING")
+
+    assert _safe_json_loads(_a_json_object_with_marker("utf-8") + b"\n") is None
+
+    [record] = caplog.records
+    assert "skipping malformed JSON line" in record.message
+    assert "RecursionError" in record.message
     assert A_MARKER not in caplog.text
 
 

@@ -1532,23 +1532,38 @@ def _make_tree_removable(root: Path) -> None:
         raise
 
 
-def _close_all(descriptors: Iterable[int], earlier_failure: BaseException | None = None) -> None:
-    """Close every descriptor; the earliest failure wins and later ones become its notes.
+class _EarliestFailure:
+    """Absorb failures inside its blocks: the earliest is kept, later ones become its notes."""
 
-    With an earlier failure the caller re-raises it; without one, the first
-    close failure is raised after the last descriptor is closed.
+    def __init__(self, earlier: BaseException | None) -> None:
+        self.failure = earlier
+
+    def __enter__(self) -> "_EarliestFailure":
+        return self
+
+    def __exit__(self, kind: object, failure: BaseException | None, traceback: object) -> bool:
+        if failure is None:
+            return False
+        if self.failure is None:
+            self.failure = failure
+        else:
+            self.failure.add_note(f"a descriptor close also failed ({type(failure).__name__})")
+        return True
+
+
+def _close_all(descriptors: Iterable[int], earlier_failure: BaseException | None = None) -> None:
+    """Close every descriptor, so none stays open whatever a close raises.
+
+    With an earlier failure the caller re-raises it and later failures become
+    its notes; without one, the first close failure is raised after the last
+    descriptor is closed.
     """
-    earliest = earlier_failure
+    absorbed = _EarliestFailure(earlier_failure)
     for descriptor in descriptors:
-        try:
+        with absorbed:
             os.close(descriptor)
-        except BaseException as failure:
-            if earliest is None:
-                earliest = failure
-            else:
-                earliest.add_note(f"a descriptor close also failed ({type(failure).__name__})")
-    if earliest is not None and earlier_failure is None:
-        raise earliest
+    if earlier_failure is None and absorbed.failure is not None:
+        raise absorbed.failure
 
 
 def _directory_flags(*names: str) -> int:

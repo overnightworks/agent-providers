@@ -2106,7 +2106,9 @@ def test_the_earliest_failure_propagates_and_every_descriptor_is_still_closed(
     monkeypatch.setattr(os, "close", close)
     descriptors_before = _descriptor_count()
 
-    with pytest.raises(BaseException) as raised:  # noqa: PT011
+    with pytest.raises(
+        (RuntimeError, KeyboardInterrupt, OSError, _FalseValuedError, _UntestableError),
+    ) as raised:
         process._make_tree_removable(tmp_path)
 
     assert raised.value is raised_in_order[0]

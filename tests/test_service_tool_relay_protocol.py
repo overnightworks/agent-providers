@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 from capability_support import canary_token, capability_carrying
 from relay_support import (
+    ConnectionEnded,
     Delivery,
     RawClient,
     RelayWrites,
@@ -248,7 +249,8 @@ def test_answers_each_message_without_reaching_the_tool_port(
 )
 def test_a_cancel_reaches_the_tool_port_only_with_a_well_formed_request_id(
     params: dict[str, Any] | None, routed: list[int | str]
-) -> None:  # C1
+) -> None:
+    """C1."""
     calls = ScriptedCalls()
 
     answer = answered(owner_of(calls=calls), json_rpc("notifications/cancelled", None, params))
@@ -447,14 +449,29 @@ def test_a_request_id_that_is_the_capability_gets_an_empty_500_and_one_log_line(
     assert SEGMENT not in caplog.text
 
 
+async def outcome_of(client: RawClient) -> tuple[HTTPStatus | Delivery, bytes]:
+    try:
+        answer = await client.answer()
+    except ConnectionEnded as ended:
+        return ended.delivery, b""
+    return HTTPStatus(answer.status), answer.body
+
+
 @pytest.mark.parametrize(
-    ("replies", "refused_lines"),
-    [([], 3), ([UNANSWERED], 2)],
+    ("replies", "refused_lines", "in_flight_outcome"),
+    [
+        ([], 3, (HTTPStatus.INTERNAL_SERVER_ERROR, b"")),
+        ([UNANSWERED], 2, (Delivery.ABSENT, b"")),
+    ],
     ids=["answered-call-gets-the-empty-500", "unanswered-call-stays-unanswered"],
 )
 def test_a_call_in_flight_when_another_connection_refuses_the_owner_gets_nothing(
-    replies: list[Unanswered], refused_lines: int, caplog: pytest.LogCaptureFixture
-) -> None:  # C2
+    replies: list[Unanswered],
+    refused_lines: int,
+    in_flight_outcome: tuple[HTTPStatus | Delivery, bytes],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """C2."""
     calls = ScriptedCalls(replies, gated=True)
     owner = owner_of(reflected_in_a_description(), calls=calls)
 
@@ -467,11 +484,7 @@ def test_a_call_in_flight_when_another_connection_refuses_the_owner_gets_nothing
         listing = await other.answer()
         assert (listing.status, listing.body) == (HTTPStatus.INTERNAL_SERVER_ERROR, b"")
         calls.release()
-        if replies:
-            assert await in_flight.delivery() is Delivery.ABSENT
-        else:
-            resumed = await in_flight.answer()
-            assert (resumed.status, resumed.body) == (HTTPStatus.INTERNAL_SERVER_ERROR, b"")
+        assert await outcome_of(in_flight) == in_flight_outcome
         await other.send(message_for(relay, json_rpc("tools/call", 3, {"name": "save_lyrics"})))
         later = await other.answer()
         assert (later.status, later.body) == (HTTPStatus.INTERNAL_SERVER_ERROR, b"")

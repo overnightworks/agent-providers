@@ -9,6 +9,7 @@ import gc
 import json
 import logging
 import uuid
+from collections import Counter
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
@@ -263,11 +264,14 @@ def drive_barrier(
                 async with asyncio.timeout(WAIT_SECONDS * 3):
                     await scenario(Rig(relay, barrier, entries, app))
             finally:
-                barrier.stop()
-                if isinstance(app, GatedApp):
-                    app.release()
-                await barrier.settle()
-                await close_bounded(relay)
+                try:
+                    barrier.stop()
+                    if isinstance(app, GatedApp):
+                        app.release()
+                    async with asyncio.timeout(WAIT_SECONDS):
+                        await barrier.settle()
+                finally:
+                    await close_bounded(relay)
 
     asyncio.run(main())
 
@@ -332,6 +336,26 @@ def capture_loop_reports() -> list[dict[str, Any]]:
     reports: list[dict[str, Any]] = []
     asyncio.get_running_loop().set_exception_handler(lambda _, context: reports.append(context))
     return reports
+
+
+@dataclass(frozen=True)
+class SettledState:
+    logged_classes: list[str]
+    retrievals: int
+
+
+def settling_with_evidence(
+    rig: Rig, caplog: pytest.LogCaptureFixture, retrievals: Counter[str]
+) -> asyncio.Task[SettledState]:
+    """A ``settle()`` that has started; its task reads the evidence at ``settle()``'s return."""
+
+    async def settle_and_observe() -> SettledState:
+        await rig.barrier.settle()
+        return SettledState(
+            [kind for _, kind, _ in failure_lines(caplog)], retrievals[f"upstream:{RUN_ID}:call-1"]
+        )
+
+    return asyncio.Task(settle_and_observe(), loop=asyncio.get_running_loop(), eager_start=True)
 
 
 async def closed_without_unretrieved_reports(rig: Rig, reports: list[dict[str, Any]]) -> None:
@@ -545,14 +569,18 @@ async def forwarded_call_given_up(rig: Rig, give_up: GiveUp) -> None:
 )
 def test_a_given_up_call_ends_by_its_state_at_once_and_frees_its_slot(
     state: Callable[[Rig, GiveUp], Awaitable[None]], give_up: GiveUp
-) -> None:  # C4
+) -> None:
+    """C4."""
+
     async def scenario(rig: Rig) -> None:
         await state(rig, give_up)
 
     drive_barrier(scenario)
 
 
-def test_a_cancel_on_the_free_fourth_connection_frees_the_slot_the_next_call_takes() -> None:  # C5
+def test_a_cancel_on_the_free_fourth_connection_frees_the_slot_the_next_call_takes() -> None:
+    """C5."""
+
     async def scenario(rig: Rig) -> None:
         clients = [await rig.pending(n, "edit_song", {"n": n}) for n in (1, 2, 3)]
         fourth = await rig.cancel(2)
@@ -615,7 +643,9 @@ def stop_then_cancel(barrier: ToolCallBarrier, call: asyncio.Task[Reply | Unansw
 )
 def test_a_give_up_before_the_call_returns_leaves_its_request_unanswered(
     race: Race, caplog: pytest.LogCaptureFixture
-) -> None:  # C6
+) -> None:
+    """C6."""
+
     async def scenario(rig: Rig) -> None:
         reports = capture_loop_reports()
         retrievals = count_retrievals()
@@ -623,24 +653,20 @@ def test_a_give_up_before_the_call_returns_leaves_its_request_unanswered(
         if race.forwarded:
             await rig.hand_out_and_accept()
             await rig.fake.forwarded(1)
-        settling = asyncio.Task(
-            rig.barrier.settle(), loop=asyncio.get_running_loop(), eager_start=True
-        )
+        settling = settling_with_evidence(rig, caplog, retrievals)
 
         race.interfere(rig.barrier, call)
         rig.fake.release()
         async with asyncio.timeout(WAIT_SECONDS):
             ending = await ending_of(call)
-            await settling
+            settled = await settling
 
         if race.unanswered:
             assert ending is UNANSWERED
         else:
             assert isinstance(ending, asyncio.CancelledError)
-        assert [kind for _, kind, _ in failure_lines(caplog)] == (
-            ["UpstreamBroke"] if race.forwarded else []
-        )
-        assert retrievals[f"upstream:{RUN_ID}:call-1"] == int(race.forwarded)
+        assert settled.logged_classes == (["UpstreamBroke"] if race.forwarded else [])
+        assert settled.retrievals == int(race.forwarded)
         await closed_without_unretrieved_reports(rig, reports)
 
     with caplog.at_level(logging.ERROR):
@@ -670,7 +696,9 @@ async def next_event_after_accept_and_stop(barrier: ToolCallBarrier, event: Tool
 )
 def test_the_hand_out_rule_holds_over_a_given_up_handed_out_call(
     misuse: Callable[[ToolCallBarrier, ToolCallEvent], Awaitable[None]],
-) -> None:  # C7
+) -> None:
+    """C7."""
+
     async def scenario(rig: Rig) -> None:
         call = arrive(rig.barrier, EDIT_SONG)
         event = await rig.barrier.next_event()
@@ -756,11 +784,14 @@ async def an_id_reused_in_the_step_of_its_cancel(rig: Rig) -> None:
 )
 def test_a_cancel_ends_only_the_pending_call_with_that_id(
     scenario: Callable[[Rig], Awaitable[None]],
-) -> None:  # C8
+) -> None:
+    """C8."""
     drive_barrier(scenario)
 
 
-def test_a_call_cancelled_before_its_accept_streams_an_error_result_and_never_runs() -> None:  # C9
+def test_a_call_cancelled_before_its_accept_streams_an_error_result_and_never_runs() -> None:
+    """C9."""
+
     async def scenario(rig: Rig) -> None:
         gate = asyncio.Event()
         runner = BarrierRunner(rig.barrier, accept_gate=gate, final_after=2)
@@ -1056,6 +1087,7 @@ UPSTREAM_BROKE = partial(UpstreamBroke, "x")
             False, UPSTREAM_BROKE, ("UpstreamBroke",), HTTPStatus.INTERNAL_SERVER_ERROR, 1
         ),
         ForwardEnding(True, asyncio.CancelledError, (), None, 0),
+        ForwardEnding(False, asyncio.CancelledError, (), None, 0),
         ForwardEnding(False, UPSTREAM_BROKE, ("UpstreamBroke",), None, 1, True),
     ],
     ids=[
@@ -1063,6 +1095,7 @@ UPSTREAM_BROKE = partial(UpstreamBroke, "x")
         "cancelled-failure",
         "waiting-failure",
         "cancelled-forward",
+        "cancelled-forward-with-an-active-waiter",
         "cancelled-on-completion",
     ],
 )
@@ -1079,19 +1112,17 @@ def test_a_forwards_outcome_is_retrieved_exactly_once_and_settle_waits_for_it(
         if ending.request_cancelled:
             await close_bounded(rig.relay)
 
-        settling = asyncio.Task(
-            rig.barrier.settle(), loop=asyncio.get_running_loop(), eager_start=True
-        )
+        settling = settling_with_evidence(rig, caplog, retrievals)
         assert not settling.done()
 
         if ending.cancelled_on_completion:
             upstream_task(1).add_done_callback(lambda _: cancel_relay_connections())
         app.release()
         async with asyncio.timeout(WAIT_SECONDS):
-            await settling
+            settled = await settling
 
-        assert [kind for _, kind, _ in failure_lines(caplog)] == list(ending.logged_classes)
-        assert retrievals[f"upstream:{RUN_ID}:call-1"] == ending.retrievals
+        assert settled.logged_classes == list(ending.logged_classes)
+        assert settled.retrievals == ending.retrievals
         if ending.status is not None:
             answer = await client.answer()
             assert (answer.status, answer.body) == (ending.status, b"")

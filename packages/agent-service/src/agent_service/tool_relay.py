@@ -443,7 +443,10 @@ class ToolCalls(Protocol):
         ...
 
     def cancel(self, request_id: RequestId) -> None:
-        """Give up the pending call with this id; an id matching no pending call is ignored."""
+        """Give up the pending call with this id; an id matching no pending call is ignored.
+
+        It is synchronous: the give-up is recorded before it returns.
+        """
         ...
 
     def unoffered(self) -> None:
@@ -506,12 +509,12 @@ class ToolCallBarrier:
     count toward the listener's cap too.
 
     A call is given up by ``cancel(request_id)`` or by the cancellation of the task running
-    ``call()``. Each is recorded before it returns: ``call()`` awaits its verdict future
-    directly, so ``Task.cancel()`` of any task whose await chain reaches ``call()`` through
-    direct awaits (no ``asyncio.wait``, shield or ``wait_for``, no task not awaited directly)
-    cancels it at once, and ``accept`` and ``next_event()`` decide from that record. A given-up
-    call leaves the pending set and its request is closed without a byte, whatever it would
-    have answered: ``call()`` returns ``Unanswered`` after a cancel and raises
+    ``call()``. Each is recorded, for a waiting or handed-out call, before it returns: ``call()``
+    awaits its verdict future directly, so ``Task.cancel()`` of any task whose await chain reaches
+    ``call()`` through direct awaits (no ``asyncio.wait``, shield or ``wait_for``, no task not
+    awaited directly) cancels it at once, and ``accept`` and ``next_event()`` decide from that
+    record. A given-up call leaves the pending set and its request is closed without a byte,
+    whatever it would have answered: ``call()`` returns ``Unanswered`` after a cancel and raises
     ``CancelledError`` after a task cancellation. A waiting one is never handed out; a
     handed-out one stays the handed-out call, is never forwarded, and its ``accept`` makes the
     next ``next_event()`` return an ``is_error`` ``ToolResultEvent`` with ``CALL_GIVEN_UP_TEXT``;
@@ -536,7 +539,7 @@ class ToolCallBarrier:
         self._given_up_result: ToolResultEvent | None = None
         self._forwards: set[asyncio.Task[ToolOutcome]] = set()
         self._changed = asyncio.Event()
-        self._retrieved = asyncio.Event()
+        self._forward_released = asyncio.Event()
         self._stopped = False
         self._unoffered = False
 
@@ -561,7 +564,7 @@ class ToolCallBarrier:
         return tool_result_response(request_id, outcome)
 
     def cancel(self, request_id: RequestId) -> None:
-        pending = next((call for call in self._pending if call.request_id == request_id), None)
+        pending = self._pending_with(request_id)
         if pending is None:
             return
         self._pending.remove(pending)
@@ -596,7 +599,6 @@ class ToolCallBarrier:
             self._given_up_result = ToolResultEvent(
                 tool_use_id=event.tool_use_id, content=CALL_GIVEN_UP_TEXT, is_error=True
             )
-            self._changed.set()
             return
         forward = asyncio.create_task(
             self._app.call_tool(pending.params.name, pending.params.arguments),
@@ -610,7 +612,6 @@ class ToolCallBarrier:
         refused = [*self._waiting, *([self._handed_out] if self._handed_out else [])]
         self._waiting.clear()
         self._handed_out = None
-        self._given_up_result = None
         for pending in refused:
             if not pending.verdict.done():
                 pending.verdict.set_result(None)
@@ -618,8 +619,8 @@ class ToolCallBarrier:
 
     async def settle(self) -> None:
         while self._forwards:
-            self._retrieved.clear()
-            await self._retrieved.wait()
+            self._forward_released.clear()
+            await self._forward_released.wait()
 
     def _handed_out_for(self, event: ToolCallEvent) -> _PendingCall:
         pending = self._handed_out
@@ -638,8 +639,11 @@ class ToolCallBarrier:
         return (
             not self._stopped
             and len(self._pending) < MAX_PENDING_TOOL_CALLS
-            and all(pending.request_id != request_id for pending in self._pending)
+            and self._pending_with(request_id) is None
         )
+
+    def _pending_with(self, request_id: RequestId) -> _PendingCall | None:
+        return next((call for call in self._pending if call.request_id == request_id), None)
 
     def _admit(self, request_id: RequestId, params: CallToolParams) -> _PendingCall:
         event = ToolCallEvent(
@@ -672,6 +676,8 @@ class ToolCallBarrier:
 
     def _retrieve(self, forward: asyncio.Task[ToolOutcome]) -> ToolOutcome:
         try:
+            if forward.cancelled():
+                raise asyncio.CancelledError
             return forward.result()
         finally:
             self._release(forward)
@@ -685,7 +691,7 @@ class ToolCallBarrier:
 
     def _release(self, forward: asyncio.Task[ToolOutcome]) -> None:
         self._forwards.discard(forward)
-        self._retrieved.set()
+        self._forward_released.set()
 
 
 class CapabilityReflected(Exception):

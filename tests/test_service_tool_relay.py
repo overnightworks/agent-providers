@@ -964,7 +964,8 @@ def test_a_client_leaving_while_the_owner_works_ends_the_connection_quietly(
 
 def test_an_unanswered_request_closes_its_connection_without_a_byte_and_frees_the_slot(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:  # C3
+) -> None:
+    """C3."""
     caplog.set_level(logging.DEBUG, logger="agent_service")
     relay_writes = RelayWrites(monkeypatch)
     owner = ScriptedOwner([UNANSWERED])

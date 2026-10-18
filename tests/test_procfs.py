@@ -16,7 +16,7 @@ from types import SimpleNamespace
 from typing import BinaryIO
 
 import pytest
-from provider_test_support import PROC_DEVICE, mountinfo_line
+from provider_test_support import PROC_DEVICE, PROC_MOUNT_POINT, mountinfo_line
 
 from agent_providers import procfs
 from agent_providers.procfs import (
@@ -825,3 +825,13 @@ def test_a_mount_point_with_an_unescaped_whitespace_character_is_matched_whole(
 
     assert holds_mount_point(line, mount_point)
     assert not holds_mount_point(line, "/r/a")
+
+
+def test_a_hidden_procfs_is_found_when_mountinfo_names_carry_a_literal_no_break_space() -> None:
+    proc_line = f"28 32 {PROC_DEVICE} /\u00a0root {PROC_MOUNT_POINT} rw - proc proc rw,hidepid=2"
+    later_line = mountinfo_line(device="0:31", mount_point="/r/a\u00a0b")
+    view = scripted_view(
+        mountinfo_text=f"{proc_line}\n{later_line}", stats={PGID: stat_text(state="S")},
+    )
+
+    assert group_census(view, PGID) is GroupCensus.PIDS_HIDDEN

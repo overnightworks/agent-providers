@@ -405,7 +405,6 @@ class ThreadedOperation:
         self._seen_lines = 0
         self._stopped_or_ended = threading.Event()
         self._resume = threading.Event()
-        self.expired = threading.Event()
         self.paused = False
         self.pause_expired = False
         self.outcome = None
@@ -452,7 +451,6 @@ class ThreadedOperation:
                 self._stopped_or_ended.set()
                 if not self._wait_for_resume():
                     self.pause_expired = True
-                    self.expired.set()
         return self._on_line
 
 

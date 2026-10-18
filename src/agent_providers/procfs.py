@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -175,8 +176,7 @@ def _mount_verdict(view: ProcView) -> GroupCensus | None:
 
 
 def holds_mount_point(mountinfo: str, directory: str) -> bool:
-    for line in mountinfo.split("\n"):
-        fields = line.split(" ")
+    for fields in _mountinfo_fields(mountinfo):
         if MOUNTINFO_SEPARATOR not in fields or len(fields) <= MOUNTINFO_MOUNT_POINT_INDEX:
             continue
         mount_point = _unescape_mountinfo(fields[MOUNTINFO_MOUNT_POINT_INDEX])
@@ -185,14 +185,18 @@ def holds_mount_point(mountinfo: str, directory: str) -> bool:
     return False
 
 
+def _mountinfo_fields(mountinfo: str) -> Iterator[list[str]]:
+    for record in mountinfo.split("\n"):
+        yield record.split(" ")
+
+
 def _unescape_mountinfo(field: str) -> str:
     return MOUNTINFO_OCTAL_ESCAPE.sub(lambda escape: chr(int(escape[1], 8)), field)
 
 
 def _super_options_of_proc_mount(mountinfo: str, device: str) -> list[str] | None:
     options = None
-    for line in mountinfo.splitlines():
-        fields = line.split()
+    for fields in _mountinfo_fields(mountinfo):
         if MOUNTINFO_SEPARATOR not in fields:
             continue
         separator = fields.index(MOUNTINFO_SEPARATOR)

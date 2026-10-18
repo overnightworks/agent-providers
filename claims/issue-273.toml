@@ -1,7 +1,0 @@
-claim_id = "6e5045160df24f5b8b31805502d1119b"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "ed820c9b31300fd56bec75e2b3ed6d1870b782d3"
-branch = "claude/issue-273-quality-v0-2-1"
-scope = [".github/workflows/ci.yml"]
-opened_commit = "a2c59ddc6a96baa54ca48b1adfa3d68b6f354888"

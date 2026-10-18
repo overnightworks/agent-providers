@@ -1,8 +1,0 @@
-claim_id = "fd2bd08cfc1c4de581dfff72f46450b2"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "6ec5847b491d396418d6007c07c105cf85dafca8"
-branch = "claude/issue-230-harness-follow-ups"
-scope = ["tests/anchored_kernel.py", "tests/anchored_leaders.py", "tests/anchored_start_cases.py", "tests/anchored_support.py", "tests/conftest.py", "tests/test_anchored_child.py", "tests/test_anchored_door.py", "tests/test_anchored_group_signal.py", "tests/test_anchored_support.py", "tests/test_zombie_anchor.py"]
-opened_commit = "ce712348ae88f1f9753e14c5642d7bd200663685"
-whole_reason = "Behaviour-keeping moves inside one test harness family; each move changes its importers in the same commit."

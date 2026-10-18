@@ -1,0 +1,8 @@
+claim_id = "94c9abdcf2ce4dc398e5ea2d4ad94e3f"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "8acc0b7e2f8dfee03e7937e8f2f1e089805f0bbf"
+branch = "claude/issue-291-4c-neutral-run-entry"
+scope = [".importlinter", "README.md", "docs/decisions/0001-agent-service.md", "src/agent_providers/claude/provider.py", "src/agent_providers/cli_run.py", "tests/provider_test_support.py", "tests/test_claude_run.py", "tests/test_cli_run.py", "tests/test_run_directories.py"]
+opened_commit = "c1e6f1458a0d078abb964d2576e41a62ab95b9fc"
+whole_reason = "The neutral entry and its port need their first adapter (ClaudeRun and its decoder), the guard that keeps the entry neutral, the shared test builders it moves and extends, and the documentation of the new boundary, so none lands alone; the #279 card is test-only in a file the slice already edits."

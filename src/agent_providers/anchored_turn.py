@@ -23,7 +23,7 @@ from typing import Protocol
 import anyio
 
 from agent_providers.errors import ContainmentLost
-from agent_providers.lost_groups import retain_lost_group
+from agent_providers.lost_groups import release_leader_if_gone, retain_lost_group
 from agent_providers.spawn import AnchoredChild, ChildProcess, open_anchored_pipes
 
 log = logging.getLogger(__name__)
@@ -154,12 +154,10 @@ async def _confirm_group_gone_and_release(child: AnchoredChild, bounds: ReapBoun
     if child.returncode is None:
         await _offer_sigterm(child, bounds.sigterm_grace_seconds)
     result = await child.kill_until_gone(within=bounds.confirmation_seconds)
-    if not result.confirmed or not await _exit_published_within(
+    exit_published = result.confirmed and await _exit_published_within(
         child, bounds.confirmation_seconds
-    ):
-        return False
-    child.release()
-    return True
+    )
+    return release_leader_if_gone(child, counted_empty=result.confirmed, exit_known=exit_published)
 
 
 async def _offer_sigterm(child: AnchoredChild, grace_seconds: float) -> None:

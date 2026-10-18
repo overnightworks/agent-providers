@@ -290,7 +290,7 @@ A host migrates at its pin bump to 0.4.0; the configuration model refuses
 unknown fields, so a host that still sets a removed name fails at startup and
 the error names the field.
 
-| Before (`ProviderRuntimeConfig`) | Now |
+| Before | Now |
 |---|---|
 | `claude_cli_binary` | `claude.binary` |
 | `claude_cli_binary_search_globs` | `claude.binary_search_globs` |

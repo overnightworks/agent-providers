@@ -1,8 +1,0 @@
-claim_id = "699302ed100b443c82e4b54095a96d23"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "925172c1425e9d6be747b61038cef79633315d9b"
-branch = "claude/issue-226-execution-barrier"
-scope = ["README.md", "docs/decisions/0001-agent-service.md", "packages/agent-service/src/agent_service/mcp_wire.py", "packages/agent-service/src/agent_service/tool_relay.py", "tests/relay_support.py", "tests/test_service_app_tools.py", "tests/test_service_mcp_wire.py", "tests/test_service_tool_relay_barrier.py"]
-opened_commit = "c4f1f43bdce50848462d04b2a49fee2796b70f35"
-whole_reason = "One port implementation in the relay's owner module, its one new test module, the wire writer it answers with, the shared fake of the port it extends, two README rows and one ADR bullet that state it; the two carried follow-ups are test-only edits in one file. The only coherent further split, the CLI's give-ups, is already cut off as A1b-10b1b."

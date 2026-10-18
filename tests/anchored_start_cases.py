@@ -66,7 +66,7 @@ class StopReportingKernel(PassThroughKernel):
 
     def bind(self, leader_pid: int) -> None:
         super().bind(leader_pid)
-        self._waitpid_answer = (leader_pid, STOP_STATUS)
+        self.answer_next_waitpid((leader_pid, STOP_STATUS))
 
 
 class GateFactory:

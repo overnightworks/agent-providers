@@ -6,7 +6,8 @@ passes through them. They forward the code under test's numeric
 calls, so they live outside the support module that names no pid number. Each model owns its
 call log, its holds and its violation list: a protocol break is recorded, never raised inside
 the watcher, and a hold that the test never opens lets the call through after the bound.
-:class:`GroupSignalModel` does the same for ``os.killpg``.
+:class:`GroupSignalModel` does the same for ``os.killpg``, and :class:`CensusRecorder` does the
+same for ``procfs.group_census``.
 """
 
 from __future__ import annotations
@@ -22,6 +23,8 @@ from typing import Literal
 
 import pytest
 from anchored_support import TEST_WAIT_SECONDS
+
+from agent_providers.procfs import GroupCensus, ProcView, group_census
 
 real_waitid = os.waitid
 real_waitpid = os.waitpid
@@ -46,6 +49,10 @@ def watcher_thread(pid: int) -> threading.Thread:
     watcher = next((t for t in threading.enumerate() if t.name == name), None)
     assert watcher is not None, f"no {name} thread exists"
     return watcher
+
+
+def watcher_names() -> set[str]:
+    return {t.name for t in threading.enumerate() if t.name.startswith(WATCHER_THREAD_PREFIX)}
 
 
 def join_watcher(watcher: threading.Thread) -> None:
@@ -97,6 +104,9 @@ class RecordingKernel:
 
     def bind(self, leader_pid: int) -> None:
         self._leader_pid = leader_pid
+
+    def answer_next_waitpid(self, answer: WaitpidAnswer) -> None:
+        self._waitpid_answer = answer
 
     def open_hold(self) -> None:
         self._opened.set()
@@ -320,3 +330,33 @@ class GroupSignalModel:
             raise failure
         if self._forward:
             real_killpg(pgid, sig)
+
+
+class EventLog(list[tuple[str, str]]):
+    def record(self, kind: str) -> None:
+        self.append((kind, threading.current_thread().name))
+
+    @property
+    def kinds(self) -> list[str]:
+        return [kind for kind, _ in self]
+
+
+class CensusRecorder(list[int]):
+    def __init__(self) -> None:
+        super().__init__()
+        self.log: EventLog | None = None
+        self.answer: GroupCensus | None = None
+        self.failure: Exception | None = None
+        self.during: Callable[[], None] | None = None
+
+    def __call__(self, view: ProcView, pgid: int) -> GroupCensus:
+        self.append(pgid)
+        if self.log is not None:
+            self.log.record("count")
+        if self.during is not None:
+            self.during()
+        if self.failure is not None:
+            raise self.failure
+        if self.answer is not None:
+            return self.answer
+        return group_census(view, pgid)

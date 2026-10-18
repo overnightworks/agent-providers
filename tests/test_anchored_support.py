@@ -22,6 +22,7 @@ from anchored_kernel import watcher_thread
 from anchored_support import (
     GONE,
     RUNNING,
+    SIGKILLED,
     TEST_WAIT_SECONDS,
     ChildCleanup,
     ChildErrorKind,
@@ -39,7 +40,6 @@ from test_zombie_anchor import EXIT_WITH_LINE
 
 from agent_providers.spawn import ChildProcess, closed_environment
 
-SIGKILLED = -9
 SHORT_BOUND = 0.2
 
 
@@ -181,7 +181,7 @@ def test_a_child_not_observed_dead_at_the_bound_is_reported_and_collected_by_the
     owned = scripts.start().owned
 
     with monkeypatch.context() as unobserved:
-        unobserved.setattr(anchored_support, "_wait_for_exits", lambda _pidfds, _timeout: set())
+        unobserved.setattr(anchored_support, "wait_for_exits", lambda _pidfds, _timeout: set())
         with pytest.raises(CleanupFailed) as failure:
             child_cleanup.cleanup(bound=SHORT_BOUND)
 
@@ -254,7 +254,7 @@ def test_drop_popen_hands_over_a_disarmed_popen_and_keeps_the_process(
 @pytest.mark.parametrize(
     ("binding", "code", "step"),
     [
-        ("_pidfd_open", errno.ENOSYS, "pidfd_open"),
+        ("pidfd_open", errno.ENOSYS, "pidfd_open"),
         ("_pidfd_send_signal", errno.EPERM, "pidfd_send_signal"),
         ("_waitid", errno.EINVAL, "waitid"),
     ],
@@ -278,7 +278,7 @@ def test_a_refused_pidfd_call_fails_the_construction_before_any_child_exists(
 def test_a_pidfd_refused_after_the_child_exists_is_reported_and_the_child_ends_by_its_stdin(
     child_cleanup: ChildCleanup, scripts: ScriptChildren, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(anchored_support, "_pidfd_open", refuse_with(errno.EMFILE))
+    monkeypatch.setattr(anchored_support, "pidfd_open", refuse_with(errno.EMFILE))
 
     with pytest.raises(IdentityUnavailable) as refusal:
         scripts.start()

@@ -36,6 +36,7 @@ from agent_providers.spawn import ChildProcess
 
 P_PIDFD = 3
 TEST_WAIT_SECONDS = 10
+SIGKILLED = -9
 DISARMED = object()
 IMPORT_ROOT_PRELUDE = "import os, sys\nsys.path[:0] = sys.argv[1].split(os.pathsep)\n"
 
@@ -70,7 +71,7 @@ def _checked(result: int) -> int:
     return result
 
 
-def _pidfd_open(pid: int) -> int:
+def pidfd_open(pid: int) -> int:
     open_number, _ = _pidfd_syscall_numbers()
     return _checked(_syscall(open_number, ctypes.c_long(pid), ctypes.c_long(0)))
 
@@ -91,7 +92,7 @@ def _pidfd_send_signal(pidfd: int, signal_number: int) -> None:
 _waitid = os.waitid
 
 
-def _wait_for_exits(pidfds: Iterable[int], timeout: float) -> set[int]:
+def wait_for_exits(pidfds: Iterable[int], timeout: float) -> set[int]:
     """Return the pidfds readable within ``timeout``; readable never means unreaped."""
     pending = set(pidfds)
     poller = select.poll()
@@ -200,7 +201,7 @@ class OwnedChild:
 
     @classmethod
     def name(cls, popen: subprocess.Popen, recipient: Recipient | PidUser) -> OwnedChild:
-        pidfd = _pidfd_open(popen.pid)
+        pidfd = pidfd_open(popen.pid)
         return cls(popen.pid, pidfd, popen, _held_recipient(recipient))
 
     def declare_recipient(self, recipient: Recipient | PidUser) -> None:
@@ -277,7 +278,7 @@ def resolve_children(
     """
     children = list(children)
     _require_unresolved(children)
-    readable = _wait_for_exits(
+    readable = wait_for_exits(
         [owned.pidfd for owned in children], max(0.0, deadline - time.monotonic())
     )
     errors = []
@@ -471,7 +472,7 @@ class ChildCleanup:
 
     def wait_exited(self, owned: OwnedChild, *, bound: float = TEST_WAIT_SECONDS) -> int:
         self._require_listed(owned)
-        if owned.pidfd not in _wait_for_exits([owned.pidfd], bound):
+        if owned.pidfd not in wait_for_exits([owned.pidfd], bound):
             raise AssertionError(f"pid {owned.pid} did not exit within {bound}s")
         observed = state(owned)
         if not isinstance(observed, Exited):
@@ -531,7 +532,7 @@ class ChildCleanup:
 
 def _prove_the_pidfd_calls_on_this_process() -> None:
     try:
-        pidfd = _pidfd_open(os.getpid())
+        pidfd = pidfd_open(os.getpid())
     except OSError as refusal:
         raise IdentityUnavailable(f"pidfd_open refused: {refusal}") from refusal
     try:

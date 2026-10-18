@@ -4,13 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import gc
-import logging
 import os
 import signal
 import sys
 import threading
-import warnings
 from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,12 +18,11 @@ from anchored_kernel import (
     KernelModel,
     install_kernel,
     join_watcher,
+    watcher_names,
     watcher_thread,
 )
-from anchored_leaders import ALL_PHASES, Leaders, Phases, spawn_warnings
-from anchored_support import GONE, TEST_WAIT_SECONDS, ChildCleanup, Exited, OwnedChild
-from test_anchored_child import watcher_names
-from test_zombie_anchor import SIGKILLED
+from anchored_leaders import Leaders, asyncio_errors, bounded, open_door
+from anchored_support import GONE, SIGKILLED, ChildCleanup, Exited
 
 from agent_providers import procfs, spawn
 from agent_providers.procfs import GroupCensus
@@ -36,6 +32,8 @@ from agent_providers.spawn import (
     ChildIdentityLost,
     ChildProcess,
 )
+
+pytestmark = pytest.mark.usefixtures("anchored_door_ends_clean")
 
 PIPE_CAPACITY = 2**16
 MEGABYTE = 2**20
@@ -82,12 +80,6 @@ class InjectedStop(BaseException):
 
 
 @dataclass(frozen=True)
-class Opened:
-    child: AnchoredChild
-    owned: OwnedChild
-
-
-@dataclass(frozen=True)
 class DoorFailure:
     exception: BaseException
     descriptors_in_handler: frozenset[int]
@@ -96,34 +88,6 @@ class DoorFailure:
 def descriptors() -> frozenset[int]:
     listed = os.listdir("/proc/self/fd")
     return frozenset(int(name) for name in listed if os.path.exists(f"/proc/self/fd/{name}"))
-
-
-async def bounded[Result](awaitable: Awaitable[Result]) -> Result:
-    async with asyncio.timeout(TEST_WAIT_SECONDS):
-        return await awaitable
-
-
-def asyncio_errors(caplog: pytest.LogCaptureFixture, phases: Phases = ("call",)) -> list[str]:
-    return [
-        record.getMessage()
-        for phase in phases
-        for record in caplog.get_records(phase)
-        if record.name == "asyncio" and record.levelno >= logging.ERROR
-    ]
-
-
-def open_door(
-    runner: asyncio.Runner,
-    child_cleanup: ChildCleanup,
-    child: ChildProcess,
-    *,
-    limit: int | None = None,
-) -> Opened:
-    captured = child_cleanup.capture(
-        lambda: runner.run(bounded(spawn.open_anchored_pipes(child, stream_buffer_limit=limit)))
-    )
-    (owned,) = captured.children
-    return Opened(captured.value, owned)
 
 
 def failed_door(
@@ -171,48 +135,8 @@ def reading_end_of_stdin_held_open(pid: int) -> Iterator[int]:
 
 
 @pytest.fixture
-def door_runner(child_cleanup: ChildCleanup) -> Iterator[asyncio.Runner]:
-    with asyncio.Runner() as runner:
-        runner.get_loop()
-        yield runner
-
-
-@pytest.fixture
 def descriptors_before_the_door(door_runner: asyncio.Runner) -> frozenset[int]:
     return descriptors()
-
-
-@pytest.fixture
-def expected_spawn_warnings() -> list[str]:
-    return []
-
-
-@pytest.fixture
-def expected_resource_warnings() -> list[str]:
-    return []
-
-
-def unclosed_resources(raised: list[warnings.WarningMessage]) -> list[str]:
-    return [
-        type(warning.source).__name__ for warning in raised if warning.category is ResourceWarning
-    ]
-
-
-@pytest.fixture(autouse=True)
-def every_row_ends_clean(
-    thread_failures: list[threading.ExceptHookArgs],
-    caplog: pytest.LogCaptureFixture,
-    expected_spawn_warnings: list[str],
-    expected_resource_warnings: list[str],
-) -> Iterator[None]:
-    with caplog.at_level(logging.WARNING), warnings.catch_warnings(record=True) as raised:
-        warnings.simplefilter("always", ResourceWarning)
-        yield
-        gc.collect()
-    assert sorted(unclosed_resources(raised)) == sorted(expected_resource_warnings)
-    assert thread_failures == []
-    assert asyncio_errors(caplog, ALL_PHASES) == []
-    assert spawn_warnings(caplog, ALL_PHASES) == expected_spawn_warnings
 
 
 def test_the_door_serves_streams_and_keeps_the_exited_leader_anchored_until_release(

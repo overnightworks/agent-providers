@@ -11,17 +11,30 @@ runtime and resets it after each test.
 
 from __future__ import annotations
 
+import asyncio
 import ctypes
+import gc
+import logging
 import sys
 import threading
+import warnings
+from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from anchored_leaders import Leaders
+from anchored_kernel import CensusRecorder
+from anchored_leaders import (
+    ALL_PHASES,
+    Leaders,
+    asyncio_errors,
+    spawn_warnings,
+    unclosed_resources,
+)
 from anchored_support import ChildCleanup, ZombieAnchor, child_cleanup_scope, zombie_anchor_session
 from provider_test_support import MCP_TOOL_NAMES, close_fake_cli_pipes
 
+from agent_providers import procfs
 from agent_providers.config import (
     McpServerSpec,
     ProviderRuntimeConfig,
@@ -173,3 +186,46 @@ def _close_fake_cli_pipes():
     """Close the pipe-backed fake Claude CLI streams after each test module."""
     yield
     close_fake_cli_pipes()
+
+
+@pytest.fixture
+def census_calls(monkeypatch: pytest.MonkeyPatch) -> CensusRecorder:
+    recorder = CensusRecorder()
+    monkeypatch.setattr(procfs, "group_census", recorder)
+    return recorder
+
+
+@pytest.fixture
+def door_runner(
+    anchored_door_ends_clean: None, child_cleanup: ChildCleanup
+) -> Iterator[asyncio.Runner]:
+    with asyncio.Runner() as runner:
+        runner.get_loop()
+        yield runner
+
+
+@pytest.fixture
+def expected_spawn_warnings() -> list[str]:
+    return []
+
+
+@pytest.fixture
+def expected_resource_warnings() -> list[str]:
+    return []
+
+
+@pytest.fixture
+def anchored_door_ends_clean(
+    thread_failures: list[threading.ExceptHookArgs],
+    caplog: pytest.LogCaptureFixture,
+    expected_spawn_warnings: list[str],
+    expected_resource_warnings: list[str],
+) -> Iterator[None]:
+    with caplog.at_level(logging.WARNING), warnings.catch_warnings(record=True) as raised:
+        warnings.simplefilter("always", ResourceWarning)
+        yield
+        gc.collect()
+    assert sorted(unclosed_resources(raised)) == sorted(expected_resource_warnings)
+    assert thread_failures == []
+    assert asyncio_errors(caplog, ALL_PHASES) == []
+    assert spawn_warnings(caplog, ALL_PHASES) == expected_spawn_warnings

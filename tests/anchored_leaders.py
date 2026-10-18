@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import subprocess
 import sys
 import threading
-from collections.abc import Callable
+import warnings
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -18,7 +20,13 @@ from anchored_support import TEST_WAIT_SECONDS, ChildCleanup, OwnedChild
 from test_zombie_anchor import EXIT_WITH_LINE
 
 from agent_providers import spawn
-from agent_providers.spawn import AnchoredLeader, AnchorState, ChildProcess, closed_environment
+from agent_providers.spawn import (
+    AnchoredChild,
+    AnchoredLeader,
+    AnchorState,
+    ChildProcess,
+    closed_environment,
+)
 
 SPAWN_LOGGER = "agent_providers.spawn"
 LEADER_WITH_GRANDCHILD = (
@@ -30,6 +38,16 @@ LEADER_WITH_GRANDCHILD = (
     "    sys.stdin.read()\n"
     "    os._exit(0)\n"
     "sys.exit(3)\n"
+)
+LEADER_AND_GRANDCHILD_WAITING = (
+    "import os, signal, sys\n"
+    "if os.fork() == 0:\n"
+    "    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+    "    sys.stdout.write(f'{os.getpid()}\\n')\n"
+    "    sys.stdout.flush()\n"
+    "    sys.stdin.read()\n"
+    "    os._exit(0)\n"
+    "sys.stdin.read()\n"
 )
 
 
@@ -217,3 +235,43 @@ def start_bound(
     started = leaders.start(probe)
     kernel.bind(started.owned.pid)
     return started
+
+
+@dataclass(frozen=True)
+class Opened:
+    child: AnchoredChild
+    owned: OwnedChild
+
+
+async def bounded[Result](awaitable: Awaitable[Result]) -> Result:
+    async with asyncio.timeout(TEST_WAIT_SECONDS):
+        return await awaitable
+
+
+def asyncio_errors(caplog: pytest.LogCaptureFixture, phases: Phases = ("call",)) -> list[str]:
+    return [
+        record.getMessage()
+        for phase in phases
+        for record in caplog.get_records(phase)
+        if record.name == "asyncio" and record.levelno >= logging.ERROR
+    ]
+
+
+def unclosed_resources(raised: list[warnings.WarningMessage]) -> list[str]:
+    return [
+        type(warning.source).__name__ for warning in raised if warning.category is ResourceWarning
+    ]
+
+
+def open_door(
+    runner: asyncio.Runner,
+    child_cleanup: ChildCleanup,
+    child: ChildProcess,
+    *,
+    limit: int | None = None,
+) -> Opened:
+    captured = child_cleanup.capture(
+        lambda: runner.run(bounded(spawn.open_anchored_pipes(child, stream_buffer_limit=limit)))
+    )
+    (owned,) = captured.children
+    return Opened(captured.value, owned)

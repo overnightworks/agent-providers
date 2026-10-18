@@ -1,0 +1,8 @@
+claim_id = "3840fb637ca54eaa8bc28b83d275d036"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "e2b53087ee4e4ac22212daaf5b9bad36978b435e"
+branch = "claude/issue-242-claude-anchored-turns"
+scope = ["CLAUDE.md", "README.md", "src/agent_providers/claude/provider.py", "src/agent_providers/spawn.py", "tests/provider_test_support.py", "tests/test_async_claude_spawn_seam.py", "tests/test_claude_adapter.py", "tests/test_claude_anchored_turns.py", "tests/test_claude_provider.py", "tests/test_claude_provider_streaming.py", "tests/test_spawn_owner.py"]
+opened_commit = "7314660a35b7d4e162b7d027f9b76334a5256da7"
+whole_reason = "The three async Claude callers' move onto the anchored door with the ported reap and its retention, the removal of the background reaper and the old door that the move replaces, the reshaped fake those callers' tests share, the real rows in their own module, and the README and CLAUDE.md sentences; the door switch without the retention would leave the reaper releasing a running leader, and the removal without the switch would leave dead code."

@@ -45,10 +45,10 @@ def main(argv: list[str] | None = None) -> int:
     # importing them first would crash a non-Linux start before the refusal line.
     import uvicorn
 
+    from agent_providers.secret_file import shown_text
     from agent_service.app import create_app
     from agent_service.claude_version import ClaudeVersionRefused, require_pinned_version
     from agent_service.config import ConfigError, load_config
-    from agent_service.secret_file import shown_text
 
     try:
         config = load_config(arguments.config)

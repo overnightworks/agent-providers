@@ -1,4 +1,4 @@
-"""How the service reads a secret the operator keeps in a file: once, from one descriptor.
+"""How the service and the core read a secret kept in a file: once, from one descriptor.
 
 The signing key and a profile's login token follow the same rules (decision record
 0001, A1a4 ruling): the file is opened once, type, mode and size come from that

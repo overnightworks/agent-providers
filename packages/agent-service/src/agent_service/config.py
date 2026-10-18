@@ -40,6 +40,7 @@ from webauth.https_client import is_https_url
 from agent_client.capability import MAX_CAPABILITY_CHARACTERS, McpOrigin
 from agent_client.tools import ToolEffect
 from agent_client.wire import MAX_EVENT_BYTES
+from agent_providers.secret_file import read_token_file, shown_text
 from agent_service.capability import (
     CapabilityScope,
     CapabilityTooLarge,
@@ -47,7 +48,6 @@ from agent_service.capability import (
     signed_capability,
 )
 from agent_service.claude_version import PinnedClaudeVersion
-from agent_service.secret_file import read_token_file, shown_text
 from agent_service.signing import SigningKey, load_signing_key
 
 NonEmptyText = Annotated[str, Field(min_length=1, strict=True)]

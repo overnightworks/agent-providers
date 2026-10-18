@@ -1,7 +1,0 @@
-claim_id = "e03541b185de419fb4770ff3c1e20119"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "db4c0c68467572abb7b72960d408f174ef968da3"
-branch = "claude/issue-293-4c0-parser-keeps-cli-bytes-out"
-scope = ["src/agent_providers/claude/provider.py", "tests/test_claude_provider.py", "tests/test_claude_provider_streaming.py"]
-opened_commit = "12c91ebff6a2ec24539705dc05fc15851425bbdf"

@@ -1,8 +1,0 @@
-claim_id = "51d56cb204b640a2a15bb017afd15ef1"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "ed820c9b31300fd56bec75e2b3ed6d1870b782d3"
-branch = "claude/issue-252-result-release"
-scope = ["README.md", "docs/decisions/0001-agent-service.md", "packages/agent-service/src/agent_service/tool_relay.py", "tests/capability_support.py", "tests/test_service_capability.py", "tests/test_service_tool_relay_barrier.py"]
-opened_commit = "7471895ede1aa85ad1d9de06fe38104c0282781f"
-whole_reason = "One class's result phase: ToolCallBarrier's one response future, completion owner, kind-and-id hand-out, release, capability check, failure text and stop rule, with the barrier module's new and adapted rows and its bounded runner cleanup, the one canary-token builder its capability rows need and the duplicate it replaces, one README row and one ADR bullet. The listener, the owner and the pump are not touched."

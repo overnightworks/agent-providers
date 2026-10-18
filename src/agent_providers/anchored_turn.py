@@ -18,10 +18,10 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from functools import partial
+from typing import Protocol
 
 import anyio
 
-from agent_providers import process
 from agent_providers.errors import ContainmentLost
 from agent_providers.lost_groups import retain_lost_group
 from agent_providers.spawn import AnchoredChild, ChildProcess, open_anchored_pipes
@@ -33,12 +33,16 @@ class CliProcessPoolSaturated(Exception):
     """The pool was at its limit, so no child was started."""
 
 
+class ReleasedWithSlot(Protocol):
+    def release(self) -> None: ...
+
+
 @dataclass(eq=False)
 class CliProcessReservation:
     """One pool slot, and the home reservation that is released with it."""
 
     pool: CliProcessPool
-    home_reservation: process.PrivateHomeReservation | None = None
+    home_reservation: ReleasedWithSlot | None = None
 
 
 @dataclass(frozen=True)
@@ -78,7 +82,7 @@ class CliProcessPool:
 
     def reserve(
         self,
-        home_reservation: process.PrivateHomeReservation | None = None,
+        home_reservation: ReleasedWithSlot | None = None,
     ) -> CliProcessReservation | None:
         """Reserve one slot before spawning, or ``None`` when the pool is full."""
         reservation = CliProcessReservation(pool=self, home_reservation=home_reservation)
@@ -184,7 +188,7 @@ async def anchored_turn_child(
     pool: CliProcessPool,
     child: ChildProcess,
     *,
-    home_reservation: process.PrivateHomeReservation,
+    home_reservation: ReleasedWithSlot,
     stream_buffer_limit: int | None = None,
 ) -> AsyncIterator[AnchoredChild]:
     """Run one async turn's child on an anchor that holds a pool slot.

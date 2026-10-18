@@ -47,8 +47,10 @@ uv build --all-packages      # the three wheels the release attaches
   read it back with `current_config()`; they gain no explicit-argument twin
   that skips it. The agent service installs no core runtime: it reads its own
   config file and passes each fact as an argument to the subscription run
-  (`ClaudeRun`), which validates at construction and reads no installed
-  configuration — a test pins each such entry working after `reset_config()`.
+  (`ClaudeRun`, which validates at construction; `run_directories`, whose root
+  is a `PrivateWorkingRoot` validated at construction and whose file names are
+  checked on entry), none of which reads installed configuration — a test pins
+  each such entry working after `reset_config()`.
   No path invents a default for a host fact.
 - **Host obligations are ports, passed in.** The tool set (`ToolExecutor`,
   `ToolCatalog`), the MCP server (`McpServerSpec`), and the image constraints

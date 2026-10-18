@@ -8,8 +8,8 @@ or of ``open_async_pipes`` there.
 
 Two modules are deliberate exceptions and are not listed: ``test_spawn_owner.py``
 (the spawn-policy tests, which name ``create_subprocess_exec`` as a string and
-run the real door) and the anchored-child watcher-coexistence integration test
-in ``test_anchored_child.py``, which awaits a stock ``create_subprocess_exec``
+run the real door) and the anchored-door coexistence test in
+``test_anchored_door.py``, which awaits a stock ``create_subprocess_exec``
 child beside an anchored zombie.
 """
 

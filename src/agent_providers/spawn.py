@@ -56,7 +56,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
-from typing import Final, Literal, cast
+from typing import IO, Final, Literal, cast
 
 log = logging.getLogger(__name__)
 
@@ -646,3 +646,250 @@ def start_anchored_leader(
     else:
         leader._handoff.decide(_WatcherOwnership.OWNED)
     return leader
+
+
+type _ParentTransport = asyncio.ReadTransport | asyncio.WriteTransport
+
+
+class _DoorPipes:
+    """The descriptors and transports of one door, each with exactly one closer.
+
+    A parent end lives in an unbuffered file object that this class closes, so a
+    close never flushes or blocks and never leaves the closing to a transport's
+    later loop turn. A child end is closed by :meth:`close_child_ends` once the
+    start returned, or by :meth:`close_parent_side`'s caller on a raise.
+    """
+
+    def __init__(self) -> None:
+        self._parent_files: list[IO[bytes]] = []
+        self._unwrapped_parent_ends: list[int] = []
+        self._child_ends: list[int] = []
+        self._transports: list[_ParentTransport] = []
+        self._write_transport: asyncio.WriteTransport | None = None
+
+    def open_pipe(self, *, parent_reads: bool) -> tuple[IO[bytes], int]:
+        """Create one pipe whose both ends the next cleanup closes.
+
+        Both descriptors are registered in the statement after ``os.pipe()``
+        returns, so an ordinary failure of an operation this method calls closes
+        them. The residual is the host's Interruptions obligation:
+
+        - an asynchronous interruption;
+        - a ``MemoryError`` in this method's own bookkeeping, which can leak a
+          descriptor;
+        - a ``MemoryError`` inside ``os.fdopen`` after its file object took the
+          parent end, which closes that descriptor twice.
+        """
+        read_end, write_end = os.pipe()
+        parent_end, child_end = (read_end, write_end) if parent_reads else (write_end, read_end)
+        self._child_ends.append(child_end)
+        self._unwrapped_parent_ends.append(parent_end)
+        parent_file = os.fdopen(parent_end, "rb" if parent_reads else "wb", buffering=0)
+        self._unwrapped_parent_ends.remove(parent_end)
+        self._parent_files.append(parent_file)
+        return parent_file, child_end
+
+    async def attach_reader(
+        self, loop: asyncio.AbstractEventLoop, pipe: IO[bytes], stream_buffer_limit: int | None
+    ) -> asyncio.StreamReader:
+        buffer_limit = {} if stream_buffer_limit is None else {"limit": stream_buffer_limit}
+        reader = asyncio.StreamReader(loop=loop, **buffer_limit)
+        protocol = asyncio.StreamReaderProtocol(reader, loop=loop)
+        transport, _ = await loop.connect_read_pipe(lambda: protocol, pipe)
+        self._transports.append(transport)
+        return reader
+
+    async def attach_writer(
+        self, loop: asyncio.AbstractEventLoop, pipe: IO[bytes]
+    ) -> asyncio.StreamWriter:
+        protocol = asyncio.StreamReaderProtocol(None, loop=loop)
+        transport, _ = await loop.connect_write_pipe(lambda: protocol, pipe)
+        self._transports.append(transport)
+        self._write_transport = transport
+        return asyncio.StreamWriter(transport, protocol, None, loop)
+
+    def close_child_ends(self) -> None:
+        child_ends, self._child_ends = self._child_ends, []
+        for child_end in child_ends:
+            os.close(child_end)
+
+    def close_parent_side(self, loop: asyncio.AbstractEventLoop) -> None:
+        transports, self._transports = self._transports, []
+        parent_files, self._parent_files = self._parent_files, []
+        unwrapped_ends, self._unwrapped_parent_ends = self._unwrapped_parent_ends, []
+        for unwrapped_end in unwrapped_ends:
+            os.close(unwrapped_end)
+        if not loop.is_closed():
+            for transport in transports:
+                self._close_transport(transport)
+        for parent_file in parent_files:
+            parent_file.close()
+
+    def _close_transport(self, transport: _ParentTransport) -> None:
+        if transport is not self._write_transport:
+            if not transport.is_closing():
+                transport.close()
+        elif not transport.is_closing() or transport.get_write_buffer_size() > 0:
+            transport.abort()
+
+
+class AnchoredChild:
+    """The async face of an :class:`AnchoredLeader`: three pipes, an exit event, no reaper.
+
+    Only :func:`open_anchored_pipes` creates one. ``pid``, ``returncode``,
+    ``done_with_pid`` and ``signal_group`` are the leader's, unchanged; ``stdin`` is
+    a writer whose ``drain()`` and ``wait_closed()`` work as on asyncio's door,
+    ``stdout`` and ``stderr`` are readers.
+
+    ``exited()`` returns the leader's code once the exit is published. It
+    waits on an event, so a cancelled or timed-out waiter harms nobody and every
+    later or concurrent waiter gets the same result; it raises
+    :class:`ChildIdentityLost` when the leader was lost while running, because no
+    code exists then. ``communicate`` mirrors asyncio's: it writes ``input`` when
+    given, drains, ignores ``BrokenPipeError`` and ``ConnectionResetError`` from
+    those two, and always closes ``stdin``, while reading both streams to EOF
+    concurrently, then awaits ``exited()``. It never reaps.
+
+    The exited leader stays an unreaped zombie, which anchors its process-group
+    number, until ``release()``. ``release()`` reaps through the leader, which
+    refuses a running one with :class:`AnchorStateError` and then closes nothing,
+    because the child may still use its pipes. Once the leader is released or
+    lost, whatever its call raised, the pipes are closed once, each transport
+    before its file object. On an open loop a reading transport that is not
+    closing is closed. The ``stdin`` transport is aborted when it is not closing
+    or when it is closing but still holds buffered output, which the abort
+    discards; a closing transport with an empty buffer has its one
+    ``connection_lost`` queued or done already and is left alone. This relies on
+    CPython queuing ``connection_lost`` only once the buffer is empty. On a closed
+    loop transports cannot be closed, so only the file objects are closed, buffered
+    output is lost with the loop and asyncio's transport destructor warns with its
+    own ``ResourceWarning``. A second ``release()`` does nothing.
+
+    The start runs on the event-loop thread, as asyncio's own door runs ``Popen``.
+    ``Popen`` blocks that loop until the child has executed its binary or failed,
+    and the start's rollback after a watcher-launch error blocks it in ``waitpid``
+    until the killed child is gone. Neither wait has a guaranteed elapsed-time
+    bound, no other task of the loop runs meanwhile, and an ``asyncio.timeout``
+    cannot shorten either.
+
+    Host obligations, each answered by stopping the use of the library and ending
+    the process (README, Interruptions): an allocation failure in the leader's
+    construction after ``Popen`` leaves a child nobody signals; a resource failure
+    in the start's hand-over or rollback, or an asynchronous interruption during
+    the start, can leave a parked watcher holding the leader and the child; a
+    resource failure or interruption inside the door's own cleanup can leave a
+    descriptor or transport of the door open; a resource failure or interruption
+    after the start returned and before the handle was returned leaves a running
+    leader that no caller holds.
+    """
+
+    def __init__(
+        self,
+        leader: AnchoredLeader,
+        exit_published: asyncio.Event,
+        pipes: _DoorPipes,
+        loop: asyncio.AbstractEventLoop,
+        *,
+        stdin: asyncio.StreamWriter,
+        stdout: asyncio.StreamReader,
+        stderr: asyncio.StreamReader,
+    ) -> None:
+        self.stdin = stdin
+        self.stdout = stdout
+        self.stderr = stderr
+        self._leader = leader
+        self._exit_published = exit_published
+        self._pipes = pipes
+        self._loop = loop
+
+    @property
+    def pid(self) -> int:
+        return self._leader.pid
+
+    @property
+    def returncode(self) -> int | None:
+        return self._leader.returncode
+
+    @property
+    def done_with_pid(self) -> bool:
+        return self._leader.done_with_pid
+
+    def signal_group(self, sig: signal.Signals) -> None:
+        self._leader.signal_group(sig)
+
+    async def exited(self) -> int:
+        await self._exit_published.wait()
+        returncode = self._leader.returncode
+        if returncode is None:
+            raise ChildIdentityLost("the leader was lost before its exit was published")
+        return returncode
+
+    async def communicate(self, input: bytes | None = None) -> tuple[bytes, bytes]:
+        _, stdout, stderr = await asyncio.gather(
+            self._feed_stdin(input), self.stdout.read(), self.stderr.read()
+        )
+        await self.exited()
+        return stdout, stderr
+
+    async def _feed_stdin(self, input: bytes | None) -> None:
+        try:
+            if input is not None:
+                self.stdin.write(input)
+            await self.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            self.stdin.close()
+
+    def release(self) -> None:
+        try:
+            self._leader.release()
+        finally:
+            if self._leader.state not in _ANCHORED_STATES:
+                self._pipes.close_parent_side(self._loop)
+
+
+async def open_anchored_pipes(
+    child: ChildProcess,
+    *,
+    stream_buffer_limit: int | None = None,
+) -> AnchoredChild:
+    """Start one child on the event loop with pipes on every stream, anchored.
+
+    All three pipes are attached before the child exists. Those attachments are the
+    door's only ``await``; the start then runs synchronously on the loop thread
+    and the handle is returned with no ``await`` after it.
+
+    Any ``BaseException`` before the return, cancellation included, is answered
+    synchronously and re-raised unchanged: every transport that is not closing is
+    closed, every parent file object and every child end is closed, so the door's
+    descriptors are closed when the caller's handler runs. That holds when the
+    cleanup itself completed and, for a raise from the watcher launch, when the
+    start's rollback completed; the residuals outside it are the host obligations
+    on :class:`AnchoredChild`, as is the loop-thread wait of the start.
+    """
+    loop = asyncio.get_running_loop()
+    exit_published = asyncio.Event()
+    pipes = _DoorPipes()
+    try:
+        stdout_file, stdout_child_end = pipes.open_pipe(parent_reads=True)
+        stderr_file, stderr_child_end = pipes.open_pipe(parent_reads=True)
+        stdin_file, stdin_child_end = pipes.open_pipe(parent_reads=False)
+        stdout = await pipes.attach_reader(loop, stdout_file, stream_buffer_limit)
+        stderr = await pipes.attach_reader(loop, stderr_file, stream_buffer_limit)
+        stdin = await pipes.attach_writer(loop, stdin_file)
+        leader = start_anchored_leader(
+            child,
+            stdin=stdin_child_end,
+            stdout=stdout_child_end,
+            stderr=stderr_child_end,
+            on_exit=lambda: loop.call_soon_threadsafe(exit_published.set),
+        )
+        pipes.close_child_ends()
+        return AnchoredChild(
+            leader, exit_published, pipes, loop, stdin=stdin, stdout=stdout, stderr=stderr
+        )
+    except BaseException:
+        pipes.close_child_ends()
+        pipes.close_parent_side(loop)
+        raise

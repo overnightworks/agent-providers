@@ -10,6 +10,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import pytest
 from anchored_kernel import RecordingKernel, join_watcher, watcher_thread
@@ -138,10 +139,15 @@ class Leaders:
         join_watcher(started.watcher)
 
 
-def spawn_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+Phases = tuple[Literal["setup", "call", "teardown"], ...]
+ALL_PHASES: Phases = ("call", "teardown")
+
+
+def spawn_warnings(caplog: pytest.LogCaptureFixture, phases: Phases = ("call",)) -> list[str]:
     return [
         record.getMessage()
-        for record in caplog.get_records("call")
+        for phase in phases
+        for record in caplog.get_records(phase)
         if record.name == SPAWN_LOGGER and record.levelno == logging.WARNING
     ]
 

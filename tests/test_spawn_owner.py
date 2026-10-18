@@ -13,9 +13,9 @@ imports a spawn name from ``os``, ``asyncio`` or AnyIO, and nothing reads a spaw
 name as an attribute: not a spawning module under any spelling of its owner
 (``spawn.subprocess``, ``asyncio.subprocess``), not a spawning ``os`` name read
 from ``os``, from an alias of it or from any ``<x>.os``, not an AnyIO
-``run_process`` or ``open_process``. The one name outside :mod:`agent_providers.spawn`
-that types a child is ``spawn.AsyncPipedProcess``. So every child is described
-by a :class:`ChildProcess` first, and that value refuses a relative binary, a
+``run_process`` or ``open_process``. The names outside :mod:`agent_providers.spawn`
+that type a child are ``spawn.AsyncPipedProcess`` and ``spawn.AnchoredChild``. So every
+child is described by a :class:`ChildProcess` first, and that value refuses a relative binary, a
 missing working directory and an unset ``HOME``.
 
 Accepted limit (head ruling 16.10.2026; owner: review): dynamic indirection
@@ -50,6 +50,7 @@ from agent_providers.spawn import (
     ChildProcess,
     ChildProcessSpecificationError,
     closed_environment,
+    open_anchored_pipes,
     open_async_pipes,
     open_pipes,
     run_capturing,
@@ -324,6 +325,8 @@ def test_the_spawn_policy_flags_every_way_to_reach_a_process_primitive(source: s
         "from agent_providers.spawn import PipedProcess",
         "from agent_providers.spawn import AsyncPipedProcess",
         "from agent_providers import spawn\ndef f(p: spawn.AsyncPipedProcess) -> None: ...",
+        "from agent_providers.spawn import AnchoredChild",
+        "from agent_providers import spawn\ndef f(p: spawn.AnchoredChild) -> None: ...",
         "import os\noperating = os\noperating.getpid()",
         "from concurrent.futures import ThreadPoolExecutor",
         "import concurrent.futures\nconcurrent.futures.Future()",
@@ -507,6 +510,16 @@ def _run_descriptor_probe(tmp_path: Path, stdout_of: Callable[[ChildProcess], st
     assert output.strip() == "False"
 
 
+def _stdout_of_open_anchored_pipes(child: ChildProcess) -> str:
+    async def run() -> str:
+        process = await open_anchored_pipes(child)
+        stdout, _ = await process.communicate(b"")
+        process.release()
+        return stdout.decode()
+
+    return asyncio.run(run())
+
+
 needs_proc_fd = pytest.mark.skipif(
     not Path("/proc/self/fd").is_dir(), reason="needs /proc/self/fd"
 )
@@ -515,8 +528,13 @@ needs_proc_fd = pytest.mark.skipif(
 @needs_proc_fd
 @pytest.mark.parametrize(
     "stdout_of",
-    [_stdout_of_run_capturing, _stdout_of_open_pipes, _stdout_of_open_async_pipes],
-    ids=["run_capturing", "open_pipes", "open_async_pipes"],
+    [
+        _stdout_of_run_capturing,
+        _stdout_of_open_pipes,
+        _stdout_of_open_async_pipes,
+        _stdout_of_open_anchored_pipes,
+    ],
+    ids=["run_capturing", "open_pipes", "open_async_pipes", "open_anchored_pipes"],
 )
 def test_a_child_inherits_no_descriptor_the_parent_holds_open(
     tmp_path: Path, stdout_of: Callable[[ChildProcess], str],

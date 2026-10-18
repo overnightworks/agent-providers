@@ -8,11 +8,13 @@ import asyncio
 import gc
 import json
 import logging
+import re
 import uuid
 from collections import Counter
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import Enum
 from functools import partial
 from http import HTTPStatus
 from typing import Any
@@ -29,12 +31,19 @@ from mcp_app_fake import (
 from relay_support import (
     RUN_ID,
     Delivery,
+    HoldingSteppedLoop,
     RawClient,
+    RelayReads,
+    RelayWrites,
     close_bounded,
     count_retrievals,
+    holding_loop,
     json_rpc,
     port_of,
     post_message,
+    relay_tasks,
+    release_held_wakeups,
+    task_named,
     yield_until,
 )
 from service_support import (
@@ -184,10 +193,16 @@ class BarrierRunner:
 
 @dataclass(frozen=True)
 class Rig:
+    """The relay, barrier and app of one scenario, keeping every connection it opened.
+
+    A collected client closes its socket, and the relay ends a call whose connection closed.
+    """
+
     relay: Relay
     barrier: ToolCallBarrier
     entries: EnteringCalls
     app: AppTools
+    connected: list[RawClient] = field(default_factory=list)
 
     async def request(
         self,
@@ -196,12 +211,14 @@ class Rig:
         arguments: Mapping[str, Any] | None = None,
         client: RawClient | None = None,
     ) -> RawClient:
-        connected = client or await RawClient.connect(port_of(self.relay))
+        if client is None:
+            client = await RawClient.connect(port_of(self.relay))
+            self.connected.append(client)
         params = {"name": name, "arguments": dict(arguments or {})}
-        await connected.send(
+        await client.send(
             post_message(self.relay, json_rpc("tools/call", request_id, params), SUPPORTED)
         )
-        return connected
+        return client
 
     async def pending(
         self,
@@ -251,6 +268,7 @@ async def gated_app(
 def drive_barrier(
     scenario: Callable[[Rig], Awaitable[None]],
     app_scope: AbstractAsyncContextManager[AppTools] | None = None,
+    loop_factory: Callable[[], asyncio.AbstractEventLoop] | None = None,
 ) -> None:
     async def main() -> None:
         async with app_scope or gated_app() as app:
@@ -268,12 +286,14 @@ def drive_barrier(
                     barrier.stop()
                     if isinstance(app, GatedApp):
                         app.release()
+                    release_held_wakeups()
                     async with asyncio.timeout(WAIT_SECONDS):
                         await barrier.settle()
                 finally:
                     await close_bounded(relay)
 
-    asyncio.run(main())
+    with asyncio.Runner(loop_factory=loop_factory) as runner:
+        runner.run(main())
 
 
 async def reply_of(client: RawClient) -> dict[str, Any]:
@@ -323,6 +343,12 @@ def upstream_task(number: int) -> asyncio.Task[ToolOutcome]:
     return next(task for task in asyncio.all_tasks() if task.get_name() == name)
 
 
+def upstream_task_names() -> list[str]:
+    return sorted(
+        name for task in asyncio.all_tasks() if (name := task.get_name()).startswith("upstream:")
+    )
+
+
 async def ending_of(call: asyncio.Task[Reply | Unanswered]) -> object:
     (ending,) = await asyncio.gather(call, return_exceptions=True)
     return ending
@@ -365,10 +391,18 @@ async def closed_without_unretrieved_reports(rig: Rig, reports: list[dict[str, A
     assert reports == []
 
 
-def cancel_relay_connections() -> None:
+def cancel_relay_tasks(suffix: str) -> None:
     for task in asyncio.all_tasks():
-        if task.get_name().startswith(f"relay:{RUN_ID}:conn-"):
+        if re.fullmatch(rf"relay:{RUN_ID}:conn-\d+{suffix}", task.get_name()):
             task.cancel()
+
+
+def cancel_relay_connections() -> None:
+    cancel_relay_tasks("")
+
+
+def cancel_owner_answers() -> None:
+    cancel_relay_tasks(":answer")
 
 
 def streamed(runner: BarrierRunner, runs: RunConfig | None = None) -> asyncio.Task[bytes]:
@@ -1116,7 +1150,7 @@ def test_a_forwards_outcome_is_retrieved_exactly_once_and_settle_waits_for_it(
         assert not settling.done()
 
         if ending.cancelled_on_completion:
-            upstream_task(1).add_done_callback(lambda _: cancel_relay_connections())
+            upstream_task(1).add_done_callback(lambda _: cancel_owner_answers())
         app.release()
         async with asyncio.timeout(WAIT_SECONDS):
             settled = await settling
@@ -1126,6 +1160,8 @@ def test_a_forwards_outcome_is_retrieved_exactly_once_and_settle_waits_for_it(
         if ending.status is not None:
             answer = await client.answer()
             assert (answer.status, answer.body) == (ending.status, b"")
+        if ending.cancelled_on_completion:
+            assert await client.delivery() is Delivery.ABSENT
         assert app.calls == [("edit_song", {"text": "a"})]
         await closed_without_unretrieved_reports(rig, reports)
 
@@ -1164,3 +1200,156 @@ def test_a_cancelled_wait_for_the_next_event_loses_and_doubles_no_call(
         assert rig.app.calls == [("edit_song", {"text": "a"})]
 
     drive_barrier(scenario)
+
+
+CONNECTION_OF_CALL_1 = f"relay:{RUN_ID}:conn-1"
+WATCH_OF_CALL_1 = f"{CONNECTION_OF_CALL_1}:watch"
+GIVEN_UP_RESULT = ToolResultEvent(tool_use_id="call-1", content=CALL_GIVEN_UP_TEXT, is_error=True)
+PARTIAL_NEXT_HEAD = b"POST /mcp HTTP/1.1\r\nHost: x\r\n"
+FORWARDED_CALL_1 = ("edit_song", {"n": 1})
+
+
+class Call1(Enum):
+    WAITING = "waiting"
+    HANDED_OUT = "handed out"
+    FORWARDED = "forwarded"
+
+
+async def bring_call_1_to(rig: Rig, state: Call1) -> ToolCallEvent | None:
+    if state is Call1.HANDED_OUT:
+        event = await rig.barrier.next_event()
+        assert isinstance(event, ToolCallEvent)
+        return event
+    if state is Call1.FORWARDED:
+        await rig.hand_out_and_accept()
+    return None
+
+
+async def accept_calls_up_to_call_4(rig: Rig) -> list[str | ToolResultEvent]:
+    """The events in the order they came: an accepted call by its id, a result as itself."""
+    events: list[str | ToolResultEvent] = []
+    while sum(isinstance(event, str) for event in events) < 3:
+        event = await rig.barrier.next_event()
+        if isinstance(event, ToolCallEvent):
+            rig.barrier.accept(event)
+            events.append(event.tool_use_id)
+        else:
+            events.append(event)
+    return events
+
+
+CLI_CLOSES = [
+    pytest.param(Call1.HANDED_OUT, RawClient.disconnect, b"", id="handed-out-fin"),
+    pytest.param(
+        Call1.HANDED_OUT, RawClient.disconnect, PARTIAL_NEXT_HEAD, id="handed-out-bytes-then-fin"
+    ),
+    pytest.param(Call1.WAITING, RawClient.finish_sending, b"", id="waiting-half-close"),
+    pytest.param(Call1.FORWARDED, RawClient.reset, b"", id="forwarded-reset"),
+]
+
+
+@pytest.mark.parametrize(("state", "end", "pipelined"), CLI_CLOSES)
+def test_a_call_the_cli_closed_is_never_forwarded_and_frees_its_slot_while_saturated(
+    state: Call1,
+    end: Callable[[RawClient], None],
+    pipelined: bytes,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """W7."""
+    reads = RelayReads(monkeypatch)
+
+    async def scenario(rig: Rig) -> None:
+        clients = [await rig.pending(number, "edit_song", {"n": number}) for number in (1, 2, 3)]
+        handed_out = await bring_call_1_to(rig, state)
+        connection_task = task_named(CONNECTION_OF_CALL_1)
+        await clients[0].send(pipelined)
+        await reads.until_read(WATCH_OF_CALL_1, len(pipelined))
+        end(clients[0])
+        await yield_until(lambda: CONNECTION_OF_CALL_1 not in relay_tasks())
+        assert not connection_task.cancelled()
+        if handed_out is not None:
+            rig.barrier.accept(handed_out)
+        await rig.pending(4, "edit_song", {"n": 4})
+
+        forwarded = [FORWARDED_CALL_1] if state is Call1.FORWARDED else []
+        assert rig.fake.calls == forwarded
+        assert upstream_task_names() == ([f"upstream:{RUN_ID}:call-1"] if forwarded else [])
+        given_up = [GIVEN_UP_RESULT] if state is Call1.HANDED_OUT else []
+        assert await accept_calls_up_to_call_4(rig) == [*given_up, "call-2", "call-3", "call-4"]
+        rig.fake.release()
+        await rig.barrier.settle()
+        assert [call for call in rig.fake.calls if call[1] == {"n": 1}] == forwarded
+
+    drive_barrier(scenario)
+
+
+def test_a_cancelled_connection_task_ends_cancelled() -> None:
+    async def scenario(rig: Rig) -> None:
+        await rig.pending(1, "edit_song", {"n": 1})
+        connection_task = task_named(CONNECTION_OF_CALL_1)
+        connection_task.cancel()
+        await yield_until(connection_task.done)
+        assert connection_task.cancelled()
+
+    drive_barrier(scenario)
+
+
+async def hand_out_call_1_with_the_connection_task_held(
+    rig: Rig, held: tuple[str, ...]
+) -> tuple[RawClient, ToolCallEvent]:
+    client = await rig.pending(1, "edit_song", {"n": 1})
+    event = await rig.barrier.next_event()
+    assert isinstance(event, ToolCallEvent)
+    holding_loop().hold_wakeups(*held)
+    return client, event
+
+
+async def assert_given_up_before_the_connection_task_resumed(
+    rig: Rig, event: ToolCallEvent
+) -> None:
+    rig.barrier.accept(event)
+    assert upstream_task_names() == []
+    assert rig.fake.calls == []
+    assert await rig.barrier.next_event() == GIVEN_UP_RESULT
+
+
+def test_a_call_accepted_after_the_watch_saw_the_close_is_not_forwarded_before_the_listener_resumes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """W8 a."""
+    writes = RelayWrites(monkeypatch)
+
+    async def scenario(rig: Rig) -> None:
+        client, event = await hand_out_call_1_with_the_connection_task_held(
+            rig, (CONNECTION_OF_CALL_1,)
+        )
+        client.disconnect()
+        await yield_until(lambda: WATCH_OF_CALL_1 not in relay_tasks())
+        assert CONNECTION_OF_CALL_1 in relay_tasks()
+        await assert_given_up_before_the_connection_task_resumed(rig, event)
+        holding_loop().release_wakeups()
+        await yield_until(lambda: relay_tasks() == [])
+        assert writes.to(client) == b""
+
+    drive_barrier(scenario, loop_factory=HoldingSteppedLoop)
+
+
+def test_a_call_accepted_after_the_relays_close_cancelled_its_connection_task_is_not_forwarded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """W8 b."""
+    writes = RelayWrites(monkeypatch)
+
+    async def scenario(rig: Rig) -> None:
+        client, event = await hand_out_call_1_with_the_connection_task_held(
+            rig, (CONNECTION_OF_CALL_1, WATCH_OF_CALL_1)
+        )
+        closing = asyncio.create_task(rig.relay.close())
+        await yield_until(lambda: task_named(CONNECTION_OF_CALL_1).cancelling() > 0)
+        await assert_given_up_before_the_connection_task_resumed(rig, event)
+        holding_loop().release_wakeups()
+        async with asyncio.timeout(WAIT_SECONDS):
+            await closing
+        assert writes.to(client) == b""
+
+    drive_barrier(scenario, loop_factory=HoldingSteppedLoop)

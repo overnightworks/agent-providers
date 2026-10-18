@@ -92,7 +92,6 @@ INHERITED_MACHINE_VARIABLES: Final[tuple[str, ...]] = (
 StderrPolicy = Literal["capture", "devnull"]
 
 type PipedProcess = subprocess.Popen[bytes]
-type AsyncPipedProcess = asyncio.subprocess.Process
 PipedProcessTimeout = subprocess.TimeoutExpired
 
 
@@ -198,29 +197,6 @@ def run_capturing(
         env=dict(child.environment),
         cwd=str(child.working_directory),
         check=False,
-    )
-
-
-async def open_async_pipes(
-    child: ChildProcess,
-    *,
-    stream_buffer_limit: int | None = None,
-) -> AsyncPipedProcess:
-    """Start one child on the event loop with pipes on every stream.
-
-    Its own session, because every failure path in the calling turn reaps
-    that group before it returns.
-    """
-    buffer_limit = {} if stream_buffer_limit is None else {"limit": stream_buffer_limit}
-    return await asyncio.create_subprocess_exec(
-        *child.command,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=dict(child.environment),
-        cwd=str(child.working_directory),
-        start_new_session=True,
-        **buffer_limit,
     )
 
 

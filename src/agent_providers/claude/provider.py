@@ -17,8 +17,9 @@ import tempfile
 import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
-from contextlib import contextmanager, suppress
+from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Final, Literal
 
@@ -27,6 +28,7 @@ from pydantic import SecretStr
 
 from agent_client.wire import TurnMessage
 from agent_providers import process
+from agent_providers.claude.lost_groups import retain_lost_group
 from agent_providers.config import McpServerSpec, current_config, current_turn_config
 from agent_providers.constants import (
     CLAUDE_CLI_COMPLETION_TIMEOUT_SECONDS,
@@ -44,6 +46,7 @@ from agent_providers.constants import (
     PROBE_TIMEOUT_SECONDS,
 )
 from agent_providers.errors import (
+    ContainmentLost,
     ProviderUnavailableError,
     SafeRouteReasonCode,
     normalize_route_failure,
@@ -64,12 +67,14 @@ from agent_providers.process import (
     run_claude_catalog_cli,
 )
 from agent_providers.spawn import (
-    AsyncPipedProcess,
+    AnchoredChild,
+    AnchorStateError,
+    ChildIdentityLost,
     ChildProcess,
     ChildProcessSpecificationError,
     PipedProcessTimeout,
     closed_environment,
-    open_async_pipes,
+    open_anchored_pipes,
     run_capturing,
 )
 
@@ -277,21 +282,16 @@ async def acall_claude_with_mcp(
     try:
         with _mcp_turn_cli_arguments(model, user_id, stream=False) as arguments:
             child = _claude_child_process(binary, arguments, home.path)
-            proc = await _spawn_reserved_async_cli_process(
-                child,
-                home_reservation=home.reserve(),
-            )
-            try:
-                stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                    proc.communicate(stdin_body.encode()),
-                    timeout=timeout_seconds,
-                )
-            except asyncio.TimeoutError:
-                raise UnavailableError(
-                    f"Claude CLI timed out after {timeout_seconds}s",
-                )
-            finally:
-                await _reap_behind_shield(proc)
+            async with _anchored_turn_child(child, home_reservation=home.reserve()) as proc:
+                try:
+                    stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                        proc.communicate(stdin_body.encode()),
+                        timeout=timeout_seconds,
+                    )
+                except asyncio.TimeoutError:
+                    raise UnavailableError(
+                        f"Claude CLI timed out after {timeout_seconds}s",
+                    )
     finally:
         home.close()
 
@@ -343,26 +343,22 @@ async def acall_claude_with_mcp_stream(
     try:
         with _mcp_turn_cli_arguments(model, user_id, stream=True) as arguments:
             child = _claude_child_process(binary, arguments, home.path)
-            proc = await _spawn_reserved_async_cli_process(
+            async with _anchored_turn_child(
                 child,
                 home_reservation=home.reserve(),
                 stream_buffer_limit=_STREAM_BUFFER_LIMIT,
-            )
-            try:
-                if proc.stdin is not None:
-                    proc.stdin.write(stdin_body.encode())
-                    await proc.stdin.drain()
-                    proc.stdin.close()
+            ) as proc:
+                proc.stdin.write(stdin_body.encode())
+                await proc.stdin.drain()
+                proc.stdin.close()
                 async for event in _consume_stream(proc, timeout_seconds, correlation_id):
                     yield event
-            finally:
-                await _reap_behind_shield(proc)
     finally:
         home.close()
 
 
 async def _consume_stream(
-    proc: AsyncPipedProcess,
+    proc: AnchoredChild,
     timeout_seconds: int,
     correlation_id: str | None = None,
 ) -> AsyncIterator[StreamEvent]:
@@ -384,7 +380,7 @@ async def _consume_stream(
             raise UnavailableError(
                 f"Claude CLI timed out after {timeout_seconds}s",
             )
-        await proc.wait()
+        await proc.exited()
         stderr_size = await stderr_task
         if proc.returncode != 0:
             log.warning(
@@ -1079,9 +1075,8 @@ _tool_surface_inflight_sync: dict[
 
 @dataclass(eq=False)
 class _ZombieReservation:
-    """A pool slot before it is bound to the spawned process's PID."""
+    """One pool slot, and the home reservation that is released with it."""
 
-    pid: int | None = None
     home_reservation: process.PrivateCredentialHomeReservation | None = None
 
 
@@ -1091,7 +1086,6 @@ class _ZombieReservation:
 # lock.
 _zombie_registry_lock = threading.Lock()
 _zombie_reap_reservations: set[_ZombieReservation] = set()
-_zombie_reap_tasks: set[asyncio.Task] = set()
 # The independent async tasks that actually run a probe — tracked the same
 # way, for the same two reasons: keep a reference so they cannot be
 # garbage-collected while still running, and give shutdown something to
@@ -1140,17 +1134,17 @@ def _discard_tool_surface_probe_task(task: asyncio.Task) -> None:
 
 
 async def shutdown_tool_surface_background_tasks() -> None:
-    """Cancel every outstanding background zombie reaper and probe-runner
-    task — call from the app's own shutdown (``server.py``'s lifespan),
-    the same way it already cancels its other background loops. Does not
-    touch any process a zombie reaper was tracking (it is already past
-    SIGKILL); it only stops this process from continuing to wait on
-    background work once it is shutting down anyway.
+    """Cancel every outstanding probe-runner task — call from the app's own
+    shutdown (``server.py``'s lifespan), the same way it already cancels its
+    other background loops.
+
+    A retained group stays as it is: it receives no signal and keeps its pool
+    slot and home until ``confirm_group_gone`` frees them. A leader still
+    unreaped when the process exits is reaped by the process's parent (under
+    a container, its init), while the exit sweep removes the home.
     """
-    with _zombie_registry_lock:
-        tasks = list(_zombie_reap_tasks)
     with _tool_surface_lock:
-        tasks.extend(_tool_surface_probe_tasks)
+        tasks = list(_tool_surface_probe_tasks)
         _tool_surface_probe_tasks.clear()
     for task in tasks:
         task.cancel()
@@ -1687,9 +1681,6 @@ def _probe_cli_surface_sync(
 
     released = False
 
-    def on_spawned(process_id: int) -> None:
-        _bind_zombie_reservation(reservation, process_id)
-
     def on_reaped(_process_id: int, _became_zombie: bool) -> None:
         nonlocal released
         _release_zombie_reservation(reservation)
@@ -1707,7 +1698,6 @@ def _probe_cli_surface_sync(
             deadline=deadline,
             stderr="devnull",
             output_read_limit_bytes=CLI_OUTPUT_READ_LIMIT_BYTES,
-            on_spawned=on_spawned,
             on_spawn_failed=on_spawn_failed,
             on_reaped=on_reaped,
         )
@@ -1746,8 +1736,8 @@ def _probe_cli_surface_sync(
 # ── reap: async ──────────────────────────────────────────────────────
 
 
-async def _reap_behind_shield(proc: AsyncPipedProcess) -> None:
-    """Run the one bounded reap of ``proc`` to completion, whatever cancels the caller.
+async def _reap_behind_shield(child: AnchoredChild, reservation: _ZombieReservation) -> None:
+    """Run the one bounded reap of ``child`` to completion, whatever cancels the caller.
 
     The reap runs in its own task, started once, and is awaited behind an
     AnyIO shield (ASGI cancel scopes) and ``asyncio.shield`` (direct
@@ -1755,7 +1745,7 @@ async def _reap_behind_shield(proc: AsyncPipedProcess) -> None:
     absorbed until the task is done.  The reap's own exception then wins over
     any cancellation; otherwise the cancellation is delivered afterwards.
     """
-    reap_task = asyncio.create_task(_reap_process_group(proc))
+    reap_task = asyncio.create_task(_reap_process_group(child, reservation))
     try:
         with anyio.CancelScope(shield=True):
             await asyncio.shield(reap_task)
@@ -1766,96 +1756,55 @@ async def _reap_behind_shield(proc: AsyncPipedProcess) -> None:
     await anyio.lowlevel.checkpoint_if_cancelled()
 
 
-async def _outlast_direct_cancellations(reap_task: asyncio.Task[bool]) -> None:
+async def _outlast_direct_cancellations(reap_task: asyncio.Task[None]) -> None:
     while not reap_task.done():
         with suppress(asyncio.CancelledError):
             await asyncio.shield(reap_task)
     reap_task.result()
 
 
-async def _reap_process_group(proc: AsyncPipedProcess) -> bool:
-    """Terminate ``proc``'s whole process group and confirm it exited.
+async def _reap_process_group(child: AnchoredChild, reservation: _ZombieReservation) -> None:
+    """End the turn's leader through its anchor and free its pool slot, or retain it.
 
-    Every wait below is bounded — a process the OS has already confirmed
-    dead (``proc.returncode`` set, or SIGTERM raising ``ProcessLookupError``)
-    is expected to report its exit almost instantly, but "expected" is not
-    "guaranteed", and an unbounded wait anywhere in this function used to
-    be able to block whoever was waiting on it forever.
-
-    Returns ``True`` when the process outlived SIGKILL and was handed to
-    a background reaper instead of being confirmed dead here — a zombie,
-    not a normal exit.
+    A leader whose exit is published is released without a signal. A running one
+    gets SIGTERM, then SIGKILL after the grace, and is released once its exit is
+    published. The slot and the home are freed only after ``release()``. A leader
+    that has not exited by the bound after SIGKILL, whose anchor was lost, or
+    that the kernel did not reap is retained instead, nothing is freed, and
+    ``ContainmentLost`` names the retention: a slot freed beside a group whose end
+    nobody knows would put a new run next to it.
     """
-    if proc.returncode is not None or proc.pid is None:
-        return await _confirm_exit_or_track_zombie(proc)
-
     try:
-        os.killpg(proc.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return await _confirm_exit_or_track_zombie(proc)
-
-    if await _wait_for_sigterm_exit(proc):
-        _release_zombie_reservation(proc.pid)
-        return False
-
-    try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        return await _confirm_exit_or_track_zombie(proc)
-
-    return await _confirm_exit_or_track_zombie(proc)
+        if child.returncode is None and not await _end_running_leader(child):
+            raise _retain_unreleased_leader(child, reservation)
+        child.release()
+    except (ChildIdentityLost, AnchorStateError) as failure:
+        raise _retain_unreleased_leader(child, reservation) from failure
+    _release_zombie_reservation(reservation)
 
 
-async def _wait_for_sigterm_exit(proc: AsyncPipedProcess) -> bool:
-    try:
-        async with asyncio.timeout(CLAUDE_CLI_SIGTERM_GRACE_SECONDS):
-            await proc.wait()
+async def _end_running_leader(child: AnchoredChild) -> bool:
+    child.signal_group(signal.SIGTERM)
+    if await _exit_published_within(child, CLAUDE_CLI_SIGTERM_GRACE_SECONDS):
         return True
+    child.signal_group(signal.SIGKILL)
+    return await _exit_published_within(child, CLAUDE_CLI_ZOMBIE_REAP_TIMEOUT_SECONDS)
+
+
+async def _exit_published_within(child: AnchoredChild, seconds: float) -> bool:
+    try:
+        async with asyncio.timeout(seconds):
+            await child.exited()
     except TimeoutError:
         return False
-
-
-async def _wait_for_zombie_reap(proc: AsyncPipedProcess) -> bool:
-    try:
-        async with asyncio.timeout(CLAUDE_CLI_ZOMBIE_REAP_TIMEOUT_SECONDS):
-            await proc.wait()
-        return True
-    except TimeoutError:
-        return False
-
-
-async def _confirm_exit_or_track_zombie(proc: AsyncPipedProcess) -> bool:
-    if await _wait_for_zombie_reap(proc):
-        _release_zombie_reservation(proc.pid)
-        return False
-    return _track_zombie_reap_async(proc)
-
-
-def _track_zombie_reap_async(proc: AsyncPipedProcess) -> bool:
-    log.error(
-        "Claude CLI process group %d did not exit within %ds of SIGKILL",
-        proc.pid,
-        CLAUDE_CLI_ZOMBIE_REAP_TIMEOUT_SECONDS,
-    )
-    task = asyncio.create_task(_reap_in_background(proc))
-    with _zombie_registry_lock:
-        _zombie_reap_tasks.add(task)
-    task.add_done_callback(_zombie_reap_tasks.discard)
     return True
 
 
-async def _reap_in_background(proc: AsyncPipedProcess) -> None:
-    """Finish waiting for a process ``_reap_process_group`` gave up waiting
-    on, off any caller's critical path, so it is reaped once it does exit
-    rather than left a zombie for the rest of the container's life."""
-    try:
-        await proc.wait()
-    except Exception:
-        log.exception("Background reap of Claude CLI process group %s failed", proc.pid)
-    else:
-        log.info("Claude CLI process group %s reaped in the background", proc.pid)
-    finally:
-        _release_zombie_reservation(proc.pid)
+def _retain_unreleased_leader(
+    child: AnchoredChild, reservation: _ZombieReservation
+) -> ContainmentLost:
+    group = retain_lost_group(child, partial(_release_zombie_reservation, reservation))
+    return ContainmentLost(group)
 
 
 # ── zombie-reaper reservations, shared by both domains ───────────────
@@ -1883,56 +1832,43 @@ def _reserve_zombie_admission(
     return reservation
 
 
-def _bind_zombie_reservation(reservation: _ZombieReservation, pid: int | None) -> None:
-    if pid is None:
-        raise ValueError("Cannot bind a Claude CLI process reservation without a PID")
+def _release_zombie_reservation(reservation: _ZombieReservation) -> None:
     with _zombie_registry_lock:
-        reservation.pid = pid
-        _zombie_reap_reservations.add(reservation)
+        _zombie_reap_reservations.discard(reservation)
+    if reservation.home_reservation is not None:
+        reservation.home_reservation.release()
 
 
-def _release_zombie_reservation(reservation: _ZombieReservation | int | None) -> None:
-    if reservation is None:
-        raise ValueError("Cannot release a Claude CLI process reservation without a PID")
-    with _zombie_registry_lock:
-        if isinstance(reservation, _ZombieReservation):
-            released = reservation
-        else:
-            released = next(
-                (
-                    candidate
-                    for candidate in _zombie_reap_reservations
-                    if candidate.pid == reservation
-                ),
-                None,
-            )
-        if released is not None:
-            _zombie_reap_reservations.discard(released)
-    if released is not None and released.home_reservation is not None:
-        released.home_reservation.release()
-
-
-async def _spawn_reserved_async_cli_process(
+@asynccontextmanager
+async def _anchored_turn_child(
     child: ChildProcess,
     *,
-    home_reservation: process.PrivateCredentialHomeReservation | None = None,
+    home_reservation: process.PrivateCredentialHomeReservation,
     stream_buffer_limit: int | None = None,
-) -> AsyncPipedProcess:
+) -> AsyncIterator[AnchoredChild]:
+    """Run one async turn's child on an anchor that holds a core pool slot.
+
+    The reservation never leaves this frame and nothing lies between the start
+    and the ``yield``. Whatever ends the body, the reap runs behind its shield,
+    so its own exception wins over the body's and a cancellation is delivered
+    after it.
+    """
     reservation = _reserve_zombie_admission(home_reservation)
     if reservation is None:
-        if home_reservation is not None:
-            home_reservation.release()
+        home_reservation.release()
         raise _ClaudeCliProcessPoolSaturated(_claude_cli_process_pool_limit_message())
     try:
-        proc = await open_async_pipes(child, stream_buffer_limit=stream_buffer_limit)
+        anchored = await open_anchored_pipes(child, stream_buffer_limit=stream_buffer_limit)
     except FileNotFoundError as missing_binary:
         _release_zombie_reservation(reservation)
         raise CliUnavailableError(CLAUDE_CLI_BINARY_NOT_FOUND_DETAIL) from missing_binary
     except BaseException:
         _release_zombie_reservation(reservation)
         raise
-    _bind_zombie_reservation(reservation, proc.pid)
-    return proc
+    try:
+        yield anchored
+    finally:
+        await _reap_behind_shield(anchored, reservation)
 
 
 def _parse_announced_surface(
@@ -2161,19 +2097,14 @@ async def _acall_cli(
     home = _claude_private_home()
     try:
         child = _claude_child_process(binary, _cli_arguments(model), home.path)
-        proc = await _spawn_reserved_async_cli_process(
-            child,
-            home_reservation=home.reserve(),
-        )
-        try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(stdin_body.encode()),
-                timeout=120,
-            )
-        except asyncio.TimeoutError:
-            raise UnavailableError("Claude CLI timed out after 120s")
-        finally:
-            await _reap_behind_shield(proc)
+        async with _anchored_turn_child(child, home_reservation=home.reserve()) as proc:
+            try:
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                    proc.communicate(stdin_body.encode()),
+                    timeout=120,
+                )
+            except asyncio.TimeoutError:
+                raise UnavailableError("Claude CLI timed out after 120s")
     finally:
         home.close()
 

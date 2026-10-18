@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import shlex
+import signal
 import stat
 import tempfile
 import threading
@@ -34,6 +35,7 @@ from collections.abc import (
     Awaitable,
     Callable,
     Collection,
+    Coroutine,
     Iterator,
     Mapping,
     Sequence,
@@ -50,6 +52,7 @@ from anchored_support import TEST_WAIT_SECONDS
 from agent_client.tools import ToolDeclaration
 from agent_providers import process
 from agent_providers.catalog import ProviderRoute
+from agent_providers.claude import lost_groups
 from agent_providers.claude import provider as claude_provider
 from agent_providers.config import (
     ProviderRuntimeConfig,
@@ -60,6 +63,7 @@ from agent_providers.config import (
 from agent_providers.dispatch import stream_turn
 from agent_providers.errors import (
     ProviderUnavailableError,
+    RetainedGroup,
     SafeRouteReasonCode,
     TextToolCallRejectedError,
     ToolProtocolRejectionCode,
@@ -68,7 +72,12 @@ from agent_providers.errors import (
 from agent_providers.events import AssistantTextEvent, FinalEvent, StreamEvent
 from agent_providers.process import CliRunOutcome, CliRunReason
 from agent_providers.procfs import GroupCensus
-from agent_providers.spawn import ChildIdentityLost, ChildProcess, closed_environment
+from agent_providers.spawn import (
+    AnchorStateError,
+    ChildIdentityLost,
+    ChildProcess,
+    closed_environment,
+)
 from agent_providers.text_tool_protocol import TextToolRejectionRule
 from agent_providers.tool_loop import (
     InitialTurn,
@@ -433,77 +442,6 @@ def _gated_answer(
         return answer
 
     return respond
-
-
-CLAUDE_CLI_CHILD_SURFACE: Final = (
-    "pid", "returncode", "communicate", "wait", "stdin", "stdout", "stderr",
-)
-CLAUDE_CLI_STDIN_SURFACE: Final = ("write", "drain", "close")
-
-
-def a_claude_cli_child(
-    *,
-    pid: int = 2468,
-    returncode: int | None = 0,
-    communicate: tuple[bytes, bytes] | BaseException = (b"", b""),
-    communicate_gate: EventGate | None = None,
-    stream_lines: Sequence[bytes] = (),
-    stderr: bytes = b"",
-    stdout_limit: int | None = None,
-    stdout_stalls: bool = False,
-    wait_outcome: int | BaseException = 0,
-    wait_gate: EventGate | None = None,
-    has_stdin: bool = True,
-) -> MagicMock:
-    """Build the async twin of ``fake_cli_process``: an ``asyncio.subprocess.Process`` stand-in."""
-    child = MagicMock(spec_set=CLAUDE_CLI_CHILD_SURFACE, pid=pid, returncode=returncode)
-    child.communicate = AsyncMock(side_effect=_gated_answer(communicate, communicate_gate))
-    child.wait = AsyncMock(side_effect=_gated_answer(wait_outcome, wait_gate))
-    child.stdout = ClaudeCliStreamReader(
-        stream_lines, limit=stdout_limit, stalls=stdout_stalls,
-    )
-    child.stderr = ClaudeCliStreamReader([stderr] if stderr else [])
-    if has_stdin:
-        child.stdin = MagicMock(spec_set=CLAUDE_CLI_STDIN_SURFACE)
-        child.stdin.drain = AsyncMock()
-    else:
-        child.stdin = None
-    return child
-
-
-@dataclass(frozen=True)
-class ClaudeCliSpawns:
-    """What the provider asked the async door to start, in order."""
-
-    children: list[ChildProcess] = field(default_factory=list)
-    stream_buffer_limits: list[int | None] = field(default_factory=list)
-
-
-def install_claude_cli_children(
-    monkeypatch: pytest.MonkeyPatch,
-    *queued_children: MagicMock,
-    factory: Callable[[ChildProcess, int | None], MagicMock] | None = None,
-) -> ClaudeCliSpawns:
-    """Answer every async Claude spawn with a queued child, then with ``factory``'s.
-
-    The one place that names the async door the provider spawns through.
-    """
-    spawns = ClaudeCliSpawns()
-    waiting = list(queued_children)
-
-    async def open_async_pipes(
-        child: ChildProcess, *, stream_buffer_limit: int | None = None,
-    ) -> MagicMock:
-        spawns.children.append(child)
-        spawns.stream_buffer_limits.append(stream_buffer_limit)
-        if waiting:
-            return waiting.pop(0)
-        if factory is None:
-            pytest.fail(f"a Claude child was spawned with none queued: {child.command}")
-        return factory(child, stream_buffer_limit)
-
-    monkeypatch.setattr(claude_provider, "open_async_pipes", open_async_pipes)
-    return spawns
 
 
 def override_provider_runtime(**deployment_facts: Any) -> None:
@@ -1310,3 +1248,205 @@ class ScriptedAnchoredChild:
     def _remember_loss(self, failure: BaseException) -> None:
         if isinstance(failure, ChildIdentityLost):
             self._lost = failure
+
+
+CLAUDE_CLI_STDIN_SURFACE: Final = ("write", "drain", "close")
+
+
+class ScriptedClaudeChild(ScriptedAnchoredChild):
+    """The Claude turns' ``AnchoredChild`` double: stream pipes, an exit model and a log.
+
+    ``returncode`` is the published exit (``None`` while the leader runs).
+    ``exited()`` passes ``exit_gate``, publishes ``natural_exit`` unless it is
+    ``None``, and then only waits for a published exit; ``signal_group(sig)``
+    publishes ``-sig`` unless the leader ``survives`` it. Like the real handle it
+    refuses ``release()`` while the leader runs. Every group call is recorded in
+    ``log``, and nothing here ever reaches a real process.
+    """
+
+    def __init__(
+        self,
+        pid: int,
+        *,
+        returncode: int | None = 0,
+        natural_exit: int | None = 0,
+        survives: Collection[signal.Signals] = (),
+        exit_gate: EventGate | None = None,
+        signal_loss: ChildIdentityLost | None = None,
+        exit_loss: ChildIdentityLost | None = None,
+        release_failures: Sequence[Exception] = (),
+        censuses: Sequence[GroupCensus | BaseException] = (GroupCensus.EMPTY,),
+        communicate: tuple[bytes, bytes] | BaseException = (b"", b""),
+        communicate_gate: EventGate | None = None,
+        stream_lines: Sequence[bytes] = (),
+        stderr: bytes = b"",
+        stdout_limit: int | None = None,
+        stdout_stalls: bool = False,
+    ) -> None:
+        self.log: list[Recorded] = []
+        super().__init__(
+            pid,
+            self.log,
+            censuses=censuses,
+            release_failures=release_failures,
+            returncode=returncode,
+        )
+        self._natural_exit = natural_exit
+        self._survives = frozenset(survives)
+        self._exit_gate = exit_gate
+        self._signal_loss = signal_loss
+        self._exit_loss = exit_loss
+        self._exit_published = asyncio.Event()
+        if returncode is not None:
+            self._exit_published.set()
+        self.communicate = AsyncMock(side_effect=_gated_answer(communicate, communicate_gate))
+        self.stdout = ClaudeCliStreamReader(
+            stream_lines, limit=stdout_limit, stalls=stdout_stalls,
+        )
+        self.stderr = ClaudeCliStreamReader([stderr] if stderr else [])
+        self.stdin = MagicMock(spec_set=CLAUDE_CLI_STDIN_SURFACE)
+        self.stdin.drain = AsyncMock()
+
+    def publish_exit(self, returncode: int) -> None:
+        self.returncode = returncode
+        self._exit_published.set()
+
+    def signal_group(self, sig: signal.Signals) -> None:
+        self._enter(sig.name)
+        if self._signal_loss is not None:
+            self._remember_loss(self._signal_loss)
+            raise self._signal_loss
+        if sig not in self._survives:
+            self.publish_exit(-sig)
+
+    async def exited(self) -> int:
+        if self._exit_loss is not None:
+            self._remember_loss(self._exit_loss)
+            raise self._exit_loss
+        if self._exit_gate is not None:
+            await self._exit_gate.pass_through()
+        if self._natural_exit is not None and not self._exit_published.is_set():
+            self.publish_exit(self._natural_exit)
+        await self._exit_published.wait()
+        assert self.returncode is not None
+        return self.returncode
+
+    def release(self) -> None:
+        if self.returncode is None:
+            self._enter("release")
+            raise AnchorStateError("the leader's exit is not published; it cannot be released")
+        super().release()
+
+
+def a_claude_cli_child(*, pid: int = 2468, **script: Any) -> ScriptedClaudeChild:
+    """Build the async twin of ``fake_cli_process``: an ``AnchoredChild`` for a Claude turn."""
+    return ScriptedClaudeChild(pid, **script)
+
+
+@dataclass(frozen=True)
+class ClaudeCliSpawns:
+    """What the provider asked the anchored door to start, in order."""
+
+    children: list[ChildProcess] = field(default_factory=list)
+    stream_buffer_limits: list[int | None] = field(default_factory=list)
+
+
+def install_claude_cli_children(
+    monkeypatch: pytest.MonkeyPatch,
+    *queued_children: ScriptedClaudeChild,
+    factory: Callable[[ChildProcess, int | None], ScriptedClaudeChild] | None = None,
+) -> ClaudeCliSpawns:
+    """Answer every async Claude spawn with a queued child, then with ``factory``'s.
+
+    The one place that names the anchored door the provider spawns through.
+    """
+    spawns = ClaudeCliSpawns()
+    waiting = list(queued_children)
+
+    async def open_anchored_pipes(
+        child: ChildProcess, *, stream_buffer_limit: int | None = None,
+    ) -> ScriptedClaudeChild:
+        spawns.children.append(child)
+        spawns.stream_buffer_limits.append(stream_buffer_limit)
+        if waiting:
+            return waiting.pop(0)
+        if factory is None:
+            pytest.fail(f"a Claude child was spawned with none queued: {child.command}")
+        return factory(child, stream_buffer_limit)
+
+    monkeypatch.setattr(claude_provider, "open_anchored_pipes", open_anchored_pipes)
+    return spawns
+
+
+def held_claude_slots() -> int:
+    with claude_provider._zombie_registry_lock:
+        return len(claude_provider._zombie_reap_reservations)
+
+
+def run_bounded[T](scenario: Coroutine[Any, Any, T]) -> T:
+    return asyncio.run(asyncio.wait_for(scenario, 2 * TEST_WAIT_SECONDS))
+
+
+@contextmanager
+def killpg_forbidden() -> Iterator[list[tuple[int, int]]]:
+    """Fail on any ``os.killpg`` the provider makes, and again at exit if a caller swallowed it."""
+    seen: list[tuple[int, int]] = []
+
+    def refuse(pid: int, signal_number: int) -> None:
+        seen.append((pid, signal_number))
+        raise AssertionError(f"os.killpg({pid}, {signal_number}) on a number")
+
+    with patch.object(claude_provider.os, "killpg", refuse):
+        yield seen
+    assert seen == [], "a group was signalled by number"
+
+
+@dataclass
+class CensusWorkers:
+    """The lost-group census threads started so far, kept whether or not they have ended."""
+
+    threads: list[threading.Thread] = field(default_factory=list)
+
+    def join_all(self) -> None:
+        for worker in self.threads:
+            worker.join(TEST_WAIT_SECONDS)
+            assert not worker.is_alive(), "a census worker did not end within the bound"
+
+
+@contextmanager
+def recorded_census_workers(monkeypatch: pytest.MonkeyPatch) -> Iterator[CensusWorkers]:
+    """Keep every census worker at its start, so one that fails before recording is joined."""
+    workers = CensusWorkers()
+    real_start = threading.Thread.start
+
+    def start(thread: threading.Thread) -> None:
+        if getattr(thread, "_target", None) is lost_groups._kill_and_count:
+            workers.threads.append(thread)
+        real_start(thread)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(threading.Thread, "start", start)
+        yield workers
+
+
+def a_child_that_outlives_sigkill(**script: Any) -> ScriptedClaudeChild:
+    """A running leader no signal ends, so its turn's reap retains it."""
+    return a_claude_cli_child(
+        returncode=None,
+        natural_exit=None,
+        survives={signal.SIGTERM, signal.SIGKILL},
+        **script,
+    )
+
+
+def reap_without_waiting(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give the reap's grace and bound no time, so an unpublished exit expires at once."""
+    monkeypatch.setattr(claude_provider, "CLAUDE_CLI_SIGTERM_GRACE_SECONDS", 0)
+    monkeypatch.setattr(claude_provider, "CLAUDE_CLI_ZOMBIE_REAP_TIMEOUT_SECONDS", 0)
+
+
+async def confirm_the_retained_group_gone(child: ScriptedClaudeChild, group: RetainedGroup) -> bool:
+    """End the retained leader and confirm its group, so its slot and home are freed."""
+    child.publish_exit(-signal.SIGKILL)
+    async with asyncio.timeout(TEST_WAIT_SECONDS):
+        return await lost_groups.confirm_group_gone(group)

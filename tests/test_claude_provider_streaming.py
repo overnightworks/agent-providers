@@ -8,7 +8,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-from provider_test_support import a_claude_cli_child, install_claude_cli_children
+from provider_test_support import a_claude_cli_child, install_claude_cli_children, operations
 
 from agent_providers.claude import provider
 from agent_providers.claude.provider import (
@@ -335,21 +335,12 @@ def test_stream_binary_missing_raises(monkeypatch) -> None:
         asyncio.run(collected)
 
 
-def test_stream_timeout_kills_subprocess(monkeypatch) -> None:
+def test_stream_timeout_ends_the_leader_through_its_anchor(monkeypatch) -> None:
     monkeypatch.setattr(
         provider, "_require_claude_binary", lambda: "/bin/claude",
     )
-
-    killed = {"value": False}
-
-    install_claude_cli_children(
-        monkeypatch, a_claude_cli_child(returncode=None, stdout_stalls=True),
-    )
-
-    def _killpg(_pid, _sig):
-        killed["value"] = True
-
-    monkeypatch.setattr(provider.os, "killpg", _killpg)
+    child = a_claude_cli_child(returncode=None, stdout_stalls=True)
+    install_claude_cli_children(monkeypatch, child)
 
     stream = acall_claude_with_mcp_stream(
         prompt="hi", user_id="u", timeout_seconds=0.1,
@@ -357,21 +348,24 @@ def test_stream_timeout_kills_subprocess(monkeypatch) -> None:
     collected = _collect(stream)
     with pytest.raises(UnavailableError):
         asyncio.run(collected)
-    assert killed["value"] is True
+
+    assert operations(child.log) == [("SIGTERM", child.pid), ("release", child.pid)]
+    provider.os.killpg.assert_not_called()
 
 
-def test_completed_stream_does_not_signal_process_group(monkeypatch) -> None:
+def test_completed_stream_releases_its_leader_without_a_signal(monkeypatch) -> None:
     monkeypatch.setattr(
         provider, "_require_claude_binary", lambda: "/bin/claude",
     )
-
-    install_claude_cli_children(monkeypatch, a_claude_cli_child(stream_lines=[_result_line("ok")]))
+    child = a_claude_cli_child(stream_lines=[_result_line("ok")])
+    install_claude_cli_children(monkeypatch, child)
 
     events = asyncio.run(_collect(
         acall_claude_with_mcp_stream(prompt="hi", user_id="u"),
     ))
 
     assert isinstance(events[-1], FinalEvent)
+    assert operations(child.log) == [("release", child.pid)]
     provider.os.killpg.assert_not_called()
 
 

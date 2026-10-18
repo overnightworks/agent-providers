@@ -14,7 +14,7 @@ name as an attribute: not a spawning module under any spelling of its owner
 (``spawn.subprocess``, ``asyncio.subprocess``), not a spawning ``os`` name read
 from ``os``, from an alias of it or from any ``<x>.os``, not an AnyIO
 ``run_process`` or ``open_process``. The names outside :mod:`agent_providers.spawn`
-that type a child are ``spawn.AsyncPipedProcess`` and ``spawn.AnchoredChild``. So every
+that type a child are ``spawn.PipedProcess`` and ``spawn.AnchoredChild``. So every
 child is described by a :class:`ChildProcess` first, and that value refuses a relative binary, a
 missing working directory and an unset ``HOME``.
 
@@ -39,7 +39,6 @@ import time
 import uuid
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
-from typing import Any
 
 import pytest
 from anchored_kernel import join_watcher, watcher_thread
@@ -51,7 +50,6 @@ from agent_providers.spawn import (
     ChildProcessSpecificationError,
     closed_environment,
     open_anchored_pipes,
-    open_async_pipes,
     open_pipes,
     run_capturing,
     start_anchored_leader,
@@ -323,8 +321,6 @@ def test_the_spawn_policy_flags_every_way_to_reach_a_process_primitive(source: s
         "import os\nos.getpid()\nos.environ",
         "from os import getpid",
         "from agent_providers.spawn import PipedProcess",
-        "from agent_providers.spawn import AsyncPipedProcess",
-        "from agent_providers import spawn\ndef f(p: spawn.AsyncPipedProcess) -> None: ...",
         "from agent_providers.spawn import AnchoredChild",
         "from agent_providers import spawn\ndef f(p: spawn.AnchoredChild) -> None: ...",
         "import os\noperating = os\noperating.getpid()",
@@ -342,7 +338,7 @@ def test_the_spawn_owners_process_type_starts_nothing() -> None:
         spawn.PipedProcess(["/bin/true"])
 
 
-OWNER_SPAWN_CALLS = frozenset({"Popen", "run", "create_subprocess_exec"})
+OWNER_SPAWN_CALLS = frozenset({"Popen", "run"})
 
 
 def test_the_spawn_owner_hands_every_primitive_an_explicit_environment() -> None:
@@ -478,15 +474,6 @@ def _stdout_of_open_pipes(child: ChildProcess) -> str:
     return stdout.decode()
 
 
-def _stdout_of_open_async_pipes(child: ChildProcess) -> str:
-    async def run() -> str:
-        process = await open_async_pipes(child)
-        stdout, _ = await process.communicate(b"")
-        return stdout.decode()
-
-    return asyncio.run(run())
-
-
 def _run_descriptor_probe(tmp_path: Path, stdout_of: Callable[[ChildProcess], str]) -> None:
     probe = (
         "import os, sys\n"
@@ -531,10 +518,9 @@ needs_proc_fd = pytest.mark.skipif(
     [
         _stdout_of_run_capturing,
         _stdout_of_open_pipes,
-        _stdout_of_open_async_pipes,
         _stdout_of_open_anchored_pipes,
     ],
-    ids=["run_capturing", "open_pipes", "open_async_pipes", "open_anchored_pipes"],
+    ids=["run_capturing", "open_pipes", "open_anchored_pipes"],
 )
 def test_a_child_inherits_no_descriptor_the_parent_holds_open(
     tmp_path: Path, stdout_of: Callable[[ChildProcess], str],
@@ -590,34 +576,3 @@ def test_an_anchored_leader_inherits_no_descriptor_the_parent_holds_open(
                     os.close(descriptor)
 
     _run_descriptor_probe(tmp_path, stdout_of_anchored_leader)
-
-
-@pytest.mark.parametrize(
-    ("stream_buffer_limit", "forwarded_keywords"),
-    [(1 << 20, {"limit": 1 << 20}), (None, {})],
-    ids=["a-requested-limit-is-forwarded", "no-request-leaves-asyncios-default"],
-)
-def test_the_async_door_forwards_the_requested_stream_buffer_limit_to_asyncio(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    stream_buffer_limit: int | None,
-    forwarded_keywords: dict[str, int],
-) -> None:
-    recorded_keywords: list[dict[str, Any]] = []
-
-    async def record_start(*_command: str, **keywords: Any) -> object:
-        recorded_keywords.append(keywords)
-        return object()
-
-    monkeypatch.setattr(spawn.asyncio, "create_subprocess_exec", record_start)
-    child = ChildProcess(
-        binary=Path("/usr/bin/claude"),
-        arguments=("-p",),
-        environment=closed_environment(tmp_path),
-        working_directory=tmp_path,
-    )
-
-    asyncio.run(open_async_pipes(child, stream_buffer_limit=stream_buffer_limit))
-
-    (keywords,) = recorded_keywords
-    assert {key: value for key, value in keywords.items() if key == "limit"} == forwarded_keywords

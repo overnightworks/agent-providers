@@ -11,8 +11,8 @@ from typing import Annotated, Final
 from pydantic import BeforeValidator
 
 from agent_providers.process import CliRun, run_catalog_cli
+from agent_providers.secret_file import shown_text
 from agent_providers.spawn import ChildProcess, closed_environment
-from agent_service.secret_file import shown_text
 
 VERSION_PATTERN: Final = re.compile(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)", re.ASCII)
 VERSION_OUTPUT_SUFFIX: Final = " (Claude Code)"

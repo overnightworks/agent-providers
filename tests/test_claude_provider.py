@@ -12,16 +12,18 @@ import sys
 import threading
 import time
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from enum import Enum, auto
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import anyio
 import pytest
+from anchored_support import TEST_WAIT_SECONDS
 from provider_test_support import (
     A_RUNNER_FAILURE_CANARY,
     CLAUDE_MODEL_CATALOG_STDOUT,
@@ -31,6 +33,7 @@ from provider_test_support import (
     SECRET_ENV_KEYS,
     EventGate,
     RunnerFailureWatch,
+    ScenarioDeadline,
     a_claude_cli_child,
     a_credential_destination_that_fails,
     assert_private_credential_child,
@@ -40,6 +43,7 @@ from provider_test_support import (
     install_claude_cli_children,
     override_provider_runtime,
     override_turn_runtime,
+    scenario_holds,
 )
 from pydantic import SecretStr
 
@@ -1100,7 +1104,8 @@ def test_acall_cli_refuses_a_cli_the_gate_rejects(_no_tool_gate_open, monkeypatc
 def test_healthy_mcp_turn_holds_its_process_pool_reservation_until_it_exits(
     monkeypatch,
 ) -> None:
-    turn_gate = EventGate()
+    deadline = ScenarioDeadline()
+    turn_gate = EventGate(deadline)
     install_claude_cli_children(
         monkeypatch,
         a_claude_cli_child(
@@ -1114,16 +1119,19 @@ def test_healthy_mcp_turn_holds_its_process_pool_reservation_until_it_exits(
     monkeypatch.setattr(provider, "_unlink_quiet", lambda _path: None)
 
     async def run_turn() -> None:
-        turn = asyncio.create_task(provider.acall_claude_with_mcp("hi", user_id="u-1"))
-        await turn_gate.started.wait()
-        with provider._zombie_registry_lock:
-            assert len(provider._zombie_reap_reservations) == 1
-        turn_gate.release.set()
-        assert (await turn).text == "ok"
-        with provider._zombie_registry_lock:
-            assert not provider._zombie_reap_reservations
+        tasks: list[asyncio.Future[Any]] = []
+        async with scenario_holds([turn_gate], tasks, set()):
+            turn = asyncio.create_task(provider.acall_claude_with_mcp("hi", user_id="u-1"))
+            tasks.append(turn)
+            await turn_gate.started.wait()
+            with provider._zombie_registry_lock:
+                assert len(provider._zombie_reap_reservations) == 1
+            turn_gate.release.set()
+            assert (await turn).text == "ok"
+            with provider._zombie_registry_lock:
+                assert not provider._zombie_reap_reservations
 
-    asyncio.run(run_turn())
+    _run_bounded(run_turn())
 
 
 def test_mcp_turn_refuses_a_healthy_turn_when_the_shared_process_pool_is_full(
@@ -1136,41 +1144,43 @@ def test_mcp_turn_refuses_a_healthy_turn_when_the_shared_process_pool_is_full(
     )
     monkeypatch.setattr(provider, "_write_mcp_config", lambda _spec, _user_id: "unused")
     monkeypatch.setattr(provider, "_unlink_quiet", lambda _path: None)
+    deadline = ScenarioDeadline()
     release = asyncio.Event()
-    started = [asyncio.Event() for _ in range(process_cap + 1)]
+    gates = [EventGate(deadline, release=release) for _ in range(process_cap + 1)]
     processes = [
         a_claude_cli_child(
             pid=pid,
             communicate=(b'{"result":"ok"}', b""),
-            communicate_gate=EventGate(started=turn_started, release=release),
+            communicate_gate=gate,
         )
-        for pid, turn_started in enumerate(started, start=1)
+        for pid, gate in enumerate(gates, start=1)
     ]
     spawned = install_claude_cli_children(monkeypatch, *processes).children
 
     async def run_turns() -> None:
-        running = []
-        for turn_started in started[:process_cap]:
-            running.append(
-                asyncio.create_task(provider.acall_claude_with_mcp("hi", user_id="u-1")),
+        running: list[asyncio.Future[Any]] = []
+        async with scenario_holds(gates, running, set()):
+            for gate in gates[:process_cap]:
+                running.append(
+                    asyncio.create_task(provider.acall_claude_with_mcp("hi", user_id="u-1")),
+                )
+                await gate.started.wait()
+
+            expected = (
+                f"Claude CLI process pool is at its concurrency limit ({process_cap}); "
+                "refusing to start another"
             )
-            await turn_started.wait()
+            with pytest.raises(UnavailableError) as exc:
+                await provider.acall_claude_with_mcp("hi", user_id="u-1")
+            assert str(exc.value) == expected
+            assert len(spawned) == process_cap
 
-        expected = (
-            f"Claude CLI process pool is at its concurrency limit ({process_cap}); "
-            "refusing to start another"
-        )
-        with pytest.raises(UnavailableError) as exc:
-            await provider.acall_claude_with_mcp("hi", user_id="u-1")
-        assert str(exc.value) == expected
-        assert len(spawned) == process_cap
+            release.set()
+            assert [turn.text for turn in await asyncio.gather(*running)] == ["ok"] * process_cap
+            assert (await provider.acall_claude_with_mcp("hi", user_id="u-1")).text == "ok"
+            assert len(spawned) == process_cap + 1
 
-        release.set()
-        assert [turn.text for turn in await asyncio.gather(*running)] == ["ok"] * process_cap
-        assert (await provider.acall_claude_with_mcp("hi", user_id="u-1")).text == "ok"
-        assert len(spawned) == process_cap + 1
-
-    asyncio.run(run_turns())
+    _run_bounded(run_turns())
 
 
 # ── the child a Claude turn runs as ─────────────────────────────────
@@ -1293,8 +1303,9 @@ def _sync_claude_call(fails: bool, monkeypatch: pytest.MonkeyPatch) -> object:
 
 
 def _cancelled_async_claude_call(fails: bool, monkeypatch: pytest.MonkeyPatch) -> object:
+    communicating = EventGate(ScenarioDeadline())
+
     async def run() -> str:
-        communicating = EventGate()
         install_claude_cli_children(
             monkeypatch,
             a_claude_cli_child(
@@ -1302,13 +1313,16 @@ def _cancelled_async_claude_call(fails: bool, monkeypatch: pytest.MonkeyPatch) -
                 communicate_gate=communicating if fails else None,
             ),
         )
-        turn = asyncio.create_task(acall_claude("hello"))
-        if fails:
-            await communicating.started.wait()
-            turn.cancel()
-        return (await turn).text
+        tasks: list[asyncio.Future[Any]] = []
+        async with scenario_holds([communicating], tasks, set()):
+            turn = asyncio.create_task(acall_claude("hello"))
+            tasks.append(turn)
+            if fails:
+                await communicating.started.wait()
+                turn.cancel()
+            return (await turn).text
 
-    return asyncio.run(run())
+    return _run_bounded(run())
 
 
 def _mcp_claude_call(fails: bool, monkeypatch: pytest.MonkeyPatch) -> object:
@@ -2290,21 +2304,27 @@ def test_track_zombie_reap_logs_and_starts_a_background_reaper(monkeypatch, capl
     assert any("did not exit" in r.message for r in caplog.records)
 
 
+def _register_background_reapers(tasks: list[asyncio.Future[Any]]) -> None:
+    with provider._zombie_registry_lock:
+        tasks.extend(task for task in provider._zombie_reap_tasks if task not in tasks)
+
+
 def test_track_zombie_reap_starts_the_reaper_held_by_its_reservation() -> None:
-    reaping = EventGate()
+    reaping = EventGate(ScenarioDeadline())
 
     async def _run() -> bool:
-        proc = a_claude_cli_child(pid=5150, returncode=None, wait_gate=reaping)
-        _reserve_zombie_process(proc.pid)
-        became_zombie = provider._track_zombie_reap_async(proc)
-        await reaping.started.wait()
-        reaping.release.set()
-        with provider._zombie_registry_lock:
-            tasks = list(provider._zombie_reap_tasks)
-        await asyncio.gather(*tasks)
-        return became_zombie
+        reapers: list[asyncio.Future[Any]] = []
+        async with scenario_holds([reaping], reapers, set()):
+            proc = a_claude_cli_child(pid=5150, returncode=None, wait_gate=reaping)
+            _reserve_zombie_process(proc.pid)
+            became_zombie = provider._track_zombie_reap_async(proc)
+            _register_background_reapers(reapers)
+            await reaping.started.wait()
+            reaping.release.set()
+            await asyncio.gather(*reapers)
+            return became_zombie
 
-    assert asyncio.run(_run()) is True
+    assert _run_bounded(_run()) is True
     reservation = provider._reserve_zombie_admission()
     assert reservation is not None
     provider._release_zombie_reservation(reservation)
@@ -3571,49 +3591,55 @@ def test_tool_surface_probe_refuses_to_start_when_the_zombie_pool_is_saturated(
         lambda *_a, **_kw: spawned.append(1) or MagicMock(),
     )
 
+    deadline = ScenarioDeadline()
+    release_reapers = asyncio.Event()
+    reaper_gates = [EventGate(deadline, release=release_reapers) for _ in range(2)]
+
     async def _run() -> None:
-        reapers_started = [asyncio.Event(), asyncio.Event()]
-        release_reapers = asyncio.Event()
-        install_claude_cli_children(
-            monkeypatch,
-            *(
-                a_claude_cli_child(
-                    pid=pid,
-                    returncode=None,
-                    communicate=asyncio.TimeoutError(),
-                    wait_gate=EventGate(started=started, release=release_reapers),
-                )
-                for pid, started in enumerate(reapers_started, start=1)
-            ),
-        )
+        reapers: list[asyncio.Future[Any]] = []
+        async with scenario_holds(reaper_gates, reapers, set()):
+            install_claude_cli_children(
+                monkeypatch,
+                *(
+                    a_claude_cli_child(
+                        pid=pid,
+                        returncode=None,
+                        communicate=asyncio.TimeoutError(),
+                        wait_gate=gate,
+                    )
+                    for pid, gate in enumerate(reaper_gates, start=1)
+                ),
+            )
 
-        for _ in reapers_started:
-            with pytest.raises(UnavailableError, match="timed out"):
-                await provider.acall_claude_with_mcp(prompt="hi", user_id="u-1")
+            for _ in reaper_gates:
+                try:
+                    with pytest.raises(UnavailableError, match="timed out"):
+                        await provider.acall_claude_with_mcp(prompt="hi", user_id="u-1")
+                finally:
+                    _register_background_reapers(reapers)
 
-        await asyncio.gather(*(started.wait() for started in reapers_started))
-        async def refused_probe() -> Path:
-            if probe_kind == "async":
-                return await averify_no_builtin_cli_tools()
-            return verify_no_builtin_cli_tools()
+            await asyncio.gather(*(gate.started.wait() for gate in reaper_gates))
 
-        with pytest.raises(UnavailableError) as exc:
-            await refused_probe()
-        assert str(exc.value) == (
-            "Claude CLI process pool is at its concurrency limit (2); refusing to start another"
-        )
-        assert spawned == []
-        release_reapers.set()
-        with provider._zombie_registry_lock:
-            tasks = list(provider._zombie_reap_tasks)
-        await asyncio.gather(*tasks)
+            async def refused_probe() -> Path:
+                if probe_kind == "async":
+                    return await averify_no_builtin_cli_tools()
+                return verify_no_builtin_cli_tools()
 
-        monkeypatch.setattr(provider.os, "killpg", _a_process_group_that_is_gone)
-        commands = _answer_with(monkeypatch, _init_line([]))
-        assert await refused_probe() == claude_binary
-        assert len(commands) == 1
+            with pytest.raises(UnavailableError) as exc:
+                await refused_probe()
+            assert str(exc.value) == (
+                "Claude CLI process pool is at its concurrency limit (2); refusing to start another"
+            )
+            assert spawned == []
+            release_reapers.set()
+            await asyncio.gather(*reapers)
 
-    asyncio.run(_run())
+            monkeypatch.setattr(provider.os, "killpg", _a_process_group_that_is_gone)
+            commands = _answer_with(monkeypatch, _init_line([]))
+            assert await refused_probe() == claude_binary
+            assert len(commands) == 1
+
+    _run_bounded(_run())
 
 
 def test_zombie_reap_reservation_is_reserved_atomically_not_just_counted(monkeypatch) -> None:
@@ -3939,49 +3965,51 @@ def test_stream_reap_completes_before_a_twice_cancelled_closer_returns(monkeypat
     The reaper itself has awaits for SIGTERM/SIGKILL grace and process wait,
     so cancelling the closer must not cancel that work halfway through.
     """
+    deadline = ScenarioDeadline()
+    reap_gate = EventGate(deadline)
+    real_reap = provider._reap_process_group
     monkeypatch.setattr(
         provider, "verify_cli_tool_surface", AsyncMock(return_value=Path("/usr/bin/claude")),
     )
     monkeypatch.setattr(provider, "_write_mcp_config", lambda _spec, _user_id: "unused")
     monkeypatch.setattr(provider, "_unlink_quiet", lambda _path: None)
+    spawns = install_claude_cli_children(monkeypatch, a_claude_cli_child(has_stdin=False))
 
     async def _run() -> None:
-        proc = a_claude_cli_child(has_stdin=False)
-        reaper_started = asyncio.Event()
-        finish_reaper = asyncio.Event()
         reaper_finished = asyncio.Event()
-
-        async def fake_spawn(*_args, **_kwargs):
-            return proc
 
         async def fake_consume(*_args, **_kwargs):
             yield AssistantTextEvent(text="partial")
             await asyncio.Future()
 
-        async def fake_reap(_proc) -> bool:
-            reaper_started.set()
-            await finish_reaper.wait()
+        async def fake_reap(proc) -> bool:
+            reaped = await _reap_after_holds(real_reap, proc, reap_gate)
             reaper_finished.set()
-            return False
+            return reaped
 
-        monkeypatch.setattr(provider, "_spawn_reserved_async_cli_process", fake_spawn)
         monkeypatch.setattr(provider, "_consume_stream", fake_consume)
         monkeypatch.setattr(provider, "_reap_process_group", fake_reap)
 
-        stream = provider.acall_claude_with_mcp_stream(prompt="hi", user_id="u-1")
-        assert (await anext(stream)).text == "partial"
+        tasks: list[asyncio.Future[Any]] = []
+        async with scenario_holds([reap_gate], tasks, set()):
+            stream = provider.acall_claude_with_mcp_stream(prompt="hi", user_id="u-1")
+            assert (await anext(stream)).text == "partial"
 
-        closer = asyncio.create_task(stream.aclose())
-        await reaper_started.wait()
-        for _ in range(2):
-            closer.cancel()
-            await _after_pending_callbacks()
-            assert not closer.done()
+            closer = asyncio.create_task(stream.aclose())
+            tasks.append(closer)
+            await reap_gate.started.wait()
+            for _ in range(2):
+                closer.cancel()
+                await _after_pending_callbacks()
+                assert not closer.done()
 
-        finish_reaper.set()
-        with pytest.raises(asyncio.CancelledError):
-            await closer
-        assert reaper_finished.is_set()
+            reap_gate.release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await closer
+            assert reaper_finished.is_set()
+            assert not reap_gate.missed.is_set()
+            assert _held_slots() == 0
+            assert not spawns.children[0].working_directory.exists()
 
     _run_bounded(_run())
 
@@ -3989,13 +4017,15 @@ def test_stream_reap_completes_before_a_twice_cancelled_closer_returns(monkeypat
 def test_closing_a_claude_stream_keeps_its_private_home_until_confirmed_reap(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    killpg_signals,
 ) -> None:
     source = current_config().claude_cli_auth_file
+    deadline = ScenarioDeadline()
+    reap_gate = EventGate(deadline)
+    real_reap = provider._reap_process_group
 
     async def run() -> None:
         home_seen: Path | None = None
-        reap_started = asyncio.Event()
-        finish_reap = asyncio.Event()
 
         def child_started_in_a_private_home(child, _stream_buffer_limit):
             nonlocal home_seen
@@ -4014,10 +4044,7 @@ def test_closing_a_claude_stream_keeps_its_private_home_until_confirmed_reap(
             )
 
         async def reap_process_group(proc) -> bool:
-            reap_started.set()
-            await finish_reap.wait()
-            provider._release_zombie_reservation(proc.pid)
-            return False
+            return await _reap_after_holds(real_reap, proc, reap_gate)
 
         install_claude_cli_children(monkeypatch, factory=child_started_in_a_private_home)
         monkeypatch.setattr(provider, "_reap_process_group", reap_process_group)
@@ -4027,18 +4054,22 @@ def test_closing_a_claude_stream_keeps_its_private_home_until_confirmed_reap(
             AsyncMock(return_value=Path("/usr/bin/claude")),
         )
 
-        stream = acall_claude_with_mcp_stream("hello", user_id="user-1")
-        assert await anext(stream) == AssistantTextEvent(text="partial")
-        closer = asyncio.create_task(stream.aclose())
-        await reap_started.wait()
-        assert home_seen is not None
-        assert home_seen.exists()
+        tasks: list[asyncio.Future[Any]] = []
+        async with scenario_holds([reap_gate], tasks, set()):
+            stream = acall_claude_with_mcp_stream("hello", user_id="user-1")
+            assert await anext(stream) == AssistantTextEvent(text="partial")
+            closer = asyncio.create_task(stream.aclose())
+            tasks.append(closer)
+            await reap_gate.started.wait()
+            assert home_seen is not None
+            assert home_seen.exists()
 
-        finish_reap.set()
-        await closer
-        assert not home_seen.exists()
+            reap_gate.release.set()
+            await closer
+            assert not home_seen.exists()
 
     _run_bounded(run())
+    assert killpg_signals == [(A_PROCESS_PID, provider.signal.SIGTERM)]
 
 
 REAPER_CHECKPOINTS = 5
@@ -4058,6 +4089,7 @@ def test_stream_reap_does_not_spin_under_anyio_level_cancellation(
     while the reaper could not finish.  A cancellation shield waits once for
     the child reaper, then propagates cancellation after it has completed.
     """
+    deadline = ScenarioDeadline()
     shield_calls = 0
     original_shield = asyncio.shield
 
@@ -4095,16 +4127,19 @@ def test_stream_reap_does_not_spin_under_anyio_level_cancellation(
                 await provider._reap_behind_shield(process)
             close_finished.set()
 
-        async with anyio.create_task_group() as task_group:
-            task_group.start_soon(close_after_cancellation)
-            await reaper_started.wait()
-            task_group.cancel_scope.cancel()
-            if also_cancelled_directly:
-                closing[0].cancel()
-            with anyio.CancelScope(shield=True), anyio.fail_after(ONE_SHOT_TEST_BOUND_SECONDS):
-                finish_reaper.set()
-                await reaper_finished.wait()
-                await close_finished.wait()
+        with anyio.fail_after(deadline.remaining()):
+            async with anyio.create_task_group() as task_group:
+                try:
+                    task_group.start_soon(close_after_cancellation)
+                    await reaper_started.wait()
+                    task_group.cancel_scope.cancel()
+                    if also_cancelled_directly:
+                        closing[0].cancel()
+                finally:
+                    finish_reaper.set()
+                with anyio.CancelScope(shield=True), anyio.fail_after(deadline.remaining()):
+                    await reaper_finished.wait()
+                    await close_finished.wait()
 
         assert reap_calls == 1
         assert shield_calls <= MOST_SHIELD_CALLS_OF_ONE_REAP
@@ -4114,7 +4149,6 @@ def test_stream_reap_does_not_spin_under_anyio_level_cancellation(
 
 # ── every exit of a turn goes through one shielded reap ──────────────
 
-ONE_SHOT_TEST_BOUND_SECONDS = 10
 A_PROCESS_PID = 2468
 
 
@@ -4128,8 +4162,22 @@ async def _after_pending_callbacks() -> None:
     await callbacks_ran.wait()
 
 
-def _run_bounded(scenario) -> None:
-    asyncio.run(asyncio.wait_for(scenario, ONE_SHOT_TEST_BOUND_SECONDS))
+def _run_bounded[T](scenario: Coroutine[Any, Any, T]) -> T:
+    return asyncio.run(asyncio.wait_for(scenario, 2 * TEST_WAIT_SECONDS))
+
+
+async def _reap_after_holds(
+    real_reap: Callable[[object], Coroutine[Any, Any, bool]],
+    proc: object,
+    *holds: EventGate,
+) -> bool:
+    """Hold at each gate, then run the real reap, so a missed hold still frees slot and home."""
+    try:
+        for hold in holds:
+            await hold.pass_through()
+    finally:
+        reaped = await real_reap(proc)
+    return reaped
 
 
 def _held_slots() -> int:
@@ -4210,24 +4258,27 @@ def _record_the_real_reap(
 def test_a_successful_one_shot_holds_its_slot_and_home_until_the_reap_is_done(
     one_shot, monkeypatch, killpg_signals,
 ) -> None:
-    exit_wait = EventGate()
+    exit_wait = EventGate(ScenarioDeadline())
     turn_child = _install_child_in_a_home(
         monkeypatch, communicate=(b'{"result":"ok"}', b""), wait_gate=exit_wait,
     )
     reaps = _record_the_real_reap(monkeypatch)
 
     async def scenario() -> None:
-        turn = asyncio.create_task(one_shot())
-        await exit_wait.started.wait()
-        assert not turn.done()
-        assert _held_slots() == 1
-        assert turn_child.home.exists()
+        tasks: list[asyncio.Future[Any]] = []
+        async with scenario_holds([exit_wait], tasks, set()):
+            turn = asyncio.create_task(one_shot())
+            tasks.append(turn)
+            await exit_wait.started.wait()
+            assert not turn.done()
+            assert _held_slots() == 1
+            assert turn_child.home.exists()
 
-        exit_wait.release.set()
-        assert (await turn).text == "ok"
-        assert reaps.invocations == 1
-        assert _held_slots() == 0
-        assert not turn_child.home.exists()
+            exit_wait.release.set()
+            assert (await turn).text == "ok"
+            assert reaps.invocations == 1
+            assert _held_slots() == 0
+            assert not turn_child.home.exists()
 
     _run_bounded(scenario())
     assert killpg_signals == []
@@ -4261,24 +4312,28 @@ def test_a_failed_one_shot_reaps_once_then_releases_its_slot_and_home(
 def test_a_cancelled_one_shot_receives_its_cancellation_only_after_the_reap(
     one_shot, monkeypatch,
 ) -> None:
-    turn_gate = EventGate()
-    exit_wait = EventGate()
+    deadline = ScenarioDeadline()
+    turn_gate = EventGate(deadline)
+    exit_wait = EventGate(deadline)
     turn_child = _install_child_in_a_home(
         monkeypatch, returncode=None, communicate_gate=turn_gate, wait_gate=exit_wait,
     )
 
     async def scenario() -> None:
-        turn = asyncio.create_task(one_shot())
-        await turn_gate.started.wait()
-        turn.cancel()
-        await exit_wait.started.wait()
-        assert not turn.done()
-        assert turn_child.home.exists()
+        tasks: list[asyncio.Future[Any]] = []
+        async with scenario_holds([turn_gate, exit_wait], tasks, set()):
+            turn = asyncio.create_task(one_shot())
+            tasks.append(turn)
+            await turn_gate.started.wait()
+            turn.cancel()
+            await exit_wait.started.wait()
+            assert not turn.done()
+            assert turn_child.home.exists()
 
-        exit_wait.release.set()
-        with pytest.raises(asyncio.CancelledError):
-            await turn
-        assert not turn_child.home.exists()
+            exit_wait.release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await turn
+            assert not turn_child.home.exists()
 
     _run_bounded(scenario())
 
@@ -4286,8 +4341,10 @@ def test_a_cancelled_one_shot_receives_its_cancellation_only_after_the_reap(
 def test_a_one_shot_cancelled_twice_completes_one_reap_before_delivering_the_cancellation(
     one_shot, monkeypatch,
 ) -> None:
-    first_stage = EventGate()
-    second_stage = EventGate()
+    deadline = ScenarioDeadline()
+    first_stage = EventGate(deadline)
+    second_stage = EventGate(deadline)
+    real_reap = provider._reap_process_group
     reaps_completed = 0
     turn_child = _install_child_in_a_home(
         monkeypatch, returncode=None, communicate=RuntimeError("turn broke"),
@@ -4295,34 +4352,35 @@ def test_a_one_shot_cancelled_twice_completes_one_reap_before_delivering_the_can
 
     async def two_stage_reap(proc) -> bool:
         nonlocal reaps_completed
-        await first_stage.pass_through()
-        await second_stage.pass_through()
+        reaped = await _reap_after_holds(real_reap, proc, first_stage, second_stage)
         reaps_completed += 1
-        provider._release_zombie_reservation(proc.pid)
-        return False
+        return reaped
 
     _replace_the_reap(monkeypatch, two_stage_reap)
 
     async def scenario() -> None:
-        turn = asyncio.create_task(one_shot())
-        await first_stage.started.wait()
-        turn.cancel()
-        await _after_pending_callbacks()
-        assert reaps_completed == 0
+        tasks: list[asyncio.Future[Any]] = []
+        async with scenario_holds([first_stage, second_stage], tasks, set()):
+            turn = asyncio.create_task(one_shot())
+            tasks.append(turn)
+            await first_stage.started.wait()
+            turn.cancel()
+            await _after_pending_callbacks()
+            assert reaps_completed == 0
 
-        first_stage.release.set()
-        await second_stage.started.wait()
-        turn.cancel()
-        await _after_pending_callbacks()
-        assert not turn.done()
-        assert reaps_completed == 0
-        assert turn_child.home.exists()
+            first_stage.release.set()
+            await second_stage.started.wait()
+            turn.cancel()
+            await _after_pending_callbacks()
+            assert not turn.done()
+            assert reaps_completed == 0
+            assert turn_child.home.exists()
 
-        second_stage.release.set()
-        with pytest.raises(asyncio.CancelledError):
-            await turn
-        assert reaps_completed == 1
-        assert not turn_child.home.exists()
+            second_stage.release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await turn
+            assert reaps_completed == 1
+            assert not turn_child.home.exists()
 
     _run_bounded(scenario())
 
@@ -4370,31 +4428,37 @@ REAP_FAULT_BOUNDARIES = {
 def test_the_reaps_own_exception_wins_over_the_turns_exit(
     one_shot, monkeypatch, boundary,
 ) -> None:
-    reap_gate = EventGate()
+    reap_gate = EventGate(ScenarioDeadline())
     reap_fault = boundary.make_reap_fault()
+    real_reap = provider._reap_process_group
     _install_child_in_a_home(
         monkeypatch, returncode=None, communicate=boundary.make_turn_failure(),
     )
 
-    async def reap_that_fails(_proc) -> bool:
-        await reap_gate.pass_through()
+    async def reap_that_fails(proc) -> bool:
+        await _reap_after_holds(real_reap, proc, reap_gate)
         raise reap_fault
 
     _replace_the_reap(monkeypatch, reap_that_fails)
 
     async def scenario() -> None:
-        turn = asyncio.create_task(one_shot())
-        await reap_gate.started.wait()
-        if boundary.cancellation is _CancellationOfTheTurn.WHILE_THE_REAP_IS_HELD:
-            turn.cancel()
-            await _after_pending_callbacks()
-        reap_gate.release.set()
-        if boundary.cancellation is _CancellationOfTheTurn.IN_THE_LOOP_ITERATION_THE_REAP_FAILS:
-            turn.cancel()
-        with pytest.raises(type(reap_fault)) as caught:
-            await turn
-        assert caught.value is reap_fault
-        assert isinstance(caught.value.__context__, boundary.expected_context)
+        tasks: list[asyncio.Future[Any]] = []
+        asserted_faults: set[asyncio.Future[Any]] = set()
+        async with scenario_holds([reap_gate], tasks, asserted_faults):
+            turn = asyncio.create_task(one_shot())
+            tasks.append(turn)
+            await reap_gate.started.wait()
+            if boundary.cancellation is _CancellationOfTheTurn.WHILE_THE_REAP_IS_HELD:
+                turn.cancel()
+                await _after_pending_callbacks()
+            reap_gate.release.set()
+            if boundary.cancellation is _CancellationOfTheTurn.IN_THE_LOOP_ITERATION_THE_REAP_FAILS:
+                turn.cancel()
+            with pytest.raises(type(reap_fault)) as caught:
+                await turn
+            asserted_faults.add(turn)
+            assert caught.value is reap_fault
+            assert isinstance(caught.value.__context__, boundary.expected_context)
 
     _run_bounded(scenario())
 
@@ -4402,8 +4466,9 @@ def test_the_reaps_own_exception_wins_over_the_turns_exit(
 def test_a_stream_that_ends_normally_reaps_once_and_releases_its_slot_and_home(
     monkeypatch,
 ) -> None:
-    exit_wait = EventGate()
-    reap_entered = EventGate()
+    deadline = ScenarioDeadline()
+    exit_wait = EventGate(deadline)
+    reap_entered = EventGate(deadline)
     turn_child = _install_child_in_a_home(
         monkeypatch,
         has_stdin=False,
@@ -4413,24 +4478,27 @@ def test_a_stream_that_ends_normally_reaps_once_and_releases_its_slot_and_home(
     reaps = _record_the_real_reap(monkeypatch, before_reaping=reap_entered)
 
     async def scenario() -> None:
-        stream = provider.acall_claude_with_mcp_stream("hi", user_id="u-1")
-        consuming = asyncio.create_task(_collect_stream_events(stream))
-        await exit_wait.started.wait()
-        assert not consuming.done()
-        assert _held_slots() == 1
-        assert turn_child.home.exists()
+        tasks: list[asyncio.Future[Any]] = []
+        async with scenario_holds([exit_wait, reap_entered], tasks, set()):
+            stream = provider.acall_claude_with_mcp_stream("hi", user_id="u-1")
+            consuming = asyncio.create_task(_collect_stream_events(stream))
+            tasks.append(consuming)
+            await exit_wait.started.wait()
+            assert not consuming.done()
+            assert _held_slots() == 1
+            assert turn_child.home.exists()
 
-        exit_wait.release.set()
-        await reap_entered.started.wait()
-        assert not consuming.done()
-        assert _held_slots() == 1
-        assert turn_child.home.exists()
+            exit_wait.release.set()
+            await reap_entered.started.wait()
+            assert not consuming.done()
+            assert _held_slots() == 1
+            assert turn_child.home.exists()
 
-        reap_entered.release.set()
-        assert (await consuming)[-1].text == "ok"
-        assert reaps.invocations == 1
-        assert _held_slots() == 0
-        assert not turn_child.home.exists()
+            reap_entered.release.set()
+            assert (await consuming)[-1].text == "ok"
+            assert reaps.invocations == 1
+            assert _held_slots() == 0
+            assert not turn_child.home.exists()
 
     _run_bounded(scenario())
 
@@ -4439,24 +4507,27 @@ def test_a_one_shot_handed_to_the_background_reaper_keeps_its_slot_and_home_with
     one_shot, monkeypatch,
 ) -> None:
     monkeypatch.setattr(provider, "_wait_for_zombie_reap", AsyncMock(return_value=False))
-    exit_wait = EventGate()
+    exit_wait = EventGate(ScenarioDeadline())
     turn_child = _install_child_in_a_home(
         monkeypatch, returncode=None, communicate=asyncio.TimeoutError(), wait_gate=exit_wait,
     )
 
     async def scenario() -> None:
-        with pytest.raises(UnavailableError, match="timed out"):
-            await one_shot()
-        await exit_wait.started.wait()
-        assert _held_slots() == 1
-        assert turn_child.home.exists()
+        background_reaps: list[asyncio.Future[Any]] = []
+        async with scenario_holds([exit_wait], background_reaps, set()):
+            try:
+                with pytest.raises(UnavailableError, match="timed out"):
+                    await one_shot()
+            finally:
+                _register_background_reapers(background_reaps)
+            await exit_wait.started.wait()
+            assert _held_slots() == 1
+            assert turn_child.home.exists()
 
-        exit_wait.release.set()
-        with provider._zombie_registry_lock:
-            background_reaps = list(provider._zombie_reap_tasks)
-        await asyncio.gather(*background_reaps)
-        assert _held_slots() == 0
-        assert not turn_child.home.exists()
+            exit_wait.release.set()
+            await asyncio.gather(*background_reaps)
+            assert _held_slots() == 0
+            assert not turn_child.home.exists()
 
     _run_bounded(scenario())
 
@@ -4482,14 +4553,14 @@ def test_stream_failure_starts_one_background_reaper(
     monkeypatch.setattr(provider, "_write_mcp_config", lambda _spec, _user_id: "unused")
     monkeypatch.setattr(provider, "_unlink_quiet", lambda _path: None)
 
+    reaper_gate = EventGate(ScenarioDeadline())
+
     async def _run() -> None:
-        reaper_started = asyncio.Event()
-        release_reaper = asyncio.Event()
         proc = a_claude_cli_child(
             pid=5150,
             returncode=None,
             has_stdin=False,
-            wait_gate=EventGate(started=reaper_started, release=release_reaper),
+            wait_gate=reaper_gate,
         )
 
         async def failing_lines(*_args: object):
@@ -4504,19 +4575,22 @@ def test_stream_failure_starts_one_background_reaper(
             async for _ in provider.acall_claude_with_mcp_stream(prompt="hi", user_id="u-1"):
                 pass
 
-        with pytest.raises(expected_error, match=message):
-            await stream()
-        await reaper_started.wait()
-        with provider._zombie_registry_lock:
-            tasks = list(provider._zombie_reap_tasks)
-        assert len(tasks) == 1
-        proc.wait.assert_awaited_once_with()
-        assert provider._reserve_zombie_admission() is None
+        tasks: list[asyncio.Future[Any]] = []
+        async with scenario_holds([reaper_gate], tasks, set()):
+            try:
+                with pytest.raises(expected_error, match=message):
+                    await stream()
+            finally:
+                _register_background_reapers(tasks)
+            await reaper_gate.started.wait()
+            assert len(tasks) == 1
+            proc.wait.assert_awaited_once_with()
+            assert provider._reserve_zombie_admission() is None
 
-        release_reaper.set()
-        await asyncio.gather(*tasks)
+            reaper_gate.release.set()
+            await asyncio.gather(*tasks)
 
-    asyncio.run(_run())
+    _run_bounded(_run())
 
 
 # ── no-builtin-tools gate (_call_cli / _acall_cli) ────────────────────

@@ -4167,7 +4167,9 @@ def _run_bounded[T](scenario: Coroutine[Any, Any, T]) -> T:
 
 
 async def _reap_after_holds(
-    real_reap: Callable[[object], Coroutine[Any, Any, bool]], proc: object, *holds: EventGate,
+    real_reap: Callable[[object], Coroutine[Any, Any, bool]],
+    proc: object,
+    *holds: EventGate,
 ) -> bool:
     """Hold at each gate, then run the real reap, so a missed hold still frees slot and home."""
     try:
@@ -4450,10 +4452,7 @@ def test_the_reaps_own_exception_wins_over_the_turns_exit(
                 turn.cancel()
                 await _after_pending_callbacks()
             reap_gate.release.set()
-            if (
-                boundary.cancellation
-                is _CancellationOfTheTurn.IN_THE_LOOP_ITERATION_THE_REAP_FAILS
-            ):
+            if boundary.cancellation is _CancellationOfTheTurn.IN_THE_LOOP_ITERATION_THE_REAP_FAILS:
                 turn.cancel()
             with pytest.raises(type(reap_fault)) as caught:
                 await turn
@@ -4558,7 +4557,10 @@ def test_stream_failure_starts_one_background_reaper(
 
     async def _run() -> None:
         proc = a_claude_cli_child(
-            pid=5150, returncode=None, has_stdin=False, wait_gate=reaper_gate,
+            pid=5150,
+            returncode=None,
+            has_stdin=False,
+            wait_gate=reaper_gate,
         )
 
         async def failing_lines(*_args: object):

@@ -229,7 +229,7 @@ class _HeldScenario:
 @dataclass(frozen=True)
 class _HoldsCase:
     body: Callable[[_HeldScenario], Awaitable[None]]
-    expected_failure: Callable[[_HeldScenario], type[BaseException] | None]
+    expected_failure: type[BaseException] | None
     reported: Callable[[_HeldScenario, BaseException], bool]
 
 
@@ -289,27 +289,32 @@ def _the_recorded_miss(held: _HeldScenario, raised: BaseException) -> bool:
 HOLDS_CASES = {
     "body_fails_with_pending_tasks": _HoldsCase(
         _body_fails_while_tasks_pend_and_a_gate_missed,
-        lambda _held: AssertionError,
+        AssertionError,
         _the_body_failure_itself,
     ),
     "body_completes_with_two_task_faults": _HoldsCase(
-        _body_completes_while_two_tasks_fault, lambda _held: ExceptionGroup,
+        _body_completes_while_two_tasks_fault,
+        ExceptionGroup,
         _every_task_fault_in_one_group,
     ),
     "cancelled_and_asserted_tasks_are_not_faults": _HoldsCase(
-        _body_cancels_a_task_and_asserts_an_expected_fault, lambda _held: None,
+        _body_cancels_a_task_and_asserts_an_expected_fault,
+        None,
         lambda _held, _raised: True,
     ),
     "body_completes_with_a_missed_gate": _HoldsCase(
-        _body_completes_with_a_missed_gate, lambda _held: pytest.fail.Exception,
+        _body_completes_with_a_missed_gate,
+        pytest.fail.Exception,
         _the_recorded_miss,
     ),
     "body_fails_before_asserting_the_expected_fault": _HoldsCase(
-        _body_fails_before_asserting_an_expected_fault, lambda _held: AssertionError,
+        _body_fails_before_asserting_an_expected_fault,
+        AssertionError,
         _the_body_failure_itself,
     ),
     "body_completes_without_asserting_the_expected_fault": _HoldsCase(
-        _body_completes_without_asserting_an_expected_fault, lambda _held: _TaskFault,
+        _body_completes_without_asserting_an_expected_fault,
+        _TaskFault,
         _the_unasserted_fault,
     ),
 }
@@ -318,7 +323,7 @@ HOLDS_CASES = {
 @pytest.mark.parametrize("case", HOLDS_CASES.values(), ids=HOLDS_CASES)
 def test_scenario_holds_drains_every_task_without_masking_the_body(case: _HoldsCase) -> None:
     held = _HeldScenario(EventGate(ScenarioDeadline()))
-    expected_failure = case.expected_failure(held)
+    expected_failure = case.expected_failure
     expectation: AbstractContextManager[Any] = (
         nullcontext() if expected_failure is None else pytest.raises(expected_failure)
     )

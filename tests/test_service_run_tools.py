@@ -211,16 +211,15 @@ class ListenerRecorder:
 
 
 def failing_transport_close(monkeypatch: pytest.MonkeyPatch) -> None:
-    original = httpx.AsyncHTTPTransport.aclose
     request = httpx.Request(
         "POST", "https://localhost/mcp", headers={"Authorization": f"Bearer {TOKEN}"}
     )
-
-    async def failing(transport: httpx.AsyncHTTPTransport) -> None:
-        await original(transport)
-        raise httpx.CloseError("the close failed", request=request)
-
-    monkeypatch.setattr(httpx.AsyncHTTPTransport, "aclose", failing)
+    failing_after(
+        monkeypatch,
+        httpx.AsyncHTTPTransport,
+        "aclose",
+        lambda: httpx.CloseError("the close failed", request=request),
+    )
 
 
 def failing_after(

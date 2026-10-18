@@ -49,7 +49,7 @@ def _retire(task: asyncio.Task[None]) -> None:
 def _ending_of(task: asyncio.Task[None]) -> BaseException | None:
     try:
         return task.exception()
-    except asyncio.CancelledError as cancelled:  # NOSONAR(S7497) returned as the step's failure
+    except asyncio.CancelledError as cancelled:  # NOSONAR(S7497) keeps its stack positions for the log
         return cancelled
 
 
@@ -143,7 +143,9 @@ class RunTools:
     finished, not that a stalled cleanup's socket is closed.
 
     Only the reap's exception, of any class, is raised, as the same object, after step 5 and
-    never logged; steps 3 to 5 run whatever the reap raised.
+    never logged; steps 3 to 5 run whatever the reap raised. ``KeyboardInterrupt`` and
+    ``SystemExit`` are not contained, for any step or the reap: asyncio propagates them out of
+    the event loop and the process ends as README "Interruptions" says.
     A caller's cancellation, direct or AnyIO's level one, never cuts the attempt short: the
     close waits for the attempt, raises its exception, otherwise the direct cancellation,
     otherwise delivers the level cancellation, otherwise returns. ``close`` is called once.

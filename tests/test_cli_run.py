@@ -611,7 +611,6 @@ def test_a_failed_reap_keeps_the_original_failure_as_its_context(
         drive_scripted(monkeypatch, child, scenario())
 
     run_to_the_failed_reap()
-    caplog.clear()
     gc.collect()
 
     assert (

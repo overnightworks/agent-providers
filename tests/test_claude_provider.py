@@ -2618,22 +2618,30 @@ def test_tool_surface_failure_is_cached_across_sequential_calls(
     assert len(commands) == 1
 
 
+_INIT_MARKER = "INIT-MARKER-5d2e81"
+
+
 @pytest.mark.parametrize(
     "init_line",
     [
-        b"\xff" + json.dumps({"type": "system", "subtype": "init"}).encode(),
-        json.dumps({"type": "system", "subtype": "init"}).encode("utf-16"),
+        b"\xff" + json.dumps({"type": "system", "subtype": "init", "note": _INIT_MARKER}).encode(),
+        json.dumps({"type": "system", "subtype": "init", "note": _INIT_MARKER}).encode("utf-16"),
     ],
     ids=["non-utf8", "utf16"],
 )
 def test_an_init_line_that_is_not_utf8_json_is_refused_with_the_closed_init_error(
-    init_line,
+    init_line, caplog,
 ) -> None:
+    caplog.set_level(logging.DEBUG)
+
     with pytest.raises(UnavailableError) as refused:
         _parse_announced_surface(init_line, mcp=None)
 
+    carried = [str(refused.value), repr(refused.value), repr(refused.value.args)]
     assert str(refused.value) == "Claude CLI did not open with the expected session init event"
     assert (refused.value.__cause__, refused.value.__context__) == (None, None)
+    assert [_INIT_MARKER in text for text in carried] == [False] * len(carried)
+    assert _INIT_MARKER not in caplog.text
 
 
 def test_tool_surface_failure_cache_expires_so_a_repair_takes_effect(

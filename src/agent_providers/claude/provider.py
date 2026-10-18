@@ -56,6 +56,7 @@ from agent_providers.errors import (
     ProviderUnavailableError,
     SafeRouteReasonCode,
     normalize_route_failure,
+    raise_without_chain,
     refuse_empty_model,
 )
 from agent_providers.events import (
@@ -450,7 +451,7 @@ def _safe_json_loads(raw_line: bytes) -> dict | None:
         return None
     try:
         parsed = json.loads(line.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
+    except (ValueError, RecursionError) as error:
         log.warning(
             "Claude stream: skipping malformed JSON line (%s, %d bytes)",
             type(error).__name__,
@@ -469,7 +470,7 @@ def _parse_stream_event(payload: dict, correlation_id: str | None) -> list[Strea
     except (AttributeError, TypeError, ValidationError) as error:
         refusal = type(error).__name__
     log.warning("Claude stream: refusing a malformed event (%s)", refusal)
-    raise UnavailableError(CLAUDE_CLI_UNAVAILABLE_DETAIL)
+    raise_without_chain(UnavailableError(CLAUDE_CLI_UNAVAILABLE_DETAIL))
 
 
 def _dispatch_stream_event(payload: dict, correlation_id: str | None) -> list[StreamEvent]:

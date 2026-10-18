@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -222,6 +223,9 @@ def _a_json_object_with_marker(encoding: str) -> bytes:
     return json.dumps({"type": "system", "note": A_MARKER}).encode(encoding)
 
 
+A_TOO_LONG_INTEGER_LINE = b'{"' + A_MARKER.encode() + b'": ' + b"9" * 5000 + b"}"
+
+
 def assert_no_marker_in_failure(error: BaseException, caplog) -> None:
     carried = [str(error), repr(error), repr(error.args)]
     carried.append(repr(getattr(error, "obj", "")))
@@ -239,8 +243,9 @@ def assert_no_marker_in_failure(error: BaseException, caplog) -> None:
         (_a_json_object_with_marker("utf-32"), "UnicodeDecodeError"),
         (_a_json_object_with_marker("utf-16-le"), "JSONDecodeError"),
         (_a_json_object_with_marker("utf-32-le"), "JSONDecodeError"),
+        (A_TOO_LONG_INTEGER_LINE, "ValueError"),
     ],
-    ids=["non-utf8", "utf16-bom", "utf32-bom", "utf16le", "utf32le"],
+    ids=["non-utf8", "utf16-bom", "utf32-bom", "utf16le", "utf32le", "int-digits"],
 )
 def test_a_line_that_is_not_utf8_json_is_skipped_with_a_class_only_warning(
     line, error_class, caplog,
@@ -253,10 +258,11 @@ def test_a_line_that_is_not_utf8_json_is_skipped_with_a_class_only_warning(
     assert "skipping malformed JSON line" in record.message
     assert error_class in record.message
     assert "bytes" in record.message
+    assert "9999" not in caplog.text
     assert A_MARKER not in caplog.text
 
 
-def test_a_line_nested_beyond_the_interpreters_limit_is_skipped_with_a_class_only_warning(
+def test_a_decoder_recursion_error_is_skipped_with_a_class_only_warning_and_never_its_message(
     monkeypatch, caplog,
 ) -> None:
     def too_deep(_text: str) -> None:
@@ -273,17 +279,41 @@ def test_a_line_nested_beyond_the_interpreters_limit_is_skipped_with_a_class_onl
     assert A_MARKER not in caplog.text
 
 
+def test_a_line_nested_deeper_than_the_decoder_can_parse_is_skipped_with_a_class_only_warning(
+    caplog,
+) -> None:
+    depth = 1_000_000
+    line = b"[" * depth + b"]" * depth + b"\n"
+    caplog.set_level("WARNING")
+    outcome: list[dict | None] = []
+    threading.stack_size(16 << 20)
+    try:
+        worker = threading.Thread(target=lambda: outcome.append(_safe_json_loads(line)))
+        worker.start()
+    finally:
+        threading.stack_size(0)
+    worker.join()
+
+    assert outcome == [None]
+    [record] = caplog.records
+    assert "RecursionError" in record.message
+    assert "[[[" not in caplog.text
+
+
 @pytest.mark.parametrize(
-    "payload",
+    ("payload", "error_class"),
     [
-        {"type": "assistant", "message": A_MARKER},
-        _assistant_payload(A_MARKER),
-        _user_payload(A_MARKER),
-        _user_payload(_a_tool_result_block("tu-1")) | {"message": {"content": 7}},
-        _assistant_payload({"type": "text", "text": {"k": A_MARKER}}),
-        _assistant_payload(_a_tool_use_block("tu-1") | {"input": A_MARKER}),
-        _user_payload(_a_tool_result_block({"k": A_MARKER})),
-        _user_payload(_a_tool_result_block("tu-1", [{"text": 7.5}])),
+        ({"type": "assistant", "message": A_MARKER}, "AttributeError"),
+        (_assistant_payload(A_MARKER), "AttributeError"),
+        (_user_payload(A_MARKER), "AttributeError"),
+        ({"type": "user", "message": {"content": 7}}, "TypeError"),
+        (_assistant_payload({"type": "text", "text": {"k": A_MARKER}}), "ValidationError"),
+        (
+            _assistant_payload(_a_tool_use_block("tu-1") | {"input": A_MARKER}),
+            "ValidationError",
+        ),
+        (_user_payload(_a_tool_result_block({"k": A_MARKER})), "ValidationError"),
+        (_user_payload(_a_tool_result_block("tu-1", [{"text": 7.5}])), "TypeError"),
     ],
     ids=[
         "message-string", "assistant-block-string", "user-block-string",
@@ -291,7 +321,7 @@ def test_a_line_nested_beyond_the_interpreters_limit_is_skipped_with_a_class_onl
         "tool-use-id-object", "result-item-text-number",
     ],
 )
-def test_a_refused_field_shape_fails_closed_and_unchained(payload, caplog) -> None:
+def test_a_refused_field_shape_fails_closed_and_unchained(payload, error_class, caplog) -> None:
     caplog.set_level("WARNING")
 
     with pytest.raises(UnavailableError) as refused:
@@ -301,6 +331,24 @@ def test_a_refused_field_shape_fails_closed_and_unchained(payload, caplog) -> No
     assert_no_marker_in_failure(refused.value, caplog)
     [record] = caplog.records
     assert "refusing a malformed event" in record.message
+    assert error_class in record.message
+
+
+def test_a_refusal_raised_while_the_caller_handles_a_marker_error_keeps_no_chain(caplog) -> None:
+    caplog.set_level("WARNING")
+    marker_error = UnicodeDecodeError("utf-8", A_MARKER.encode(), 0, 1, "invalid start byte")
+    refusal: UnavailableError | None = None
+
+    try:
+        raise marker_error
+    except UnicodeDecodeError:
+        try:
+            _parse_stream_event({"type": "assistant", "message": A_MARKER}, A_CORRELATION_ID)
+        except UnavailableError as refused:
+            refusal = refused
+
+    assert refusal is not None
+    assert_no_marker_in_failure(refusal, caplog)
 
 
 def _payload_of(event: StreamEvent) -> Any:

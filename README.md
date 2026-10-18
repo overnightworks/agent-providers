@@ -322,7 +322,7 @@ the error names the field.
 | `dispatch.image_capability` for the Codex CLI route always answered with the Codex fields set | it raises `ProviderNotConfiguredError("codex", block)` when `codex` or `turns.codex` is missing |
 | `process.run_cli_bounded` read the Grok prompt-file prefix itself | the caller passes `prompt_file_prefix` together with `prompt_file_bytes` and `prompt_file_arg_index`; the Grok transport passes `turns.grok.prompt_file_prefix` |
 | `process.PrivateCredentialHomeReservation` | `process.PrivateHomeReservation`, the reservation of the base `PrivateHome`; no alias remains |
-| `codex.protocol.run_reserved_codex_cli(...)` looked the process pool up itself | `codex.protocol.run_reserved_codex_cli(process_pool, reservation, home_reservation, child, *, stdin_payload, deadline, channel)` takes the `CodexProcessPool` that issued the reservation as its first argument | Pass the pool the reservation came from, so one turn reserves and reaps on one reference. No known host calls it. |
+| `codex.protocol.run_reserved_codex_cli(...)` looked the process pool up itself | `codex.protocol.run_reserved_codex_cli(process_pool, reservation, home_reservation, child, *, stdin_payload, deadline, channel)` takes the `CodexProcessPool` that issued the reservation as its first argument; pass that pool, so one turn reserves and reaps on one reference (no known host calls it) |
 
 ## Migrating to 0.3.0
 

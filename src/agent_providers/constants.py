@@ -42,24 +42,21 @@ CLAUDE_CLI_COMPLETION_TIMEOUT_SECONDS = 120
 # reinstalled, DB reachable again) is picked up on the next request rather
 # than staying failed for the lifetime of the success cache.
 CLAUDE_CLI_TOOL_SURFACE_FAILURE_CACHE_SECONDS = 10
-# How long a probe waits for SIGTERM to take effect before escalating to
-# SIGKILL. Named rather than a literal so the reap budget below is legible
-# as spelled-out arithmetic, not a mystery "+1".
-CLAUDE_CLI_SIGTERM_GRACE_SECONDS = 1
-# After SIGKILL a process cannot ignore the signal, so this bounds only the
-# pathological case (an uninterruptible kernel sleep, a stuck watcher) —
-# not a normal exit, which is immediate. Chosen well above that normal case
-# so it never fires in practice, and well below any caller's own timeout so
-# a stuck reap cannot block whoever is waiting on its outcome past it.
-CLAUDE_CLI_ZOMBIE_REAP_TIMEOUT_SECONDS = 5
+# The bound, from a reap's first SIGKILL, within which it must count a CLI
+# turn's process group empty before it frees the turn's slot; also the longest
+# wait for the leader's exit to be published after that count. A group not
+# confirmed by then is retained, not freed.
+CLI_GROUP_CONFIRMATION_SECONDS = 5
 # A process that outlives SIGKILL is not a transient hiccup — ten more
 # seconds will not make it healthy, and probing again on that schedule only
 # spawns another zombie. Cached failures of that specific kind get this much
 # longer TTL instead of CLAUDE_CLI_TOOL_SURFACE_FAILURE_CACHE_SECONDS.
 CLAUDE_CLI_ZOMBIE_FAILURE_CACHE_SECONDS = 300
-# A hard ceiling on all Claude CLI processes: live turns, probes, and processes
-# that are still waiting for a background reaper. A zombie storm deliberately
-# degrades to refusing new work (fail-closed), rather than growing without bound.
+# A hard ceiling on all Claude CLI processes: live turns, probes, the leaders of
+# retained groups (held until confirm_group_gone frees them), and probe processes
+# the bounded runner's background reaper still waits for. A zombie storm
+# deliberately degrades to refusing new work (fail-closed), rather than growing
+# without bound.
 CLAUDE_CLI_MAX_CONCURRENT_PROCESSES = 8
 
 # A missed deadline has one stable reason across a provider's own bound and

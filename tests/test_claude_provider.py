@@ -4029,12 +4029,14 @@ class _ChildInAHome:
 def _install_child_in_a_home(
     monkeypatch: pytest.MonkeyPatch,
     build_child: Callable[..., ScriptedClaudeChild] = a_claude_cli_child,
+    on_spawn: Callable[[], None] = lambda: None,
     **child_knobs: object,
 ) -> _ChildInAHome:
     child = build_child(**child_knobs)
     homes: list[Path] = []
 
     def start(spawned, _stream_buffer_limit) -> ScriptedClaudeChild:
+        on_spawn()
         homes.append(Path(spawned.environment["HOME"]))
         return child
 
@@ -4397,13 +4399,14 @@ def _prepare_the_turn(
     monkeypatch: pytest.MonkeyPatch,
     ending: _TurnEnding,
     build_child: Callable[..., ScriptedClaudeChild] = a_claude_cli_child,
+    on_spawn: Callable[[], None] = lambda: None,
     **child_script: object,
 ) -> _ChildInAHome:
     _write_no_mcp_config_file(monkeypatch)
     if ending.iteration_failure:
         monkeypatch.setattr(provider, "_iter_lines", lines_that_fail)
     return _install_child_in_a_home(
-        monkeypatch, build_child, **{**ending.child_script, **child_script},
+        monkeypatch, build_child, on_spawn, **{**ending.child_script, **child_script},
     )
 
 
@@ -4443,11 +4446,11 @@ def test_sigkill_ends_a_leader_that_survives_sigterm_before_its_slot_and_home_ar
     assert killpg_signals == []
 
 
-def _provider_records_after_the_turn_started(caplog: pytest.LogCaptureFixture) -> list[str]:
+def _provider_records_after(caplog: pytest.LogCaptureFixture, spawned_at: int) -> list[str]:
     return [
-        record.getMessage()
-        for record in caplog.records
-        if record.name == provider.log.name and not record.getMessage().startswith("Claude: ")
+        f"{record.levelname} {record.getMessage()}"
+        for record in caplog.records[spawned_at:]
+        if record.name == provider.log.name
     ]
 
 
@@ -4456,7 +4459,13 @@ def test_a_leader_that_outlives_sigkill_keeps_its_slot_and_home_until_its_group_
     ending: _TurnEnding, monkeypatch, killpg_signals, caplog,
 ) -> None:
     reap_without_waiting(monkeypatch)
-    turn = _prepare_the_turn(monkeypatch, ending, a_child_that_outlives_sigkill)
+    records_before_spawn: list[int] = []
+    turn = _prepare_the_turn(
+        monkeypatch,
+        ending,
+        a_child_that_outlives_sigkill,
+        lambda: records_before_spawn.append(len(caplog.records)),
+    )
     child = turn.child
     pid = child.pid
     caplog.set_level(logging.DEBUG)
@@ -4472,7 +4481,7 @@ def test_a_leader_that_outlives_sigkill_keeps_its_slot_and_home_until_its_group_
             assert operations(child.log) == [("SIGTERM", pid), ("SIGKILL", pid)]
             assert held_claude_slots() == 1
             assert turn.home.exists()
-            assert _provider_records_after_the_turn_started(caplog) == []
+            assert _provider_records_after(caplog, records_before_spawn[0]) == []
 
             reset_config()
             child.publish_exit(-provider.signal.SIGKILL)

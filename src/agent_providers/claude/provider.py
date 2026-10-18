@@ -936,12 +936,14 @@ def _mcp_turn_cli_arguments(
 #   timeout — see ``_verify_tool_surface_async``/``_sync``.
 # - The probe itself runs under one overall deadline covering every step
 #   (process start, stdin write, stdout read) — not a separate timeout per
-#   step that can add up to an unknown total. Only the final cleanup (SIGTERM
-#   grace, then the post-SIGKILL wait) has its own, separate, small bound —
+#   step that can add up to an unknown total. Only the final cleanup (the
+#   bounded runner's reap: SIGTERM grace, then the group's count and exit
+#   wait after SIGKILL) has its own, separate, small bound —
 #   cleanup must always be attempted regardless of how much of the answer
 #   budget is left. See ``_probe_cli_surface_async``/``_sync``.
-# - A process that survives SIGKILL is handed to ``process.run_cli_bounded``'s
-#   reaper. One reservation per process caps that work so a run of bad
+# - A group the bounded runner's reap did not confirm gone after SIGKILL is
+#   kept by ``process.run_cli_bounded``'s background reap. One reservation per
+#   process caps that work so a run of bad
 #   probes cannot grow an unbounded pool of waiting
 #   tasks/threads — and its failure is cached for
 #   ``CLAUDE_CLI_ZOMBIE_FAILURE_CACHE_SECONDS`` (much longer than an
@@ -1050,9 +1052,9 @@ _ToolSurfaceKey = tuple[BinaryBuild, frozenset[str]]
 
 # Extra margin a follower waits beyond the leader's own worst case before
 # giving up on its own — generous, since this only ever fires if the
-# leader's own bound (probe deadline + SIGTERM grace + group-confirmation bound)
-# somehow failed to hold; it is a defense-in-depth backstop, not the
-# expected path.
+# leader's own bound (probe deadline + the bounded runner's settle margin,
+# ``process.cli_settle_margin_seconds()``) somehow failed to hold; it is a
+# defense-in-depth backstop, not the expected path.
 _FOLLOWER_WAIT_MARGIN_SECONDS: Final = 2
 
 # _tool_surface_lock guards only the dicts below — a plain lookup/insert,
@@ -1475,11 +1477,7 @@ def _follower_wait_budget_seconds(probe_timeout_seconds: float) -> float:
 
 
 def _cleanup_margin_seconds() -> float:
-    return (
-        CLI_TERMINATION_GRACE_SECONDS
-        + CLI_GROUP_CONFIRMATION_SECONDS
-        + _FOLLOWER_WAIT_MARGIN_SECONDS
-    )
+    return process.cli_settle_margin_seconds() + _FOLLOWER_WAIT_MARGIN_SECONDS
 
 
 # ── cache lookups shared by both domains ────────────────────────────
@@ -1700,7 +1698,9 @@ def _probe_cli_surface_sync(
     if outcome.reason is process.CliRunReason.CLEANUP_OVERRAN:
         raise UnavailableError("Claude CLI probe cleanup did not finish within its budget")
     if outcome.became_zombie:
-        raise _ZombieProbeError("Claude CLI probe process outlived SIGKILL")
+        raise _ZombieProbeError(
+            "Claude CLI probe process group was not confirmed gone after SIGKILL"
+        )
     if outcome.reason is process.CliRunReason.IO_ERROR:
         raise UnavailableError("Claude CLI probe failed to run")
     if outcome.reason in {

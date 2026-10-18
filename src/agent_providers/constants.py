@@ -43,7 +43,8 @@ CLAUDE_CLI_COMPLETION_TIMEOUT_SECONDS = 120
 # than staying failed for the lifetime of the success cache.
 CLAUDE_CLI_TOOL_SURFACE_FAILURE_CACHE_SECONDS = 10
 # The bound, from a reap's first SIGKILL, within which it must count a CLI
-# turn's process group empty before it frees the turn's slot; also the longest
+# turn's process group empty (the anchored turn's reap and the bounded
+# runner's alike) before it frees the turn's slot; also the longest
 # wait for the leader's exit to be published after that count. A group not
 # confirmed by then is retained, not freed.
 CLI_GROUP_CONFIRMATION_SECONDS = 5

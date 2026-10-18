@@ -13,6 +13,7 @@ import os
 import pickle
 import resource
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -28,7 +29,9 @@ from functools import partial
 from pathlib import Path
 from unittest.mock import patch
 
+import provider_test_support
 import pytest
+from anchored_support import TEST_WAIT_SECONDS
 from provider_test_support import (
     A_RUNNER_FAILURE_CANARY,
     ANOTHER_RUNNER_FAILURE_CANARY,
@@ -37,7 +40,9 @@ from provider_test_support import (
     DESTINATION_FAULTS,
     GROK_LOGGED_IN,
     SECRET_ENV_KEYS,
+    ExitOnKill,
     FailingLogHandler,
+    FakeBlockingChild,
     RaisingLogHandler,
     RunnerFailureWatch,
     ThreadedOperation,
@@ -57,7 +62,9 @@ from provider_test_support import (
     fail_the_home_chmod,
     fail_the_work_directory,
     fail_to_start_the_runner_thread,
+    fake_cli_process,
     install_cli_door,
+    killpg_forbidden,
     order_the_thread_start_claims,
     override_claude_runtime,
     override_codex_runtime,
@@ -70,7 +77,7 @@ from provider_test_support import (
     tree_snapshot,
 )
 
-from agent_providers import process
+from agent_providers import lost_groups, process
 from agent_providers.codex.pool import CodexProcessKind, CodexProcessPool
 from agent_providers.codex.protocol import codex_child_process, create_codex_turn_home
 from agent_providers.codex_login import _blanked_document, assess_codex_login, blanked_copy
@@ -78,10 +85,14 @@ from agent_providers.config import current_codex_runtime, current_config
 from agent_providers.constants import (
     CLAUDE_CLI_AUTH_METHOD_FIELD,
     CLAUDE_CLI_LOGGED_IN_FIELD,
+    CLI_GROUP_CONFIRMATION_SECONDS,
     CLI_OUTPUT_READ_LIMIT_BYTES,
+    CLI_TERMINATION_GRACE_SECONDS,
+    PROBE_TIMEOUT_SECONDS,
 )
 from agent_providers.process import (
     CLAUDE_CLI_BINARY_MISSING_DETAIL,
+    CLI_PROBE_CALLER_TIMEOUT_SECONDS,
     CODEX_CLI_BINARY_MISSING_DETAIL,
     CODEX_CLI_CREDENTIALS_INVALID_DETAIL,
     GROK_CLI_BINARY_MISSING_DETAIL,
@@ -103,6 +114,7 @@ from agent_providers.process import (
     claude_cli_login,
     clear_agent_cli_caches,
     cli_settle_deadline,
+    cli_settle_margin_seconds,
     codex_cli_login,
     codex_cli_model_catalog,
     grok_cli_status,
@@ -111,8 +123,18 @@ from agent_providers.process import (
     run_claude_catalog_cli,
     run_cli_bounded,
 )
+from agent_providers.procfs import GroupCensus
 from agent_providers.sandbox.paths import CODEX_TOOL_TURN_DIRECTORY_PREFIX
-from agent_providers.spawn import INHERITED_MACHINE_VARIABLES, ChildProcess
+from agent_providers.spawn import (
+    INHERITED_MACHINE_VARIABLES,
+    AnchorStateError,
+    BlockingAnchoredChild,
+    ChildIdentityLost,
+    ChildProcess,
+    KillUntilGoneResult,
+)
+
+held_bounded_groups = provider_test_support.held_bounded_groups
 
 GROK_LOGGED_OUT = """You are not authenticated.
 
@@ -945,6 +967,7 @@ def test_bounded_runner_returns_at_the_settle_instant_when_its_cleanup_overruns(
     monkeypatch, failure_watch,
 ) -> None:
     monkeypatch.setattr("agent_providers.process.CLI_TERMINATION_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr("agent_providers.process.CLI_GROUP_CONFIRMATION_SECONDS", 0.2)
     monkeypatch.setattr("agent_providers.process.CLI_PROBE_CALLER_TIMEOUT_MARGIN_SECONDS", 0.01)
     release_cleanup = threading.Event()
     reaped = threading.Event()
@@ -995,6 +1018,7 @@ def test_the_second_wait_ends_at_the_settle_instant_however_late_the_first_one_w
     monkeypatch,
 ) -> None:
     monkeypatch.setattr("agent_providers.process.CLI_TERMINATION_GRACE_SECONDS", 0.2)
+    monkeypatch.setattr("agent_providers.process.CLI_GROUP_CONFIRMATION_SECONDS", 0.2)
 
     @dataclass
     class LateWakingState(process._BoundedRunState):
@@ -1038,10 +1062,9 @@ def test_bounded_runner_notifies_a_zombie_reap_only_after_background_confirmatio
     def await_background_reap(child, callback) -> None:
         background_started.set()
         assert allow_background_reap.wait(timeout=1)
-        for stream in (child.stdin, child.stdout, child.stderr):
-            if stream is not None:
-                stream.close()
-        child.wait()
+        child.close_streams()
+        assert child.wait_for_exit(TEST_WAIT_SECONDS)
+        child.release()
         process._notify_reaped(callback, child.pid, became_zombie=True)
 
     def record_reaped(process_id: int, became_zombie: bool) -> None:
@@ -1112,96 +1135,375 @@ def test_bounded_runner_stops_a_cli_that_never_writes_output() -> None:
     assert started[0].poll() is not None
 
 
-def test_bounded_runner_marks_an_unconfirmed_sigkill_as_a_zombie(monkeypatch) -> None:
-    started: list[subprocess.Popen[bytes]] = []
-    real_popen = subprocess.Popen
+_THE_RUNNER_DOOR_PID = FakeBlockingChild.pid
+_THE_CONFIRMED_REAP = [
+    ("kill_until_gone", CLI_GROUP_CONFIRMATION_SECONDS),
+    ("wait_for_exit", CLI_GROUP_CONFIRMATION_SECONDS),
+    ("release",),
+]
+_A_LIVE_GROUP = KillUntilGoneResult(GroupCensus.LIVE, ended_in_time=True)
+_AN_EMPTY_COUNT_THAT_ENDED_LATE = KillUntilGoneResult(GroupCensus.EMPTY, ended_in_time=False)
+_UNCOUNTABLE_CENSUSES = [
+    census for census in GroupCensus if census not in {GroupCensus.EMPTY, GroupCensus.LIVE}
+]
+_UNCONFIRMED_COUNTS = [
+    pytest.param(_A_LIVE_GROUP, "live", id="live"),
+    *(
+        pytest.param(KillUntilGoneResult(census, ended_in_time=True), census.value, id=census.value)
+        for census in _UNCOUNTABLE_CENSUSES
+    ),
+    pytest.param(_AN_EMPTY_COUNT_THAT_ENDED_LATE, "empty, counted too late", id="empty-too-late"),
+]
 
-    def capture_process(*args, **kwargs):
-        child = real_popen(*args, **kwargs)
-        started.append(child)
-        return child
 
-    monkeypatch.setattr(
-        "agent_providers.process._wait_for_process_group_exit",
-        lambda _process, _timeout: False,
+def _run_on_a_fake_door(monkeypatch, child, **options) -> CliRunOutcome:
+    install_cli_door(monkeypatch, lambda _child, *, stderr: child)
+    options.setdefault("deadline", time.monotonic() + TEST_WAIT_SECONDS)
+    return run_cli_bounded(
+        shell_child("-c", ":"), stdin_payload=None, read="all", **options,
     )
-    monkeypatch.setattr("agent_providers.process.CLI_TERMINATION_GRACE_SECONDS", 0.01)
-    with patch("agent_providers.spawn.subprocess.Popen", side_effect=capture_process):
-        outcome = run_cli_bounded(
-            shell_child("-c", "trap '' TERM; while :; do :; done"),
-            stdin_payload=None,
-            read="all",
-            deadline=time.monotonic() + 0.02,
-        )
-
-    assert outcome is not None
-    assert outcome.became_zombie is True
-    started[0].wait(timeout=1)
 
 
-def test_run_cli_logs_a_sigkill_survivor_without_starting_a_background_reaper(
-    monkeypatch, caplog,
+def _noting_on_the_child(child: FakeBlockingChild) -> Callable[[int, bool], None]:
+    return lambda process_id, became_zombie: child.operations.append(
+        ("on_reaped", process_id, became_zombie),
+    )
+
+
+def _reap_warnings(caplog) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING and "not confirmed gone" in record.getMessage()
+    ]
+
+
+def _not_confirmed_warning(diagnostic: str) -> str:
+    return (
+        f"agent CLI process group {_THE_RUNNER_DOOR_PID} was not confirmed gone ({diagnostic}); "
+        "its reap continues in the background"
+    )
+
+
+def _outlived_error(caplog) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.ERROR and "outlived its background reap" in record.getMessage()
+    ]
+
+
+def test_a_run_counts_its_group_before_it_frees_the_leader_and_calls_back(
+    monkeypatch, failure_watch, held_bounded_groups,
 ) -> None:
-    reaper_may_finish = threading.Event()
-    threads_before = {thread.ident for thread in threading.enumerate()}
-    monkeypatch.setattr(
-        "agent_providers.process._wait_for_process_group_exit",
-        lambda _process, _timeout: False,
-    )
-    monkeypatch.setattr(
-        "agent_providers.process._process_group_exists",
-        lambda _process_id: not reaper_may_finish.is_set(),
-    )
-    monkeypatch.setattr("agent_providers.process.CLI_TERMINATION_GRACE_SECONDS", 0.01)
-    caplog.set_level("WARNING")
+    child = fake_cli_process(b"ready\n")
 
-    try:
-        run = run_catalog_cli(shell_child("-c", "printf ready"))
-        threads_after = {thread.ident for thread in threading.enumerate()}
-    finally:
-        reaper_may_finish.set()
+    outcome = _run_on_a_fake_door(monkeypatch, child, on_reaped=_noting_on_the_child(child))
+
+    assert child.operations == [
+        ("close_streams",), *_THE_CONFIRMED_REAP, ("on_reaped", _THE_RUNNER_DOOR_PID, False),
+    ]
+    assert outcome.became_zombie is False
+    assert held_bounded_groups == []
+    failure_watch.assert_nothing_leaked()
+
+
+@pytest.mark.parametrize(
+    "survives_sigterm",
+    [pytest.param(False, id="sigterm-ends-the-leader"), pytest.param(True, id="sigterm-ignored")],
+)
+def test_a_running_leader_is_offered_sigterm_and_its_group_is_killed_and_counted_either_way(
+    monkeypatch, failure_watch, held_bounded_groups, survives_sigterm,
+) -> None:
+    child = fake_cli_process(b"ready\n", still_running=True, survives_sigterm=survives_sigterm)
+
+    outcome = _run_on_a_fake_door(monkeypatch, child, on_reaped=_noting_on_the_child(child))
+
+    assert child.operations == [
+        ("close_streams",),
+        ("signal_group", signal.SIGTERM),
+        ("wait_for_exit", CLI_TERMINATION_GRACE_SECONDS),
+        *_THE_CONFIRMED_REAP,
+        ("on_reaped", _THE_RUNNER_DOOR_PID, False),
+    ]
+    assert outcome.became_zombie is False
+    failure_watch.assert_nothing_leaked()
+
+
+@pytest.mark.parametrize(("answer", "diagnostic"), _UNCONFIRMED_COUNTS)
+def test_a_group_the_count_did_not_confirm_is_reported_and_not_freed(
+    monkeypatch, caplog, failure_watch, held_bounded_groups, answer, diagnostic,
+) -> None:
+    caplog.set_level(logging.WARNING, logger=process.__name__)
+    child = fake_cli_process(b"ready\n", gone=(answer,))
+    reaped: list[tuple[int, bool]] = []
+
+    outcome = _run_on_a_fake_door(
+        monkeypatch, child, on_reaped=lambda *call: reaped.append(call),
+    )
+    failure_watch.wait_for_the_runner_threads_to_end()
+
+    assert outcome.became_zombie is True
+    assert outcome.stdout == "ready\n"
+    assert ("release",) not in child.operations
+    assert reaped == []
+    assert _reap_warnings(caplog) == [_not_confirmed_warning(diagnostic)]
+    assert [group.process for group in held_bounded_groups] == [child]
+    failure_watch.assert_nothing_leaked()
+
+
+@pytest.mark.parametrize(
+    "exit_on_kill",
+    [
+        pytest.param(ExitOnKill.COMMITTED_UNANNOUNCED, id="exit-committed-not-announced"),
+        pytest.param(ExitOnKill.NONE, id="no-exit"),
+    ],
+)
+def test_an_empty_count_without_a_published_exit_frees_nothing(
+    monkeypatch, caplog, failure_watch, held_bounded_groups, exit_on_kill,
+) -> None:
+    caplog.set_level(logging.WARNING, logger=process.__name__)
+    child = fake_cli_process(
+        b"ready\n", still_running=True, survives_sigterm=True, exit_on_kill=exit_on_kill,
+    )
+    reaped: list[tuple[int, bool]] = []
+
+    outcome = _run_on_a_fake_door(
+        monkeypatch, child, on_reaped=lambda *call: reaped.append(call),
+    )
+    failure_watch.wait_for_the_runner_threads_to_end()
+
+    assert outcome.became_zombie is True
+    assert ("release",) not in child.operations
+    assert reaped == []
+    assert _reap_warnings(caplog) == [_not_confirmed_warning("empty, exit not published")]
+    assert child.kill_bounds == [
+        CLI_GROUP_CONFIRMATION_SECONDS, process._BACKGROUND_REAP_LIMIT_SECONDS,
+    ]
+    assert [group.process for group in held_bounded_groups] == [child]
+    failure_watch.assert_nothing_leaked()
+
+
+_A_STEP_THAT_RAISES = [
+    pytest.param(
+        {"still_running": True, "signal_failure": OSError(A_RUNNER_FAILURE_CANARY)},
+        ["reap OSError"],
+        True,
+        id="signal",
+    ),
+    pytest.param(
+        {"gone": (OSError(A_RUNNER_FAILURE_CANARY),)},
+        ["reap OSError", "background reap of agent CLI process group OSError"],
+        False,
+        id="census",
+    ),
+    pytest.param(
+        {"release_failures": (AnchorStateError(A_RUNNER_FAILURE_CANARY),)},
+        ["reap AnchorStateError"],
+        True,
+        id="release-refused",
+    ),
+    pytest.param(
+        {"release_failures": [ChildIdentityLost(A_RUNNER_FAILURE_CANARY)] * 2},
+        ["reap ChildIdentityLost", "background reap of agent CLI process group ChildIdentityLost"],
+        False,
+        id="identity-lost",
+    ),
+]
+
+
+@pytest.mark.parametrize(("script", "reported", "freed_in_background"), _A_STEP_THAT_RAISES)
+def test_a_reap_step_that_raises_is_not_confirmed_and_never_signals_by_number(
+    monkeypatch, failure_watch, held_bounded_groups, script, reported, freed_in_background,
+) -> None:
+    child = fake_cli_process(b"ready\n", **script)
+    reaped: list[tuple[int, bool]] = []
+
+    with killpg_forbidden():
+        outcome = _run_on_a_fake_door(
+            monkeypatch, child, on_reaped=lambda *call: reaped.append(call),
+        )
+        failure_watch.wait_for_the_runner_threads_to_end()
+
+    assert outcome.became_zombie is True
+    assert failure_watch.reported_steps() == reported
+    assert reaped == ([(_THE_RUNNER_DOOR_PID, True)] if freed_in_background else [])
+    failure_watch.assert_nothing_leaked()
+
+
+def test_a_background_count_frees_the_place_only_after_the_leader_is_released(
+    monkeypatch, failure_watch, held_bounded_groups,
+) -> None:
+    child = fake_cli_process(
+        b"ready\n", gone=(_A_LIVE_GROUP, KillUntilGoneResult(GroupCensus.EMPTY, True)),
+    )
+
+    outcome = _run_on_a_fake_door(monkeypatch, child, on_reaped=_noting_on_the_child(child))
+    failure_watch.wait_for_the_runner_threads_to_end()
+
+    assert outcome.became_zombie is True
+    assert child.operations[-2:] == [("release",), ("on_reaped", _THE_RUNNER_DOOR_PID, True)]
+    assert [operation for operation in child.operations if operation[0] == "on_reaped"] == [
+        ("on_reaped", _THE_RUNNER_DOOR_PID, True),
+    ]
+    assert held_bounded_groups == []
+    failure_watch.assert_nothing_leaked()
+
+
+@pytest.mark.parametrize(
+    "background_answers",
+    [
+        pytest.param((_A_LIVE_GROUP,), id="the-group-stays-live"),
+        pytest.param((_A_LIVE_GROUP, OSError(A_RUNNER_FAILURE_CANARY)), id="the-count-raises"),
+    ],
+)
+def test_a_background_reap_that_never_confirms_holds_the_place_until_the_process_exits(
+    monkeypatch, caplog, failure_watch, held_bounded_groups, pooled_run, background_answers,
+) -> None:
+    caplog.set_level(logging.ERROR, logger=process.__name__)
+    monkeypatch.setattr(process, "_BACKGROUND_REAP_LIMIT_SECONDS", _A_SHORT_REAP_BOUND_SECONDS)
+    process_pool, callbacks = pooled_run
+    child = fake_cli_process(b"ready\n", gone=background_answers)
+
+    _run_on_a_fake_door(monkeypatch, child, **callbacks)
+    failure_watch.wait_for_the_runner_threads_to_end()
+
+    assert _outlived_error(caplog) == [
+        f"agent CLI process group {_THE_RUNNER_DOOR_PID} outlived its background reap",
+    ]
+    assert child.kill_bounds == [CLI_GROUP_CONFIRMATION_SECONDS, _A_SHORT_REAP_BOUND_SECONDS]
+    assert [(group.process, group.on_reaped) for group in held_bounded_groups] == [
+        (child, callbacks["on_reaped"]),
+    ]
+    assert process_pool.reservation_count() == 1
+    failure_watch.assert_nothing_leaked()
+
+
+def test_a_catalog_run_with_an_unconfirmed_group_still_reaps_in_the_background(
+    monkeypatch, caplog, failure_watch, held_bounded_groups,
+) -> None:
+    caplog.set_level(logging.WARNING, logger=process.__name__)
+    child = fake_cli_process(b"ready", gone=(_A_LIVE_GROUP,))
+    install_cli_door(monkeypatch, lambda _child, *, stderr: child)
+
+    run = run_catalog_cli(shell_child("-c", ":"))
+    failure_watch.wait_for_the_runner_threads_to_end()
 
     assert run == CliRun(returncode=0, stdout="ready", stderr="", complete=True)
-    assert threads_after == threads_before
-    assert any("survived its SIGKILL grace period" in record.message for record in caplog.records)
+    assert child.kill_bounds == [
+        CLI_GROUP_CONFIRMATION_SECONDS, process._BACKGROUND_REAP_LIMIT_SECONDS,
+    ]
+    assert [(group.process, group.on_reaped) for group in held_bounded_groups] == [(child, None)]
+    assert _reap_warnings(caplog) == [_not_confirmed_warning("live")]
+    failure_watch.assert_nothing_leaked()
 
 
-def test_background_reap_notifies_when_process_group_check_fails(
-    monkeypatch, caplog, capfd,
-) -> None:
-    watch = RunnerFailureWatch(monkeypatch, caplog, capfd)
-    process_pool = CodexProcessPool(maximum_processes=2, maximum_image_runs=1)
-    reservation = process_pool.reserve(CodexProcessKind.IMAGE)
-    child = _a_session_leader("printf ready")
-    process_pool.bind(reservation, child.pid)
-    callbacks: list[tuple[int, bool]] = []
-    reap = pool_callbacks(process_pool, reservation)["on_reaped"]
+def test_the_settle_margin_covers_the_grace_the_count_bound_and_the_exit_wait() -> None:
+    assert cli_settle_margin_seconds() == pytest.approx(11.1)
+    assert cli_settle_deadline(100.0) == 100.0 + cli_settle_margin_seconds()
+    assert CLI_PROBE_CALLER_TIMEOUT_SECONDS == PROBE_TIMEOUT_SECONDS + cli_settle_margin_seconds()
 
-    def record_and_reap(process_id: int, became_zombie: bool) -> None:
-        callbacks.append((process_id, became_zombie))
-        reap(process_id, became_zombie)
 
-    monkeypatch.setattr(
-        "agent_providers.process._process_group_exists",
-        lambda _process_id: (_ for _ in ()).throw(OSError(A_RUNNER_FAILURE_CANARY)),
+def _a_confirmation_table():
+    yield pytest.param({"gone": (_A_LIVE_GROUP,)}, False, "live", id="live")
+    for census in _UNCOUNTABLE_CENSUSES:
+        yield pytest.param(
+            {"gone": (KillUntilGoneResult(census, True),)}, False, census.value, id=census.value,
+        )
+    yield pytest.param(
+        {"gone": (_AN_EMPTY_COUNT_THAT_ENDED_LATE,)}, False, "empty, counted too late",
+        id="empty-too-late",
     )
+    yield pytest.param(
+        {"still_running": True, "exit_on_kill": ExitOnKill.NONE},
+        False,
+        "empty, exit not published",
+        id="empty-exit-not-published",
+    )
+    yield pytest.param({}, True, None, id="empty-exit-published")
 
-    process._reap_in_background(child, record_and_reap)
-    child.communicate()
 
-    assert callbacks == [(child.pid, True)]
-    assert watch.reported_steps() == ["background reap of agent CLI process group OSError"]
-    assert process_pool.reservation_count() == 0
-    watch.assert_nothing_leaked()
+@pytest.mark.parametrize(("script", "released", "diagnostic"), list(_a_confirmation_table()))
+def test_a_confirmation_frees_the_leader_only_as_the_decider_answers_with_one_count(
+    script, released, diagnostic,
+) -> None:
+    child = fake_cli_process(None, **script)
+
+    confirmation = process._confirm_and_release(child, within=2.0)
+
+    assert confirmation.released is released
+    assert (("release",) in child.operations) is released
+    assert child.kill_bounds == [2.0]
+    if not released:
+        assert confirmation.diagnostic == diagnostic
 
 
-def test_background_reap_reports_a_failing_release_and_keeps_the_reservation(
+def test_the_runner_leaves_the_decision_to_free_to_the_shared_decider(
+    monkeypatch, caplog, failure_watch, held_bounded_groups,
+) -> None:
+    caplog.set_level(logging.WARNING, logger=process.__name__)
+    monkeypatch.setattr(lost_groups, "release_leader_if_gone", lambda *_call, **_keywords: False)
+    child = fake_cli_process(b"ready\n")
+    reaped: list[tuple[int, bool]] = []
+
+    outcome = _run_on_a_fake_door(
+        monkeypatch, child, on_reaped=lambda *call: reaped.append(call),
+    )
+    failure_watch.wait_for_the_runner_threads_to_end()
+
+    assert outcome.became_zombie is True
+    assert ("release",) not in child.operations
+    assert reaped == []
+    assert len(_reap_warnings(caplog)) == 1
+    assert [group.process for group in held_bounded_groups] == [child]
+
+
+@pytest.mark.parametrize(
+    ("script", "counted_empty", "exit_known"),
+    [
+        pytest.param({}, True, True, id="confirmed-and-published"),
+        pytest.param({"gone": (_A_LIVE_GROUP,)}, False, False, id="live"),
+        pytest.param({"gone": (_AN_EMPTY_COUNT_THAT_ENDED_LATE,)}, False, False, id="empty-late"),
+        pytest.param(
+            {
+                "still_running": True,
+                "survives_sigterm": True,
+                "exit_on_kill": ExitOnKill.COMMITTED_UNANNOUNCED,
+            },
+            True,
+            False,
+            id="empty-exit-committed-not-published",
+        ),
+    ],
+)
+def test_the_runner_asks_the_decider_with_the_count_and_the_published_exit_of_each_attempt(
+    monkeypatch, failure_watch, held_bounded_groups, script, counted_empty, exit_known,
+) -> None:
+    asked: list[tuple[bool, bool]] = []
+    decide = lost_groups.release_leader_if_gone
+
+    def record_and_decide(leader, *, counted_empty: bool, exit_known: bool) -> bool:
+        asked.append((counted_empty, exit_known))
+        return decide(leader, counted_empty=counted_empty, exit_known=exit_known)
+
+    monkeypatch.setattr(lost_groups, "release_leader_if_gone", record_and_decide)
+    child = fake_cli_process(b"ready\n", **script)
+
+    _run_on_a_fake_door(monkeypatch, child)
+    failure_watch.wait_for_the_runner_threads_to_end()
+
+    assert asked == [(counted_empty, exit_known)] * len(child.kill_bounds)
+    assert (("release",) in child.operations) is (counted_empty and exit_known)
+    failure_watch.assert_nothing_leaked()
+
+
+def test_bounded_runner_reports_a_failing_release_callback_and_keeps_the_reservation(
     monkeypatch, caplog, capfd,
 ) -> None:
     watch = RunnerFailureWatch(monkeypatch, caplog, capfd)
     process_pool = CodexProcessPool(maximum_processes=2, maximum_image_runs=1)
     reservation = process_pool.reserve(CodexProcessKind.IMAGE)
-    child = _a_session_leader(":")
+    child = fake_cli_process(None)
     process_pool.bind(reservation, child.pid)
 
     process._reap_in_background(
@@ -1214,44 +1516,17 @@ def test_background_reap_reports_a_failing_release_and_keeps_the_reservation(
     watch.assert_nothing_leaked()
 
 
-def _a_session_leader(command: str) -> subprocess.Popen[bytes]:
-    return subprocess.Popen(
-        ("/bin/sh", "-c", command),
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        start_new_session=True,
-    )
-
-
 _A_SHORT_REAP_BOUND_SECONDS = 0.2
-_REAP_BOUND_SLACK_SECONDS = 0.5
+
+
+def _a_group_that_never_dies() -> FakeBlockingChild:
+    return fake_cli_process(None, gone=(_A_LIVE_GROUP,))
 
 
 @pytest.fixture
-def a_background_reap_over_a_group_that_never_dies(monkeypatch):
+def a_background_reap_over_a_group_that_never_dies(monkeypatch, held_bounded_groups):
     monkeypatch.setattr(process, "_BACKGROUND_REAP_LIMIT_SECONDS", _A_SHORT_REAP_BOUND_SECONDS)
-    monkeypatch.setattr(process, "_BACKGROUND_REAP_POLL_SECONDS", 0.01)
-    monkeypatch.setattr(process, "_process_group_exists", lambda _process_id: True)
-    held: list = []
-    monkeypatch.setattr(process, "_reap_callbacks_held_until_exit", held)
-    return held
-
-
-def _reap_in_background_on_a_bounded_thread(child, on_reaped) -> Exception | None:
-    raised: list[Exception] = []
-
-    def reap() -> None:
-        try:
-            process._reap_in_background(child, on_reaped)
-        except Exception as error:
-            raised.append(error)
-
-    reaper = threading.Thread(target=reap)
-    reaper.start()
-    reaper.join(timeout=_A_SHORT_REAP_BOUND_SECONDS + _REAP_BOUND_SLACK_SECONDS)
-    assert not reaper.is_alive()
-    return raised[0] if raised else None
+    return held_bounded_groups
 
 
 def test_a_background_reap_ends_at_its_bound_and_keeps_what_it_holds(
@@ -1262,7 +1537,7 @@ def test_a_background_reap_ends_at_its_bound_and_keeps_what_it_holds(
     pool_reservation = process_pool.reserve(CodexProcessKind.IMAGE)
     home = _build_home(_a_source_login(tmp_path))
     home_reservation = home.reserve()
-    child = _a_session_leader(":")
+    child = _a_group_that_never_dies()
     process_pool.bind(pool_reservation, child.pid)
     release_pool = pool_callbacks(process_pool, pool_reservation)["on_reaped"]
 
@@ -1271,22 +1546,20 @@ def test_a_background_reap_ends_at_its_bound_and_keeps_what_it_holds(
         home_reservation.on_reaped(process_id, became_zombie)
 
     caplog.set_level(logging.ERROR, logger=process.__name__)
-    started = time.monotonic()
 
-    assert _reap_in_background_on_a_bounded_thread(child, on_reaped) is None
+    process._reap_in_background(child, on_reaped)
 
-    assert time.monotonic() - started < _A_SHORT_REAP_BOUND_SECONDS + _REAP_BOUND_SLACK_SECONDS
+    assert child.kill_bounds == [_A_SHORT_REAP_BOUND_SECONDS]
     [record] = caplog.records
     assert record.getMessage() == (
         f"agent CLI process group {child.pid} outlived its background reap"
     )
     assert record.exc_info is None
-    assert held[-1] is on_reaped
+    assert held[-1].on_reaped is on_reaped
     assert process_pool.reservation_count() == 1
     home.close()
     assert home.path.exists()
-    child.communicate()
-    held[-1](child.pid, True)
+    held[-1].on_reaped(child.pid, True)
     assert process_pool.reservation_count() == 0
     assert not home.path.exists()
 
@@ -1304,15 +1577,14 @@ def test_a_home_stays_held_when_logging_fails_at_the_reap_bound(
     monkeypatch.setattr(process.log, "propagate", False)
     home = _build_home(_a_source_login(tmp_path))
     home_path = home.path
-    child = _a_session_leader(":")
+    child = _a_group_that_never_dies()
 
-    failure = _reap_in_background_on_a_bounded_thread(child, home.reserve().on_reaped)
-    child.communicate()
+    with pytest.raises(OSError, match="log sink is gone"):
+        process._reap_in_background(child, home.reserve().on_reaped)
     home.close()
     del home
     gc.collect()
 
-    assert isinstance(failure, OSError)
     assert len(held) == 1
     assert home_path.exists()
     held.clear()
@@ -1321,18 +1593,18 @@ def test_a_home_stays_held_when_logging_fails_at_the_reap_bound(
 
 _REAP_OUTLIVED_IN_A_SUBPROCESS_SCRIPT = """
 import gc
-import subprocess
 import sys
 from pathlib import Path
+
+sys.path.insert(0, sys.argv[3])
+from provider_test_support import KillUntilGoneResult, fake_cli_process
 
 from agent_providers import process
 from agent_providers.config import ProviderRuntimeConfig, configure
 from agent_providers.process import PrivateCredentialHome
+from agent_providers.procfs import GroupCensus
 
 configure(ProviderRuntimeConfig.model_validate_json(sys.argv[1]))
-process._BACKGROUND_REAP_LIMIT_SECONDS = 0.2
-process._BACKGROUND_REAP_POLL_SECONDS = 0.01
-process._process_group_exists = lambda _process_id: True
 home = PrivateCredentialHome(
     Path(sys.argv[2]),
     Path(".claude/.credentials.json"),
@@ -1340,9 +1612,8 @@ home = PrivateCredentialHome(
     missing_credential_is_error=True,
 )
 home_path = home.path
-child = subprocess.Popen(("/bin/sh", "-c", ":"))
+child = fake_cli_process(None, gone=(KillUntilGoneResult(GroupCensus.LIVE, True),))
 process._reap_in_background(child, home.reserve().on_reaped)
-child.wait()
 home.close()
 del home, child
 gc.collect()
@@ -1364,28 +1635,22 @@ def test_a_zombie_whose_group_never_dies_frees_its_runner_thread(
     monkeypatch, a_background_reap_over_a_group_that_never_dies,
 ) -> None:
     held = a_background_reap_over_a_group_that_never_dies
-    monkeypatch.setattr(process, "_reap_process_group", lambda _process: True)
     threads_before = set(threading.enumerate())
     reaped: list[tuple[int, bool]] = []
 
-    outcome = run_cli_bounded(
-        shell_child("-c", "printf ready"),
-        stdin_payload=None,
-        read="all",
-        deadline=time.monotonic() + 1,
+    outcome = _run_on_a_fake_door(
+        monkeypatch,
+        _a_group_that_never_dies(),
         on_reaped=lambda process_id, became_zombie: reaped.append((process_id, became_zombie)),
     )
-    settled_at = time.monotonic()
     runner_threads = set(threading.enumerate()) - threads_before
     for runner_thread in runner_threads:
-        runner_thread.join(timeout=_A_SHORT_REAP_BOUND_SECONDS + _REAP_BOUND_SLACK_SECONDS)
+        runner_thread.join(timeout=TEST_WAIT_SECONDS)
 
     assert outcome.became_zombie is True
     assert not any(runner_thread.is_alive() for runner_thread in runner_threads)
-    assert time.monotonic() - settled_at < _A_SHORT_REAP_BOUND_SECONDS + _REAP_BOUND_SLACK_SECONDS
     assert reaped == []
     assert len(held) == 1
-
 
 
 def test_bounded_runner_stops_collecting_at_the_byte_limit(monkeypatch) -> None:
@@ -1410,29 +1675,6 @@ def test_run_cli_discards_partial_output_when_its_read_deadline_expires(monkeypa
     run = run_catalog_cli(shell_child("-c", "printf partial; exec sleep 10"))
 
     assert run == CliRun(returncode=-15, stdout="", stderr="", complete=False)
-
-
-def test_run_cli_keeps_a_started_cli_result_when_cleanup_reports_a_zombie(monkeypatch) -> None:
-    started: list[subprocess.Popen[bytes]] = []
-    real_popen = subprocess.Popen
-
-    def capture_process(*args, **kwargs):
-        child = real_popen(*args, **kwargs)
-        started.append(child)
-        return child
-
-    monkeypatch.setattr("agent_providers.process.PROBE_TIMEOUT_SECONDS", 0.2)
-    monkeypatch.setattr("agent_providers.process.CLI_TERMINATION_GRACE_SECONDS", 0.01)
-    monkeypatch.setattr(
-        "agent_providers.process._wait_for_process_group_exit",
-        lambda _process, _timeout: False,
-    )
-    with patch("agent_providers.spawn.subprocess.Popen", side_effect=capture_process):
-        run = run_catalog_cli(shell_child("-c", "trap '' TERM; while :; do :; done"))
-
-    assert run is not None
-    assert run.complete is False
-    started[0].wait(timeout=1)
 
 
 def test_bounded_runner_delivers_stdin_without_a_blocking_write() -> None:
@@ -2785,7 +3027,14 @@ def _run_home_script(script: str, tmp_path: Path) -> list[str]:
     source = tmp_path / "source.json"
     source.write_text(_CATALOG_AUTH_PAYLOAD)
     completed = subprocess.run(
-        [sys.executable, "-c", script, current_config().model_dump_json(), str(source)],
+        [
+            sys.executable,
+            "-c",
+            script,
+            current_config().model_dump_json(),
+            str(source),
+            str(Path(__file__).parent),
+        ],
         capture_output=True,
         text=True,
         check=True,
@@ -5042,7 +5291,7 @@ def test_a_failing_exchange_is_published_as_an_io_error_and_reaped(
     failure_watch.assert_nothing_leaked()
 
 
-def test_a_reap_that_raises_is_handed_off_with_a_sigkill_and_a_background_reap(
+def test_a_reap_that_raises_is_handed_off_to_the_background_reap(
     monkeypatch, failure_watch, pooled_run,
 ) -> None:
     process_pool, callbacks = pooled_run
@@ -5054,7 +5303,7 @@ def test_a_reap_that_raises_is_handed_off_with_a_sigkill_and_a_background_reap(
         reap(process_id, became_zombie)
 
     callbacks["on_reaped"] = count_then_reap
-    handed_off: list[subprocess.Popen[bytes]] = []
+    handed_off: list[BlockingAnchoredChild] = []
     background_reap_ended = threading.Event()
     real_background_reap = process._reap_in_background
 
@@ -5063,23 +5312,18 @@ def test_a_reap_that_raises_is_handed_off_with_a_sigkill_and_a_background_reap(
         handed_off.append(child)
         background_reap_ended.set()
 
-    class StdinWhoseCloseFails:
-        def __init__(self, stdin) -> None:
-            self._stdin = stdin
+    def fail_the_reap_and_the_first_stream_close(child) -> bool:
+        close_streams = child.close_streams
 
-        @property
-        def closed(self) -> bool:
-            return self._stdin.closed
-
-        def close(self) -> None:
-            self._stdin.close()
+        def close_then_fail_once() -> None:
+            del child.close_streams
+            close_streams()
             raise OSError(ANOTHER_RUNNER_FAILURE_CANARY)
 
-    def fail_the_reap_and_the_stdin_close(child) -> bool:
-        child.stdin = StdinWhoseCloseFails(child.stdin)
+        child.close_streams = close_then_fail_once
         raise PermissionError(A_RUNNER_FAILURE_CANARY)
 
-    monkeypatch.setattr(process, "_reap_process_group", fail_the_reap_and_the_stdin_close)
+    monkeypatch.setattr(process, "_reap_process_group", fail_the_reap_and_the_first_stream_close)
     monkeypatch.setattr(process, "_reap_in_background", capture_background_reap)
     deadline = time.monotonic() + 0.05
 
@@ -5229,6 +5473,7 @@ def test_a_cleanup_that_outlasts_the_settle_instant_is_published_by_the_channel_
 ) -> None:
     process_pool, callbacks = pooled_run
     monkeypatch.setattr("agent_providers.process.CLI_TERMINATION_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr("agent_providers.process.CLI_GROUP_CONFIRMATION_SECONDS", 0.2)
     monkeypatch.setattr("agent_providers.process.CLI_PROBE_CALLER_TIMEOUT_MARGIN_SECONDS", 0.01)
     channel = CliLineChannel(maximum_lines=1)
     release_reap = threading.Event()
@@ -5279,6 +5524,7 @@ def test_the_returned_outcome_is_the_overrun_a_consumer_already_published(
 ) -> None:
     process_pool, callbacks = pooled_run
     monkeypatch.setattr("agent_providers.process.CLI_TERMINATION_GRACE_SECONDS", 0.2)
+    monkeypatch.setattr("agent_providers.process.CLI_GROUP_CONFIRMATION_SECONDS", 0.2)
     channel = CliLineChannel(maximum_lines=1)
     release_reap = threading.Event()
     real_reap = process._reap_process_group
@@ -5450,6 +5696,7 @@ def test_whichever_thread_settles_first_decides_the_return_and_the_channel(
 ) -> None:
     process_pool, callbacks = pooled_run
     monkeypatch.setattr("agent_providers.process.CLI_TERMINATION_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr("agent_providers.process.CLI_GROUP_CONFIRMATION_SECONDS", 0.2)
     monkeypatch.setattr("agent_providers.process.CLI_PROBE_CALLER_TIMEOUT_MARGIN_SECONDS", 0.01)
     returned, runner_settled = _settle_in_order(
         monkeypatch, runner_thread_first=runner_thread_first,
@@ -5521,6 +5768,7 @@ def test_control_flow_raised_by_the_channel_close_on_the_callers_thread_propagat
 ) -> None:
     process_pool, callbacks = pooled_run
     monkeypatch.setattr("agent_providers.process.CLI_TERMINATION_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr("agent_providers.process.CLI_GROUP_CONFIRMATION_SECONDS", 0.2)
     monkeypatch.setattr("agent_providers.process.CLI_PROBE_CALLER_TIMEOUT_MARGIN_SECONDS", 0.01)
     channel = CliLineChannel(maximum_lines=1)
     caller = threading.current_thread()

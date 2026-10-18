@@ -41,6 +41,7 @@ from agent_providers.constants import (
     CLAUDE_CLI_AUTH_METHOD_FIELD,
     CLAUDE_CLI_LOGGED_IN_FIELD,
     CLAUDE_CLI_STATUS_ARGS,
+    CLI_GROUP_CONFIRMATION_SECONDS,
     CLI_LOGIN_STATUS_CACHE_SECONDS,
     CLI_OUTPUT_READ_LIMIT_BYTES,
     CLI_TERMINATION_GRACE_SECONDS,
@@ -57,13 +58,12 @@ from agent_providers.constants import (
 )
 from agent_providers.errors import raise_without_chain
 from agent_providers.spawn import (
+    BlockingAnchoredChild,
     ChildProcess,
     ChildProcessSpecificationError,
-    PipedProcess,
-    PipedProcessTimeout,
     StderrPolicy,
     closed_environment,
-    open_pipes,
+    open_blocking_anchored_pipes,
 )
 
 CODEX_CLI_MODEL_CATALOG_OUTPUT_READ_LIMIT_BYTES: Final = 4 * 1024 * 1024
@@ -165,7 +165,12 @@ class CliRunReason(str, Enum):
 
 @dataclass(frozen=True)
 class CliRunOutcome:
-    """The result of a bounded CLI invocation and its cleanup."""
+    """The result of a bounded CLI invocation and its cleanup.
+
+    ``became_zombie`` is true when the reap did not confirm the group gone: the reap goes on
+    in the background, and ``on_reaped(pid, True)`` follows only a later confirmation.
+    ``returncode`` is the leader's published code, or ``None``.
+    """
 
     started: bool
     spawn_error: BaseException | None
@@ -354,24 +359,36 @@ def run_publishing_failures(channel: CliLineChannel, runner_step: Callable[[], o
 
 LOGGED_OUT = CliLogin(logged_in=False, auth_method=None)
 
-# A probe can spend its answer budget and then two termination grace periods
-# reaping its process group. Give callers enough time to receive that outcome.
+# A probe can spend its answer budget and then its reap: the termination grace,
+# the group's count bound and the exit wait that follows a confirmed count. Give
+# callers enough time to receive that outcome.
 CLI_PROBE_CALLER_TIMEOUT_MARGIN_SECONDS = 0.1
 
 
-def _cli_settle_margin_seconds() -> float:
-    return 2 * CLI_TERMINATION_GRACE_SECONDS + CLI_PROBE_CALLER_TIMEOUT_MARGIN_SECONDS
+def cli_settle_margin_seconds() -> float:
+    return (
+        CLI_TERMINATION_GRACE_SECONDS
+        + 2 * CLI_GROUP_CONFIRMATION_SECONDS
+        + CLI_PROBE_CALLER_TIMEOUT_MARGIN_SECONDS
+    )
 
 
 def cli_settle_deadline(deadline: float) -> float:
     """The instant by which a run with this deadline has published its outcome."""
-    return deadline + _cli_settle_margin_seconds()
+    return deadline + cli_settle_margin_seconds()
 
 
-CLI_PROBE_CALLER_TIMEOUT_SECONDS = PROBE_TIMEOUT_SECONDS + _cli_settle_margin_seconds()
-_BACKGROUND_REAP_POLL_SECONDS: Final = 0.1
+CLI_PROBE_CALLER_TIMEOUT_SECONDS = PROBE_TIMEOUT_SECONDS + cli_settle_margin_seconds()
 _BACKGROUND_REAP_LIMIT_SECONDS: Final = 60.0
-_reap_callbacks_held_until_exit: list[Callable[[int, bool], None]] = []
+
+
+@dataclass(frozen=True)
+class _HeldGroup:
+    process: BlockingAnchoredChild
+    on_reaped: Callable[[int, bool], None] | None
+
+
+_groups_held_until_exit: list[_HeldGroup] = []
 
 log = logging.getLogger(__name__)
 
@@ -794,14 +811,14 @@ def _run_cli_bounded(
 ) -> None:
     failures = StepFailures()
     started, prompt_file_path = _start_bounded_cli(child, request, failures)
-    background_reap_process: PipedProcess | None = None
+    background_reap_process: BlockingAnchoredChild | None = None
     if isinstance(started, CliRunOutcome):
         outcome = started
     else:
         state.started.set()
         output = _exchange_after_spawn(started, request, failures)
         outcome, handed_off = _reaped_outcome(started, output, request.on_reaped, failures)
-        if handed_off and request.on_reaped is not None:
+        if handed_off:
             background_reap_process = started
     outcome = _outcome_after_prompt_file_cleanup(prompt_file_path, outcome, failures)
     _settle(state, request.stdout_line_channel, outcome, failures)
@@ -814,7 +831,7 @@ def _start_bounded_cli(
     child: ChildProcess,
     request: _CliRunRequest,
     failures: StepFailures,
-) -> tuple[PipedProcess | CliRunOutcome, str | None]:
+) -> tuple[BlockingAnchoredChild | CliRunOutcome, str | None]:
     prompt_file_path: str | None = None
     with failures.contained("spawn", reported=False):
         prompted_child, prompt_file_path = _with_private_prompt_file(
@@ -823,7 +840,10 @@ def _start_bounded_cli(
             request.prompt_file_arg_index,
             request.prompt_file_prefix,
         )
-        return open_pipes(prompted_child, stderr=request.stderr), prompt_file_path
+        return (
+            open_blocking_anchored_pipes(prompted_child, stderr=request.stderr),
+            prompt_file_path,
+        )
     with failures.contained("on_spawn_failed"):
         _notify_spawn_failed(request.on_spawn_failed)
     spawn_failure = _spawn_failure_outcome(failures.error_raised_by("spawn"))
@@ -844,7 +864,7 @@ def _spawn_failure_outcome(error: BaseException) -> CliRunOutcome:
 
 
 def _exchange_after_spawn(
-    process: PipedProcess,
+    process: BlockingAnchoredChild,
     request: _CliRunRequest,
     failures: StepFailures,
 ) -> _CliOutput:
@@ -872,7 +892,7 @@ def _exchange_after_spawn(
 
 
 def _reaped_outcome(
-    process: PipedProcess,
+    process: BlockingAnchoredChild,
     output: _CliOutput,
     on_reaped: Callable[[int, bool], None] | None,
     failures: StepFailures,
@@ -895,16 +915,12 @@ def _reaped_outcome(
     return outcome, became_zombie
 
 
-def _reap_or_hand_off(process: PipedProcess, failures: StepFailures) -> bool:
+def _reap_or_hand_off(process: BlockingAnchoredChild, failures: StepFailures) -> bool:
     """Reap the group; a reap that raises is handed to the background reap."""
     with failures.contained("reap"):
         return _reap_process_group(process)
-    with failures.contained("hand-off"):
-        _signal_process_group(process.pid, signal.SIGKILL)
-    for stream in (process.stdin, process.stdout, process.stderr):
-        if stream is not None:
-            with failures.contained("hand-off close"):
-                stream.close()
+    with failures.contained("hand-off close"):
+        process.close_streams()
     return True
 
 
@@ -1002,7 +1018,7 @@ def _notify_reaped(
 
 
 def _exchange_bounded(
-    process: PipedProcess,
+    process: BlockingAnchoredChild,
     stdin_payload: bytes | None,
     read: Literal["all", "first_line"],
     deadline: float,
@@ -1038,7 +1054,7 @@ def _exchange_bounded(
 
 def _register_exchange_streams(
     selector: selectors.BaseSelector,
-    process: PipedProcess,
+    process: BlockingAnchoredChild,
     exchange: _CliExchange,
 ) -> None:
     stdin = process.stdin
@@ -1052,7 +1068,7 @@ def _register_exchange_streams(
 
 def _register_output_streams(
     selector: selectors.BaseSelector,
-    process: PipedProcess,
+    process: BlockingAnchoredChild,
 ) -> None:
     for stream, name in ((process.stdout, "stdout"), (process.stderr, "stderr")):
         if stream is not None:
@@ -1281,7 +1297,7 @@ def _output_limit_reached(exchange: _CliExchange) -> _CliOutput:
     )
 
 
-def _close_stdin(process: PipedProcess) -> None:
+def _close_stdin(process: BlockingAnchoredChild) -> None:
     if process.stdin is not None:
         process.stdin.close()
 
@@ -2060,85 +2076,71 @@ def _decode(collected: bytearray) -> str:
     return collected.decode(errors="replace")
 
 
-def _reap_process_group(process: PipedProcess) -> bool:
-    for stream in (process.stdin, process.stdout, process.stderr):
-        if stream is not None:
-            stream.close()
-    _signal_process_group(process.pid, signal.SIGTERM)
-    _bounded_wait(process, CLI_TERMINATION_GRACE_SECONDS)
-    if _process_group_exists(process.pid):
-        _signal_process_group(process.pid, signal.SIGKILL)
-        if not _wait_for_process_group_exit(process, CLI_TERMINATION_GRACE_SECONDS):
-            log.warning("agent CLI process group %s survived its SIGKILL grace period", process.pid)
-            return True
-    return False
+@dataclass(frozen=True)
+class _GroupConfirmation:
+    census: procfs.GroupCensus
+    ended_in_time: bool
+    exit_published: bool
+    released: bool
+
+    @property
+    def diagnostic(self) -> str:
+        if self.census is not procfs.GroupCensus.EMPTY:
+            return self.census.value
+        if not self.ended_in_time:
+            return "empty, counted too late"
+        return "empty, exit not published"
+
+
+def _confirm_and_release(process: BlockingAnchoredChild, *, within: float) -> _GroupConfirmation:
+    # lost_groups imports ClaimedStartThread from this module, so only a call-time import fits
+    from agent_providers.lost_groups import release_leader_if_gone
+
+    result = process.kill_until_gone(within=within)
+    exit_published = result.confirmed and process.wait_for_exit(within)
+    released = release_leader_if_gone(
+        process, counted_empty=result.confirmed, exit_known=exit_published
+    )
+    return _GroupConfirmation(
+        result.census,
+        result.ended_in_time,
+        exit_published=exit_published,
+        released=released,
+    )
+
+
+def _reap_process_group(process: BlockingAnchoredChild) -> bool:
+    process.close_streams()
+    if process.returncode is None:
+        process.signal_group(signal.SIGTERM)
+        process.wait_for_exit(CLI_TERMINATION_GRACE_SECONDS)
+    confirmation = _confirm_and_release(process, within=CLI_GROUP_CONFIRMATION_SECONDS)
+    if confirmation.released:
+        return False
+    log.warning(
+        "agent CLI process group %s was not confirmed gone (%s); "
+        "its reap continues in the background",
+        process.pid,
+        confirmation.diagnostic,
+    )
+    return True
 
 
 def _reap_in_background(
-    process: PipedProcess,
+    process: BlockingAnchoredChild,
     on_reaped: Callable[[int, bool], None] | None,
 ) -> None:
     failures = StepFailures()
-    outlived_bound = False
+    released = False
     with failures.contained("background reap of agent CLI process group"):
-        bound = time.monotonic() + _BACKGROUND_REAP_LIMIT_SECONDS
-        while _process_group_exists(process.pid):
-            if time.monotonic() >= bound:
-                outlived_bound = True
-                break
-            process.poll()
-            time.sleep(_BACKGROUND_REAP_POLL_SECONDS)
-    if outlived_bound:
-        if on_reaped is not None:
-            _reap_callbacks_held_until_exit.append(on_reaped)
-        log.error("agent CLI process group %s outlived its background reap", process.pid)
-    else:
+        released = _confirm_and_release(process, within=_BACKGROUND_REAP_LIMIT_SECONDS).released
+    if released:
         with failures.contained("on_reaped"):
             _notify_reaped(on_reaped, process.pid, became_zombie=True)
+    else:
+        _groups_held_until_exit.append(_HeldGroup(process, on_reaped))
+        log.error("agent CLI process group %s outlived its background reap", process.pid)
     failures.report()
-
-
-def _wait_for_process_group_exit(process: PipedProcess, timeout: float) -> bool:
-    """Wait until SIGKILL has made the whole group unaddressable.
-
-    Waiting only for the direct child can return while one of its children
-    still runs, which would make a completed probe lie about its cleanup.
-    """
-    deadline = time.monotonic() + timeout
-    while _process_group_exists(process.pid):
-        # `poll()` performs the non-blocking waitpid that reaps the direct
-        # child. Without it, its zombie can keep the process group addressable
-        # after SIGKILL even though no runnable process remains.
-        process.poll()
-        if not _process_group_exists(process.pid):
-            return True
-        if time.monotonic() >= deadline:
-            return False
-        time.sleep(min(0.01, max(deadline - time.monotonic(), 0)))
-    return True
-
-
-def _signal_process_group(process_id: int, signal_number: signal.Signals) -> None:
-    try:
-        os.killpg(process_id, signal_number)
-    except ProcessLookupError:
-        return
-
-
-def _process_group_exists(process_id: int) -> bool:
-    try:
-        os.killpg(process_id, 0)
-    except ProcessLookupError:
-        return False
-    return True
-
-
-def _bounded_wait(process: PipedProcess, timeout: float) -> bool:
-    try:
-        process.wait(timeout=timeout)
-        return True
-    except PipedProcessTimeout:
-        return False
 
 
 def _probe_claude_login(binary: Path) -> CliLogin:

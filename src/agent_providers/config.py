@@ -131,7 +131,7 @@ class CodexCliRuntime(BaseModel):
     """The deployment facts of the Codex CLI, present only on a host that runs it.
 
     ``token_file`` is the provider's login source; Codex defines its format, an
-    ``auth.json`` whose copy is blanked, mode 0400.
+    ``auth.json`` whose copy is blanked: mode 0600 for a turn, 0400 for the catalog.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")

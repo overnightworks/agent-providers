@@ -2855,6 +2855,12 @@ def test_a_tool_turn_without_a_binary_reserves_nothing(
     image_turn.watch.assert_nothing_leaked(turn.error)
 
 
+def _remove_the_codex_turn_block_with_no_login_and_no_binary() -> None:
+    current_codex_runtime().token_file.unlink(missing_ok=True)
+    override_codex_runtime(binary="no-such-codex-binary-7c1d")
+    override_turn_runtime(codex=None)
+
+
 def _the_tool_turn_streams() -> object:
     return asyncio.run(_collect_tool_responses(_transport()))
 
@@ -2869,7 +2875,7 @@ def _the_tool_turn_streams() -> object:
             id="image-capability-codex-block",
         ),
         pytest.param(
-            lambda: override_turn_runtime(codex=None),
+            _remove_the_codex_turn_block_with_no_login_and_no_binary,
             "turns.codex",
             codex_image.codex_image_turn_is_available,
             id="image-capability-turns-codex-block",
@@ -2881,7 +2887,7 @@ def _the_tool_turn_streams() -> object:
             id="image-turn-codex-block",
         ),
         pytest.param(
-            lambda: override_turn_runtime(codex=None),
+            _remove_the_codex_turn_block_with_no_login_and_no_binary,
             "turns.codex",
             _generate_image,
             id="image-turn-turns-codex-block",
@@ -2893,7 +2899,7 @@ def _the_tool_turn_streams() -> object:
             id="tool-turn-codex-block",
         ),
         pytest.param(
-            lambda: override_turn_runtime(codex=None),
+            _remove_the_codex_turn_block_with_no_login_and_no_binary,
             "turns.codex",
             _the_tool_turn_streams,
             id="tool-turn-turns-codex-block",
@@ -2906,7 +2912,6 @@ def test_a_codex_entry_point_without_its_block_is_refused_naming_it_and_spawns_n
 ) -> None:
     for module in (codex_image, codex_protocol, codex_transport):
         monkeypatch.setattr(module, "get_codex_process_pool", get_codex_process_pool)
-    current_codex_runtime().token_file.write_bytes(a_codex_login())
     remove_block()
 
     with pytest.raises(ProviderNotConfiguredError) as refused:

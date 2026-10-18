@@ -253,7 +253,8 @@ MCP server passes `mcp_server=None` inside `turns`. A host migrates at its pin b
 A turn path reached
 without `turns` raises `TurnRuntimeNotConfiguredError` instead of running against a
 guess. These errors and `ProviderRuntimeNotConfiguredError` share the base
-`HostWiringError`, and `dispatch.stream_turn` raises them unchanged instead of
+`HostWiringError`, and `dispatch.stream_turn`, `dispatch.call_provider_once` and
+`dispatch.image_capability` raise them unchanged instead of
 reporting `ROUTE_FAILED`, so a host sees which part of its wiring is missing.
 
 `configure()` refuses a `cli_working_directory_root` that is not private: it
@@ -317,7 +318,7 @@ the error names the field.
 | `turns.codex_resources_directory` | `turns.codex.resources_directory` |
 | `turns.codex_max_concurrent_processes` | `turns.codex.max_concurrent_processes` |
 | `turns.codex_max_concurrent_image_runs` | `turns.codex.max_concurrent_image_runs` |
-| `dispatch.stream_turn` and `dispatch.call_provider_once` raised `ProviderUnavailableError` with `ROUTE_FAILED` when a provider block, `turns`, or the configuration itself was missing | both raise `ProviderNotConfiguredError(provider, block)`, `TurnRuntimeNotConfiguredError` or `ProviderRuntimeNotConfiguredError` unchanged, all `config.HostWiringError`s; a host that caught `ProviderUnavailableError` for a wiring fault catches `HostWiringError` too |
+| `dispatch.stream_turn`, `dispatch.call_provider_once` and `dispatch.image_capability` raised `ProviderUnavailableError` with `ROUTE_FAILED` when a provider block, `turns`, or the configuration itself was missing | all three raise `ProviderNotConfiguredError(provider, block)`, `TurnRuntimeNotConfiguredError` or `ProviderRuntimeNotConfiguredError` unchanged, all `config.HostWiringError`s; a host that caught `ProviderUnavailableError` for a wiring fault catches `HostWiringError` too |
 | `process.run_cli_bounded` read the Grok prompt-file prefix itself | the caller passes `prompt_file_prefix` together with `prompt_file_bytes` and `prompt_file_arg_index`; the Grok transport passes `turns.grok.prompt_file_prefix` |
 | `process.PrivateCredentialHomeReservation` | `process.PrivateHomeReservation`, the reservation of the base `PrivateHome`; no alias remains |
 

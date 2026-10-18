@@ -267,6 +267,16 @@ def test_grok_turn_without_a_grok_block_is_refused_naming_the_provider() -> None
     assert (refused.value.provider, refused.value.block) == ("grok", "grok")
 
 
+def test_grok_turn_without_a_turns_grok_block_is_refused_before_any_login_is_read() -> None:
+    current_grok_runtime().token_file.unlink(missing_ok=True)
+    override_turn_runtime(grok=None)
+
+    with pytest.raises(ProviderNotConfiguredError) as refused:
+        _transport()
+
+    assert (refused.value.provider, refused.value.block) == ("grok", "turns.grok")
+
+
 def test_grok_round_without_a_turns_grok_block_is_refused_naming_the_provider() -> None:
     override_turn_runtime(grok=None)
 

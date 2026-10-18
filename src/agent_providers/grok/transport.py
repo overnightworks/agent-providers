@@ -101,6 +101,7 @@ class GrokCliToolTransport:
 
     def __init__(self, *, model: str | None, catalog: ToolCatalog) -> None:
         refuse_empty_model("grok", "cli", model)
+        current_grok_turn_runtime()
         self._model = model
         self._catalog = catalog
         try:

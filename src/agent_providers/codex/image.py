@@ -213,6 +213,7 @@ def generate_codex_image(
         refuse_empty_model("codex", "cli", model)
     except ProviderUnavailableError:
         raise_without_chain(CodexImageCliError())
+    current_codex_turn_runtime()
     if not image_encoder_is_installed():
         raise CodexImageEncoderUnavailableError(_IMAGE_ENCODER_MISSING_DETAIL)
     try:

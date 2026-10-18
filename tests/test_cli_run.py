@@ -584,30 +584,33 @@ def test_a_failed_reap_keeps_the_original_failure_as_its_context(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.DEBUG)
-    refusal = ScriptRefused()
-    drain_failure = OSError("stderr read failed")
-    child = a_child_that_outlives_sigkill(
-        censuses=(GroupCensus.LIVE, GroupCensus.EMPTY),
-        stream_lines=[b"say:a\n", b"fail\n"],
-        stderr_failure=drain_failure,
-    )
-    adapter = LineScriptAdapter(CLAUDE_CLI_PROCESS_POOL, refusal=refusal)
 
-    async def scenario() -> None:
-        events = astream_cli_run(root, adapter)
-        assert await anext(events) == text("a")
-        await child.stderr_failed.wait()
-        async with without_waiting_on_stderr():
-            with pytest.raises(ContainmentLost) as lost:
-                await anext(events)
-        assert (
-            lost.value.__context__ is refusal,
-            drain_failure in exception_chain(lost.value),
-        ) == (True, False)
-        await free_the_retained_group(child, lost.value.group, private_root)
+    def run_to_the_failed_reap() -> None:
+        refusal = ScriptRefused()
+        drain_failure = OSError("stderr read failed")
+        child = a_child_that_outlives_sigkill(
+            censuses=(GroupCensus.LIVE, GroupCensus.EMPTY),
+            stream_lines=[b"say:a\n", b"fail\n"],
+            stderr_failure=drain_failure,
+        )
+        adapter = LineScriptAdapter(CLAUDE_CLI_PROCESS_POOL, refusal=refusal)
 
-    drive_scripted(monkeypatch, child, scenario())
-    del adapter, refusal
+        async def scenario() -> None:
+            events = astream_cli_run(root, adapter)
+            assert await anext(events) == text("a")
+            await child.stderr_failed.wait()
+            async with without_waiting_on_stderr():
+                with pytest.raises(ContainmentLost) as lost:
+                    await anext(events)
+            assert (
+                lost.value.__context__ is refusal,
+                drain_failure in exception_chain(lost.value),
+            ) == (True, False)
+            await free_the_retained_group(child, lost.value.group, private_root)
+
+        drive_scripted(monkeypatch, child, scenario())
+
+    run_to_the_failed_reap()
     caplog.clear()
     gc.collect()
 

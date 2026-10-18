@@ -1,7 +1,0 @@
-claim_id = "85634970a92549788bccbdd8a2901971"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "3d545e24e91e1a73a6b9487c96aa4f6a42a57037"
-branch = "claude/issue-251-grok-probe-no-login"
-scope = ["docs/decisions/0001-agent-service.md"]
-opened_commit = "13e9b58be5612710dafd983674fb72ae9ec30521"

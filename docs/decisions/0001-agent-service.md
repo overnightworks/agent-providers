@@ -1844,44 +1844,81 @@ g0a.report("A1", "ACP initialize and session/new over agent stdio", r)
 
 ### A1b measured: codex 0.163.0
 
-Measured on 18.10.2026 on the installed `codex` (`codex --version` prints
-`codex-cli 0.163.0`). No cell used a login, a token, an auth file or a model
+Measured on 18.10.2026 on the installed `codex`, whose native executable prints
+`codex-cli 0.163.0` (V1). No cell used a login, a token, an auth file or a model
 turn; the probe never ran `login` or `logout`, never opened any auth file, and
 every run had an empty throwaway home and an empty `CODEX_HOME`. Nothing here
 reads `~/.codex`. Operator ruling 18.10.2026: C0a uses no login.
 
 #### A1b-C0a the Codex CLI without a login (flags, stream, MCP client, files, egress)
 
-**V1 the binary.** `codex` on the path is a Node script
-(`@openai/codex/bin/codex.js`, 8,790 bytes, sha256 `61b0194f3bb6`) that starts a
-static musl executable from the optional package `@openai/codex-linux-x64`
-(296,865,480 bytes, sha256 `399ff69c431c`) with a sibling `codex-code-mode-host`.
-Every cell ran the native executable directly, bound read-only as `/opt/codex`;
-the sibling host was not bound. `codex --version` prints one line, exit 0:
+**V1 the binary.** `codex` on the path is a symlink to a Node script
+(`@openai/codex/bin/codex.js`) that starts a static musl executable from the
+optional package `@openai/codex-linux-x64`, with a sibling `codex-code-mode-host`.
+The pin, read-only commands run on 18.10.2026 after the series (paths shortened;
+`<shim>` is the resolved `codex.js`, `<native>` the musl executable):
+
+```text
+$ readlink -f "$(command -v codex)"
+<node-lib>/@openai/codex/bin/codex.js
+$ stat -c %s <shim> <native>
+8790
+296865480
+$ sha256sum <shim> <native>      (first 12 hex digits)
+61b0194f3bb6  <shim>
+399ff69c431c  <native>
+```
+
+The series itself recorded only the native executable, by `os.path.getsize` and
+`sha256sum` in cell V1 of both passes (296,865,480 bytes, sha256 prefix
+`399ff69c431c`, equal before and after); the shim size and hash have no
+in-series record, only the command above, run once after the series. The
+harness resolved the shim with `command -v codex` and executed neither it nor
+`codex.js`: every cell ran the native executable directly, bound read-only as
+`/opt/codex`, so the sibling host was not bound. `codex --version` as run by
+the harness (native executable, in the sandbox) prints one line, exit 0:
 
 ```text
 codex-cli 0.163.0
 ```
+
+It is not recorded whether the first version line came from a run of the shim in
+the ordinary environment; such a run would create `tmp/arg0-linux/` under the
+real `CODEX_HOME` (F1) but reads no auth file. Outside the sandbox the harness ran
+only `command -v codex`, `sha256sum` and `os.path.getsize` on the native
+executable, `find`, `rm -rf` and `pgrep` in scratch, and `python3` with the
+scripts below; every `codex` process ran inside `bwrap`, with `HOME` and
+`CODEX_HOME` in scratch. The earlier logs `all1.log`, `all2.log` and `v2.log`
+are development runs of the same scripts (one `B1` run died on a harness
+`AttributeError`, fixed before the series); the evidence below is the two passes
+of the locked series.
 
 The regex `^codex-cli (\d+\.\d+\.\d+)$` parses it. `codex version` is not a
 subcommand: the word is taken as the prompt of the interactive mode, which prints
 `Error: stdin is not a terminal` and exits 1.
 
 **Harness (every cell).** Each run is the native executable under `bwrap` with
-`--die-with-parent`, the system directories bound read-only, a throwaway home and
-an empty working directory in scratch, the network unshared (cells E1 share it,
-E1-dns also binds the resolver stub) and exactly this environment: `PATH`,
-`HOME`, `CODEX_HOME`, `TMPDIR` and, for the MCP cell, `FAKE_MCP_SECRET` (a random
-value made per harness process, never on argv). The driver runs inside the
+`--die-with-parent` (and no `--unshare-pid`), the system directories bound
+read-only, a throwaway home and an empty working directory in scratch (fresh per
+cell: `run.sh` deletes the cell's directory, calls within a cell share it), the
+network unshared (cells E1 share it, E1-dns also binds the resolver stub) and
+exactly this environment: `PATH`, `HOME`, `CODEX_HOME`, `TMPDIR` and
+`FAKE_MCP_SECRET` in every cell (a random value made per harness process, never
+on argv; only M1 passes it on to a server and a `-c` switch). The driver runs inside the
 sandbox, writes the prompt `hello` to stdin, closes stdin, waits at most `WAIT`
 seconds (30 unless a cell says 8 or 15) and kills the process group; the outer
-harness kills its own group 15 s later. `pgrep` for the driver after each cell
-found no survivor. One locked series (`/tmp/probe-stack.lock`) ran all cells, once fresh and once
-repeated, with the load average under 18. `BASE` is the argv of the issue:
+harness kills its own group 15 s later. After each cell `run.sh` counts
+`pgrep -fc` matches of the `drive.py` path (0 each time); that check does not see a
+leftover `codex` process, and the sandbox has no PID namespace of its own. One
+locked series (`/tmp/probe-stack.lock`, via `both.sh` below) ran all cells, once
+fresh and once repeated, with the load average checked per cell by `run.sh`
+(limit 18). `BASE` is the argv of the issue:
 `exec --json --sandbox read-only --skip-git-repo-check --ignore-user-config
 --ignore-rules --ephemeral` plus the `-c` switches listed in cell T1, with the
-prompt `-` (stdin). Every line of the evidence passed `write_record`, which drops
-any line holding the random bearer string or one of its 12-character windows.
+prompt `-` (stdin). Every line of the `ev/` evidence passed `write_record`, which drops
+any line holding the random bearer string or one of its 12-character windows; the
+`strace` files in `raw/` (B1, E1) are written by `strace` itself and were not
+passed through it.
 The scripts, verbatim (scratch only, the repository gains none):
 
 `drive.py`, run inside the sandbox (the fake MCP server is part of it, on an
@@ -2069,7 +2106,7 @@ elif cell == 'E1':
 
 ```bash
 #!/bin/bash
-# usage: run.sh CELL ; load check, lock, run, survivor check
+# usage: run.sh CELL ; load check, run, survivor check
 S=<scratch>
 load=$(cut -d' ' -f1 /proc/loadavg); awk -v l=$load 'BEGIN{exit !(l>18)}' && { echo "load $load too high"; exit 9; }
 export C0A=$S CODEX_NATIVE=<native-codex> CODEX_SHIM=$(command -v codex)
@@ -2077,6 +2114,28 @@ rm -rf $S/run/$1* $S/ev/$1.txt $S/raw/$1-*
 timeout 600 python3 -I $S/bin/cells.py $1; rc=$?
 echo "cell $1 rc=$rc survivors=$(pgrep -fc "$S/bin/drive.py")"
 ```
+
+`series.sh` (one pass over all cells) and `both.sh` (the lock wrapper that ran
+two passes), with the scratch path replaced by `<scratch>`:
+
+```bash
+#!/bin/bash
+S=<scratch>
+pass=$1
+rm -rf $S/ev $S/raw $S/run; mkdir -p $S/ev $S/raw
+for c in V1 N1 V2 T1 S1 L1 M1 M2 F1 B1 E1; do $S/bin/run.sh $c; done
+rm -rf $S/ev-$pass $S/raw-$pass; cp -r $S/ev $S/ev-$pass; cp -r $S/raw $S/raw-$pass
+echo "pass $pass done"
+```
+
+```bash
+#!/bin/bash
+S=<scratch>
+for pass in 1 2; do flock -o /tmp/probe-stack.lock $S/bin/series.sh $pass; done
+```
+
+The lock is therefore taken once per pass by `flock -o`, so no child inherits
+it; `run.sh` itself takes no lock.
 
 **V2 flags and config keys.** `codex exec --help` and `codex --help` exit 0. Each
 head flag of `BASE` (`--json`, `--sandbox read-only`, `--ignore-user-config`,
@@ -2106,8 +2165,9 @@ network unshared (DNS cannot answer) the stream is
 | 4 and on | `{"type":"error","message":"Reconnecting... n/5 (stream disconnected before completion: failed to lookup address information: Try again)"}`, first with `n` = 2 after about 15 s | `message` |
 
 Stderr carries tracing `ERROR` lines (`failed to connect to websocket ...`) every
-5 s from the start. The run does not end by itself: the 30 s deadline killed it
-(exit -9 in the harness). With a resolver and the network shared (E1-dns) it ends
+5 s from the start. The run had not ended when the 30 s deadline killed it
+(exit -9 in the harness); the last counter seen was `Reconnecting... 4/5` at
+26.7 s. With a resolver and the network shared (E1-dns) it ends
 on its own after 16 s: five websocket reconnects, one `item.completed` error
 `Falling back from WebSockets to HTTPS transport`, five HTTPS reconnects, an
 `{"type":"error","message":...}` and
@@ -2173,9 +2233,14 @@ file).
 **M2 MCP deny and approval switches.** Config keys that exist and were accepted
 under `--strict-config`: `mcp_servers.NAME.enabled_tools` and
 `mcp_servers.NAME.disabled_tools` (control `mcp_servers.fake.invented_c0a` refused),
-`approval_policy` (T1), `-s/--sandbox` (V2), plus the flags `--approve-for-me` and
-`--dangerously-bypass-approvals-and-sandbox`. Whether they block an MCP tool call
-is a model-turn fact: deferred.
+`approval_policy` (T1, `approval_policy="never"` under `--strict-config`),
+`-s/--sandbox` (V2, as a flag), plus the flags `--approve-for-me` and
+`--dangerously-bypass-approvals-and-sandbox`. The config key `sandbox_mode` was
+not driven: the harness run `-c sandbox_mode="read-only"` under `--strict-config`
+(empty throwaway home, no login) waited for `/tmp/probe-stack.lock` for over an
+hour behind other probes and was withdrawn, so the verdict is "not driven (probe
+lock unavailable)"; only the flag form `--sandbox read-only` is measured. Whether
+any of them blocks an MCP tool call is a model-turn fact: deferred.
 
 **F1 files in an empty `CODEX_HOME`** (type, bytes; the random directory suffix
 shown as `*`; the harness also gives the process its `TMPDIR`):
@@ -2184,7 +2249,7 @@ shown as `*`; the harness also gives the process its `TMPDIR`):
 |---|---|
 | `--version` | `tmp/arg0-linux/codex-arg0*/` with `.lock` (0 bytes) and three symlinks (`apply_patch`, `applypatch`, `codex-linux-sandbox`) |
 | `BASE` (with `--ephemeral`) | the same, plus `installation_id` (36 bytes), `shell_snapshots/` (one file, about 2.2 kB), `skills/.system/` (21 directories, 49 files, with a `.codex-system-skills.marker`), and the SQLite stores `goals_1`, `logs_2`, `memories_1`, `queue_1`, `state_5` (each with `-wal` and `-shm`; the databases 4 to 49 kB, the `-wal` files up to about 2 MB) |
-| `BASE` without `--ephemeral` | all of the above, plus `sessions/YYYY/MM/DD/rollout-*.jsonl` (about 38 kB for the failed turn), `thread-writer-locks/` (a coordination lock and one lock per thread), `thread_history_1.sqlite` (with `-wal` and `-shm`) |
+| `BASE` without `--ephemeral` | all of the above, plus `sessions/YYYY/MM/DD/rollout-*.jsonl` (about 38 kB, from a run that the 30 s deadline killed, not a completed turn), `thread-writer-locks/` (a coordination lock and one lock per thread), `thread_history_1.sqlite` (with `-wal` and `-shm`) |
 
 So `--ephemeral` removes the session file and the thread history only; the
 installation id, logs, state databases and the unpacked system skills still land
@@ -2198,10 +2263,12 @@ the CLI, traced with `strace -f -qq -e trace=execve,clone,clone3,unshare`. The
 no `CLONE_NEW*` flag; its children are the shell-snapshot helpers
 (`lsb_release`, `getconf`, `bash`, `locale`, `awk`, `sed` and friends). The
 control `codex sandbox linux -- true` runs `codex-linux-sandbox`, which executes
-`bwrap` (three `execve`s), clones with `CLONE_NEWUSER`, `CLONE_NEWNS`,
-`CLONE_NEWPID`, `CLONE_NEWIPC` and `CLONE_NEWNET`, and executes `true`; it then
-exits 101 (`Failed to execvp linux`, the extra word being how `sandbox linux`
-re-executes itself). So bubblewrap and user namespaces are needed by the
+`bwrap` (three `execve`s) and clones with `CLONE_NEWUSER`, `CLONE_NEWNS`,
+`CLONE_NEWPID`, `CLONE_NEWIPC` and `CLONE_NEWNET`; `true` ran once, in bwrap's
+namespace probe. The argv `sandbox linux -- true` then reached the second bwrap
+with `CLONE_NEW*` and the re-executed `codex-linux-sandbox` tried to run
+`linux -- true` (`execve` ENOENT three times), so it exited 101
+(`Failed to execvp linux`); the requested inner `true` did not run. So bubblewrap and user namespaces are needed by the
 sandboxed command path, not by the start-up of a turn with every feature off.
 The half with a model turn is deferred to C0b.
 
@@ -2212,7 +2279,9 @@ repeatedly; no connection follows. With the host resolver stub bound (E1-dns):
 the same name, then `connect` to two Cloudflare IPv4 and two IPv6 addresses
 (the port-65535 connects are address-selection probes) and to port 443; the only
 host is `api.openai.com:443`. No update, telemetry or other host appeared before
-the 401. The CLI contacts the OpenAI API with no credential at all, so C1 and
+the 401. The unauthenticated E1-dns request carried the prompt `hello` and Codex's
+environment context, including the scratch working path, to OpenAI. The CLI
+contacts the OpenAI API with no credential at all, so C1 and
 the network policy must assume that a CLI started without a usable login still
 calls out.
 
@@ -2221,7 +2290,9 @@ tool-free turn and its ending; tools really off under `BASE`; whether the three
 system-text keys replace or append; whether any turn limit ends a run (none found
 by name); MCP tool-call naming, parallel calls and whether `approval_policy`,
 `--sandbox` or `disabled_tools` block MCP calls; files a completed run writes;
-bubblewrap need in a model turn (HQ9, second half); hosts of a model turn; token
+bubblewrap need in a model turn (HQ9, second half); the held reply and
+JSON-only answers of M-live; a tool listing after the model starts (A1); hosts
+of a model turn; token
 lifetime and refresh by the child; refused or expired login.
 
 **What each consumer may rely on.** C1: without a login the CLI starts a turn and

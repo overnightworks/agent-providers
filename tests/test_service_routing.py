@@ -2,7 +2,7 @@
 
 Every combination of the five inputs is one row: whether the purpose names a
 CLI provider, whether a profile for that provider exists, whether the caller is
-in ``/ki-abo``, whether the purpose has an API alias, and whether the caller is
+in ``/subscription-members``, whether the purpose has an API alias, and whether the caller is
 in the app's group.
 """
 
@@ -19,7 +19,7 @@ CLI = Cli("claude-main")
 API = Api("cowriter")
 OFF = NotEnabled()
 
-# cli provider set, its profile exists, in /ki-abo, api alias set, in /apps/songmaker -> route
+# cli set, profile exists, in subscription group, api alias set, in /apps/songmaker -> route
 CROSS_PRODUCT = [
     (True, True, True, True, True, CLI),
     (True, True, True, True, False, CLI),
@@ -57,7 +57,7 @@ CROSS_PRODUCT = [
 
 
 def _row_id(row: tuple) -> str:
-    names = ("cli", "profile", "ki-abo", "alias", "app-group")
+    names = ("cli", "profile", "subscription-members", "alias", "app-group")
     present = [name if flag else f"no-{name}" for name, flag in zip(names, row[:5], strict=True)]
     return "-".join(present)
 
@@ -76,7 +76,10 @@ def test_route_follows_the_h5_table(
     )
     groups = frozenset(
         group
-        for group, member in (("/ki-abo", in_subscription), ("/apps/songmaker", in_app_group))
+        for group, member in (
+            ("/subscription-members", in_subscription),
+            ("/apps/songmaker", in_app_group),
+        )
         if member
     )
 
@@ -85,7 +88,7 @@ def test_route_follows_the_h5_table(
         CLAUDE_PROFILE if profile_exists else ONLY_ANOTHER_PROVIDERS_PROFILE,
         groups,
         "songmaker",
-        subscription_group="/ki-abo",
+        subscription_group="/subscription-members",
     )
 
     assert served == expected
@@ -101,7 +104,7 @@ def test_another_apps_group_does_not_open_the_api_route():
         {},
         frozenset({"/apps/presentator"}),
         "songmaker",
-        subscription_group="/ki-abo",
+        subscription_group="/subscription-members",
     )
 
     assert served == NotEnabled()

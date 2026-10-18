@@ -44,7 +44,7 @@ USER_PASSWORDS = {
     "carol": "carol-test-password",
 }
 EXPECTED_GROUPS = {
-    "alice": {"/ki-abo", "/apps/songmaker"},
+    "alice": {"/subscription-members", "/apps/songmaker"},
     "bob": {"/apps/songmaker"},
     "carol": set(),
 }

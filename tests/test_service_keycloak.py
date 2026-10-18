@@ -188,9 +188,7 @@ def test_only_the_user_who_started_a_run_reads_it_with_real_tokens(verify):  # n
         songmaker = _songmaker_workload()
         alice = get_run(base_url, run_headers(songmaker, _user_token("alice")), str(run_id))
         bob = get_run(base_url, run_headers(songmaker, _user_token("bob")), str(run_id))
-        never_begun = get_run(
-            base_url, run_headers(songmaker, _user_token("alice")), str(uuid4())
-        )
+        never_begun = get_run(base_url, run_headers(songmaker, _user_token("alice")), str(uuid4()))
         through_presentator = get_run(
             base_url,
             run_headers(
@@ -215,7 +213,9 @@ def test_a_token_of_an_unpublished_key_is_unavailable_once_the_key_set_origin_st
         return _fetch_key_set_from_test_keycloak(url)
 
     app = create_app(
-        service_config(issuer=_realm_url()), fetch_key_set=key_set_origin, monotonic_clock=clock
+        service_config(issuer=_realm_url()),
+        fetch_key_set=key_set_origin,
+        monotonic_clock=clock,
     )
     unpublished_key = TokenMint(key_id="never-published")
     with served(app) as base_url:

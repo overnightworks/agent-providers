@@ -411,9 +411,10 @@ def test_an_interleaving_whose_second_thread_hangs_on_start_still_joins_it() -> 
     paused = ThreadedOperation(an_operation_with_lines, pause_in=lines, at_line=1)
     other = StartThatLaunchesThenHangs(an_operation_with_lines, pause_in=lines, at_line=1)
 
-    with pytest.raises(AssertionError, match="the operation hung"):
-        with interleaved(paused, other, threading.Event()):
-            pass
+    interleaving = interleaved(paused, other, threading.Event())
+
+    with pytest.raises(AssertionError, match="the operation hung"), interleaving:
+        pass
 
     assert (paused.outcome, other.outcome) == ("the end", "the end")
     assert threading.active_count() == threads_before

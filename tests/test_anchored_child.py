@@ -19,18 +19,13 @@ from anchored_kernel import (
     KernelModel,
     PassThroughKernel,
     join_watcher,
+    watcher_names,
 )
 from anchored_leaders import SPAWN_LOGGER, ExitProbe, Leaders, spawn_warnings
-from anchored_support import TEST_WAIT_SECONDS, ChildCleanup, Exited
+from anchored_support import SIGKILLED, TEST_WAIT_SECONDS, ChildCleanup, Exited
 
 from agent_providers import spawn
 from agent_providers.spawn import AnchorState
-
-SIGKILLED = -9
-
-
-def watcher_names() -> set[str]:
-    return {t.name for t in threading.enumerate() if t.name.startswith(WATCHER_THREAD_PREFIX)}
 
 
 def process_status(pid: int) -> tuple[str, int, int]:

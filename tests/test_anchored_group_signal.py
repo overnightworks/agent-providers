@@ -15,6 +15,8 @@ from typing import Any
 import pytest
 from anchored_kernel import (
     OBSERVE_EXIT,
+    CensusRecorder,
+    EventLog,
     GroupSignalCall,
     GroupSignalModel,
     KernelModel,
@@ -23,6 +25,7 @@ from anchored_kernel import (
     join_watcher,
 )
 from anchored_leaders import (
+    LEADER_AND_GRANDCHILD_WAITING,
     LEADER_WITH_GRANDCHILD,
     InstrumentedLock,
     Leaders,
@@ -39,9 +42,9 @@ from anchored_support import (
     ChildCleanup,
     Exited,
     ProcessState,
-    _pidfd_open,
-    _wait_for_exits,
     absolute_import_roots,
+    pidfd_open,
+    wait_for_exits,
 )
 from provider_test_support import call_within_deadline
 
@@ -57,16 +60,6 @@ from agent_providers.spawn import (
 
 EXIT_CODE = 3
 
-LEADER_AND_GRANDCHILD_WAITING = (
-    "import os, signal, sys\n"
-    "if os.fork() == 0:\n"
-    "    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-    "    sys.stdout.write(f'{os.getpid()}\\n')\n"
-    "    sys.stdout.flush()\n"
-    "    sys.stdin.read()\n"
-    "    os._exit(0)\n"
-    "sys.stdin.read()\n"
-)
 LEAVER = (
     "import os, sys\n"
     "def say(text):\n"
@@ -202,15 +195,6 @@ def call_within_bound(started: Started, call: GroupCall) -> object:
     return call_within_deadline(call.send, started.leader, seconds=TEST_WAIT_SECONDS)
 
 
-class EventLog(list[tuple[str, str]]):
-    def record(self, kind: str) -> None:
-        self.append((kind, threading.current_thread().name))
-
-    @property
-    def kinds(self) -> list[str]:
-        return [kind for kind, _ in self]
-
-
 class LoggedLock(InstrumentedLock):
     def __init__(self, log: EventLog) -> None:
         super().__init__()
@@ -227,34 +211,6 @@ class LoggedLock(InstrumentedLock):
         super().release()
 
 
-class CensusRecorder(list[int]):
-    def __init__(self) -> None:
-        super().__init__()
-        self.log: EventLog | None = None
-        self.answer: procfs.GroupCensus | None = None
-        self.failure: Exception | None = None
-        self.during: Callable[[], None] | None = None
-
-    def __call__(self, view: procfs.ProcView, pgid: int) -> procfs.GroupCensus:
-        self.append(pgid)
-        if self.log is not None:
-            self.log.record("count")
-        if self.during is not None:
-            self.during()
-        if self.failure is not None:
-            raise self.failure
-        if self.answer is not None:
-            return self.answer
-        return group_census(view, pgid)
-
-
-@pytest.fixture
-def census_calls(monkeypatch: pytest.MonkeyPatch) -> CensusRecorder:
-    recorder = CensusRecorder()
-    monkeypatch.setattr(procfs, "group_census", recorder)
-    return recorder
-
-
 def test_a_group_signal_after_the_leader_exited_reaches_a_sigterm_ignoring_grandchild(
     leaders: Leaders,
     child_cleanup: ChildCleanup,
@@ -264,14 +220,14 @@ def test_a_group_signal_after_the_leader_exited_reaches_a_sigterm_ignoring_grand
     child_cleanup.close_at_cleanup(pid_reader)
     started = leaders.start(script=LEADER_WITH_GRANDCHILD, stdout=pid_writer)
     os.close(pid_writer)
-    grandchild = _pidfd_open(read_pid_line(pid_reader))
+    grandchild = pidfd_open(read_pid_line(pid_reader))
     child_cleanup.close_at_cleanup(grandchild)
     leaders.await_exit_seen(started)
     assert started.probe.observed == [(AnchorState.EXITED, EXIT_CODE)]
 
     signal_within_bound(started, signal.SIGKILL)
 
-    assert grandchild in _wait_for_exits([grandchild], TEST_WAIT_SECONDS)
+    assert grandchild in wait_for_exits([grandchild], TEST_WAIT_SECONDS)
     assert group_census(RealProcView(), started.owned.pid) is GroupCensus.EMPTY
     assert child_cleanup.state(started.owned) == Exited(EXIT_CODE)
     assert started.leader.state is AnchorState.EXITED
@@ -301,7 +257,9 @@ def test_a_group_signal_the_kernel_refuses_propagates_and_leaves_the_handle_usab
             call_within_bound(started, call)
         assert raised.value is refusal
         assert census_calls == []
-        assert started.leader.state is AnchorState.RUNNING
+        assert call_within_deadline(lambda: started.leader.state, seconds=TEST_WAIT_SECONDS) is (
+            AnchorState.RUNNING
+        )
         assert child_cleanup.state(started.owned) == RUNNING
         assert started.owned.popen.returncode is None
         assert not started.probe.seen.is_set()
@@ -372,7 +330,7 @@ def test_a_group_signal_after_the_end_is_refused_without_a_kernel_call(
 
     assert model.calls == []
     assert census_calls == []
-    assert started.leader.state is state
+    assert call_within_deadline(lambda: started.leader.state, seconds=TEST_WAIT_SECONDS) is state
     assert child_cleanup.state(started.owned) == process
     assert thread_failures == []
 
@@ -669,7 +627,7 @@ def test_a_kill_and_census_kills_a_sigterm_ignoring_grandchild_and_leaves_the_le
     child_cleanup.close_at_cleanup(pid_reader)
     started = leaders.start(script=script, stdout=pid_writer)
     os.close(pid_writer)
-    grandchild = _pidfd_open(read_pid_line(pid_reader))
+    grandchild = pidfd_open(read_pid_line(pid_reader))
     child_cleanup.close_at_cleanup(grandchild)
     if leader_exits_first:
         leaders.await_exit_seen(started)
@@ -677,7 +635,7 @@ def test_a_kill_and_census_kills_a_sigterm_ignoring_grandchild_and_leaves_the_le
     first = kill_and_census_within_bound(started)
 
     assert first in {GroupCensus.LIVE, GroupCensus.EMPTY}
-    assert grandchild in _wait_for_exits([grandchild], TEST_WAIT_SECONDS)
+    assert grandchild in wait_for_exits([grandchild], TEST_WAIT_SECONDS)
     leaders.await_exit_seen(started)
     assert group_census(RealProcView(), started.owned.pid) is GroupCensus.EMPTY
     assert started.leader.state is AnchorState.EXITED
@@ -701,7 +659,7 @@ class LeaverRun:
 
 
 def watched(pid: int, child_cleanup: ChildCleanup) -> int:
-    pidfd = _pidfd_open(pid)
+    pidfd = pidfd_open(pid)
     child_cleanup.close_at_cleanup(pidfd)
     return pidfd
 
@@ -717,7 +675,7 @@ def start_leaver(leaders: Leaders, child_cleanup: ChildCleanup, leave: str) -> L
 
 
 def assert_gone_within_bound(*pidfds: int) -> None:
-    assert set(pidfds) <= _wait_for_exits(pidfds, TEST_WAIT_SECONDS)
+    assert set(pidfds) <= wait_for_exits(pidfds, TEST_WAIT_SECONDS)
 
 
 SETSID = "os.setsid()"

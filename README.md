@@ -189,7 +189,7 @@ A bounded run (`process.run_cli_bounded`) sends SIGTERM to a leader that still r
 lasts for its bounded probe. Each Codex turn uses a fresh private home below
 `cli_working_directory_root`, with its blanked login copy at mode 0600. Removal is
 requested when the image turn returns or at the tool turn's `aclose`; like a Claude
-or Grok turn's home, the home remains until the turn's direct child has exited. A host
+or Grok turn's home, the home remains until the turn's process group is confirmed gone. A host
 test that replaces `codex.protocol.run_cli_bounded` must call `on_reaped` or
 `on_spawn_failed`, as the runner does, or the Codex turn home stays until it is
 collected. Removal never changes a call's outcome: a home that cannot be

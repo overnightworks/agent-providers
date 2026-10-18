@@ -1651,6 +1651,13 @@ class FakeBlockingChild:
         for stream in (self.stdin, self.stdout, self.stderr):
             stream.close()
 
+    def end_and_release(self) -> None:
+        if self.returncode is None:
+            self._publish_exit(-signal.SIGKILL)
+        self._release_failures.clear()
+        self.release()
+        self.close_every_pipe()
+
     def close_every_pipe(self) -> None:
         for stream in (
             self.stdin,
@@ -1669,13 +1676,13 @@ class FakeBlockingChild:
 
 @pytest.fixture
 def held_bounded_groups(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[process._HeldGroup]]:
-    """A fresh list of the groups the bounded runner holds until their process exits."""
+    """A fresh list of the groups the bounded runner holds; teardown ends and releases each fake."""
     held: list[process._HeldGroup] = []
     monkeypatch.setattr(process, "_groups_held_until_exit", held)
     yield held
     for group in held:
         assert isinstance(group.process, FakeBlockingChild), "a real handle was held at the end"
-        group.process.close_every_pipe()
+        group.process.end_and_release()
 
 
 def a_claude_cli_child(*, pid: int = 2468, **script: Any) -> ScriptedClaudeChild:

@@ -2089,7 +2089,9 @@ class _GroupConfirmation:
             return self.census.value
         if not self.ended_in_time:
             return "empty, counted too late"
-        return "empty, exit not published"
+        if not self.exit_published:
+            return "empty, exit not published"
+        return "empty, exit published, leader not released"
 
 
 def _confirm_and_release(process: BlockingAnchoredChild, *, within: float) -> _GroupConfirmation:

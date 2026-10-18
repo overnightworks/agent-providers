@@ -32,6 +32,7 @@ from unittest.mock import patch
 import provider_test_support
 import pytest
 from anchored_support import TEST_WAIT_SECONDS
+from descendant_support import process_identity
 from provider_test_support import (
     A_RUNNER_FAILURE_CANARY,
     ANOTHER_RUNNER_FAILURE_CANARY,
@@ -776,7 +777,7 @@ def test_a_sigterm_ignoring_cli_and_child_are_reaped_after_sigkill() -> None:
     ):
         assert run_catalog_cli(shell_child("-c", command)).complete is False
 
-    assert started[0].poll() is not None
+    assert process_identity(started[0].pid) is None
     with pytest.raises(ProcessLookupError):
         os.killpg(started[0].pid, 0)
 
@@ -1110,7 +1111,7 @@ def test_bounded_runner_stops_a_cli_that_never_reads_its_full_stdin_pipe() -> No
 
     assert outcome is not None
     assert outcome.complete is False
-    assert started[0].poll() is not None
+    assert process_identity(started[0].pid) is None
 
 
 def test_bounded_runner_stops_a_cli_that_never_writes_output() -> None:
@@ -1132,7 +1133,7 @@ def test_bounded_runner_stops_a_cli_that_never_writes_output() -> None:
 
     assert outcome is not None
     assert outcome.complete is False
-    assert started[0].poll() is not None
+    assert process_identity(started[0].pid) is None
 
 
 _THE_RUNNER_DOOR_PID = FakeBlockingChild.pid
@@ -1398,6 +1399,49 @@ def test_a_catalog_run_with_an_unconfirmed_group_still_reaps_in_the_background(
     failure_watch.assert_nothing_leaked()
 
 
+def test_a_failed_step_reported_to_a_dead_log_sink_still_hands_the_group_to_the_background_reap(
+    monkeypatch, a_background_reap_over_a_group_that_never_dies, failure_watch,
+) -> None:
+    held = a_background_reap_over_a_group_that_never_dies
+    monkeypatch.setattr(process.log, "handlers", [_FailingLogHandler()])
+    monkeypatch.setattr(process.log, "propagate", False)
+    child = fake_cli_process(
+        b"ready\n", still_running=True, gone=(RuntimeError("count failed"), _A_LIVE_GROUP),
+    )
+
+    outcome = _run_on_a_fake_door(monkeypatch, child)
+    failure_watch.wait_for_the_runner_threads_to_end()
+
+    assert outcome.became_zombie is True
+    assert [group.process for group in held] == [child]
+    assert child.kill_bounds[-1] == process._BACKGROUND_REAP_LIMIT_SECONDS
+
+
+@pytest.mark.parametrize(
+    ("confirmation", "diagnostic"),
+    [
+        pytest.param(
+            process._GroupConfirmation(
+                GroupCensus.EMPTY, True, exit_published=False, released=False,
+            ),
+            "empty, exit not published",
+            id="exit-not-published",
+        ),
+        pytest.param(
+            process._GroupConfirmation(
+                GroupCensus.EMPTY, True, exit_published=True, released=False,
+            ),
+            "empty, exit published, leader not released",
+            id="exit-published",
+        ),
+    ],
+)
+def test_a_declined_empty_count_names_whether_the_exit_was_published(
+    confirmation, diagnostic,
+) -> None:
+    assert confirmation.diagnostic == diagnostic
+
+
 def test_the_settle_margin_covers_the_grace_the_count_bound_and_the_exit_wait() -> None:
     assert cli_settle_margin_seconds() == pytest.approx(11.1)
     assert cli_settle_deadline(100.0) == 100.0 + cli_settle_margin_seconds()
@@ -1578,9 +1622,10 @@ def test_a_home_stays_held_when_logging_fails_at_the_reap_bound(
     home = _build_home(_a_source_login(tmp_path))
     home_path = home.path
     child = _a_group_that_never_dies()
+    on_reaped = home.reserve().on_reaped
 
     with pytest.raises(OSError, match="log sink is gone"):
-        process._reap_in_background(child, home.reserve().on_reaped)
+        process._reap_in_background(child, on_reaped)
     home.close()
     del home
     gc.collect()

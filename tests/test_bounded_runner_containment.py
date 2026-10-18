@@ -158,14 +158,25 @@ def kernel_spy() -> Iterator[list[tuple]]:
         yield events
 
 
+@pytest.mark.parametrize(
+    ("leader_blocks", "deadline_seconds"),
+    [
+        pytest.param(False, TEST_WAIT_SECONDS, id="leader-exited"),
+        pytest.param(True, A_READ_DEADLINE_SECONDS, id="leader-running-at-the-deadline"),
+    ],
+)
 def test_the_group_is_signalled_while_the_leader_is_still_unreaped_and_never_after_the_reap(
-    tmp_path: Path, handshake: Handshake, row: DescendantRow,
+    tmp_path: Path,
+    handshake: Handshake,
+    row: DescendantRow,
+    leader_blocks: bool,
+    deadline_seconds: float,
 ) -> None:
     run = BoundedRun()
-    child = a_leader_with_a_descendant(tmp_path, handshake)
+    child = a_leader_with_a_descendant(tmp_path, handshake, blocks=leader_blocks)
 
     with kernel_spy() as events:
-        row.run_beside(lambda: run_bounded(child, run, TEST_WAIT_SECONDS))
+        row.run_beside(lambda: run_bounded(child, run, deadline_seconds))
     (leader,) = run.spawned
 
     signals = [index for index, event in enumerate(events) if event[:2] == ("signal", leader)]

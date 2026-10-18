@@ -17,7 +17,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
-from anchored_kernel import CensusRecorder, EventLog, GroupSignalCall, GroupSignalModel
+from anchored_kernel import (
+    CensusRecorder,
+    EventLog,
+    GroupSignalCall,
+    GroupSignalModel,
+    KernelModel,
+    install_kernel,
+)
 from anchored_leaders import Leaders
 from anchored_support import GONE, SIGKILLED, TEST_WAIT_SECONDS, ChildCleanup, Exited, OwnedChild
 from descendant_support import DescendantRow, Handshake, lingering_descendant, process_identity
@@ -29,6 +36,7 @@ from agent_providers.spawn import (
     AnchoredLeader,
     AnchorStateError,
     BlockingAnchoredChild,
+    ChildIdentityLost,
     ChildProcess,
     StderrPolicy,
     closed_environment,
@@ -42,12 +50,13 @@ INTERVAL = GROUP_CENSUS_INTERVAL_SECONDS
 LIVE = GroupCensus.LIVE
 EMPTY = GroupCensus.EMPTY
 UNAVAILABLE = [census for census in GroupCensus if census not in {EMPTY, LIVE}]
+EXIT_STATUS = 3
 ECHOES_STDIN_THEN_EXITS_WITH_THREE = (
     "import sys\n"
     "sys.stdout.write(sys.stdin.read())\n"
     "sys.stdout.flush()\n"
     "sys.stderr.write('problem')\n"
-    "sys.exit(3)\n"
+    f"sys.exit({EXIT_STATUS})\n"
 )
 NAMES_ITS_STDERR = (
     "import os, sys\nsys.stdout.write(os.readlink('/proc/self/fd/2'))\nsys.stdin.read()\n"
@@ -169,13 +178,28 @@ def test_the_door_carries_the_streams_and_holds_the_exited_leader_until_its_rele
 
     assert (echoed, problem) == (b"hello", b"problem")
     assert exit_published
-    assert child.returncode == 3
+    assert child.returncode == EXIT_STATUS
     assert held_state is not None
     assert held_state[0] == "Z"
     child.release()
     assert [child.stdin.closed, child.stdout.closed, child.stderr.closed] == [True] * 3
     assert child_cleanup.state(owned) == GONE
     child.release()
+
+
+def test_a_lost_leader_is_no_published_exit_and_is_released_to_nobody(
+    leaders: Leaders, child_cleanup: ChildCleanup, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_kernel(monkeypatch, KernelModel(loses_at="wait"))
+    child, _ = open_door(child_cleanup, leaders.describe())
+
+    exit_published = child.wait_for_exit(TEST_WAIT_SECONDS)
+    with pytest.raises(ChildIdentityLost):
+        child.release()
+
+    assert exit_published is False
+    assert child.returncode is None
+    assert child.stdout.closed
 
 
 def test_a_devnull_stderr_is_no_stream_and_the_childs_stderr_is_the_null_device(

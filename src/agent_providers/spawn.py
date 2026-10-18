@@ -1006,7 +1006,8 @@ class BlockingAnchoredChild:
     thread. ``pid``, ``returncode``, ``done_with_pid`` and ``signal_group`` are the leader's.
     ``stdin`` and ``stdout`` are unbuffered file objects; ``stderr`` is one, or ``None`` when
     the door sent it to ``/dev/null``. There is no ``wait``, ``poll`` or ``communicate``:
-    ``wait_for_exit`` answers whether the leader's exit is published and never reaps.
+    ``wait_for_exit`` answers whether the leader's exit is published, false for a lost
+    leader too, and never reaps.
 
     ``kill_until_gone(within=)`` is :meth:`AnchoredChild.kill_until_gone` on the caller's
     thread and on ``time.monotonic``: the same bound, the same attempt-again decision, the
@@ -1064,7 +1065,7 @@ class BlockingAnchoredChild:
         return KillUntilGoneResult(census, ended_in_time=ended <= deadline)
 
     def wait_for_exit(self, timeout: float) -> bool:
-        return self._exit_published.wait(timeout)
+        return self._exit_published.wait(timeout) and self._leader.returncode is not None
 
     def close_streams(self) -> None:
         self._pipes.close_parent_files()

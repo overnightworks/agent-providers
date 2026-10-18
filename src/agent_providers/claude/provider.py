@@ -31,6 +31,7 @@ from agent_providers.anchored_turn import (
     ReapBounds,
     anchored_turn_child,
 )
+from agent_providers.cli_run import CliRunStart, StepEvent, drain_without_keeping
 from agent_providers.config import (
     McpServerSpec,
     current_claude_runtime,
@@ -151,6 +152,7 @@ _CLI_INIT_EVENT_SUBTYPE: Final = "init"
 _TOOL_SURFACE_PROBE_PROMPT: Final = "."
 
 _STREAM_BUFFER_LIMIT = 4 * 1024 * 1024
+_SYSTEM_PROMPT_FILE_NAME: Final = "system-prompt"
 _CLAUDE_TURN_HOME_PREFIX: Final = "agent-cli-claude-turn-"
 _CLAUDE_CREDENTIAL_PATH: Final = Path(".claude/.credentials.json")
 
@@ -378,7 +380,7 @@ async def _consume_stream(
 ) -> AsyncIterator[StreamEvent]:
     text_chunks: list[str] = []
     final_text: str | None = None
-    stderr_task = asyncio.create_task(_drain_stream(proc.stderr))
+    stderr_task = asyncio.create_task(drain_without_keeping(proc.stderr))
     try:
         try:
             async for raw_line in _iter_lines(proc.stdout, timeout_seconds):
@@ -431,18 +433,6 @@ async def _iter_lines(
         if not line:
             return
         yield line
-
-
-async def _drain_stream(stream: asyncio.StreamReader | None) -> int:
-    """Drain a subprocess pipe without retaining its potentially sensitive body."""
-    if stream is None:
-        return 0
-    total = 0
-    while True:
-        chunk = await stream.read(64 * 1024)
-        if not chunk:
-            return total
-        total += len(chunk)
 
 
 def _safe_json_loads(raw_line: bytes) -> dict | None:
@@ -666,18 +656,44 @@ def _build_api_kwargs(
     return kwargs
 
 
+class ClaudeStreamDecoder:
+    """Claude's stream-json lines as events, and the ending from the result line."""
+
+    def __init__(self) -> None:
+        self._result: str | None = None
+
+    def events_of(self, line: bytes) -> list[StepEvent]:
+        payload = _safe_json_loads(line)
+        if payload is None:
+            return []
+        steps: list[StepEvent] = []
+        for event in _parse_stream_event(payload, None):
+            if isinstance(event, FinalEvent):
+                self._result = event.text
+            elif isinstance(event, (AssistantTextEvent, ToolCallEvent, ToolResultEvent)):
+                steps.append(event)
+        return steps
+
+    def ending(self, returncode: int) -> FinalEvent:
+        if returncode != 0 or self._result is None:
+            log.warning(
+                "Claude run failed (rc=%d, result=%s)", returncode, self._result is not None
+            )
+            raise UnavailableError(CLAUDE_CLI_UNAVAILABLE_DETAIL)
+        return FinalEvent(text=self._result.strip())
+
+
 @dataclass(frozen=True)
 class ClaudeRun:
-    """One subscription run of the pinned CLI: its child and its one stdin line.
+    """One subscription run of the pinned CLI, as the neutral run entry's adapter.
 
-    It describes the run and starts nothing; the spawn owner starts the child.
+    It describes the run and starts nothing; the entry makes the directories and
+    the spawn owner starts the child.
     """
 
     binary: Path
     token: SecretStr
-    home: Path
-    working_directory: Path
-    system_prompt_file: Path
+    system: str = field(repr=False)
     max_tool_calls: int
     history: tuple[TurnMessage, ...] = field(repr=False)
     relay_config: Path | None = None
@@ -685,36 +701,38 @@ class ClaudeRun:
     def __post_init__(self) -> None:
         if not isinstance(self.token, SecretStr):
             raise ChildProcessSpecificationError("A Claude run needs its token as a SecretStr")
-        paths = {
-            "binary": self.binary,
-            "home": self.home,
-            "working_directory": self.working_directory,
-            "system_prompt_file": self.system_prompt_file,
-            "relay_config": self.relay_config,
-        }
+        paths = {"binary": self.binary, "relay_config": self.relay_config}
         for name, path in paths.items():
             if path is not None and not path.is_absolute():
                 raise ChildProcessSpecificationError(f"A Claude run needs an absolute {name}")
-        if self.working_directory == self.home:
-            raise ChildProcessSpecificationError(
-                "A Claude run needs a working_directory apart from its home",
-            )
         if self.max_tool_calls < 1:
             raise ChildProcessSpecificationError("A Claude run needs max_tool_calls of at least 1")
         if not self.history:
             raise ChildProcessSpecificationError("A Claude run needs a non-empty history")
 
-    def child(self) -> ChildProcess:
-        return ChildProcess(
+    @property
+    def pool(self) -> CliProcessPool:
+        return CLAUDE_CLI_PROCESS_POOL
+
+    @property
+    def line_limit_bytes(self) -> int:
+        return _STREAM_BUFFER_LIMIT
+
+    def run_files(self) -> dict[str, bytes]:
+        return {_SYSTEM_PROMPT_FILE_NAME: self.system.encode()}
+
+    def start(self, home: Path, working_directory: Path) -> CliRunStart:
+        child = ChildProcess(
             binary=self.binary,
-            arguments=self._arguments(),
+            arguments=self._arguments(home / _SYSTEM_PROMPT_FILE_NAME),
             environment=closed_environment(
-                self.home,
+                home,
                 **{_OAUTH_TOKEN_VARIABLE: self.token.get_secret_value()},
                 **_RUN_SWITCHES,
             ),
-            working_directory=self.working_directory,
+            working_directory=working_directory,
         )
+        return CliRunStart(child, self.stdin_message(), ClaudeStreamDecoder())
 
     def stdin_message(self) -> bytes:
         transcript = flatten_messages(
@@ -724,7 +742,7 @@ class ClaudeRun:
         line = {"type": "user", "message": {"role": "user", "content": transcript}}
         return (json.dumps(line) + "\n").encode()
 
-    def _arguments(self) -> tuple[str, ...]:
+    def _arguments(self, system_prompt_file: Path) -> tuple[str, ...]:
         arguments = (
             "-p",
             "--input-format",
@@ -737,7 +755,7 @@ class ClaudeRun:
             "--max-turns",
             str(self.max_tool_calls + TURNS_BEYOND_TOOL_CALLS),
             "--system-prompt-file",
-            str(self.system_prompt_file),
+            str(system_prompt_file),
         )
         if self.relay_config is None:
             return arguments

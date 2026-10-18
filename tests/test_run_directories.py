@@ -461,12 +461,16 @@ def real_runs(
     assert (held_slots(runs.pool), thread_failures, spawn_warnings(caplog)) == (0, [], [])
 
 
-def assert_a_clean_real_run(real_runs: RealRuns, outside_before: dict[str, Any]) -> None:
+def assert_the_real_child_ran(real_runs: RealRuns) -> None:
     assert real_runs.stdout == PROMPT
     assert real_runs.after_reap == ReapObservation(
         leader_gone=True, slots_held=0,
         home_entries=HOME_AFTER_THE_LEADER, work_entries=WORK_AFTER_THE_LEADER,
     )
+
+
+def assert_a_clean_real_run(real_runs: RealRuns, outside_before: dict[str, Any]) -> None:
+    assert_the_real_child_ran(real_runs)
     assert list(real_runs.root.iterdir()) == []
     assert real_runs.outside_snapshot() == outside_before
 
@@ -496,8 +500,10 @@ def test_a_real_run_whose_body_raises_removes_its_directories_and_propagates_the
 ) -> None:
     outside_before = real_runs.outside_snapshot()
 
+    scenario = real_runs.run(fails_with(error))
+
     with pytest.raises(type(error)) as raised:
-        real_runs.drive(real_runs.run(fails_with(error)))
+        real_runs.drive(scenario)
 
     assert raised.value is error
     assert_a_clean_real_run(real_runs, outside_before)
@@ -545,6 +551,7 @@ def test_a_removal_never_follows_a_run_entry_replaced_by_a_link(
 
     real_runs.drive(real_runs.run(before_removal=swap))
 
+    assert_the_real_child_ran(real_runs)
     assert (list(real_runs.root.iterdir()), real_runs.outside_snapshot()) == ([], outside_before)
 
 
@@ -558,11 +565,14 @@ def test_a_removal_never_follows_the_tree_replaced_by_a_link_and_logs_once(
 
     link = the_only_tree(real_runs.root)
     renamed = real_runs.root / f"moved-{link.name}"
-    assert (link.is_symlink(), real_runs.outside_snapshot(), len(removal_errors(caplog))) == (
-        True, outside_before, 1,
-    )
-    link.unlink()
-    assert process._remove_private_tree(renamed)
+    try:
+        assert_the_real_child_ran(real_runs)
+        assert (link.is_symlink(), real_runs.outside_snapshot(), len(removal_errors(caplog))) == (
+            True, outside_before, 1,
+        )
+    finally:
+        link.unlink()
+        assert process._remove_private_tree(renamed)
 
 
 def mount_table_naming(root: Path, locate: Callable[[Path], Path]) -> Callable[[], str]:
@@ -816,10 +826,11 @@ async def lost_group_of(directories: RunDirectories) -> RetainedGroup:
         environment=closed_environment(directories.home),
         working_directory=directories.working_directory,
     )
+    turn = anchored_turn_child(
+        CLAUDE_CLI_PROCESS_POOL, spec, home_reservation=directories.reserve(),
+    )
     with pytest.raises(ContainmentLost) as lost:
-        async with anchored_turn_child(
-            CLAUDE_CLI_PROCESS_POOL, spec, home_reservation=directories.reserve(),
-        ):
+        async with turn:
             pass
     return lost.value.group
 

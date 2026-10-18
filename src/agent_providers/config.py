@@ -147,7 +147,7 @@ class ProviderRuntimeConfig(BaseModel):
 
     ``cli_working_directory_root`` is the directory below which the catalog and
     turn paths create every child's private working directory and every
-    temporary file this layer writes, so a deployment states that root once instead of inheriting
+    temporary file those paths write, so a deployment states that root once instead of inheriting
     whatever ``TMPDIR`` happens to be. It holds every credential copy, so
     :func:`configure` refuses a root that is not private: an absolute path to an
     existing directory, not a symlink, owned by the process's effective user,

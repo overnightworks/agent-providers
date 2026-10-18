@@ -1,0 +1,8 @@
+claim_id = "a59d522b0d454dce8d78d0958bb3602d"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "db4c0c68467572abb7b72960d408f174ef968da3"
+branch = "claude/issue-290-4b2-cli-working-root"
+scope = ["README.md", "docs/decisions/0001-agent-service.md", "packages/agent-service/src/agent_service/claude_version.py", "packages/agent-service/src/agent_service/cli.py", "packages/agent-service/src/agent_service/config.py", "src/agent_providers/anchored_turn.py", "src/agent_providers/process.py", "tests/service_support.py", "tests/test_catalog_home_retention.py", "tests/test_service_claude_version.py", "tests/test_service_config.py"]
+opened_commit = "f62bfb3c631ab05f75f2837d765ed2c2089d86dc"
+whole_reason = "The key exists so the probe and the runs make their directories below it, the probe's move needs the key, and handing its tree to run_catalog_cli needs the widened home port, which has no other caller; the shared builders must carry the root the moment it is required."

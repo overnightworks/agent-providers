@@ -5,11 +5,13 @@ The CLI side is the real ``Relay`` with ``McpRelayOwner`` over raw sockets. The 
 """
 
 import asyncio
+import contextlib
 import gc
 import json
 import logging
 import re
 import uuid
+import weakref
 from collections import Counter
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
@@ -64,7 +66,7 @@ from agent_client.wire import (
     ToolResult,
 )
 from agent_providers.events import FinalEvent, ToolCallEvent, ToolResultEvent
-from agent_service.app_tools import open_app_tools
+from agent_service.app_tools import UpstreamCallLost, open_app_tools
 from agent_service.config import RunConfig
 from agent_service.mcp_wire import (
     CallToolParams,
@@ -75,16 +77,23 @@ from agent_service.mcp_wire import (
     ToolOutcome,
     tool_result_response,
 )
-from agent_service.run_events import RUNNER_FAILED_MESSAGE, TOO_MANY_TOOL_CALLS_MESSAGE, run_frames
+from agent_service.run_events import (
+    RUNNER_FAILED_MESSAGE,
+    TOO_MANY_TOOL_CALLS_MESSAGE,
+    TOO_MUCH_DATA_MESSAGE,
+    run_frames,
+)
 from agent_service.run_liveness import LoopClock
 from agent_service.run_records import RunRecords
 from agent_service.runners import AdmittedRun
 from agent_service.tool_relay import (
+    CALL_FAILED_TEXT,
     CALL_GIVEN_UP_TEXT,
     MAX_PENDING_TOOL_CALLS,
     MAX_RELAY_CONNECTIONS,
     UNANSWERED,
     AppTools,
+    CapabilityReflected,
     McpRelayOwner,
     Relay,
     ToolCallBarrier,
@@ -97,6 +106,11 @@ CLAIMED = ("edit_song", "read_song", "list_songs")
 OFFERED = ("edit_song", "read_song", "delete_song")
 REFUSAL = {"code": -32602, "message": "Invalid params"}
 UPSTREAM_TEXT = "ran edit_song"
+UPSTREAM_FAILURE_MARKER = "upstream-failure-marker-5d1c"
+OVERSIZED_MARKER = "oversized-result-marker-0c4e7b19"
+CANARY = canary_token()
+CANARY_SIGNATURE = CANARY.rsplit(".", 1)[-1]
+ANSWER_OF_CALL_1 = f"relay:{RUN_ID}:conn-1:answer"
 
 
 class UpstreamBroke(Exception):
@@ -106,10 +120,13 @@ class UpstreamBroke(Exception):
 class GatedApp:
     """An ``AppTools`` fake that records each call, holds it until released, then answers."""
 
-    def __init__(self, failure: BaseException | None = None) -> None:
+    def __init__(
+        self, failure: BaseException | None = None, outcome: ToolOutcome | None = None
+    ) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.received: list[Mapping[str, Any]] = []
         self._failure = failure
+        self._outcome = outcome
         self._gate = asyncio.Event()
 
     def forget_failure(self) -> None:
@@ -124,7 +141,7 @@ class GatedApp:
         await self._gate.wait()
         if self._failure is not None:
             raise self._failure
-        return ToolOutcome(f"ran {name}", is_error=False)
+        return self._outcome or ToolOutcome(f"ran {name}", is_error=False)
 
     async def forwarded(self, count: int) -> None:
         await yield_until(lambda: len(self.calls) == count)
@@ -152,7 +169,7 @@ class BarrierRunner:
     """The fake of the CLI runner's loop: hand out, yield, accept once resumed, then stop.
 
     ``accept_gate`` holds each acceptance of a call until the test opens it, and
-    ``final_after`` ends the run with a final event once that many calls were accepted.
+    ``final_after`` ends the run with a final event once that many results were accepted.
     """
 
     def __init__(
@@ -170,25 +187,25 @@ class BarrierRunner:
     async def run(
         self, admitted: AdmittedRun
     ) -> AsyncIterator[ToolCallEvent | ToolResultEvent | FinalEvent]:
-        accepted = 0
+        accepted_results = 0
         try:
             while True:
                 self.asks += 1
                 event = await self._barrier.next_event()
                 yield event
-                if not isinstance(event, ToolCallEvent):
-                    continue
-                if self._accept_gate is not None:
+                if self._accept_gate is not None and isinstance(event, ToolCallEvent):
                     self.at_gate.set()
                     await self._accept_gate.wait()
                 self._barrier.accept(event)
-                accepted += 1
-                if accepted == self._final_after:
+                if isinstance(event, ToolResultEvent):
+                    accepted_results += 1
+                if accepted_results == self._final_after:
                     yield FinalEvent(text="done")
                     return
         finally:
             self._barrier.stop()
-            await self._barrier.settle()
+            async with asyncio.timeout(WAIT_SECONDS):
+                await self._barrier.settle()
 
 
 @dataclass(frozen=True)
@@ -245,6 +262,13 @@ class Rig:
         self.barrier.accept(event)
         return event
 
+    async def accept_result(self, tool_use_id: str) -> ToolResultEvent:
+        result = await self.barrier.next_event()
+        assert isinstance(result, ToolResultEvent)
+        assert result.tool_use_id == tool_use_id
+        self.barrier.accept(result)
+        return result
+
     @property
     def fake(self) -> GatedApp:
         assert isinstance(self.app, GatedApp)
@@ -260,9 +284,9 @@ def offered(names: Sequence[str]) -> list[ToolDefinition]:
 
 @asynccontextmanager
 async def gated_app(
-    failure: Callable[[], BaseException] | None = None,
+    failure: Callable[[], BaseException] | None = None, outcome: ToolOutcome | None = None
 ) -> AsyncIterator[GatedApp]:
-    yield GatedApp(failure() if failure else None)
+    yield GatedApp(failure() if failure else None, outcome)
 
 
 def drive_barrier(
@@ -272,23 +296,24 @@ def drive_barrier(
 ) -> None:
     async def main() -> None:
         async with app_scope or gated_app() as app:
-            barrier = ToolCallBarrier(RUN_ID, app)
+            capability = capability_carrying(CANARY, tools=CLAIMED)
+            barrier = ToolCallBarrier(RUN_ID, app, capability)
             entries = EnteringCalls(barrier)
-            owner = McpRelayOwner(
-                capability_carrying(canary_token(), tools=CLAIMED), offered(OFFERED), entries
-            )
+            owner = McpRelayOwner(capability, offered(OFFERED), entries)
             relay = await Relay.start(RUN_ID, owner, LoopClock())
             try:
                 async with asyncio.timeout(WAIT_SECONDS * 3):
                     await scenario(Rig(relay, barrier, entries, app))
             finally:
                 try:
-                    barrier.stop()
-                    if isinstance(app, GatedApp):
-                        app.release()
-                    release_held_wakeups()
-                    async with asyncio.timeout(WAIT_SECONDS):
-                        await barrier.settle()
+                    try:
+                        barrier.stop()
+                    finally:
+                        if isinstance(app, GatedApp):
+                            app.release()
+                        release_held_wakeups()
+                        async with asyncio.timeout(WAIT_SECONDS):
+                            await barrier.settle()
                 finally:
                     await close_bounded(relay)
 
@@ -306,11 +331,13 @@ def refused(request_id: RequestId) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": request_id, "error": REFUSAL}
 
 
-def result_of(request_id: RequestId, text: str = UPSTREAM_TEXT) -> dict[str, Any]:
+def result_of(
+    request_id: RequestId, text: str = UPSTREAM_TEXT, is_error: bool = False
+) -> dict[str, Any]:
     return {
         "jsonrpc": "2.0",
         "id": request_id,
-        "result": {"content": [{"type": "text", "text": text}], "isError": False},
+        "result": {"content": [{"type": "text", "text": text}], "isError": is_error},
     }
 
 
@@ -421,12 +448,17 @@ def streamed(runner: BarrierRunner, runs: RunConfig | None = None) -> asyncio.Ta
     return asyncio.create_task(collected())
 
 
-async def settled_stream(task: asyncio.Task[bytes]) -> list[Any]:
+async def settled_bytes(task: asyncio.Task[bytes]) -> bytes:
     async with asyncio.timeout(WAIT_SECONDS):
-        return decoded_events(await task)
+        return await task
+
+
+async def settled_stream(task: asyncio.Task[bytes]) -> list[Any]:
+    return decoded_events(await settled_bytes(task))
 
 
 EDIT_SONG = CallToolParams(name="edit_song", arguments={"text": "a"})
+GIVEN_UP_RESULT = ToolResultEvent(tool_use_id="call-1", content=CALL_GIVEN_UP_TEXT, is_error=True)
 
 
 def app_calls(fake: McpAppFake) -> list[dict[str, Any]]:
@@ -461,7 +493,7 @@ def test_a_call_over_the_budget_is_never_run_in_the_app(authority, caplog) -> No
                 TOO_MANY_TOOL_CALLS_MESSAGE,
             )
             assert await reply_of(second) == refused(2)
-            assert await reply_of(first) == result_of(1, "edit_song")
+            assert await reply_of(first) == refused(1)
             assert app_calls(fake) == [{"name": "edit_song", "arguments": {"text": "a"}}]
 
         drive_barrier(
@@ -494,6 +526,14 @@ async def another_call_is_accepted(rig: Rig) -> None:
 
     app.release()
     await rig.barrier.settle()
+    rig.barrier.cancel(2)
+    rig.barrier.accept(second)
+    assert await rig.accept_result("call-2") == ToolResultEvent(
+        tool_use_id="call-2", content=CALL_GIVEN_UP_TEXT, is_error=True
+    )
+    assert await rig.accept_result("call-1") == ToolResultEvent(
+        tool_use_id="call-1", content=UPSTREAM_TEXT, is_error=False
+    )
     assert await reply_of(first_client) == result_of(1)
     assert app.calls == [("edit_song", {"text": "a"})]
 
@@ -573,9 +613,10 @@ async def handed_out_call_given_up(rig: Rig, give_up: GiveUp) -> None:
 
     await ended_as_given_up_and_admits_a_fourth(rig, calls[0], give_up)
     assert rig.fake.calls == []
-    assert await rig.barrier.next_event() == ToolResultEvent(
-        tool_use_id="call-1", content=CALL_GIVEN_UP_TEXT, is_error=True
-    )
+    assert await rig.barrier.next_event() == GIVEN_UP_RESULT
+    with pytest.raises(ToolCallsMisused):
+        await rig.barrier.next_event()
+    rig.barrier.accept(GIVEN_UP_RESULT)
     assert (await rig.barrier.next_event()).tool_use_id == "call-2"
 
 
@@ -754,6 +795,7 @@ async def an_id_never_seen(rig: Rig) -> None:
 
     await rig.hand_out_and_accept()
     rig.fake.release()
+    await rig.accept_result("call-1")
     assert await call == upstream_answer(1)
 
 
@@ -767,6 +809,7 @@ async def a_repeated_cancel(rig: Rig) -> None:
     assert await ending_of(first) is UNANSWERED
     await rig.hand_out_and_accept()
     rig.fake.release()
+    await rig.accept_result("call-2")
     assert await second == upstream_answer(2)
 
 
@@ -785,6 +828,7 @@ async def a_reused_id(rig: Rig) -> None:
     rig.fake.release()
     first = arrive(rig.barrier, EDIT_SONG, 2)
     await rig.hand_out_and_accept()
+    await rig.accept_result("call-1")
     assert await first == upstream_answer(2)
     reused = arrive(rig.barrier, EDIT_SONG, 2)
 
@@ -823,6 +867,31 @@ def test_a_cancel_ends_only_the_pending_call_with_that_id(
     drive_barrier(scenario)
 
 
+@pytest.mark.parametrize("ending", ["cancelled_by_the_cli", "given_up_by_task_cancellation"])
+def test_a_call_that_ended_before_its_hand_out_leaves_nothing_queued_while_the_runner_is_parked(
+    ending: str,
+) -> None:
+    async def scenario(rig: Rig) -> None:
+        admitted = [
+            CallToolParams(name="edit_song", arguments={"n": number}) for number in range(1, 6)
+        ]
+        watchers = [weakref.ref(params) for params in admitted]
+        calls = [arrive(rig.barrier, params, number) for number, params in enumerate(admitted, 1)]
+        for number, call in enumerate(calls, 1):
+            if ending == "cancelled_by_the_cli":
+                rig.barrier.cancel(number)
+            else:
+                call.cancel()
+            await ending_of(call)
+        del admitted, calls, call
+        await asyncio.sleep(0)
+        gc.collect()
+
+        assert [watcher() for watcher in watchers] == [None] * len(watchers)
+
+    drive_barrier(scenario)
+
+
 def test_a_call_cancelled_before_its_accept_streams_an_error_result_and_never_runs() -> None:
     """C9."""
 
@@ -839,7 +908,9 @@ def test_a_call_cancelled_before_its_accept_streams_an_error_result_and_never_ru
         await rig.pending(2, "edit_song", {"n": 2}, client=second_connection)
         rig.fake.release()
 
-        started, first_call, given_up, second_call, succeeded = await settled_stream(stream)
+        started, first_call, given_up, second_call, second_result, succeeded = await settled_stream(
+            stream
+        )
         assert isinstance(started, RunStarted)
         assert isinstance(first_call, ToolCall)
         assert (first_call.tool_use_id, first_call.name, first_call.effect) == (
@@ -855,6 +926,8 @@ def test_a_call_cancelled_before_its_accept_streams_an_error_result_and_never_ru
         )
         assert isinstance(second_call, ToolCall)
         assert second_call.tool_use_id == "call-2"
+        assert isinstance(second_result, ToolResult)
+        assert (second_result.tool_use_id, second_result.content) == ("call-2", UPSTREAM_TEXT)
         assert isinstance(succeeded, Succeeded)
         assert rig.fake.calls == [("edit_song", {"n": 2})]
         assert await first.delivery() is Delivery.ABSENT
@@ -920,6 +993,10 @@ def test_a_duplicate_pending_id_is_refused_and_mints_no_call() -> None:  # A4
         assert [event.tool_use_id for event in handed_out] == ["call-1", "call-2"]
         rig.app.release()
         await rig.barrier.settle()
+        rig.barrier.cancel(8)
+        rig.barrier.accept(handed_out[1])
+        await rig.accept_result("call-2")
+        await rig.accept_result("call-1")
         assert await reply_of(first) == result_of(7)
         assert rig.app.calls == [("edit_song", {"text": "a"})]
 
@@ -932,6 +1009,7 @@ def test_a_reused_id_on_a_new_connection_after_initialize_is_a_new_call() -> Non
         rig.app.release()
         first = await rig.pending(2, "edit_song", {"text": "a"})
         await rig.hand_out_and_accept()
+        await rig.accept_result("call-1")
         assert await reply_of(first) == result_of(2)
 
         fresh = await RawClient.connect(port_of(rig.relay))
@@ -945,17 +1023,20 @@ def test_a_reused_id_on_a_new_connection_after_initialize_is_a_new_call() -> Non
         event = await rig.hand_out_and_accept()
         assert event.tool_use_id == "call-2"
         await rig.app.forwarded(2)
+        await rig.accept_result("call-2")
         assert await reply_of(fresh) == result_of(2)
 
     drive_barrier(scenario)
 
 
-def test_a_call_over_the_pending_bound_is_refused_and_never_forwarded() -> None:  # A6
+def test_a_call_over_the_pending_bound_is_refused_and_never_forwarded() -> None:  # A6, P4
     async def scenario(rig: Rig) -> None:
         assert isinstance(rig.app, GatedApp)
         assert MAX_PENDING_TOOL_CALLS == MAX_RELAY_CONNECTIONS - 1
-        for request_id in range(1, MAX_PENDING_TOOL_CALLS + 1):
+        clients = [
             await rig.pending(request_id, "edit_song", {"n": request_id})
+            for request_id in range(1, MAX_PENDING_TOOL_CALLS + 1)
+        ]
         extra = await rig.request(99, "edit_song", {"n": 99})
 
         assert await reply_of(extra) == refused(99)
@@ -965,12 +1046,21 @@ def test_a_call_over_the_pending_bound_is_refused_and_never_forwarded() -> None:
         rig.app.release()
         await rig.app.forwarded(1)
         await rig.barrier.settle()
-
-        await rig.pending(100, "edit_song", {"n": 100}, client=extra)
         later = [first.tool_use_id]
-        for _ in range(MAX_PENDING_TOOL_CALLS):
+        for _ in range(MAX_PENDING_TOOL_CALLS - 1):
             later.append((await rig.hand_out_and_accept()).tool_use_id)
+        await rig.barrier.settle()
+
+        await rig.request(100, "edit_song", {"n": 100}, client=extra)
+        assert await reply_of(extra) == refused(100)
+        await rig.accept_result("call-1")
+        assert await reply_of(clients[0]) == result_of(1)
+        await rig.pending(101, "edit_song", {"n": 101}, client=extra)
+        await rig.accept_result("call-2")
+        await rig.accept_result("call-3")
+        later.append((await rig.hand_out_and_accept()).tool_use_id)
         assert later == ["call-1", "call-2", "call-3", "call-4"]
+        assert rig.entries.entered == [1, 2, 3, 99, 100, 101]
 
     drive_barrier(scenario)
 
@@ -1016,8 +1106,8 @@ async def calls_pending_when_stopped(rig: Rig) -> None:
     assert await reply_of(await rig.request(4, "edit_song", {"n": 4})) == refused(4)
     with pytest.raises(ToolCallsMisused):
         rig.barrier.accept(event)
+    assert await reply_of(forwarded) == refused(1)
     rig.app.release()
-    assert await reply_of(forwarded) == result_of(1)
     assert rig.app.calls == [("edit_song", {"n": 1})]
 
 
@@ -1057,9 +1147,7 @@ async def handed_out_when_closed(rig: Rig) -> None:
     assert isinstance(event, ToolCallEvent)
     await close_bounded(rig.relay)
     rig.barrier.accept(event)
-    assert await rig.barrier.next_event() == ToolResultEvent(
-        tool_use_id="call-1", content=CALL_GIVEN_UP_TEXT, is_error=True
-    )
+    assert await rig.barrier.next_event() == GIVEN_UP_RESULT
 
 
 async def handed_out_when_its_connection_task_is_cancelled(rig: Rig) -> None:
@@ -1067,9 +1155,7 @@ async def handed_out_when_its_connection_task_is_cancelled(rig: Rig) -> None:
     assert isinstance(event, ToolCallEvent)
     cancel_relay_connections()
     rig.barrier.accept(event)
-    assert await rig.barrier.next_event() == ToolResultEvent(
-        tool_use_id="call-1", content=CALL_GIVEN_UP_TEXT, is_error=True
-    )
+    assert await rig.barrier.next_event() == GIVEN_UP_RESULT
 
 
 async def waiting_when_closed(rig: Rig) -> None:
@@ -1104,38 +1190,36 @@ class ForwardEnding:
     request_cancelled: bool
     failure: Callable[[], BaseException] | None
     logged_classes: tuple[str, ...]
-    status: HTTPStatus | None
     retrievals: int
+    no_result: bool = False
     cancelled_on_completion: bool = False
 
 
-UPSTREAM_BROKE = partial(UpstreamBroke, "x")
+UPSTREAM_BROKE = partial(UpstreamBroke, UPSTREAM_FAILURE_MARKER)
 
 
 @pytest.mark.parametrize(
     "ending",
     [
-        ForwardEnding(True, None, (), None, 1),
-        ForwardEnding(True, UPSTREAM_BROKE, ("UpstreamBroke",), None, 1),
-        ForwardEnding(
-            False, UPSTREAM_BROKE, ("UpstreamBroke",), HTTPStatus.INTERNAL_SERVER_ERROR, 1
-        ),
-        ForwardEnding(True, asyncio.CancelledError, (), None, 0),
-        ForwardEnding(False, asyncio.CancelledError, (), None, 0),
-        ForwardEnding(False, UPSTREAM_BROKE, ("UpstreamBroke",), None, 1, True),
+        ForwardEnding(True, None, (), 1),
+        ForwardEnding(True, UPSTREAM_BROKE, ("UpstreamBroke",), 1),
+        ForwardEnding(True, asyncio.CancelledError, (), 0, no_result=True),
+        ForwardEnding(False, asyncio.CancelledError, (), 0, no_result=True),
+        ForwardEnding(False, UPSTREAM_BROKE, ("UpstreamBroke",), 1, cancelled_on_completion=True),
     ],
     ids=[
         "cancelled-success",
         "cancelled-failure",
-        "waiting-failure",
         "cancelled-forward",
         "cancelled-forward-with-an-active-waiter",
         "cancelled-on-completion",
     ],
 )
 def test_a_forwards_outcome_is_retrieved_exactly_once_and_settle_waits_for_it(
-    ending: ForwardEnding, caplog: pytest.LogCaptureFixture
-) -> None:  # A8c
+    ending: ForwardEnding, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:  # A8c, P5
+    writes = RelayWrites(monkeypatch)
+
     async def scenario(rig: Rig) -> None:
         reports = capture_loop_reports()
         retrievals = count_retrievals()
@@ -1157,11 +1241,12 @@ def test_a_forwards_outcome_is_retrieved_exactly_once_and_settle_waits_for_it(
 
         assert settled.logged_classes == list(ending.logged_classes)
         assert settled.retrievals == ending.retrievals
-        if ending.status is not None:
-            answer = await client.answer()
-            assert (answer.status, answer.body) == (ending.status, b"")
-        if ending.cancelled_on_completion:
+        if ending.cancelled_on_completion or (ending.no_result and not ending.request_cancelled):
             assert await client.delivery() is Delivery.ABSENT
+            assert writes.to(client) == b""
+        if ending.no_result:
+            arrive(rig.barrier, EDIT_SONG, 2)
+            assert (await rig.barrier.next_event()).tool_use_id == "call-2"
         assert app.calls == [("edit_song", {"text": "a"})]
         await closed_without_unretrieved_reports(rig, reports)
 
@@ -1195,6 +1280,7 @@ def test_a_cancelled_wait_for_the_next_event_loses_and_doubles_no_call(
 
         rig.app.release()
         await rig.barrier.settle()
+        await rig.accept_result("call-1")
         async with asyncio.timeout(WAIT_SECONDS):
             assert (await arrival).id == 1
         assert rig.app.calls == [("edit_song", {"text": "a"})]
@@ -1204,7 +1290,6 @@ def test_a_cancelled_wait_for_the_next_event_loses_and_doubles_no_call(
 
 CONNECTION_OF_CALL_1 = f"relay:{RUN_ID}:conn-1"
 WATCH_OF_CALL_1 = f"{CONNECTION_OF_CALL_1}:watch"
-GIVEN_UP_RESULT = ToolResultEvent(tool_use_id="call-1", content=CALL_GIVEN_UP_TEXT, is_error=True)
 PARTIAL_NEXT_HEAD = b"POST /mcp HTTP/1.1\r\nHost: x\r\n"
 FORWARDED_CALL_1 = ("edit_song", {"n": 1})
 
@@ -1230,11 +1315,8 @@ async def accept_calls_up_to_call_4(rig: Rig) -> list[str | ToolResultEvent]:
     events: list[str | ToolResultEvent] = []
     while sum(isinstance(event, str) for event in events) < 3:
         event = await rig.barrier.next_event()
-        if isinstance(event, ToolCallEvent):
-            rig.barrier.accept(event)
-            events.append(event.tool_use_id)
-        else:
-            events.append(event)
+        rig.barrier.accept(event)
+        events.append(event.tool_use_id if isinstance(event, ToolCallEvent) else event)
     return events
 
 
@@ -1353,3 +1435,485 @@ def test_a_call_accepted_after_the_relays_close_cancelled_its_connection_task_is
         assert writes.to(client) == b""
 
     drive_barrier(scenario, loop_factory=HoldingSteppedLoop)
+
+
+async def forwarded_call_1(rig: Rig) -> RawClient:
+    client = await rig.pending(1, "edit_song", {"n": 1})
+    await rig.hand_out_and_accept()
+    await rig.fake.forwarded(1)
+    return client
+
+
+async def answer_pending_once_idle() -> bool:
+    await holding_loop().settled()
+    return not task_named(ANSWER_OF_CALL_1).done()
+
+
+RELEASED_OUTCOMES = [
+    pytest.param(ToolOutcome(UPSTREAM_TEXT, False), id="success"),
+    pytest.param(ToolOutcome("the song is locked", True), id="upstream-error"),
+]
+
+
+@pytest.mark.parametrize("outcome", RELEASED_OUTCOMES)
+def test_a_result_is_released_to_the_cli_only_after_its_acceptance(
+    outcome: ToolOutcome, monkeypatch: pytest.MonkeyPatch
+) -> None:  # R1
+    writes = RelayWrites(monkeypatch)
+
+    async def scenario(rig: Rig) -> None:
+        client = await forwarded_call_1(rig)
+        rig.fake.release()
+
+        result = await rig.barrier.next_event()
+
+        assert result == ToolResultEvent(
+            tool_use_id="call-1", content=outcome.content, is_error=outcome.is_error
+        )
+        assert await answer_pending_once_idle()
+        assert writes.to(client) == b""
+        rig.barrier.accept(result)
+        assert await reply_of(client) == result_of(1, outcome.content, outcome.is_error)
+
+    drive_barrier(scenario, gated_app(outcome=outcome), loop_factory=HoldingSteppedLoop)
+
+
+def test_a_result_is_released_only_after_the_service_resumed_the_runner_past_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # R2
+    writes = RelayWrites(monkeypatch)
+
+    async def scenario(rig: Rig) -> None:
+        frames = run_frames(
+            alice_admitted_run(uuid.uuid4()),
+            BarrierRunner(rig.barrier, final_after=1),
+            SONGMAKER,
+            RunConfig(),
+            LoopClock(),
+            RunRecords(),
+        )
+        async with contextlib.aclosing(frames):
+            rig.fake.release()
+            taken = [await anext(frames)]
+            client = await rig.pending(1, "edit_song", {"n": 1})
+
+            assert await answer_pending_once_idle()
+            assert writes.to(client) == b""
+
+            taken.append(await anext(frames))
+            assert await reply_of(client) == result_of(1)
+            taken.extend([await anext(frames), await anext(frames)])
+
+        started, called, result, succeeded = decoded_events(b"".join(taken))
+        assert isinstance(started, RunStarted)
+        assert isinstance(called, ToolCall)
+        assert isinstance(result, ToolResult)
+        assert (result.tool_use_id, result.content, result.is_error) == (
+            "call-1",
+            UPSTREAM_TEXT,
+            False,
+        )
+        assert isinstance(succeeded, Succeeded)
+
+    drive_barrier(scenario, loop_factory=HoldingSteppedLoop)
+
+
+def test_a_result_the_run_refuses_is_never_released_and_its_call_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # R3
+    writes = RelayWrites(monkeypatch)
+
+    async def scenario(rig: Rig) -> None:
+        stream = streamed(BarrierRunner(rig.barrier), RunConfig(max_bytes=2_048))
+        rig.fake.release()
+        client = await rig.pending(1, "edit_song", {"n": 1})
+
+        started, called, failed = await settled_stream(stream)
+
+        assert isinstance(started, RunStarted)
+        assert isinstance(called, ToolCall)
+        assert isinstance(failed, Failed)
+        assert (failed.code, failed.message) == (
+            FailureCode.LIMIT_EXCEEDED,
+            TOO_MUCH_DATA_MESSAGE,
+        )
+        assert await reply_of(client) == refused(1)
+        assert OVERSIZED_MARKER.encode() not in writes.to(client)
+        assert len(rig.fake.calls) == 1
+
+    oversized = ToolOutcome(OVERSIZED_MARKER * 128, is_error=False)
+    drive_barrier(scenario, gated_app(outcome=oversized))
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        pytest.param(ToolOutcome(f"echo {CANARY} end", False), id="whole-token-in-success"),
+        pytest.param(ToolOutcome(f"locked {CANARY_SIGNATURE}", True), id="segment-in-error"),
+    ],
+)
+def test_a_result_whose_text_carries_the_capability_never_becomes_an_event_and_fails_the_run(
+    outcome: ToolOutcome, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:  # R4 a, b
+    writes = RelayWrites(monkeypatch)
+
+    async def scenario(rig: Rig) -> None:
+        stream = streamed(BarrierRunner(rig.barrier))
+        rig.fake.release()
+        client = await rig.pending(1, "edit_song", {"n": 1})
+
+        raw = await settled_bytes(stream)
+
+        started, called, failed = decoded_events(raw)
+        assert isinstance(started, RunStarted)
+        assert isinstance(called, ToolCall)
+        assert isinstance(failed, Failed)
+        assert (failed.code, failed.message) == (FailureCode.PROVIDER_ERROR, RUNNER_FAILED_MESSAGE)
+        assert await client.delivery() is Delivery.ABSENT
+        assert CANARY_SIGNATURE.encode() not in raw
+        assert all(CANARY_SIGNATURE.encode() not in writes.to(each) for each in rig.connected)
+        assert writes.to(client) == b""
+
+    drive_barrier(scenario, gated_app(outcome=outcome))
+
+    assert [kind for _, kind, _ in failure_lines(caplog)] == ["CapabilityReflected"]
+    assert CANARY_SIGNATURE not in caplog.text
+
+
+def test_a_capability_in_the_result_of_a_call_the_cli_gave_up_on_still_fails_the_run(
+    caplog: pytest.LogCaptureFixture,
+) -> None:  # R4 c
+    async def scenario(rig: Rig) -> None:
+        await forwarded_call_1(rig)
+        rig.barrier.cancel(1)
+        rig.fake.release()
+        await rig.barrier.settle()
+
+        with pytest.raises(CapabilityReflected):
+            await rig.barrier.next_event()
+
+    drive_barrier(scenario, gated_app(outcome=ToolOutcome(CANARY_SIGNATURE, False)))
+
+    assert CANARY_SIGNATURE not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("failure", "failure_class"),
+    [
+        pytest.param(UpstreamCallLost, "UpstreamCallLost", id="call-lost"),
+        pytest.param(UPSTREAM_BROKE, "UpstreamBroke", id="another-failure"),
+    ],
+)
+def test_an_upstream_failure_is_the_services_error_result_without_the_apps_text(
+    failure: Callable[[], BaseException],
+    failure_class: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:  # R5
+    writes = RelayWrites(monkeypatch)
+
+    async def scenario(rig: Rig) -> None:
+        client = await forwarded_call_1(rig)
+        rig.fake.release()
+
+        result = await rig.barrier.next_event()
+
+        assert result == ToolResultEvent(
+            tool_use_id="call-1", content=CALL_FAILED_TEXT, is_error=True
+        )
+        rig.barrier.accept(result)
+        assert await reply_of(client) == result_of(1, CALL_FAILED_TEXT, is_error=True)
+        assert UPSTREAM_FAILURE_MARKER.encode() not in writes.to(client)
+        assert len(rig.fake.calls) == 1
+
+    drive_barrier(scenario, gated_app(failure))
+
+    assert [kind for _, kind, _ in failure_lines(caplog)] == [failure_class]
+    assert UPSTREAM_FAILURE_MARKER not in caplog.text
+
+
+async def cancelled_while_forwarded(rig: Rig) -> ToolResultEvent | None:
+    await rig.cancel(1)
+    rig.fake.release()
+    await rig.barrier.settle()
+    return None
+
+
+async def cancelled_while_the_result_is_queued(rig: Rig) -> ToolResultEvent | None:
+    rig.fake.release()
+    await holding_loop().settled()
+    cancel_owner_answers()
+    return None
+
+
+async def cancelled_while_the_result_is_handed_out(rig: Rig) -> ToolResultEvent | None:
+    rig.fake.release()
+    result = await rig.barrier.next_event()
+    assert isinstance(result, ToolResultEvent)
+    await rig.cancel(1)
+    return result
+
+
+@pytest.mark.parametrize(
+    "give_up",
+    [
+        cancelled_while_forwarded,
+        cancelled_while_the_result_is_queued,
+        cancelled_while_the_result_is_handed_out,
+    ],
+)
+def test_a_call_the_cli_gave_up_on_still_shows_its_result_to_the_app_and_gets_no_reply(
+    give_up: Callable[[Rig], Awaitable[ToolResultEvent | None]], monkeypatch: pytest.MonkeyPatch
+) -> None:  # R6
+    writes = RelayWrites(monkeypatch)
+
+    async def scenario(rig: Rig) -> None:
+        retrievals = count_retrievals()
+        client = await forwarded_call_1(rig)
+
+        handed_out = await give_up(rig)
+
+        await rig.pending(2, "edit_song", {"n": 2})
+        result = handed_out or await rig.barrier.next_event()
+        assert result == ToolResultEvent(
+            tool_use_id="call-1", content=UPSTREAM_TEXT, is_error=False
+        )
+        rig.barrier.accept(result)
+        assert await client.delivery() is Delivery.ABSENT
+        assert writes.to(client) == b""
+        assert retrievals[f"upstream:{RUN_ID}:call-1"] == 1
+        assert (await rig.barrier.next_event()).tool_use_id == "call-2"
+
+    drive_barrier(scenario, loop_factory=HoldingSteppedLoop)
+
+
+async def stopped_while_the_forward_runs(
+    rig: Rig, writes: RelayWrites, caplog: pytest.LogCaptureFixture, retrievals: Counter[str]
+) -> RawClient:
+    client = await forwarded_call_1(rig)
+    rig.barrier.stop()
+    settling = settling_with_evidence(rig, caplog, retrievals)
+    await yield_until(lambda: writes.to(client) != b"")
+    rig.fake.release()
+    async with asyncio.timeout(WAIT_SECONDS):
+        settled = await settling
+    assert (settled.logged_classes, settled.retrievals) == (["UpstreamBroke"], 1)
+    return client
+
+
+async def stopped_while_the_result_is_queued(
+    rig: Rig, writes: RelayWrites, caplog: pytest.LogCaptureFixture, retrievals: Counter[str]
+) -> RawClient:
+    client = await forwarded_call_1(rig)
+    rig.fake.release()
+    await holding_loop().settled()
+    rig.barrier.stop()
+    return client
+
+
+async def stopped_while_the_result_is_handed_out(
+    rig: Rig, writes: RelayWrites, caplog: pytest.LogCaptureFixture, retrievals: Counter[str]
+) -> RawClient:
+    client = await forwarded_call_1(rig)
+    rig.fake.release()
+    result = await rig.barrier.next_event()
+    rig.barrier.stop()
+    with pytest.raises(ToolCallsMisused):
+        rig.barrier.accept(result)
+    return client
+
+
+@pytest.mark.parametrize(
+    ("stopping", "failure"),
+    [
+        pytest.param(stopped_while_the_forward_runs, UPSTREAM_BROKE, id="forward-running"),
+        pytest.param(stopped_while_the_result_is_queued, None, id="result-queued"),
+        pytest.param(stopped_while_the_result_is_handed_out, None, id="result-handed-out"),
+    ],
+)
+def test_stop_refuses_every_reply_not_yet_released(
+    stopping: Callable[..., Awaitable[RawClient]],
+    failure: Callable[[], BaseException] | None,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:  # R7
+    writes = RelayWrites(monkeypatch)
+
+    async def scenario(rig: Rig) -> None:
+        client = await stopping(rig, writes, caplog, count_retrievals())
+
+        assert await reply_of(client) == refused(1)
+        written = writes.to(client)
+        assert UPSTREAM_TEXT.encode() not in written
+        assert UPSTREAM_FAILURE_MARKER.encode() not in written
+
+    with caplog.at_level(logging.ERROR):
+        drive_barrier(scenario, gated_app(failure), loop_factory=HoldingSteppedLoop)
+
+
+def test_the_hand_out_rule_over_a_result_accepts_exactly_the_handed_out_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # R8
+    writes = RelayWrites(monkeypatch)
+
+    async def scenario(rig: Rig) -> None:
+        client = await rig.pending(1, "edit_song", {"n": 1})
+        call_event = await rig.hand_out_and_accept()
+        rig.fake.release()
+        await rig.barrier.settle()
+        await rig.pending(2, "edit_song", {"n": 2})
+        result = await rig.barrier.next_event()
+
+        with pytest.raises(ToolCallsMisused):
+            await rig.barrier.next_event()
+        with pytest.raises(ToolCallsMisused):
+            rig.barrier.accept(call_event)
+        another_result = ToolResultEvent(
+            tool_use_id="call-2", content=UPSTREAM_TEXT, is_error=False
+        )
+        with pytest.raises(ToolCallsMisused):
+            rig.barrier.accept(another_result)
+        assert writes.to(client) == b""
+        assert len(rig.fake.calls) == 1
+
+        rig.barrier.accept(result)
+        assert await reply_of(client) == result_of(1)
+        written = writes.to(client)
+        with pytest.raises(ToolCallsMisused):
+            rig.barrier.accept(result)
+        assert writes.to(client) == written
+        assert (await rig.barrier.next_event()).tool_use_id == "call-2"
+
+    drive_barrier(scenario)
+
+
+def calls_through_a_direct_await(
+    barrier: ToolCallBarrier,
+) -> asyncio.Task[Reply | Unanswered]:
+    return asyncio.Task(
+        barrier.call(1, EDIT_SONG),
+        loop=asyncio.get_running_loop(),
+        name="waiter",
+        eager_start=True,
+    )
+
+
+def calls_through_gather(barrier: ToolCallBarrier) -> asyncio.Task[Reply | Unanswered]:
+    inner = asyncio.Task(
+        barrier.call(1, EDIT_SONG),
+        loop=asyncio.get_running_loop(),
+        name="waiter:call",
+        eager_start=True,
+    )
+
+    async def gathered() -> Reply | Unanswered:
+        (reply,) = await asyncio.gather(inner)
+        return reply
+
+    return asyncio.Task(
+        gathered(), loop=asyncio.get_running_loop(), name="waiter", eager_start=True
+    )
+
+
+async def given_up_by_a_direct_await(
+    rig: Rig, writes: RelayWrites
+) -> Callable[[], Awaitable[None]]:
+    waiter = calls_through_a_direct_await(rig.barrier)
+    event = await rig.barrier.next_event()
+    assert isinstance(event, ToolCallEvent)
+    holding_loop().hold_wakeups("waiter")
+    rig.barrier.accept(event)
+    waiter.cancel()
+
+    async def waiter_ends_cancelled() -> None:
+        assert isinstance(await ending_of(waiter), asyncio.CancelledError)
+
+    return waiter_ends_cancelled
+
+
+async def given_up_through_gather(rig: Rig, writes: RelayWrites) -> Callable[[], Awaitable[None]]:
+    waiter = calls_through_gather(rig.barrier)
+    event = await rig.barrier.next_event()
+    assert isinstance(event, ToolCallEvent)
+    holding_loop().hold_wakeups("waiter", "waiter:call")
+    rig.barrier.accept(event)
+    waiter.cancel()
+
+    async def waiter_ends_cancelled() -> None:
+        assert isinstance(await ending_of(waiter), asyncio.CancelledError)
+
+    return waiter_ends_cancelled
+
+
+async def given_up_by_the_relays_close(
+    rig: Rig, writes: RelayWrites
+) -> Callable[[], Awaitable[None]]:
+    client = await forwarded_call_1(rig)
+    holding_loop().hold_wakeups(
+        CONNECTION_OF_CALL_1, f"{CONNECTION_OF_CALL_1}:answer", WATCH_OF_CALL_1
+    )
+    closing = asyncio.create_task(rig.relay.close())
+    await yield_until(lambda: task_named(CONNECTION_OF_CALL_1).cancelling() > 0)
+
+    async def close_ends_without_a_byte() -> None:
+        async with asyncio.timeout(WAIT_SECONDS):
+            await closing
+        assert writes.to(client) == b""
+
+    return close_ends_without_a_byte
+
+
+@pytest.mark.parametrize(
+    ("give_up", "failure", "expected_result"),
+    [
+        pytest.param(
+            given_up_by_a_direct_await,
+            UPSTREAM_BROKE,
+            ToolResultEvent(tool_use_id="call-1", content=CALL_FAILED_TEXT, is_error=True),
+            id="direct-await-failure",
+        ),
+        pytest.param(
+            given_up_through_gather,
+            None,
+            ToolResultEvent(tool_use_id="call-1", content=UPSTREAM_TEXT, is_error=False),
+            id="gather-success",
+        ),
+        pytest.param(
+            given_up_by_the_relays_close,
+            None,
+            ToolResultEvent(tool_use_id="call-1", content=UPSTREAM_TEXT, is_error=False),
+            id="relay-close-success",
+        ),
+    ],
+)
+def test_a_give_up_recorded_while_its_waiter_has_not_resumed_releases_nothing(
+    give_up: Callable[[Rig, RelayWrites], Awaitable[Callable[[], Awaitable[None]]]],
+    failure: Callable[[], BaseException] | None,
+    expected_result: ToolResultEvent,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:  # R9
+    writes = RelayWrites(monkeypatch)
+
+    async def scenario(rig: Rig) -> None:
+        retrievals = count_retrievals()
+        waiter_ends = await give_up(rig, writes)
+        rig.fake.release()
+        await rig.barrier.settle()
+        result = await rig.barrier.next_event()
+        assert result == expected_result
+
+        rig.barrier.accept(result)
+
+        assert holding_loop().held_wakeups > 0
+        holding_loop().release_wakeups()
+        await waiter_ends()
+        assert retrievals[f"upstream:{RUN_ID}:call-1"] == 1
+        arrive(rig.barrier, EDIT_SONG, 2)
+        assert (await rig.barrier.next_event()).tool_use_id == "call-2"
+
+    with caplog.at_level(logging.ERROR):
+        drive_barrier(scenario, gated_app(failure), loop_factory=HoldingSteppedLoop)
+
+    assert [kind for _, kind, _ in failure_lines(caplog)] == (["UpstreamBroke"] if failure else [])
+    assert UPSTREAM_FAILURE_MARKER not in caplog.text

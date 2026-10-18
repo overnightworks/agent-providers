@@ -668,6 +668,27 @@ with no MCP SDK dependency.
   bytes are bounded by `MAX_PIPELINED_BYTES` (one further request), counted over
   everything the connection holds unparsed, beyond which the request ends like a close.
   Not measured: the CLI's reaction to the relay closing its connection (A1b-12b).
+- *The result release (A1b-10b2a, 18.10.2026).* HD2 holds at the barrier. A forward's
+  outcome becomes the call's one `ToolResultEvent`, handed out like a call in the order
+  events became ready, after the given-up result of the last acceptance, and accepted only
+  as exactly that event (same kind and id). Each call has one response future, created at
+  its admission and awaited directly by `call()` until its answer; it is resolved by the
+  release, a refusal or a close without a byte, or cancelled by a give-up, and an explicit
+  cancel of the CLI is recorded beside it and wins over any earlier resolution, so
+  guarantee G holds through the whole call with no handoff. The JSON-RPC answer is written
+  only when the runner accepts the result, after the service resumed it past the event
+  (checked, counted, recorded and queued). An upstream failure becomes `CALL_FAILED_TEXT`
+  as an `is_error` result, logged once by class, so the model never reads the app's
+  failure text and the app's client sees the call end. Every outcome's decoded text is
+  asked `Capability.appears_in` before its event exists, whether the CLI still waits or
+  not; a hit yields no event and no answer and fails the run (line 16). A give-up
+  withholds only the answer, because the call ran. `stop()` refuses with `-32602` every
+  call whose result was not released, a running forward included, which keeps running
+  upstream (design item 10); the pinned CLI continued after that refusal and after an
+  `isError` result (A1b-0e c7). A call holds its pending slot until it is released,
+  refused or given up; a forward's completion alone never frees it, and a cancelled call
+  never releases a result (line 22). Not measured: the pinned CLI against the release
+  (A1b-12b). The bounded close is A1b-10b2b's.
 - *H9.* Its import contract says "client → stdlib, pydantic, HTTP and the MCP SDK
   only". That sentence is about `agent-client` and is untouched; HD1 adds no
   MCP SDK to any package, so it stays true.

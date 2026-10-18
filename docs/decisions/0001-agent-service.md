@@ -2041,10 +2041,9 @@ start to the `result`: E1 32.6 s, E2 9.1 s, E3 63.0 s, E4 132.7 s.
   observed (record seq 15): a new connection (conn 3) opened in the window. Its handshake
   had `server/discover`, `initialize`, `notifications/initialized` and `GET`, and no
   `tools/list`; then came a `tools/call` with n=2 and id 1 (11,051 ms, held, closed at
-  11,509 ms), lower than the run's earlier `tools/call` ids 2 and 3. As a cell it is
-  `later-new-id(1)` for n=2, with no attribution to response 2's model call
-  (`insufficient(provisional-attribution)`, `later_new_id` 1, `same_id` 0); the ids
-  restarted on the new connection, and no id was seen twice. After-window observations:
+  11,509 ms), lower than the run's earlier `tools/call` ids 2 and 3. By the identity
+  rules it is recorded as `later-new-id(1)` for n=2; no cell reads it (n=2's give-up is
+  c5's). The ids restarted on the new connection, and no id was seen twice. After-window observations:
   none. Residuals: an exit between the last readability check and the signal cannot be told
   from one the signal caused; a close made before the signal and observed after it counts
   as pending (this run's close was observed 3 ms after `signal_ms`); an exit, close or
@@ -2088,11 +2087,12 @@ start to the `result`: E1 32.6 s, E2 9.1 s, E3 63.0 s, E4 132.7 s.
   id arrived on conn 2 at 7,303 ms, 5,015 ms after n=1's arrival). Its pairing with the
   stream's 5 s give-up is provisional and unclaimed; the stream's timeout and the server's
   cancellation are kept separate. Conn 2 then carried n=2. `cancelled-other-id`
-  0 in every run. For 10b1: a give-up is signalled to the relay in the two different ways
-  seen here (the default 60 s path closed the connection; the 5 s path sent a cancel, and
-  closed the first connection only at 10,985 ms), so the relay must treat both a client
-  close and a `notifications/cancelled` as the end of a pending call, or state that a
-  pending call is still forwarded after the CLI gave up. The two runs differ in
+  0 in every run. For 10b1: two endings of a waiting call were
+  observed. In E3 the connection was closed with no cancel. In E5 a `notifications/cancelled`
+  for n=1's id arrived on conn 2, 5,015 ms after n=1, and the first connection closed only
+  at 10,985 ms; how the cancel relates to the stream's timeout stays provisional. So the
+  relay must treat both a client close and a `notifications/cancelled` as the end of a
+  pending call, or state that a pending call is still forwarded after the CLI gave up. The two runs differ in
   `MCP_TOOL_TIMEOUT` and in whether a second call followed; the cause of the difference is
   not measured.
 - **c9 The whole-response gap, a live check of 4a's reading** (E1, `--max-turns 1`):

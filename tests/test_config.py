@@ -26,6 +26,7 @@ from agent_providers.catalog import (
     probe_provider_route,
 )
 from agent_providers.config import (
+    PrivateWorkingRoot,
     ProviderNotConfiguredError,
     ProviderRuntimeAlreadyConfiguredError,
     ProviderRuntimeConfig,
@@ -205,11 +206,28 @@ class _Refusal:
     log_records: list[logging.LogRecord]
 
 
-def _configure_while_handling_an_exception_naming_the_root(config: ProviderRuntimeConfig) -> None:
+def _check_the_root_of(config: ProviderRuntimeConfig) -> None:
+    PrivateWorkingRoot(config.cli_working_directory_root)
+
+
+_REFUSING_ENTRIES = (
+    pytest.param(configure, id="configure"),
+    pytest.param(_check_the_root_of, id="private-working-root"),
+)
+
+
+def _entered_while_handling_an_exception_naming_the_root(
+    entry: Callable[[ProviderRuntimeConfig], None], config: ProviderRuntimeConfig,
+) -> None:
     try:
         raise PermissionError(13, "denied", str(Path("/") / THE_ROOT_NAME))
     except PermissionError:
-        configure(config)
+        entry(config)
+
+
+@pytest.fixture(params=_REFUSING_ENTRIES)
+def refusing_entry(request) -> Callable[[ProviderRuntimeConfig], None]:
+    return request.param
 
 
 @pytest.fixture
@@ -218,19 +236,18 @@ def refusal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    refusing_entry: Callable[[ProviderRuntimeConfig], None],
     while_the_caller_handles_an_exception: bool,
 ) -> _Refusal:
     expected_violation, make_root = request.param
     base = _a_private_directory(tmp_path / THE_ROOT_NAME)
     config = _runtime_with_root(tmp_path, make_root(base, monkeypatch))
     reset_config()
-    install = (
-        _configure_while_handling_an_exception_naming_the_root
-        if while_the_caller_handles_an_exception
-        else configure
-    )
     with caplog.at_level(logging.DEBUG), pytest.raises(WorkingRootNotPrivateError) as raised:
-        install(config)
+        if while_the_caller_handles_an_exception:
+            _entered_while_handling_an_exception_naming_the_root(refusing_entry, config)
+        else:
+            refusing_entry(config)
     return _Refusal(expected_violation, raised.value, list(caplog.records))
 
 
@@ -268,6 +285,24 @@ def test_a_private_root_below_a_symlinked_parent_is_installed(tmp_path: Path) ->
     _install_over_nothing(config)
 
     assert current_config() == config
+
+
+@pytest.mark.parametrize(
+    "below_a_symlinked_parent", [False, True], ids=["plain", "symlinked-parent"],
+)
+def test_a_private_root_constructs_with_no_runtime_installed(
+    tmp_path: Path, below_a_symlinked_parent: bool,
+) -> None:
+    real = _a_private_directory(tmp_path / "real")
+    root = _a_private_directory(real / "root")
+    if below_a_symlinked_parent:
+        (tmp_path / "link").symlink_to(real)
+        root = tmp_path / "link" / "root"
+    reset_config()
+    with pytest.raises(ProviderRuntimeNotConfiguredError):
+        current_config()
+
+    assert PrivateWorkingRoot(root).path == root
 
 
 def test_an_identical_reinstall_of_a_private_root_is_a_no_op(tmp_path: Path) -> None:

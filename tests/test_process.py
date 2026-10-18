@@ -40,6 +40,7 @@ from provider_test_support import (
     FailingLogHandler,
     RaisingLogHandler,
     RunnerFailureWatch,
+    ThreadedOperation,
     a_codex_login,
     a_credential_destination_that_fails,
     a_dangling_symlink,
@@ -49,6 +50,7 @@ from provider_test_support import (
     a_symlink_to_a_login,
     a_usable_login_over_the_bound,
     call_within_deadline,
+    code_of,
     exception_chain,
     fail_mkdtemp,
     fail_the_directory_named,
@@ -2453,6 +2455,37 @@ def test_a_failed_credential_copy_keeps_no_credential_in_its_error(
     assert [len(closes) for closes in destination_closes] == [1]
 
 
+def test_a_credential_copy_that_makes_no_write_progress_leaves_no_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.json"
+    source.write_text(_A_RAW_CREDENTIAL_CANARY)
+    destination_name = ".credentials.json"
+    real_write = os.write
+    open_descriptors = len(os.listdir("/proc/self/fd"))
+
+    def write_nothing_to_the_destination(descriptor: int, data) -> int:
+        if os.readlink(f"/proc/self/fd/{descriptor}").endswith(destination_name):
+            return 0
+        return real_write(descriptor, data)
+
+    monkeypatch.setattr(process.os, "write", write_nothing_to_the_destination)
+
+    with pytest.raises(CliEnvironmentUnavailableError) as raised:
+        PrivateCredentialHome(
+            source,
+            Path(".claude") / destination_name,
+            prefix="private-home-",
+            missing_credential_is_error=True,
+        )
+
+    assert raised.value.cause is CliEnvironmentCause.CREDENTIAL_COPY_NOT_WRITTEN
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+    assert not list(tmp_path.glob("private-home-*"))
+    assert len(os.listdir("/proc/self/fd")) == open_descriptors
+
+
 @pytest.mark.parametrize("destination_directory", (".claude", ".codex"))
 def test_a_destination_directory_that_cannot_be_made_is_a_copy_environment_fault(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, destination_directory: str,
@@ -3095,63 +3128,9 @@ class _LedgerOfRemovals:
         self._patch.stop()
 
 
-class _ThreadedOperation:
-    """Runs an operation on a thread, stopping it at its k-th line event inside the given code."""
-
-    _BOUND_SECONDS = 5
-
-    def __init__(self, operation, *, pause_in: frozenset = frozenset(), at_line: int = 0) -> None:
-        self._operation = operation
-        self._pause_in = pause_in
-        self._pause_at_line = at_line
-        self._seen_lines = 0
-        self._stopped_or_ended = threading.Event()
-        self._resume = threading.Event()
-        self.paused = False
-        self.outcome = None
-        self.refusal: RuntimeError | None = None
-        self._thread = threading.Thread(target=self._run, daemon=True)
-
-    def start(self) -> None:
-        self._thread.start()
-        assert self._stopped_or_ended.wait(self._BOUND_SECONDS), "the operation hung"
-
-    def finish(self) -> None:
-        self._resume.set()
-        self._thread.join(self._BOUND_SECONDS)
-        assert not self._thread.is_alive()
-
-    def _run(self) -> None:
-        tracer_found_at_entry = sys.gettrace()
-        sys.settrace(self._on_call)
-        try:
-            self.outcome = self._operation()
-        except RuntimeError as refusal:
-            self.refusal = refusal
-        finally:
-            sys.settrace(tracer_found_at_entry)
-            self._stopped_or_ended.set()
-
-    def _on_call(self, frame, event, argument):
-        return self._on_line if frame.f_code in self._pause_in else None
-
-    def _on_line(self, frame, event, argument):
-        if event == "line":
-            self._seen_lines += 1
-            if self._seen_lines == self._pause_at_line:
-                self.paused = True
-                self._stopped_or_ended.set()
-                self._resume.wait(self._BOUND_SECONDS)
-        return self._on_line
-
-
-def _code_of(*functions) -> frozenset:
-    return frozenset(function.__code__ for function in functions)
-
-
-_RESERVING_CODE = _code_of(*_HOME_CODES["reserve"])
-_CLOSING_CODE = _code_of(*_HOME_CODES["close"])
-_RELEASING_CODE = _code_of(*_HOME_CODES["release"])
+_RESERVING_CODE = code_of(*_HOME_CODES["reserve"])
+_CLOSING_CODE = code_of(*_HOME_CODES["close"])
+_RELEASING_CODE = code_of(*_HOME_CODES["release"])
 
 
 def _run_interleaved_at_every_line(
@@ -3162,11 +3141,11 @@ def _run_interleaved_at_every_line(
         home = build_home(source)
         with _LedgerOfRemovals() as ledger:
             paused_operation, other_operation = operations_of(home, ledger)
-            paused = _ThreadedOperation(
+            paused = ThreadedOperation(
                 paused_operation, pause_in=paused_code, at_line=position,
             )
             paused.start()
-            other = _ThreadedOperation(other_operation)
+            other = ThreadedOperation(other_operation)
             other.start()
             paused.finish()
             outcome_holds(home, ledger, paused, other)
@@ -4365,8 +4344,8 @@ _CREDENTIAL_HANDLING_CODE = frozenset(
         process._read_regular_file,
         process._read_within_bound,
         process._install_credential,
-        process._write_new_credential_file,
-        process._write_credential,
+        process._write_new_private_file,
+        process._write_whole,
         blanked_copy,
         _blanked_document,
         process._codex_login_in_the_mirror_is_usable,

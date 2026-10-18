@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from typing import BinaryIO
 
 import pytest
+from provider_test_support import PROC_DEVICE, mountinfo_line
 
 from agent_providers import procfs
 from agent_providers.procfs import (
@@ -24,6 +25,7 @@ from agent_providers.procfs import (
     RealProcView,
     UnparsableStatError,
     group_census,
+    holds_mount_point,
     parse_stat,
 )
 from agent_providers.spawn import ChildProcess, closed_environment, open_pipes
@@ -35,8 +37,6 @@ REPORT_FLAGS = os.WEXITED | os.WNOHANG | os.WNOWAIT
 OWN_PID = 42
 PGID = 500
 OTHER_GROUP = 600
-PROC_DEVICE = "0:25"
-PROC_MOUNT_POINT = "/proc"
 STAT_FIELDS_AFTER_COMMAND = 50
 WAIT_FOR_STDIN = "import sys; sys.stdin.read()"
 NON_UTF8_NAME_THEN_WAIT_FOR_STDIN = (
@@ -64,20 +64,6 @@ def stat_text(
     fields[0], fields[2], fields[17] = state, str(pgrp), str(threads)
     command = comm.encode() if isinstance(comm, str) else comm
     return f"{OWN_PID} (".encode() + command + f") {' '.join(fields)}\n".encode()
-
-
-def mountinfo_line(
-    *,
-    device: str = PROC_DEVICE,
-    mount_point: str = PROC_MOUNT_POINT,
-    optional_fields: str = "shared:13",
-    filesystem_type: str = "proc",
-    super_options: str = "rw",
-) -> str:
-    return (
-        f"28 32 {device} / {mount_point} rw,nosuid {optional_fields} - "
-        f"{filesystem_type} proc {super_options}"
-    )
 
 
 def own_status(*name_space_pid_line: str) -> str:
@@ -791,3 +777,37 @@ def test_the_real_view_reads_a_stat_with_a_non_utf8_command_name_as_raw_bytes(fa
     (fake_proc_root / "9" / "stat").write_bytes(raw)
 
     assert RealProcView().stat(9) == raw
+
+
+HELD_DIRECTORY = "/r/agent-run-a"
+
+
+@pytest.mark.parametrize(
+    ("mountinfo", "holds"),
+    [
+        pytest.param(mountinfo_line(mount_point=HELD_DIRECTORY), True, id="equal"),
+        pytest.param(mountinfo_line(mount_point=f"{HELD_DIRECTORY}/work"), True, id="below"),
+        pytest.param(
+            mountinfo_line(mount_point="/r/agent-run-a1"), False, id="sibling-sharing-a-prefix",
+        ),
+        pytest.param(mountinfo_line(mount_point="/r"), False, id="parent"),
+        pytest.param("28 32 0:25 / /r/agent-run-a rw,nosuid shared:13", False, id="no-separator"),
+        pytest.param("", False, id="empty-table"),
+    ],
+)
+def test_a_mount_table_holds_a_directory_when_a_mount_point_is_at_or_below_it(
+    mountinfo: str, holds: bool,
+) -> None:
+    assert holds_mount_point(mountinfo, HELD_DIRECTORY) is holds
+
+
+@pytest.mark.parametrize(
+    ("escape", "decoded"),
+    [("\\040", " "), ("\\011", "\t"), ("\\012", "\n"), ("\\134", "\\")],
+    ids=["space", "tab", "newline", "backslash"],
+)
+def test_an_escaped_mount_point_is_matched_by_its_decoded_name(escape: str, decoded: str) -> None:
+    line = mountinfo_line(mount_point=f"/r/a{escape}b")
+
+    assert holds_mount_point(line, f"/r/a{decoded}b")
+    assert not holds_mount_point(line, f"/r/a{escape}b")

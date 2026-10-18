@@ -31,7 +31,7 @@ It owns the machinery that is the same in every deployment:
 
 | Module | Owns |
 |---|---|
-| `agent_providers.config` | The deployment facts every module reads, installed once per process via `configure()`, which refuses a working root that is not private |
+| `agent_providers.config` | The deployment facts the catalog and turn paths read, installed once per process via `configure()`, which refuses a working root that is not private; `PrivateWorkingRoot`, a root checked by the same rule at construction, without installing a runtime |
 | `agent_providers.catalog` | Live provider/route readiness probes and the model names each route offers, aliases or ids as the provider lists them (`probe_provider_route`, `list_provider_models`); a snapshot also names the Claude CLI's own default (`default_model_label`) |
 | `agent_providers.dispatch` | Routing one turn to a provider and route, and the image capability |
 | `agent_providers.events` | The `StreamEvent` union a turn emits in-process (assistant text, tool call, tool result, final); not the service wire |
@@ -44,12 +44,12 @@ It owns the machinery that is the same in every deployment:
 | `agent_providers.codex_login` | `assess_codex_login`: the one decider of whether a Codex login can start a child, and the blanked copy it receives |
 | `agent_providers.tools` | The `ToolCatalog`, its host-declared `ToolProtocolMarkup` and its Anthropic/OpenAI schema projections; re-exports the identical `ToolDeclaration` |
 | `agent_providers.spawn` | `ChildProcess` (its `repr` omits the environment field) and the only calls in this library that create a child process. `open_anchored_pipes` returns an `AnchoredChild`, an async child whose exited leader only its own handle reaps, so its process group can be signalled safely until `release()`; its start runs synchronously on the event loop, as asyncio's own door does, and blocks that loop until the child has executed its binary; `AnchoredLeader.kill_and_census()`, also on `AnchoredChild`, sends SIGKILL to the leader's process group and then counts the group's live members in `/proc` (`procfs.group_census`), both inside one hold of the anchor, so every count follows a kill that could reach only this run's group; its `EMPTY` says nothing about a process that left the group with `setsid` or `setpgid`, and it neither publishes nor releases the leader's exit. `AnchoredChild.kill_until_gone(within=)` repeats that kill and count in a worker thread, `GROUP_CENSUS_INTERVAL_SECONDS` (0.1 s) after each live count, and returns a `KillUntilGoneResult` whose `confirmed` is true only for an `EMPTY` count that ended no later than the bound; the bound is measured from just before the first SIGKILL, the first attempt is unconditional (so a zero bound makes one kill and count and practically never confirms on a real clock), no subsequent attempt starts at or after it, and a count that ends after it is reported as it is but never confirms, so the call can return later than the bound by one wait's overrun and one attempt. The host must not reap children it did not start. After a resource failure or an interruption inside `open_anchored_pipes`, during its start or after the start and before the handle is returned, the host stops using the library and ends the process (see **Interruptions**) |
-| `agent_providers.process` | `run_cli_bounded`: the bounded runner over a `ChildProcess` (start, stdin, first line, deadline, process-group cleanup); its line channel ends in exactly one outcome before the run returns, `cli_settle_deadline(deadline)` is the one instant by which every wait ends, and a failed step is reported by name and exception class only |
+| `agent_providers.process` | `run_cli_bounded`: the bounded runner over a `ChildProcess` (start, stdin, first line, deadline, process-group cleanup); its line channel ends in exactly one outcome before the run returns, `cli_settle_deadline(deadline)` is the one instant by which every wait ends, and a failed step is reported by name and exception class only; `LastHolderRemoval`: one removal, claimed exactly once by the last of a closure and its reservations and run outside its lock, never retried |
 | `agent_providers.anchored_turn` | `CliProcessPool` (the process-wide slots of one CLI, built with a limit and a name and no default for either) and `anchored_turn_child`: one async turn's child on an anchor that holds a pool slot, reaped behind a shield whatever ends the turn; a leader that cannot be shown gone is retained and keeps its slot |
 | `agent_providers.lost_groups` | `retain_lost_group` and `confirm_group_gone`: the registry of process groups a reap could not release, and the one attempt that may free their place |
 | `agent_providers.transcript` | `flatten_messages` and `stdin_prompt`: the single prompt a CLI turn reads from stdin |
 | `agent_providers.secret_file` | How the service and the core read a secret kept in a file: opened once, type, mode (nothing for group or others) and size (16 KiB) taken from that descriptor; refusals name the path and the reason, never the content. A profile token must be one printable line and not an `sk-ant-api` API key |
-| `agent_providers.procfs` | `group_census`, one scan of one process group's live members from `/proc`, unavailable unless `/proc` is visibly a procfs of the process's own PID namespace with nothing hidden |
+| `agent_providers.procfs` | `group_census`, one scan of one process group's live members from `/proc`, unavailable unless `/proc` is visibly a procfs of the process's own PID namespace with nothing hidden; `holds_mount_point`, whether a mount table names a mount point at or below a directory |
 | `agent_providers.images` | The `ImagePolicy` an image turn is held to |
 | `agent_providers.sandbox` | The directory-name prefix constants a host's kernel sandbox profile must permit |
 | `agent_service.app` | `POST /runs` and `GET /runs/{id}`: the order of checks (a CLI run takes an admission place before anything is signed), the typed rejections, the admitted run's event stream (`_RunResponse`, which closes the run whenever its response ends), and the run status that only the app and user that started a run may read; an admitted run of an app with an MCP origin hands its runner one capability, and an oversized one answers 422 `capability_too_large` before any runner, stream or record |
@@ -267,7 +267,10 @@ Create the root with `install -d -m 0700 <root>`, never `/tmp` itself, in every
 process that configures, and keep its owner, mode, path and the process's
 effective identity for the process lifetime. The check proves privacy only on a
 filesystem with POSIX ownership and modes, and gives no protection against a
-hostile replacement after startup.
+hostile replacement after startup. `PrivateWorkingRoot(path)` runs the same
+inspection at construction and raises the same error, so a host that installs
+no runtime checks its root once at startup; it is checked at construction, not
+kept private, and the same obligations hold.
 
 The other host obligations arrive as arguments where they are needed:
 

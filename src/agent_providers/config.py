@@ -7,8 +7,8 @@ owns, not values this package may guess. Its catalog and turn paths
 therefore read them from one frozen value the host installs once per process
 via :func:`configure`, instead of reaching into an application settings
 module; the subscription run
-(:class:`agent_providers.claude.provider.ClaudeRun`) takes them as explicit
-arguments instead.
+(:class:`agent_providers.claude.provider.ClaudeRun`) and the working root
+(:class:`PrivateWorkingRoot`) take them as explicit arguments instead.
 
 The configuration is cut along the two ways into this library. A host that only
 asks which models exist and whether a provider is logged in configures
@@ -33,6 +33,7 @@ from __future__ import annotations
 import os
 import stat
 import threading
+from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
@@ -241,6 +242,22 @@ class WorkingRootNotPrivateError(RuntimeError):
 
     def __reduce__(self) -> tuple[type[WorkingRootNotPrivateError], tuple[WorkingRootViolation]]:
         return (type(self), (self.violation,))
+
+
+@dataclass(frozen=True)
+class PrivateWorkingRoot:
+    """A working root that passed the privacy rule when it was constructed.
+
+    The host keeps the root's owner, mode and path resolution, and the
+    process's effective identity, for the process lifetime. The check proves
+    privacy only on a filesystem with POSIX ownership and modes, and claims no
+    protection against a hostile replacement after construction.
+    """
+
+    path: Path
+
+    def __post_init__(self) -> None:
+        _inspect_working_root(self.path)
 
 
 _NOT_CONFIGURED_DETAIL = (

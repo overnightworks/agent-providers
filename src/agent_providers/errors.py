@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import StrEnum
 from functools import partial
 from typing import TYPE_CHECKING, Any, NoReturn
@@ -164,3 +165,33 @@ class CodexProcessPoolSaturatedError(Exception):
 
     def __reduce__(self) -> _Reduction:
         return (partial(type(self), kind=self.kind, scope=self.scope), (), self.__dict__)
+
+
+@dataclass(frozen=True)
+class RetainedGroup:
+    """Names one retention of a lost process group, valid only in the process that minted it.
+
+    A host never persists it, passes it to another process, or uses it after a
+    restart: the registry cannot tell such a value from an unknown group and
+    answers ``True`` without a signal, which says nothing about the old run
+    (the container's restart ends that run's processes).
+    """
+
+    pgid: int
+    generation: int
+
+
+class ContainmentLost(Exception):
+    """The end of a run's process group after SIGKILL is not confirmed.
+
+    Deliberately neither an ``UnavailableError`` nor a ``ProviderError``: a
+    route failure would be mapped to a retry, while this one is handed to the
+    quarantine that keeps the run's place held.
+    """
+
+    def __init__(self, group: RetainedGroup) -> None:
+        self.group = group
+        super().__init__(f"process group {group.pgid}: its end after SIGKILL is not confirmed")
+
+    def __reduce__(self) -> _Reduction:
+        return (type(self), (self.group,), self.__dict__)

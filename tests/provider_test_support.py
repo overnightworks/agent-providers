@@ -27,6 +27,7 @@ import tempfile
 import threading
 import traceback
 import types
+from collections import deque
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -35,6 +36,7 @@ from typing import Any, Final
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from anchored_support import TEST_WAIT_SECONDS
 
 from agent_client.tools import ToolDeclaration
 from agent_providers import process
@@ -56,7 +58,8 @@ from agent_providers.errors import (
 )
 from agent_providers.events import AssistantTextEvent, FinalEvent, StreamEvent
 from agent_providers.process import CliRunOutcome, CliRunReason
-from agent_providers.spawn import ChildProcess, closed_environment
+from agent_providers.procfs import GroupCensus
+from agent_providers.spawn import ChildIdentityLost, ChildProcess, closed_environment
 from agent_providers.text_tool_protocol import TextToolRejectionRule
 from agent_providers.tool_loop import (
     InitialTurn,
@@ -1162,3 +1165,81 @@ class RaisingLogHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         raise next(self._errors, self._then)
+
+
+@dataclass(frozen=True)
+class Recorded:
+    operation: str
+    pid: int
+    thread: threading.Thread
+
+
+def operations(log: Sequence[Recorded]) -> list[tuple[str, int]]:
+    return [(recorded.operation, recorded.pid) for recorded in log]
+
+
+@dataclass(frozen=True)
+class Hold:
+    """Parks a scripted call: ``entered`` is set on arrival, the call goes on at ``proceed``."""
+
+    entered: threading.Event = field(default_factory=threading.Event)
+    proceed: threading.Event = field(default_factory=threading.Event)
+
+
+class ScriptedAnchoredChild:
+    """An ``AnchoredChild`` double whose kill answers and release failures are scripted.
+
+    Each ``kill_and_census`` takes the next scripted answer (the last one repeats); an
+    exception answer is raised. Every call is recorded in the shared ``log`` with the thread
+    that made it. After a ``ChildIdentityLost`` it mirrors the real admission: later calls raise
+    it again and record nothing.
+    """
+
+    def __init__(
+        self,
+        pid: int,
+        log: list[Recorded],
+        *,
+        censuses: Sequence[GroupCensus | BaseException] = (GroupCensus.EMPTY,),
+        release_failures: Sequence[Exception] = (),
+        returncode: int | None = None,
+        hold: Hold | None = None,
+        during: Callable[[], None] | None = None,
+    ) -> None:
+        self.pid = pid
+        self.returncode = returncode
+        self._log = log
+        self._censuses = deque(censuses)
+        self._release_failures = deque(release_failures)
+        self._hold = hold
+        self._during = during
+        self._lost: ChildIdentityLost | None = None
+
+    def kill_and_census(self) -> GroupCensus:
+        self._enter("kill")
+        if self._hold is not None:
+            self._hold.entered.set()
+            assert self._hold.proceed.wait(TEST_WAIT_SECONDS), "the held kill was never released"
+        answer = self._censuses[0] if len(self._censuses) == 1 else self._censuses.popleft()
+        if isinstance(answer, BaseException):
+            self._remember_loss(answer)
+            raise answer
+        return answer
+
+    def release(self) -> None:
+        self._enter("release")
+        if self._release_failures:
+            failure = self._release_failures.popleft()
+            self._remember_loss(failure)
+            raise failure
+
+    def _enter(self, operation: str) -> None:
+        if self._lost is not None:
+            raise self._lost
+        self._log.append(Recorded(operation, self.pid, threading.current_thread()))
+        if self._during is not None:
+            self._during()
+
+    def _remember_loss(self, failure: BaseException) -> None:
+        if isinstance(failure, ChildIdentityLost):
+            self._lost = failure

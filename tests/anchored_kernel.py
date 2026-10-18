@@ -16,8 +16,9 @@ import os
 import signal
 import threading
 from collections import deque
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Literal
 
@@ -49,6 +50,36 @@ def watcher_thread(pid: int) -> threading.Thread:
     watcher = next((t for t in threading.enumerate() if t.name == name), None)
     assert watcher is not None, f"no {name} thread exists"
     return watcher
+
+
+@dataclass
+class WatcherStarts:
+    """The watcher threads started so far, kept whether or not they have already ended."""
+
+    _threads: dict[int, threading.Thread] = field(default_factory=dict)
+
+    def keep(self, watcher: threading.Thread) -> None:
+        self._threads[int(watcher.name.removeprefix(WATCHER_THREAD_PREFIX))] = watcher
+
+    def thread(self, pid: int) -> threading.Thread:
+        assert pid in self._threads, f"no {WATCHER_THREAD_PREFIX}{pid} thread was started"
+        return self._threads[pid]
+
+
+@contextmanager
+def recorded_watcher_starts(monkeypatch: pytest.MonkeyPatch) -> Iterator[WatcherStarts]:
+    """Keep every watcher thread at its start, for a leader that can exit before it is looked up."""
+    starts = WatcherStarts()
+    real_start = threading.Thread.start
+
+    def start(thread: threading.Thread) -> None:
+        if thread.name.startswith(WATCHER_THREAD_PREFIX):
+            starts.keep(thread)
+        real_start(thread)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(threading.Thread, "start", start)
+        yield starts
 
 
 def watcher_names() -> set[str]:

@@ -504,6 +504,7 @@ def refusal_of(decoder: ClaudeStreamDecoder, *lines: bytes) -> RunSurfaceRefused
         pytest.param(False, "Bash", id="built-in-without-a-relay"),
         pytest.param(True, "mcp__notes__get_note", id="another-servers-tool-beside-the-relay"),
         pytest.param(False, "mcp__relay__lookup", id="a-relay-tool-without-a-relay"),
+        pytest.param(True, "mcp__relayx__foo", id="a-server-named-like-the-relay-with-a-suffix"),
     ],
 )
 def test_a_tool_beside_the_relay_in_init_refuses_the_run(relay_attached: bool, tool: str) -> None:

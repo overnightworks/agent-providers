@@ -1,0 +1,8 @@
+claim_id = "e85a2392ed75404799da2a21b87fa4ed"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "7d410b818d869293ea2b82b45c9caa6f698eb4c9"
+branch = "claude/issue-281-one-core-decider"
+scope = ["README.md", "src/agent_providers/anchored_turn.py", "src/agent_providers/lost_groups.py", "tests/provider_test_support.py", "tests/test_anchored_turn.py"]
+opened_commit = "0bc28986a0d03df98a9f5832ae5784820ef65652"
+whole_reason = "The decider is only proven with the double that can split a committed exit from a published one and the reap row that uses it; the two modules, the double and the row are one extraction, and README rows 48-49 describe it."

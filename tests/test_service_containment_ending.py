@@ -17,6 +17,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from functools import partial
 
+import anyio
 import pytest
 from service_support import (
     BrokenClock,
@@ -276,6 +277,45 @@ async def test_a_loss_at_a_step_ends_the_run_provider_error_after_the_close(
     assert runner.log.index(marker) < runner.log.index("taken:failed")
     _assert_recorded(drive.status(), RunState.FAILED, FailureCode.PROVIDER_ERROR, events=2, at=0)
     assert _failure_classes(caplog) == []
+
+
+@in_loop
+async def test_a_closer_cut_by_its_scope_is_cancelled_after_the_place_passed_to_the_quarantine():
+    runner = GatedRunner()
+    runner.close_error = _lost()
+    runner.hold_close()
+    reached_after_the_close: list[bool] = []
+    async with driven(runner, read=False) as drive:
+        drive.took(await anext(drive.frames))
+        await drive.clock.parked()
+        scope = anyio.CancelScope()
+
+        async def close_inside_the_scope() -> None:
+            with scope:
+                await drive.frames.aclose()
+                reached_after_the_close.append(True)
+
+        closing = asyncio.create_task(close_inside_the_scope())
+        await drive.clock.parked()
+        scope.cancel()
+        await drive.clock.parked()
+        assert not closing.done()
+
+        runner.release_close()
+        await closing
+
+        assert (scope.cancelled_caught, reached_after_the_close) == (True, [])
+        _assert_recorded(
+            drive.status(),
+            RunState.FAILED,
+            FailureCode.PROVIDER_ERROR,
+            events=1,
+            at=0,
+            lost=ClientLoss.DISCONNECTED,
+        )
+        assert drive.slot_is_full()
+        await drive.quarantine_clock.step_to_next_deadline()
+        assert not drive.slot_is_full()
 
 
 @pytest.mark.parametrize(

@@ -19,9 +19,11 @@ ending is decided at once but stops the runner first: the terminal is
 committed (encoded, accepted, recorded) and queued only after the runner's
 close has finished, and a containment loss the pump met makes it
 ``failed: provider_error``, and its place passes to the quarantine before
-the record ends. The shielded wait for that close mirrors the
-provider core's reap of a streaming process
-(``agent_providers.anchored_turn``) without importing it.
+the record ends. The shielded wait for that close is the
+provider core's (``agent_providers.outlasting``), the one owner of what a
+waiter that outlasts its cancellation raises; leaving the run delivers the
+closer's AnyIO level cancellation once the close, the hand-over and the
+record's end are done.
 """
 
 from __future__ import annotations
@@ -48,11 +50,10 @@ from types import TracebackType
 from typing import Any, Final, Protocol
 from uuid import UUID
 
-import anyio
-
 from agent_client.wire import ClientLoss, FailureCode
 from agent_providers.errors import ContainmentLost, RetainedGroup
 from agent_providers.events import StreamEvent
+from agent_providers.outlasting import level_cancellation, wait_outlasting_cancellation
 from agent_service.config import RunConfig
 
 log = logging.getLogger(__name__)
@@ -230,24 +231,6 @@ class _FrameSlot:
         return frame
 
 
-async def wait_outlasting_cancellation(task: asyncio.Task[object]) -> asyncio.CancelledError | None:
-    """Wait until ``task`` is done, however often the waiter is cancelled meanwhile.
-
-    Returns the first cancellation of the waiter, for the caller to raise once
-    it has retrieved the task's outcome. The task is never cancelled by this
-    wait, and AnyIO's level cancellation (which Starlette uses on a client's
-    disconnect) cannot cut it short.
-    """
-    interrupted: asyncio.CancelledError | None = None
-    while not task.done():
-        try:
-            with anyio.CancelScope(shield=True):
-                await asyncio.wait({task})
-        except asyncio.CancelledError as cancelled:  # NOSONAR(S7497) returned once done (rule 10)
-            interrupted = interrupted or cancelled
-    return interrupted
-
-
 async def unfinished_by(
     clock: RunClock, deadline: float, tasks: Collection[asyncio.Task[Any]], expiry_name: str
 ) -> set[asyncio.Task[Any]]:
@@ -318,7 +301,8 @@ def _exit_of(
     one is that step's failure, recorded among ``failures`` as ``RunStepCancelled``.
 
     1. A delivered cancellation always wins: one caught while the run was
-       torn down is raised, and the body's outcome is left to propagate
+       torn down, or AnyIO's level one of a scope cancelled meanwhile
+       (taken after the cleanup), is raised, and the body's outcome is left to propagate
        while a cancellation request is on the task. That covers a
        cancellation that arrived in the body, and a close (``GeneratorExit``)
        by a closer whose cancellation is on its way out.
@@ -590,7 +574,10 @@ class SupervisedRun:
             self._failures.add(FailedPart.SUPERVISION, failure)
         if (failure := _failure_of(self._reaping())) is not None:
             self._failures.add(FailedPart.CLEANUP, failure)
-        self._failures.leave(cancellation=waited or reaped, body_failure=exc)
+        cancellation = waited or reaped
+        if cancellation is None and not _cancel_requested(asyncio.current_task()):
+            cancellation = await level_cancellation()
+        self._failures.leave(cancellation=cancellation, body_failure=exc)
 
     async def frames(self) -> AsyncIterator[bytes]:
         while (frame := await self._slot.take()) is not None:

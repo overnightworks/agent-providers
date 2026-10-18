@@ -17,6 +17,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Final
 
+import anyio
 import pytest
 from provider_test_support import Recorded, ScriptedAnchoredChild, operations
 from service_support import (
@@ -563,6 +564,56 @@ async def test_a_hand_over_that_raises_still_ends_the_record_is_raised_and_keeps
             (f"The cleanup of run {drive.run_id} failed", "RuntimeError")
         ]
     else:
+        status = drive.status()
+        assert status is not None
+        assert (status.state, status.failure_code) == (RunState.FAILED, FailureCode.PROVIDER_ERROR)
+
+
+@pytest.mark.parametrize(
+    ("record_end_fails", "logged_kinds"),
+    [(False, ["OSError"]), (True, ["OSError", "RuntimeError"])],
+    ids=["record-ends", "record-fails"],
+)
+@in_loop
+async def test_a_scope_cut_closer_over_a_failing_hand_over_is_cancelled_after_the_record_end(
+    record_end_fails, logged_kinds, quarantine_line_fails, monkeypatch, caplog
+):
+    caplog.set_level(logging.ERROR)
+    if record_end_fails:
+        _RecorderFailsOver(monkeypatch)
+    runner = GatedRunner()
+    runner.close_error = _lost()
+    runner.hold_close()
+    reached_after_the_close: list[bool] = []
+    async with driven(runner, read=False) as drive:
+        drive.took(await anext(drive.frames))
+        await drive.clock.parked()
+        scope = anyio.CancelScope()
+
+        async def close_inside_the_scope() -> None:
+            with scope:
+                await drive.frames.aclose()
+                reached_after_the_close.append(True)
+
+        closing = asyncio.create_task(close_inside_the_scope())
+        await drive.clock.parked()
+        scope.cancel()
+        await drive.clock.parked()
+        assert not closing.done()
+
+        runner.release_close()
+        await closing
+
+        assert (scope.cancelled_caught, reached_after_the_close) == (True, [])
+        assert drive.slot_is_full()
+        await drive.quarantine_clock.step_to_next_deadline()
+        assert not drive.slot_is_full()
+
+    cleanup = f"The cleanup of run {drive.run_id} failed"
+    assert [(line[0], line[1]) for line in failure_lines(caplog)] == [
+        (cleanup, kind) for kind in logged_kinds
+    ]
+    if not record_end_fails:
         status = drive.status()
         assert status is not None
         assert (status.state, status.failure_code) == (RunState.FAILED, FailureCode.PROVIDER_ERROR)

@@ -1,8 +1,0 @@
-claim_id = "dd8a45bc182644c999d15d684a4a1457"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "d325678ff9506f3d9dbcc7825c44d41fc6ea78bf"
-branch = "claude/issue-232-lost-group-registry"
-scope = ["src/agent_providers/claude/lost_groups.py", "src/agent_providers/errors.py", "tests/anchored_kernel.py", "tests/provider_test_support.py", "tests/test_claude_lost_groups.py", "tests/test_route_failures.py"]
-opened_commit = "a0807f4260b7f58f39ec9c6a392212d8b226c396"
-whole_reason = "Two value types, the one registry module with its census worker, its test module, the shared fake, one round-trip row, and the watcher-start recorder beside its sibling; splitting lands names or contract without their proof."

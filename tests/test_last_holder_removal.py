@@ -418,3 +418,26 @@ def test_an_interleaving_whose_second_thread_hangs_on_start_still_joins_it() -> 
 
     assert (paused.outcome, other.outcome) == ("the end", "the end")
     assert threading.active_count() == threads_before
+
+
+START_FAILED_BEFORE_LAUNCH = "the start failed before the thread launched"
+
+
+class StartThatFailsBeforeLaunching(ThreadedOperation):
+    def start(self, or_when: threading.Event | None = None) -> None:
+        raise AssertionError(START_FAILED_BEFORE_LAUNCH)
+
+
+def test_an_interleaving_whose_second_start_fails_before_launch_keeps_that_failure() -> None:
+    threads_before = threading.active_count()
+    lines = code_of(an_operation_with_lines)
+    paused = ThreadedOperation(an_operation_with_lines, pause_in=lines, at_line=1)
+    other = StartThatFailsBeforeLaunching(an_operation_with_lines)
+
+    interleaving = interleaved(paused, other, threading.Event())
+
+    with pytest.raises(AssertionError, match=START_FAILED_BEFORE_LAUNCH), interleaving:
+        pass
+
+    assert (paused.outcome, other.outcome) == ("the end", None)
+    assert threading.active_count() == threads_before

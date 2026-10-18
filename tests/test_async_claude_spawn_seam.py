@@ -52,6 +52,7 @@ GUARDED_MODULES = (
     "test_claude_provider_streaming.py",
     "test_claude_anchored_turns.py",
     "test_anchored_turn.py",
+    "test_run_directories.py",
 )
 PATCHING_CALLS = frozenset({"setattr", "patch", "object"})
 GUARDED_DOOR_NAMES = frozenset({"create_subprocess_exec", "open_anchored_pipes"})

@@ -20,16 +20,18 @@ import threading
 import time
 import weakref
 from collections import deque
-from collections.abc import Callable, Iterable, Iterator
-from contextlib import contextmanager
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from enum import Enum, StrEnum
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Final, Literal, NotRequired, Required, TypedDict, Unpack, cast
 
+from agent_providers import procfs
 from agent_providers.codex_login import CodexLoginVerdict, assess_codex_login, blanked_copy
 from agent_providers.config import (
+    PrivateWorkingRoot,
     current_claude_runtime,
     current_codex_runtime,
     current_config,
@@ -56,6 +58,7 @@ from agent_providers.constants import (
 from agent_providers.errors import raise_without_chain
 from agent_providers.spawn import (
     ChildProcess,
+    ChildProcessSpecificationError,
     PipedProcess,
     PipedProcessTimeout,
     StderrPolicy,
@@ -379,6 +382,12 @@ CLAUDE_CLI_BINARY_MISSING_DETAIL: Final = (
 )
 GROK_CLI_BINARY_MISSING_DETAIL: Final = "the configured Grok CLI binary is not on the search path"
 CODEX_CLI_BINARY_MISSING_DETAIL: Final = "the configured Codex CLI binary is not on the search path"
+RUN_TREE_PREFIX: Final = "agent-run-"
+RUN_HOME_DIRECTORY_NAME: Final = "home"
+RUN_WORK_DIRECTORY_NAME: Final = "work"
+RUN_FILE_MODE: Final = 0o600
+_RUN_DIRECTORY_MODE: Final = 0o700
+_RUN_FILE_NAME_DETAIL: Final = "A run file needs a single path component as its name"
 _CATALOG_HOME_PREFIX: Final = "agent-cli-catalog-"
 _CATALOG_AUTH_FILE_PATH: Final = Path("auth.json")
 CredentialCopy = Callable[[bytes], bytes | None]
@@ -1522,6 +1531,99 @@ class HolderReservation:
 
     def release(self) -> None:
         self._removal._release(self)
+
+
+class RunTreeRemovalRefusal(StrEnum):
+    """Why a run's tree was left in place without an attempt to remove it."""
+
+    MOUNT_POINT = "mount_point"
+    MOUNT_TABLE_UNREADABLE = "mount_table_unreadable"
+
+
+class RunDirectories:
+    """One run's home and working directory; built only by :func:`run_directories`."""
+
+    def __init__(self, tree: Path, removal: LastHolderRemoval) -> None:
+        self._home = tree / RUN_HOME_DIRECTORY_NAME
+        self._working_directory = tree / RUN_WORK_DIRECTORY_NAME
+        self._removal = removal
+
+    @property
+    def home(self) -> Path:
+        return self._home
+
+    @property
+    def working_directory(self) -> Path:
+        return self._working_directory
+
+    def reserve(self) -> HolderReservation:
+        return self._removal.reserve()
+
+
+@contextmanager
+def run_directories(
+    root: PrivateWorkingRoot, files: Mapping[str, bytes],
+) -> Iterator[RunDirectories]:
+    """One run's tree below ``root``, removed once by the last of this context and its reservations.
+
+    A removal that fails or is refused is logged once and never retried. Setup
+    makes its one removal attempt on any exception; an ``OSError`` becomes the
+    closed environment error and every other exception propagates unchanged.
+    """
+    for name in files:
+        if not _is_single_path_component(name):
+            raise_without_chain(ChildProcessSpecificationError(_RUN_FILE_NAME_DETAIL))
+    try:
+        directories = _create_run_directories(root, files)
+    except OSError:
+        raise_without_chain(
+            CliEnvironmentUnavailableError(
+                "could not create a private CLI home",
+                cause=CliEnvironmentCause.HOME_NOT_CREATED,
+            )
+        )
+    try:
+        yield directories
+    finally:
+        directories._removal.close()
+
+
+def _is_single_path_component(name: str) -> bool:
+    return name not in ("", ".", "..") and "/" not in name and "\0" not in name
+
+
+def _create_run_directories(root: PrivateWorkingRoot, files: Mapping[str, bytes]) -> RunDirectories:
+    with ExitStack() as rollback:
+        tree = Path(tempfile.mkdtemp(prefix=RUN_TREE_PREFIX, dir=root.path))
+        removal = LastHolderRemoval(functools.partial(_remove_run_tree, tree))
+        rollback.callback(removal.close)
+        os.chmod(tree, _RUN_DIRECTORY_MODE)
+        directories = RunDirectories(tree, removal)
+        for directory in (directories.home, directories.working_directory):
+            directory.mkdir(mode=_RUN_DIRECTORY_MODE)
+            os.chmod(directory, _RUN_DIRECTORY_MODE)
+        for name, content in files.items():
+            _write_new_private_file(directories.home / name, content, RUN_FILE_MODE)
+        rollback.pop_all()
+    return directories
+
+
+def _remove_run_tree(tree: Path) -> None:
+    refusal = _run_tree_removal_refusal(Path(os.path.realpath(tree.parent)) / tree.name)
+    if refusal is None:
+        _remove_private_tree(tree)
+    else:
+        log.error("run directory removal refused (%s)", refusal.value)
+
+
+def _run_tree_removal_refusal(location: Path) -> RunTreeRemovalRefusal | None:
+    try:
+        mountinfo = procfs.RealProcView().mountinfo()
+    except OSError:
+        return RunTreeRemovalRefusal.MOUNT_TABLE_UNREADABLE
+    if procfs.holds_mount_point(mountinfo, str(location)):
+        return RunTreeRemovalRefusal.MOUNT_POINT
+    return None
 
 
 def _discard_failed_home(created: str | None, registry_key: object) -> None:

@@ -85,9 +85,9 @@ class IdentityConfig(_Section):
 
     issuer: NonEmptyText
     jwks_url: HttpsUrl
-    audience: NonEmptyText = "agent-service"
-    subscription_group: NonEmptyText = "/ki-abo"
-    group_claim: NonEmptyText = "groups"
+    audience: NonEmptyText
+    subscription_group: NonEmptyText
+    group_claim: NonEmptyText
     leeway_seconds: int = Field(default=0, ge=0, le=300)
 
 

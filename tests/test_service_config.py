@@ -63,6 +63,9 @@ VALID_CONFIG = f"""
 [identity]
 issuer = "https://keycloak.test/realms/agent-test"
 jwks_url = "https://keycloak.test/realms/agent-test/protocol/openid-connect/certs"
+audience = "agent-test-audience"
+subscription_group = "/subscription-members"
+group_claim = "member-groups"
 
 [server]
 host = "127.0.0.1"
@@ -108,12 +111,12 @@ def test_loading_a_file_does_not_run_the_program_its_cli_section_names(tmp_path)
     assert not probe_log.exists()
 
 
-def test_a_valid_file_loads_with_the_documented_defaults(tmp_path):
+def test_a_valid_file_loads_with_its_configured_identity_and_the_documented_defaults(tmp_path):
     config = load_config(_written(tmp_path, VALID_CONFIG))
 
-    assert config.identity.audience == "agent-service"
-    assert config.identity.subscription_group == "/ki-abo"
-    assert config.identity.group_claim == "groups"
+    assert config.identity.audience == "agent-test-audience"
+    assert config.identity.subscription_group == "/subscription-members"
+    assert config.identity.group_claim == "member-groups"
     assert config.profiles["claude-main"].provider is Provider.CLAUDE
     assert (config.runs.heartbeat_interval_s, config.runs.idle_timeout_s) == (15, 120.0)
     assert config.runs.max_duration_s == 600.0
@@ -255,6 +258,16 @@ def _with_key_set_url(url: str) -> str:
             _with('issuer = "https://keycloak.test/realms/agent-test"\n', ""),
             "identity.issuer",
             id="missing-issuer",
+        ),
+        *(
+            pytest.param(
+                _with(line, ""), f"identity.{field}", id=f"missing-{field.replace('_', '-')}"
+            )
+            for field, line in (
+                ("audience", 'audience = "agent-test-audience"\n'),
+                ("subscription_group", 'subscription_group = "/subscription-members"\n'),
+                ("group_claim", 'group_claim = "member-groups"\n'),
+            )
         ),
         pytest.param("[identity\n", "not TOML", id="not-toml"),
         pytest.param(_with(SIGNING_KEY_LINE, ""), "signing.key_file", id="signing-without-key"),

@@ -69,7 +69,9 @@ SONGMAKER_CLIENT: Final = "songmaker-test"
 PRESENTATOR_CLIENT: Final = "presentator-test"
 COWRITER: Final = "songmaker.cowriter"
 PRESENTER: Final = "presentator.copresenter"
-SUBSCRIPTION_GROUP: Final = "/ki-abo"
+SUBSCRIPTION_GROUP: Final = "/subscription-members"
+AUDIENCE: Final = "agent-service"
+GROUP_CLAIM: Final = "groups"
 SONGMAKER_GROUP: Final = "/apps/songmaker"
 CLI_PROFILE: Final = "claude-main"
 COWRITER_ALIAS: Final = "cowriter"
@@ -164,11 +166,20 @@ def process_claude_cli() -> Path:
 
 
 def _service_config_document(
-    issuer: str, runs: Mapping[str, object] | None, songmaker: Mapping[str, object] | None
+    issuer: str,
+    runs: Mapping[str, object] | None,
+    songmaker: Mapping[str, object] | None,
+    subscription_group: str,
 ) -> dict[str, Any]:
     return {
         **({} if runs is None else {"runs": runs}),
-        "identity": {"issuer": issuer, "jwks_url": TEST_JWKS_URL},
+        "identity": {
+            "issuer": issuer,
+            "jwks_url": TEST_JWKS_URL,
+            "audience": AUDIENCE,
+            "subscription_group": subscription_group,
+            "group_claim": GROUP_CLAIM,
+        },
         "cli": {
             "claude_binary": str(process_claude_cli()),
             "claude_version": PINNED_CLAUDE_VERSION,
@@ -197,8 +208,11 @@ def service_config(
     runs: Mapping[str, object] | None = None,
     *,
     songmaker: Mapping[str, object] | None = None,
+    subscription_group: str = SUBSCRIPTION_GROUP,
 ) -> ServiceConfig:
-    return ServiceConfig.model_validate(_service_config_document(issuer, runs, songmaker))
+    return ServiceConfig.model_validate(
+        _service_config_document(issuer, runs, songmaker, subscription_group)
+    )
 
 
 def plain_service_config() -> ServiceConfig:
@@ -213,7 +227,7 @@ def capable_service_config(
     songmaker: Mapping[str, object] | None = None,
 ) -> ServiceConfig:
     """``service_config`` signing with a key written under ``directory``."""
-    document = _service_config_document(issuer, None, songmaker)
+    document = _service_config_document(issuer, None, songmaker, SUBSCRIPTION_GROUP)
     document["signing"] = {"key_file": str(written_key_file(directory, generated_rsa_key()))}
     return ServiceConfig.model_validate(document)
 

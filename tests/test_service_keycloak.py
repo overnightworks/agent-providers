@@ -65,6 +65,7 @@ CLI_SCRIPT = (AssistantTextEvent(text="Hello from the CLI."), FinalEvent(text="C
 API_SCRIPT = (AssistantTextEvent(text="Hello from the API."), FinalEvent(text="API done."))
 
 RUN = "00000000-0000-4000-8000-000000000000"
+REALM_SUBSCRIPTION_GROUP = "/ki-abo"
 
 
 def _frozen_frames(route: str) -> bytes:
@@ -110,7 +111,7 @@ def runners() -> Runners:
 @pytest.fixture(scope="module")
 def service(runners) -> Iterator[str]:
     app = create_app(
-        service_config(issuer=_realm_url()),
+        service_config(issuer=_realm_url(), subscription_group=REALM_SUBSCRIPTION_GROUP),
         runners=runners,
         fetch_key_set=_fetch_key_set_from_test_keycloak,
     )
@@ -180,7 +181,7 @@ def test_only_the_user_who_started_a_run_reads_it_with_real_tokens(verify):  # n
         Principal(str(alice_claims["iss"]), str(alice_claims["sub"])),
     )
     app = create_app(
-        service_config(issuer=_realm_url()),
+        service_config(issuer=_realm_url(), subscription_group=REALM_SUBSCRIPTION_GROUP),
         records=records,
         fetch_key_set=_fetch_key_set_from_test_keycloak,
     )
@@ -215,7 +216,9 @@ def test_a_token_of_an_unpublished_key_is_unavailable_once_the_key_set_origin_st
         return _fetch_key_set_from_test_keycloak(url)
 
     app = create_app(
-        service_config(issuer=_realm_url()), fetch_key_set=key_set_origin, monotonic_clock=clock
+        service_config(issuer=_realm_url(), subscription_group=REALM_SUBSCRIPTION_GROUP),
+        fetch_key_set=key_set_origin,
+        monotonic_clock=clock,
     )
     unpublished_key = TokenMint(key_id="never-published")
     with served(app) as base_url:

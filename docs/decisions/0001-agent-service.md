@@ -719,7 +719,9 @@ with no MCP SDK dependency.
   closed: a cleanup stalled below httpx keeps its socket until the stall ends, and its
   kept task closes it then; on the pinned stack none stalls. The close is one attempt
   that outlasts its caller's cancellations, AnyIO's level one included, and delivers
-  them after its outcome. Not measured: the pinned CLI against it (A1b-12b). Whether an
+  them after its outcome; `agent_providers.outlasting.outlast` owns that order (the
+  outcome, then the first direct cancellation, then the level one) for this close and
+  for the core's reap of a turn. Not measured: the pinned CLI against it (A1b-12b). Whether an
   overrun holds the place: A1b-8.
 - *H9.* Its import contract says "client → stdlib, pydantic, HTTP and the MCP SDK
   only". That sentence is about `agent-client` and is untouched; HD1 adds no
@@ -896,7 +898,9 @@ Piece 1 of A1a3 (`agent_service.run_liveness`):
    is encoded, accepted, recorded and queued; nothing but frames already
    encoded and the terminal follows the decision. A dropped client gets no terminal and no new frame.
 10. Closing the stream stops the runner the same way, once, and returns only
-    after the close has finished, however often the closer is cancelled.
+    after the close has finished, however often the closer is cancelled; it then
+    raises the closer's cancellation, direct or AnyIO's level one, as A1a2 rule 8
+    decides.
 11. A close that raises is logged at ERROR with the run id and changes
     nothing else, unless it raises a containment loss, bare or carried by another
     error or an exception group: then the run ends `failed: provider_error` (rule 9's
@@ -1085,8 +1089,9 @@ Rules:
    and the record's end) record each failure in the run's one collection
    (`run_liveness.RunFailures`), in the order the failures happened. One pure decider (`run_liveness._exit_of`)
    reads that collection, any cancellation and the body's outcome: a
-   cancellation always wins, whether it was caught during teardown or arrived
-   in the body; then the first cleanup failure; then the first supervision
+   cancellation always wins: one caught during teardown, one that arrived in
+   the body, or AnyIO's level one of a scope cancelled while the run was torn
+   down, which the leaving delivers once the cleanup is done; then the first cleanup failure; then the first supervision
    failure, unless the body raised. Every other failure is logged exactly
    once. Every failure the service logs, a runner's and a failed close
    included, is logged by its class and its stack positions

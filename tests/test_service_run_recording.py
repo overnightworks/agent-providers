@@ -25,6 +25,7 @@ from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine, 
 from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
+from typing import Any, Final
 
 import anyio
 import pytest
@@ -774,9 +775,10 @@ async def test_a_run_whose_terminal_was_decided_is_recorded_when_the_held_close_
 
 
 @in_loop
-async def test_a_closer_cut_by_its_scope_still_waits_for_the_held_close_of_the_run():
+async def test_a_closer_cut_by_its_scope_waits_for_the_held_close_and_then_is_cancelled():
     runner = GatedRunner()
     runner.hold_close()
+    reached_after_the_close: list[bool] = []
     async with driven(runner, read=False) as drive:
         drive.took(await anext(drive.frames))
         scope = anyio.CancelScope()
@@ -784,6 +786,7 @@ async def test_a_closer_cut_by_its_scope_still_waits_for_the_held_close_of_the_r
         async def close_inside_the_scope() -> None:
             with scope:
                 await drive.frames.aclose()
+                reached_after_the_close.append(True)
 
         closing = asyncio.create_task(close_inside_the_scope())
         await drive.clock.parked()
@@ -794,6 +797,7 @@ async def test_a_closer_cut_by_its_scope_still_waits_for_the_held_close_of_the_r
         runner.release_close()
         await closing
 
+        assert (scope.cancelled_caught, reached_after_the_close) == (True, [])
         assert drive.status().state is RunState.CANCELLED
         drive.assert_nothing_left()
 
@@ -920,11 +924,29 @@ class _Closer(enum.Enum):
 
 
 class _Cancellation(enum.Enum):
-    """Where the closer is cancelled, once it waits: never, in the body, or in the teardown."""
+    """Where the closer is cancelled, once it waits, and by what.
+
+    A direct value cancels its task; a level value cancels the AnyIO scope
+    its closing runs in.
+    """
 
     NONE = enum.auto()
     IN_THE_BODY = enum.auto()
     DURING_TEARDOWN = enum.auto()
+    LEVEL_IN_THE_BODY = enum.auto()
+    LEVEL_DURING_TEARDOWN = enum.auto()
+
+    @property
+    def is_level(self) -> bool:
+        return self in {_Cancellation.LEVEL_IN_THE_BODY, _Cancellation.LEVEL_DURING_TEARDOWN}
+
+    @property
+    def in_the_body(self) -> bool:
+        return self in {_Cancellation.IN_THE_BODY, _Cancellation.LEVEL_IN_THE_BODY}
+
+    @property
+    def during_teardown(self) -> bool:
+        return self in {_Cancellation.DURING_TEARDOWN, _Cancellation.LEVEL_DURING_TEARDOWN}
 
 
 @dataclass(frozen=True)
@@ -960,12 +982,11 @@ class _Ending:
         * The disconnect report is made only when the stream is cut short: by
           a close, or by a cancellation in the body.
         """
-        match self.cancellation:
-            case _Cancellation.IN_THE_BODY if self.closer is _Closer.CLOSES:
-                return False
-            case _Cancellation.DURING_TEARDOWN if self.closer is _Closer.READS:
-                return False
-        cut_short = self.closer is _Closer.CLOSES or self.cancellation is _Cancellation.IN_THE_BODY
+        if self.cancellation.in_the_body and self.closer is _Closer.CLOSES:
+            return False
+        if self.cancellation.during_teardown and self.closer is _Closer.READS:
+            return False
+        cut_short = self.closer is _Closer.CLOSES or self.cancellation.in_the_body
         return cut_short or _Step.DISCONNECT_REPORT not in self.failing
 
     @property
@@ -1023,26 +1044,40 @@ async def _end_a_run(
     cuts: list[asyncio.Task[None]] = []
     cancelled_by_a_step: list[bool] = []
     dropped = asyncio.Event()
+    scopes: dict[asyncio.Task[object], anyio.CancelScope] = {}
+
+    def start(closing: Coroutine[Any, Any, object]) -> asyncio.Task[object]:
+        if not ending.cancellation.is_level:
+            return asyncio.create_task(closing)
+        scope = anyio.CancelScope()
+        closer = asyncio.create_task(_closed_inside(scope, closing))
+        scopes[closer] = scope
+        return closer
+
+    def cut(closer: asyncio.Task[object]) -> bool:
+        if closer not in scopes:
+            return closer.cancel()
+        scopes[closer].cancel()
+        return not closer.done()
+
     cut_while_it_stops = (
-        ending.cancellation is _Cancellation.IN_THE_BODY
-        and ending.ends_by_itself
-        and not ending.holds_close
+        ending.cancellation.in_the_body and ending.ends_by_itself and not ending.holds_close
     )
 
     def taking(step: _Step) -> None:
         if step is _Step.DROP_REPORT:
             dropped.set()
             if cut_while_it_stops and ending.stalls:
-                closers.append(asyncio.create_task(drive.drain()))
+                closers.append(start(drive.drain()))
                 cuts.append(asyncio.create_task(cut_once_it_reads(closers[0])))
             elif cut_while_it_stops:
-                cancelled_by_a_step.append(drive.frames.ag_running and closers[0].cancel())
+                cancelled_by_a_step.append(drive.frames.ag_running and cut(closers[0]))
         if step is _Step.RECORD_END and cancel_at_the_record_end:
-            cancelled_by_a_step.append(closers[0].cancel())
+            cancelled_by_a_step.append(cut(closers[0]))
 
     async def cut_once_it_reads(reader: asyncio.Task[object]) -> None:
         await _spun_until(lambda: drive.frames.ag_running or reader.done())
-        cancelled_by_a_step.append(drive.frames.ag_running and reader.cancel())
+        cancelled_by_a_step.append(drive.frames.ag_running and cut(reader))
 
     records = _RecordsThatFail(ending.failing, taking, ending.breaks)
     clock = (
@@ -1053,9 +1088,7 @@ async def _end_a_run(
     runner = GatedRunner()
     if ending.holds_close:
         runner.hold_close()
-    cut_in_the_teardown = (
-        ending.cancellation is _Cancellation.DURING_TEARDOWN and not ending.holds_close
-    )
+    cut_in_the_teardown = ending.cancellation.during_teardown and not ending.holds_close
     async with driven(runner, clock=clock, records=records, read=False) as drive:
         drive.took(await anext(drive.frames))
         if cut_in_the_teardown and ending.ends_by_itself:
@@ -1072,14 +1105,14 @@ async def _end_a_run(
                     runner.release(FINAL)
         if not closers:
             closing = drive.frames.aclose() if ending.closer is _Closer.CLOSES else drive.drain()
-            closers.append(asyncio.create_task(closing))
+            closers.append(start(closing))
         if cut_while_it_stops:
             await asyncio.wait(closers + cuts)
         elif cut_in_the_teardown:
             await _spun_until(lambda: drive.frames.ag_running or closers[0].done())
         else:
             await drive.clock.parked()
-        delivered = ending.cancellation is not _Cancellation.NONE and closers[0].cancel()
+        delivered = ending.cancellation is not _Cancellation.NONE and cut(closers[0])
         await drive.clock.parked()
         runner.release_close()
         await asyncio.wait(closers)
@@ -1095,12 +1128,29 @@ async def _spun_until(done: Callable[[], bool]) -> None:
     raise AssertionError("the run never got there")
 
 
-def _propagated(closer: asyncio.Task[object], *, delivered: bool) -> str:
-    """What the closer ended with; a cancellation nobody delivered is a raised failure."""
+def _propagated(closer: asyncio.Task[object], *, delivered: bool, by_level: bool = False) -> str:
+    """What the closer ended with; a cancellation nobody delivered is a raised failure.
+
+    A level cut ends as a scope's catch, never as a cancelled task.
+    """
     if closer.cancelled():
-        return "cancelled" if delivered else "CancelledError"
+        return "cancelled" if delivered and not by_level else "CancelledError"
     failure = closer.exception()
-    return type(failure).__name__ if failure else "returned"
+    if failure:
+        return type(failure).__name__
+    return "cancelled" if closer.result() is _CUT_BY_ITS_SCOPE else "returned"
+
+
+_CUT_BY_ITS_SCOPE: Final = object()
+
+
+async def _closed_inside(scope: anyio.CancelScope, closing: Coroutine[Any, Any, object]) -> object:
+    """Close inside ``scope``; the marker when the scope cut the closing short."""
+    finished = False
+    with scope:
+        await closing
+        finished = True
+    return _CUT_BY_ITS_SCOPE if scope.cancelled_caught and not finished else None
 
 
 @asynccontextmanager
@@ -1137,7 +1187,7 @@ async def test_every_failure_of_a_run_s_ending_propagates_or_is_logged_once(capl
     async with _watched_loop() as unretrieved:
         closer, cancelled, _drive = await _end_a_run(ending)
 
-    propagated = _propagated(closer, delivered=cancelled)
+    propagated = _propagated(closer, delivered=cancelled, by_level=ending.cancellation.is_level)
     assert cancelled is (ending.cancellation is not _Cancellation.NONE)
     if cancelled:
         assert propagated == "cancelled"
@@ -1203,6 +1253,39 @@ async def test_every_failure_of_a_run_s_ending_propagates_or_is_logged_once(capl
         ),
         pytest.param(
             _Ending(
+                _Cancellation.LEVEL_DURING_TEARDOWN,
+                _Closer.CLOSES,
+                True,
+                frozenset({_Step.RECORD_END}),
+            ),
+            "cancelled",
+            [(_CLEANUP, "_EndNotRecorded")],
+            id="a-level-cut-close-keeps-its-cancellation-over-a-failed-record-end",
+        ),
+        pytest.param(
+            _Ending(
+                _Cancellation.LEVEL_DURING_TEARDOWN,
+                _Closer.CLOSES,
+                False,
+                frozenset({_Step.CLOCK}),
+            ),
+            "cancelled",
+            [(_SUPERVISION, "_ClockBroke")],
+            id="a-level-cut-close-keeps-its-cancellation-over-a-supervision-failure",
+        ),
+        pytest.param(
+            _Ending(
+                _Cancellation.LEVEL_DURING_TEARDOWN,
+                _Closer.CLOSES,
+                True,
+                frozenset({_Step.DISCONNECT_REPORT, _Step.RECORD_END}),
+            ),
+            "cancelled",
+            [(_CLEANUP, "_DisconnectNotRecorded"), (_CLEANUP, "_EndNotRecorded")],
+            id="a-level-cut-close-logs-every-cleanup-failure-in-order",
+        ),
+        pytest.param(
+            _Ending(
                 _Cancellation.NONE,
                 _Closer.CLOSES,
                 True,
@@ -1222,7 +1305,10 @@ async def test_which_failure_of_a_run_s_ending_propagates_and_which_are_logged(
     async with _watched_loop() as unretrieved:
         closer, delivered, drive = await _end_a_run(ending)
 
-    assert _propagated(closer, delivered=delivered) == propagates
+    assert (
+        _propagated(closer, delivered=delivered, by_level=ending.cancellation.is_level)
+        == propagates
+    )
     assert [(event, kind) for event, kind, _raiser in failure_lines(caplog)] == [
         (event.format(drive.run_id), kind) for event, kind in logged
     ]
@@ -1247,6 +1333,48 @@ async def test_a_closer_cancelled_while_the_record_ends_is_cancelled_and_the_fai
     assert unretrieved == []
 
 
+class _CutDuringTheTeardown(enum.Enum):
+    """Where the closer is first cancelled directly, before its scope is cut in the teardown."""
+
+    READING = enum.auto()
+    CLOSING = enum.auto()
+
+
+@pytest.mark.parametrize("first_cut", _CutDuringTheTeardown)
+@in_loop
+async def test_a_direct_cancellation_wins_over_a_level_cut_of_the_same_closer(first_cut):
+    runner = GatedRunner()
+    runner.hold_close()
+    scope = anyio.CancelScope()
+    ran_after_the_scope: list[bool] = []
+
+    async def closed_inside_the_scope(closing: Coroutine[Any, Any, object]) -> None:
+        with scope:
+            await closing
+        ran_after_the_scope.append(True)
+
+    async with driven(runner, read=False) as drive:
+        drive.took(await anext(drive.frames))
+        await drive.clock.parked()
+        reading = first_cut is _CutDuringTheTeardown.READING
+        closer = asyncio.create_task(
+            closed_inside_the_scope(drive.drain() if reading else drive.frames.aclose())
+        )
+        await drive.clock.parked()
+        closer.cancel()
+        if reading:
+            await drive.clock.parked()
+        scope.cancel()
+        await drive.clock.parked()
+        runner.release_close()
+        await asyncio.wait({closer})
+
+    status = drive.status()
+    assert (closer.cancelled(), scope.cancelled_caught, ran_after_the_scope) == (True, False, [])
+    assert status is not None
+    assert (status.state, status.client_lost) == (RunState.CANCELLED, ClientLoss.DISCONNECTED)
+
+
 async def _observed_ending(
     ending: _Ending, caplog: pytest.LogCaptureFixture
 ) -> tuple[str, list[tuple[str, str]], list[str], tuple[RunState, ClientLoss | None] | None]:
@@ -1255,7 +1383,7 @@ async def _observed_ending(
     closer, delivered, drive = await _end_a_run(ending)
     status = drive.status()
     return (
-        _propagated(closer, delivered=delivered),
+        _propagated(closer, delivered=delivered, by_level=ending.cancellation.is_level),
         [
             (event.replace(str(drive.run_id), "{}"), kind)
             for event, kind, _raiser in failure_lines(caplog)

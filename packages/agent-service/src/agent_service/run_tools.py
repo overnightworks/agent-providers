@@ -7,16 +7,14 @@ from collections.abc import Awaitable, Callable, Coroutine
 from contextlib import AsyncExitStack
 from typing import Any, Final, Self
 
-import anyio.lowlevel
-
 from agent_client.capability import McpOrigin
+from agent_providers.outlasting import outlast, wait_outlasting_cancellation
 from agent_service.app_tools import open_app_tools
 from agent_service.capability import Capability
 from agent_service.run_liveness import (
     RunClock,
     log_failure,
     unfinished_by,
-    wait_outlasting_cancellation,
 )
 from agent_service.tool_relay import (
     McpRelayOwner,
@@ -58,20 +56,6 @@ async def _failure_of(step: Coroutine[Any, Any, None], name: str) -> BaseExcepti
     task = asyncio.get_running_loop().create_task(step, name=name)
     await asyncio.wait({task})
     return _ending_of(task)
-
-
-async def _run_outlasting_cancellation(
-    step: Coroutine[Any, Any, None], name: str
-) -> asyncio.CancelledError | None:
-    """Run ``step`` as the task ``name`` to its end, whatever cancels the caller meanwhile.
-
-    Returns the caller's first cancellation, for the caller to deliver once the step's outcome
-    was retrieved here: the step's exception leaves first.
-    """
-    attempt = asyncio.get_running_loop().create_task(step, name=name)
-    cancelled = await wait_outlasting_cancellation(attempt)
-    attempt.result()
-    return cancelled
 
 
 async def _within(
@@ -183,9 +167,11 @@ class RunTools:
             barrier = ToolCallBarrier(run_id, session, capability)
             relay = await Relay.start(run_id, McpRelayOwner(capability, offered, barrier), clock)
         except BaseException:
-            await _run_outlasting_cancellation(
-                _leave_client(run_id, clock, upstream), f"run-tools:{run_id}:failed-open"
+            leaving = asyncio.get_running_loop().create_task(
+                _leave_client(run_id, clock, upstream), name=f"run-tools:{run_id}:failed-open"
             )
+            await wait_outlasting_cancellation(leaving)
+            leaving.result()
             raise
         return cls(run_id, clock, relay, barrier, upstream)
 
@@ -198,12 +184,11 @@ class RunTools:
         return self._barrier
 
     async def close(self, reap: Callable[[], Awaitable[None]]) -> None:
-        cancelled = await _run_outlasting_cancellation(
-            self._close_once(reap), f"run-tools:{self._run_id}:close"
+        await outlast(
+            asyncio.get_running_loop().create_task(
+                self._close_once(reap), name=f"run-tools:{self._run_id}:close"
+            )
         )
-        if cancelled is not None:
-            raise cancelled
-        await anyio.lowlevel.checkpoint_if_cancelled()
 
     async def _close_once(self, reap: Callable[[], Awaitable[None]]) -> None:
         self._relay.stop_listening()

@@ -46,13 +46,42 @@ def _retire(task: asyncio.Task[None]) -> None:
         task.exception()
 
 
+def _ending_of(task: asyncio.Task[None]) -> BaseException | None:
+    try:
+        return task.exception()
+    except asyncio.CancelledError as cancelled:  # NOSONAR(S7497) returned as the step's failure
+        return cancelled
+
+
+async def _failure_of(step: Coroutine[Any, Any, None], name: str) -> BaseException | None:
+    """Run ``step`` as the task ``name``, wait for it to end and return what it ended with."""
+    task = asyncio.get_running_loop().create_task(step, name=name)
+    await asyncio.wait({task})
+    return _ending_of(task)
+
+
+async def _run_outlasting_cancellation(
+    step: Coroutine[Any, Any, None], name: str
+) -> asyncio.CancelledError | None:
+    """Run ``step`` as the task ``name`` to its end, whatever cancels the caller meanwhile.
+
+    Returns the caller's first cancellation, for the caller to deliver once the step's outcome
+    was retrieved here: the step's exception leaves first.
+    """
+    attempt = asyncio.get_running_loop().create_task(step, name=name)
+    cancelled = await wait_outlasting_cancellation(attempt)
+    attempt.result()
+    return cancelled
+
+
 async def _within(
     clock: RunClock, seconds: float, step: Coroutine[Any, Any, None], name: str
-) -> None:
+) -> BaseException | None:
     """Run ``step`` as the task ``name`` and wait for it until ``seconds`` on ``clock`` passed.
 
-    At the deadline the task is cancelled once and never awaited again: its unwinding, even a
-    cleanup that absorbs the cancellation, cannot delay the caller. The task stays referenced
+    Returns what the step ended with, or raises ``UpstreamCleanupIncomplete`` when it did not
+    end. At the deadline the task is cancelled once and never awaited again: its unwinding, even
+    a cleanup that absorbs the cancellation, cannot delay the caller. The task stays referenced
     until it ends and its outcome is retrieved then.
     """
     deadline = clock() + seconds
@@ -62,15 +91,17 @@ async def _within(
         task.add_done_callback(_retire)
         task.cancel()
         raise UpstreamCleanupIncomplete
-    task.result()
+    return _ending_of(task)
 
 
 async def _logged_within(
     clock: RunClock, seconds: float, step: Coroutine[Any, Any, None], name: str, event: str
 ) -> None:
     try:
-        await _within(clock, seconds, step, name)
-    except Exception as failure:
+        failure = await _within(clock, seconds, step, name)
+    except UpstreamCleanupIncomplete as overrun:
+        failure = overrun
+    if failure is not None:
         log_failure(log, event, failure)
 
 
@@ -89,8 +120,9 @@ class RunTools:
 
     ``open`` enters ``open_app_tools``, lists the app's tools, builds the ``ToolCallBarrier``
     and the ``McpRelayOwner`` and starts the relay; ``access`` and ``calls`` are what the
-    runner uses. A failure after the client was entered leaves the client within
-    ``UPSTREAM_ABORT_SECONDS`` and propagates as the same object.
+    runner uses. A failure after the client was entered, a cancellation included, leaves the
+    client within ``UPSTREAM_ABORT_SECONDS`` and propagates as the same object: no cancellation
+    of the opener, direct or AnyIO's level one, cuts that leaving short or replaces the failure.
 
     ``close(reap)`` is one attempt of five steps, in this order:
 
@@ -105,8 +137,9 @@ class RunTools:
     nothing to a later step and an overrun takes nothing from it. The bound is the owner's wait
     for the step's task, never a cancel scope: at the deadline the task is cancelled once and
     not awaited again, so a cleanup that absorbs cancellation delays only itself. A step that
-    overruns (``UpstreamCleanupIncomplete``, ``RelayCleanupIncomplete``) or fails is logged once
-    by class and the close goes on. A returned close means each step's bounded attempt
+    overruns (``UpstreamCleanupIncomplete``, ``RelayCleanupIncomplete``) or ends with any
+    exception, ``CancelledError`` and other ``BaseException`` included, is logged once by class
+    and the close goes on. A returned close means each step's bounded attempt
     finished, not that a stalled cleanup's socket is closed.
 
     Only the reap's exception, of any class, is raised, as the same object, after step 5 and
@@ -148,8 +181,9 @@ class RunTools:
             barrier = ToolCallBarrier(run_id, session, capability)
             relay = await Relay.start(run_id, McpRelayOwner(capability, offered, barrier), clock)
         except BaseException:
-            with anyio.CancelScope(shield=True):
-                await _leave_client(run_id, clock, upstream)
+            await _run_outlasting_cancellation(
+                _leave_client(run_id, clock, upstream), f"run-tools:{run_id}:failed-open"
+            )
             raise
         return cls(run_id, clock, relay, barrier, upstream)
 
@@ -162,11 +196,9 @@ class RunTools:
         return self._barrier
 
     async def close(self, reap: Callable[[], Awaitable[None]]) -> None:
-        attempt = asyncio.get_running_loop().create_task(
-            self._close_once(reap), name=f"run-tools:{self._run_id}:close"
+        cancelled = await _run_outlasting_cancellation(
+            self._close_once(reap), f"run-tools:{self._run_id}:close"
         )
-        cancelled = await wait_outlasting_cancellation(attempt)
-        attempt.result()
         if cancelled is not None:
             raise cancelled
         await anyio.lowlevel.checkpoint_if_cancelled()
@@ -192,7 +224,6 @@ class RunTools:
         )
 
     async def _close_relay(self) -> None:
-        try:
-            await self._relay.close()
-        except Exception as failure:
+        failure = await _failure_of(self._relay.close(), f"run-tools:{self._run_id}:relay-close")
+        if failure is not None:
             log_failure(log, f"Closing the relay of run {self._run_id} failed", failure)

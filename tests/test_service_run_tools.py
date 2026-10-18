@@ -223,6 +223,18 @@ def failing_transport_close(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(httpx.AsyncHTTPTransport, "aclose", failing)
 
 
+def failing_after(
+    monkeypatch: pytest.MonkeyPatch, owner: type, name: str, failure: Callable[[], BaseException]
+) -> None:
+    original = getattr(owner, name)
+
+    async def failing(*args: Any, **kwargs: Any) -> None:
+        await original(*args, **kwargs)
+        raise failure()
+
+    monkeypatch.setattr(owner, name, failing)
+
+
 def recording_client_exits(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
     upstream_tasks_at_exit: list[list[str]] = []
     original = httpx.AsyncClient.aclose
@@ -617,6 +629,37 @@ def test_a_callers_cancellation_never_cuts_the_close_short_and_is_delivered_afte
     run_scene(scenario, authority, monkeypatch, caplog, held_before_the_head)
 
 
+CLOSE_STEPS = {
+    "the settle": (ToolCallBarrier, "settle", CALLS_EVENT),
+    "the client's exit": (httpx.AsyncClient, "aclose", CLIENT_EVENT),
+    "the relay's close": (Relay, "close", RELAY_EVENT),
+}
+
+
+@pytest.mark.parametrize(
+    "reap_loss", [None, a_loss, Interrupt], ids=["no loss", "a loss", "an interrupt"]
+)
+@pytest.mark.parametrize("ends_with", [asyncio.CancelledError, Interrupt])
+@pytest.mark.parametrize("step", CLOSE_STEPS.values(), ids=CLOSE_STEPS.keys())
+def test_a_step_ending_with_any_class_is_logged_once_and_the_close_goes_on(
+    authority, monkeypatch, caplog, step, ends_with, reap_loss
+):
+    owner, name, event = step
+    loss = reap_loss() if reap_loss else None
+
+    async def scenario(scene: Scene) -> None:
+        tools = await scene.open()
+        failing_after(scene.monkeypatch, owner, name, ends_with)
+        closer = start_close(tools, injected_reap(raises=loss))
+
+        assert await ending_of(closer) is loss
+        await scene.assert_nothing_left()
+        await scene.app_saw_every_connection_end()
+        assert scene.logged() == [(event, ends_with.__name__)]
+
+    run_scene(scenario, authority, monkeypatch, caplog)
+
+
 def test_a_failing_step_is_logged_by_class_and_leaks_no_token(authority, monkeypatch, caplog):
     async def scenario(scene: Scene) -> None:
         tools = await scene.open()
@@ -752,6 +795,58 @@ def test_a_failed_open_leaves_the_client_and_keeps_its_own_failure(
 
     pages = [tool_listing(["edit_song", "edit_song"])] if case.offers_twice else None
     run_scene(scenario, authority, monkeypatch, caplog, refusing_the_listing, pages)
+
+
+OPENER_CANCELS = {
+    "directly once": (Cancellation.DIRECT, 1),
+    "directly again after the client step parked": (Cancellation.DIRECT, 2),
+    "by level": (Cancellation.LEVEL, 1),
+}
+
+
+@pytest.mark.parametrize("cancellation, times", OPENER_CANCELS.values(), ids=OPENER_CANCELS.keys())
+def test_a_failed_open_outlasts_cancellations_during_its_client_cleanup_and_keeps_its_failure(
+    authority, monkeypatch, caplog, cancellation, times
+):
+    def refusing_the_listing(_gate: threading.Event) -> Mapping[str, Responder]:
+        refusal = FakeResponse(status=500, content_type=None)
+        return {"tools/list": lambda _request: refusal}
+
+    async def scenario(scene: Scene) -> None:
+        listing_failures = remembering_raised(scene.monkeypatch, AppToolsSession, "list_tools")
+        stall = scene.stall(httpx.AsyncHTTPTransport, "aclose")
+        scope = anyio.CancelScope()
+
+        async def opening_in_scope() -> RunTools | None:
+            with scope:
+                return await scene.open()
+            return None
+
+        opening = asyncio.get_running_loop().create_task(
+            opening_in_scope() if cancellation is Cancellation.LEVEL else scene.open(),
+            name="test:opener",
+        )
+        await yield_until(lambda: stall.pending)
+        if cancellation is Cancellation.LEVEL:
+            scope.cancel()
+        else:
+            opening.cancel()
+        if times == 2:
+            await parked_at(scene.clock, UPSTREAM_ABORT_SECONDS)
+            opening.cancel()
+        await through_parks(scene, (UPSTREAM_ABORT_SECONDS,))
+        ending = await ending_of(opening)
+
+        assert ending is listing_failures[0]
+        assert scene.clock.now == UPSTREAM_ABORT_SECONDS
+        assert stall.pending
+        await scene.release_and_drain()
+        assert stall.cancelling == 1
+        await scene.assert_nothing_left()
+        await scene.app_saw_every_connection_end()
+        assert scene.logged() == [(CLIENT_EVENT, "UpstreamCleanupIncomplete")]
+
+    run_scene(scenario, authority, monkeypatch, caplog, refusing_the_listing)
 
 
 @pytest.mark.parametrize("cancellation", list(Cancellation))

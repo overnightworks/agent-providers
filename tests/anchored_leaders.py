@@ -138,10 +138,13 @@ class Leaders:
         join_watcher(started.watcher)
 
 
-def spawn_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+def spawn_warnings(
+    caplog: pytest.LogCaptureFixture, phases: tuple[str, ...] = ("call",)
+) -> list[str]:
     return [
         record.getMessage()
-        for record in caplog.get_records("call")
+        for phase in phases
+        for record in caplog.get_records(phase)  # type: ignore[arg-type]
         if record.name == SPAWN_LOGGER and record.levelno == logging.WARNING
     ]
 

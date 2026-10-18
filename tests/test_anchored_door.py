@@ -57,6 +57,7 @@ COUNT_STDIN = (
     "sys.stdout.flush()\n"
     "sys.exit(3)\n"
 )
+BLOCK_ON_STDIN = "import sys\nsys.stdin.read()\n"
 TWO_LINES_THEN_EXIT_LINE = (
     "import sys\n"
     "sys.stdout.write('a' * {first} + '\\n')\n"
@@ -93,10 +94,16 @@ async def bounded[Result](awaitable: Awaitable[Result]) -> Result:
         return await awaitable
 
 
-def asyncio_errors(caplog: pytest.LogCaptureFixture) -> list[str]:
+ALL_PHASES = ("call", "teardown")
+
+
+def asyncio_errors(
+    caplog: pytest.LogCaptureFixture, phases: tuple[str, ...] = ("call",)
+) -> list[str]:
     return [
         record.getMessage()
-        for record in caplog.get_records("call")
+        for phase in phases
+        for record in caplog.get_records(phase)  # type: ignore[arg-type]
         if record.name == "asyncio" and record.levelno >= logging.ERROR
     ]
 
@@ -185,8 +192,8 @@ def every_row_ends_clean(
     with caplog.at_level(logging.WARNING):
         yield
     assert thread_failures == []
-    assert asyncio_errors(caplog) == []
-    assert spawn_warnings(caplog) == expected_spawn_warnings
+    assert asyncio_errors(caplog, ALL_PHASES) == []
+    assert spawn_warnings(caplog, ALL_PHASES) == expected_spawn_warnings
 
 
 def test_the_door_serves_streams_and_keeps_the_exited_leader_anchored_until_release(
@@ -199,6 +206,7 @@ def test_the_door_serves_streams_and_keeps_the_exited_leader_anchored_until_rele
         door_runner, child_cleanup, leaders.describe(script=ECHO_LINE_TO_BOTH_STREAMS)
     )
     child = opened.child
+    watcher = watcher_thread(opened.owned.pid)
 
     async def scenario() -> None:
         with pytest.raises(AnchorStateError):
@@ -207,11 +215,15 @@ def test_the_door_serves_streams_and_keeps_the_exited_leader_anchored_until_rele
         assert await child.stdout.readline() == b"ping\n"
         assert await child.stderr.readline() == b"err:ping\n"
         await send_line(child, b"3\n")
-        child.stdin.close()
         assert await child.exited() == 3
         assert await child.stdout.read() == b""
         assert child_cleanup.state(opened.owned) == Exited(3)
+        assert not child.done_with_pid
+        child.stdin.close()
+        await child.stdin.wait_closed()
         child.release()
+        join_watcher(watcher)
+        assert child.done_with_pid
         assert child_cleanup.state(opened.owned) == GONE
         child.release()
 
@@ -278,6 +290,7 @@ def test_release_discards_stdin_output_that_is_still_buffered(
             child.stdin.write(b"x" * pending_bytes)
             child.stdin.close()
             buffered_before = child.stdin.transport.get_write_buffer_size()
+            assert child.stdin.transport.is_closing()
             child.release()
             buffered_after = child.stdin.transport.get_write_buffer_size()
             held_bytes = pipe_bytes_still_readable(holder)
@@ -294,6 +307,47 @@ def test_release_discards_stdin_output_that_is_still_buffered(
     assert buffered_after == 0
     assert held_bytes <= PIPE_CAPACITY
     assert remaining - descriptors_before_the_door - {opened.owned.pidfd} == frozenset()
+
+
+def test_a_cancelled_communicate_under_backpressure_still_closes_stdin(
+    door_runner: asyncio.Runner, child_cleanup: ChildCleanup, leaders: Leaders
+) -> None:
+    opened = open_door(door_runner, child_cleanup, leaders.describe(script=BLOCK_ON_STDIN))
+    child = opened.child
+
+    async def scenario() -> bool:
+        task = asyncio.create_task(child.communicate(b"x" * MEGABYTE))
+        while child.stdin.transport.get_write_buffer_size() == 0:
+            await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        closing = child.stdin.transport.is_closing()
+        child.signal_group(signal.SIGKILL)
+        await child.exited()
+        child.release()
+        return closing
+
+    assert door_runner.run(bounded(scenario()))
+
+
+def test_a_pipe_whose_file_object_cannot_be_made_leaves_no_descriptor(
+    door_runner: asyncio.Runner,
+    child_cleanup: ChildCleanup,
+    leaders: Leaders,
+    monkeypatch: pytest.MonkeyPatch,
+    descriptors_before_the_door: frozenset[int],
+) -> None:
+    def fdopen_that_fails(*args: object, **kwargs: object) -> None:
+        raise InjectedStop
+
+    monkeypatch.setattr(os, "fdopen", fdopen_that_fails)
+
+    failure = failed_door(door_runner, child_cleanup, leaders.describe())
+
+    assert isinstance(failure.exception, InjectedStop)
+    assert child_cleanup.listed() == ()
+    assert failure.descriptors_in_handler - descriptors_before_the_door == frozenset()
 
 
 @pytest.mark.parametrize(
@@ -406,11 +460,14 @@ def test_a_loss_before_the_exit_raises_from_exited_and_release_still_frees_the_c
     child = opened.child
 
     async def scenario() -> None:
-        with pytest.raises(ChildIdentityLost):
-            await child.exited()
-        assert child.returncode is None
-        with pytest.raises(ChildIdentityLost):
-            child.release()
+        try:
+            with pytest.raises(ChildIdentityLost):
+                await child.exited()
+            assert child.returncode is None
+            with pytest.raises(ChildIdentityLost):
+                child.release()
+        finally:
+            child.stdin.close()
 
     door_runner.run(bounded(scenario()))
 
@@ -504,11 +561,16 @@ def test_the_handle_is_returned_without_an_await_after_the_start_on_the_loop_thr
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     real_start = spawn.start_anchored_leader
-    started_on: list[tuple[asyncio.AbstractEventLoop, int]] = []
+    started_on: list[tuple[asyncio.AbstractEventLoop | None, int]] = []
 
     def start_then_request_cancellation(*args: object, **kwargs: object) -> spawn.AnchoredLeader:
         leader = real_start(*args, **kwargs)
-        started_on.append((asyncio.get_running_loop(), threading.get_ident()))
+        thread = threading.get_ident()
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        started_on.append((running_loop, thread))
         task = asyncio.current_task()
         assert task is not None
         task.cancel()
@@ -533,6 +595,5 @@ def test_the_handle_is_returned_without_an_await_after_the_start_on_the_loop_thr
 
     door_runner.run(bounded(finish()))
 
-    assert started_on == [(door_runner.get_loop(), started_on[0][1])]
-    assert started_on[0][1] == threading.get_ident()
+    assert started_on == [(door_runner.get_loop(), threading.get_ident())]
     assert child_cleanup.state(owned) == GONE

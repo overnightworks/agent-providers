@@ -662,19 +662,25 @@ class _DoorPipes:
 
     def __init__(self) -> None:
         self._parent_files: list[IO[bytes]] = []
+        self._unwrapped_parent_ends: list[int] = []
         self._child_ends: list[int] = []
         self._transports: list[_ParentTransport] = []
         self._write_transport: asyncio.WriteTransport | None = None
 
     def open_pipe(self, *, parent_reads: bool) -> tuple[IO[bytes], int]:
+        """Create one pipe whose both ends the next cleanup closes.
+
+        Both descriptors are registered in the statement after ``os.pipe()``
+        returns, so any later synchronous failure closes them; only an
+        asynchronous interruption between the two statements can leak them, which
+        is the host's Interruptions obligation.
+        """
         read_end, write_end = os.pipe()
         parent_end, child_end = (read_end, write_end) if parent_reads else (write_end, read_end)
         self._child_ends.append(child_end)
-        try:
-            parent_file = os.fdopen(parent_end, "rb" if parent_reads else "wb", buffering=0)
-        except BaseException:
-            os.close(parent_end)
-            raise
+        self._unwrapped_parent_ends.append(parent_end)
+        parent_file = os.fdopen(parent_end, "rb" if parent_reads else "wb", buffering=0)
+        self._unwrapped_parent_ends.remove(parent_end)
         self._parent_files.append(parent_file)
         return parent_file, child_end
 
@@ -691,7 +697,7 @@ class _DoorPipes:
     async def attach_writer(
         self, loop: asyncio.AbstractEventLoop, pipe: IO[bytes]
     ) -> asyncio.StreamWriter:
-        protocol = asyncio.streams.FlowControlMixin(loop=loop)
+        protocol = asyncio.StreamReaderProtocol(None, loop=loop)
         transport, _ = await loop.connect_write_pipe(lambda: protocol, pipe)
         self._transports.append(transport)
         self._write_transport = transport
@@ -705,6 +711,9 @@ class _DoorPipes:
     def close_parent_side(self, loop: asyncio.AbstractEventLoop) -> None:
         transports, self._transports = self._transports, []
         parent_files, self._parent_files = self._parent_files, []
+        unwrapped_ends, self._unwrapped_parent_ends = self._unwrapped_parent_ends, []
+        for unwrapped_end in unwrapped_ends:
+            os.close(unwrapped_end)
         if not loop.is_closed():
             for transport in transports:
                 self._close_transport(transport)
@@ -724,8 +733,8 @@ class AnchoredChild:
 
     Only :func:`open_anchored_pipes` creates one. ``pid``, ``returncode``,
     ``done_with_pid`` and ``signal_group`` are the leader's, unchanged; ``stdin`` is
-    a writer whose ``drain()`` works as on asyncio's door, ``stdout`` and ``stderr``
-    are readers.
+    a writer whose ``drain()`` and ``wait_closed()`` work as on asyncio's door,
+    ``stdout`` and ``stderr`` are readers.
 
     ``exited()`` returns the leader's code once the exit is published. It
     waits on an event, so a cancelled or timed-out waiter harms nobody and every
@@ -824,13 +833,14 @@ class AnchoredChild:
             await self.stdin.drain()
         except (BrokenPipeError, ConnectionResetError):
             pass
-        self.stdin.close()
+        finally:
+            self.stdin.close()
 
     def release(self) -> None:
         try:
             self._leader.release()
         finally:
-            if self._leader.state in (AnchorState.RELEASED, AnchorState.LOST):
+            if self._leader.state not in _ANCHORED_STATES:
                 self._pipes.close_parent_side(self._loop)
 
 

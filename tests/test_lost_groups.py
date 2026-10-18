@@ -50,14 +50,14 @@ from provider_test_support import (
     start_then_raise,
 )
 
-from agent_providers.claude import lost_groups
-from agent_providers.claude.lost_groups import confirm_group_gone, retain_lost_group
+from agent_providers import lost_groups
 from agent_providers.claude.provider import UnavailableError
 from agent_providers.errors import (
     ContainmentLost,
     ProviderError,
     RetainedGroup,
 )
+from agent_providers.lost_groups import confirm_group_gone, retain_lost_group
 from agent_providers.process import ClaimedStartThread
 from agent_providers.procfs import GroupCensus
 from agent_providers.spawn import AnchorStateError, ChildIdentityLost

@@ -2,7 +2,7 @@
 
 Async Claude behaviour tests take their child from ``a_claude_cli_child`` and
 install it with ``install_claude_cli_children``, the only place that names
-``provider.open_anchored_pipes``. The guard walks the modules listed in
+``anchored_turn.open_anchored_pipes``. The guard walks the modules listed in
 ``GUARDED_MODULES`` and fails on any patch of ``asyncio.create_subprocess_exec``
 or of ``open_anchored_pipes`` there.
 
@@ -37,7 +37,7 @@ from provider_test_support import (
     scenario_holds,
 )
 
-from agent_providers.claude import provider
+from agent_providers import anchored_turn
 from agent_providers.spawn import AnchorStateError, ChildProcess, closed_environment
 
 GUARDED_MODULES = (
@@ -417,8 +417,8 @@ def test_the_installer_hands_out_queued_children_in_order_and_records_each_spawn
 
     async def start_twice() -> list[object]:
         return [
-            await provider.open_anchored_pipes(to_start, stream_buffer_limit=4096),
-            await provider.open_anchored_pipes(to_start),
+            await anchored_turn.open_anchored_pipes(to_start, stream_buffer_limit=4096),
+            await anchored_turn.open_anchored_pipes(to_start),
         ]
 
     assert asyncio.run(start_twice()) == [first, second]
@@ -439,7 +439,7 @@ def test_the_installer_builds_a_child_from_the_factory_once_the_queue_is_empty(
 
     async def start_twice() -> list[int]:
         return [
-            (await provider.open_anchored_pipes(to_start, stream_buffer_limit=64)).pid
+            (await anchored_turn.open_anchored_pipes(to_start, stream_buffer_limit=64)).pid
             for _ in range(2)
         ]
 
@@ -452,7 +452,7 @@ def test_the_installer_fails_a_spawn_with_nothing_queued(
 ) -> None:
     spawns = install_claude_cli_children(monkeypatch)
 
-    spawning = provider.open_anchored_pipes(_a_child_to_start())
+    spawning = anchored_turn.open_anchored_pipes(_a_child_to_start())
     with pytest.raises(pytest.fail.Exception, match="none queued"):
         asyncio.run(spawning)
 

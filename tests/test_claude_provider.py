@@ -7,6 +7,7 @@ import concurrent.futures
 import gc
 import json
 import logging
+import signal
 import stat
 import sys
 import threading
@@ -56,11 +57,12 @@ from provider_test_support import (
     reset_cli_process_pool_for_test,
     run_bounded,
     scenario_holds,
+    set_claude_process_limit,
 )
 from pydantic import SecretStr
 
-from agent_providers import process, spawn
-from agent_providers.claude import lost_groups, provider
+from agent_providers import anchored_turn, lost_groups, process, spawn
+from agent_providers.claude import provider
 from agent_providers.claude.provider import (
     CLAUDE_CLI_BINARY_NOT_FOUND_DETAIL,
     CLAUDE_CLI_LOGIN_NOT_CONFIGURED_DETAIL,
@@ -695,14 +697,14 @@ def test_call_cli_uses_the_shared_process_pool_and_refuses_at_its_cap(
     _no_tool_gate_open,
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr(provider, "CLAUDE_CLI_MAX_CONCURRENT_PROCESSES", 1)
+    set_claude_process_limit(monkeypatch, 1)
     run_calls = 0
 
     def fake_run(*_args: object, **_kwargs: object) -> MagicMock:
         nonlocal run_calls
         run_calls += 1
-        with provider._zombie_registry_lock:
-            assert len(provider._zombie_reap_reservations) == 1
+        with provider.CLAUDE_CLI_PROCESS_POOL._lock:
+            assert len(provider.CLAUDE_CLI_PROCESS_POOL._reservations) == 1
         return MagicMock(returncode=0, stdout='{"result": "ok"}', stderr="")
 
     with patch("subprocess.run", side_effect=fake_run):
@@ -716,7 +718,7 @@ def test_call_cli_uses_the_shared_process_pool_and_refuses_at_its_cap(
         "Claude CLI process pool is at its concurrency limit (1); refusing to start another"
     )
     assert run_calls == 1
-    provider._release_zombie_reservation(live_turn)
+    provider.CLAUDE_CLI_PROCESS_POOL.release(live_turn)
 
 
 @pytest.mark.parametrize(
@@ -1126,12 +1128,12 @@ def test_healthy_mcp_turn_holds_its_process_pool_reservation_until_it_exits(
             turn = asyncio.create_task(provider.acall_claude_with_mcp("hi", user_id="u-1"))
             tasks.append(turn)
             await turn_gate.started.wait()
-            with provider._zombie_registry_lock:
-                assert len(provider._zombie_reap_reservations) == 1
+            with provider.CLAUDE_CLI_PROCESS_POOL._lock:
+                assert len(provider.CLAUDE_CLI_PROCESS_POOL._reservations) == 1
             turn_gate.release.set()
             assert (await turn).text == "ok"
-            with provider._zombie_registry_lock:
-                assert not provider._zombie_reap_reservations
+            with provider.CLAUDE_CLI_PROCESS_POOL._lock:
+                assert not provider.CLAUDE_CLI_PROCESS_POOL._reservations
 
     run_bounded(run_turn())
 
@@ -1140,7 +1142,7 @@ def test_mcp_turn_refuses_a_healthy_turn_when_the_shared_process_pool_is_full(
     monkeypatch,
 ) -> None:
     process_cap = 2
-    monkeypatch.setattr(provider, "CLAUDE_CLI_MAX_CONCURRENT_PROCESSES", process_cap)
+    set_claude_process_limit(monkeypatch, process_cap)
     monkeypatch.setattr(
         provider, "verify_cli_tool_surface", AsyncMock(return_value=Path("/usr/bin/claude")),
     )
@@ -1183,6 +1185,32 @@ def test_mcp_turn_refuses_a_healthy_turn_when_the_shared_process_pool_is_full(
             assert len(spawned) == process_cap + 1
 
     run_bounded(run_turns())
+
+
+def test_a_saturated_pool_refuses_a_turn_with_no_chained_cause_or_context(
+    monkeypatch,
+) -> None:
+    set_claude_process_limit(monkeypatch, 1)
+    monkeypatch.setattr(
+        provider,
+        "verify_cli_tool_surface",
+        AsyncMock(return_value=Path("/usr/bin/claude")),
+    )
+    monkeypatch.setattr(provider, "_write_mcp_config", lambda _spec, _user_id: "unused")
+    monkeypatch.setattr(provider, "_unlink_quiet", lambda _path: None)
+    install_claude_cli_children(monkeypatch)
+    held = provider.CLAUDE_CLI_PROCESS_POOL.reserve()
+    assert held is not None
+
+    turn = provider.acall_claude_with_mcp("hi", user_id="u-1")
+    with pytest.raises(provider._ClaudeCliProcessPoolSaturated) as refusal:
+        asyncio.run(turn)
+
+    assert str(refusal.value) == (
+        "Claude CLI process pool is at its concurrency limit (1); refusing to start another"
+    )
+    assert refusal.value.__cause__ is None
+    assert refusal.value.__context__ is None
 
 
 # ── the child a Claude turn runs as ─────────────────────────────────
@@ -2199,22 +2227,22 @@ def test_tool_surface_probe_stops_the_session_it_started(
 # ── the shared process pool ────────────────────────────────────────
 
 
-def _reserve_zombie_process() -> provider._ZombieReservation:
-    reservation = provider._reserve_zombie_admission()
+def _reserve_zombie_process() -> anchored_turn.CliProcessReservation:
+    reservation = provider.CLAUDE_CLI_PROCESS_POOL.reserve()
     assert reservation is not None
     return reservation
 
 
 def test_zombie_reap_reservations_have_a_hard_cap(monkeypatch, caplog) -> None:
     caplog.set_level("ERROR")
-    monkeypatch.setattr(provider, "CLAUDE_CLI_MAX_CONCURRENT_PROCESSES", 2)
+    set_claude_process_limit(monkeypatch, 2)
 
     reservations = [_reserve_zombie_process(), _reserve_zombie_process()]
-    assert provider._reserve_zombie_admission() is None
+    assert provider.CLAUDE_CLI_PROCESS_POOL.reserve() is None
     assert any("at its concurrency limit (2)" in r.message for r in caplog.records)
 
     for reservation in reservations:
-        provider._release_zombie_reservation(reservation)
+        provider.CLAUDE_CLI_PROCESS_POOL.release(reservation)
     assert held_claude_slots() == 0
 
 
@@ -2775,7 +2803,7 @@ def test_zombie_probe_keeps_its_pool_slot_until_the_runner_confirms_reap(
     background_started = threading.Event()
     allow_background_reap = threading.Event()
     background_finished = threading.Event()
-    monkeypatch.setattr(provider, "CLAUDE_CLI_MAX_CONCURRENT_PROCESSES", 1)
+    set_claude_process_limit(monkeypatch, 1)
     monkeypatch.setattr(
         spawn.subprocess,
         "Popen",
@@ -2796,12 +2824,12 @@ def test_zombie_probe_keeps_its_pool_slot_until_the_runner_confirms_reap(
         verify_no_builtin_cli_tools()
 
     assert background_started.wait(timeout=1)
-    assert provider._reserve_zombie_admission() is None
+    assert provider.CLAUDE_CLI_PROCESS_POOL.reserve() is None
     allow_background_reap.set()
     assert background_finished.wait(timeout=1)
-    reservation = provider._reserve_zombie_admission()
+    reservation = provider.CLAUDE_CLI_PROCESS_POOL.reserve()
     assert reservation is not None
-    provider._release_zombie_reservation(reservation)
+    provider.CLAUDE_CLI_PROCESS_POOL.release(reservation)
 
 
 def test_tool_surface_a_clean_read_followed_by_a_zombie_gets_the_zombie_ttl(
@@ -3245,7 +3273,7 @@ def test_probe_with_a_stalled_pipe_reaps_and_releases_its_admission(
     monkeypatch.setattr(provider.process, "_reap_process_group", fake_reap)
     monkeypatch.setattr(provider.process.selectors, "DefaultSelector", StalledPipeSelector)
     monkeypatch.setattr(provider, "CLAUDE_CLI_NO_TOOL_SURFACE_TIMEOUT_SECONDS", 5.0)
-    monkeypatch.setattr(provider, "CLAUDE_CLI_MAX_CONCURRENT_PROCESSES", 1)
+    set_claude_process_limit(monkeypatch, 1)
     incrementing_monotonic_clock.step = 0
 
     def probe() -> None:
@@ -3267,9 +3295,9 @@ def test_probe_with_a_stalled_pipe_reaps_and_releases_its_admission(
         assert isinstance(failures[0], UnavailableError)
         assert "did not answer" in str(failures[0])
         assert reaped.is_set()
-        reservation = provider._reserve_zombie_admission()
+        reservation = provider.CLAUDE_CLI_PROCESS_POOL.reserve()
         assert reservation is not None
-        provider._release_zombie_reservation(reservation)
+        provider.CLAUDE_CLI_PROCESS_POOL.release(reservation)
     finally:
         expire_probe.set()
         probe_thread.join(timeout=1)
@@ -3367,7 +3395,7 @@ def test_probe_reaps_a_process_whose_popen_call_returns_after_the_deadline(
     monkeypatch.setattr(spawn.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(provider.process, "_reap_process_group", fake_reap)
     monkeypatch.setattr(provider, "CLAUDE_CLI_NO_TOOL_SURFACE_TIMEOUT_SECONDS", 0.02)
-    monkeypatch.setattr(provider, "CLAUDE_CLI_MAX_CONCURRENT_PROCESSES", 1)
+    set_claude_process_limit(monkeypatch, 1)
     monkeypatch.setattr(provider.process, "ClaimedStartThread", tracked_thread)
 
     started = time.monotonic()
@@ -3377,7 +3405,7 @@ def test_probe_reaps_a_process_whose_popen_call_returns_after_the_deadline(
     with provider._tool_surface_lock:
         assert key in provider._tool_surface_failures
 
-    assert provider._reserve_zombie_admission() is None
+    assert provider.CLAUDE_CLI_PROCESS_POOL.reserve() is None
     popen_may_return.set()  # only now does the "late" spawn actually complete
 
     assert reaped.wait(5), "the late-returning process was never reaped"
@@ -3432,7 +3460,7 @@ def test_a_tool_surface_probe_is_refused_while_retained_groups_fill_the_pool(
     killpg_signals,
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr(provider, "CLAUDE_CLI_MAX_CONCURRENT_PROCESSES", 2)
+    set_claude_process_limit(monkeypatch, 2)
     reap_without_waiting(monkeypatch)
     monkeypatch.setattr(provider, "_write_mcp_config", lambda _spec, _user_id: "unused")
     monkeypatch.setattr(provider, "_unlink_quiet", lambda _path: None)
@@ -3485,30 +3513,30 @@ def test_zombie_reap_reservation_is_reserved_atomically_not_just_counted(monkeyp
     proceed. A real reservation closes that: the second concurrent
     attempt at the cap must be refused right at the reservation, not
     discover the gap only later when it happens to become a zombie."""
-    monkeypatch.setattr(provider, "CLAUDE_CLI_MAX_CONCURRENT_PROCESSES", 1)
+    set_claude_process_limit(monkeypatch, 1)
 
     reservation = _reserve_zombie_process()
-    assert provider._reserve_zombie_admission() is None
-    provider._release_zombie_reservation(reservation)
-    next_reservation = provider._reserve_zombie_admission()
+    assert provider.CLAUDE_CLI_PROCESS_POOL.reserve() is None
+    provider.CLAUDE_CLI_PROCESS_POOL.release(reservation)
+    next_reservation = provider.CLAUDE_CLI_PROCESS_POOL.reserve()
     assert next_reservation is not None
-    provider._release_zombie_reservation(next_reservation)
+    provider.CLAUDE_CLI_PROCESS_POOL.release(next_reservation)
 
 
 def test_clearing_the_tool_surface_cache_keeps_live_processes_in_the_pool(
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr(provider, "CLAUDE_CLI_MAX_CONCURRENT_PROCESSES", 1)
+    set_claude_process_limit(monkeypatch, 1)
     reservation = _reserve_zombie_process()
 
     clear_cli_tool_surface_cache()
 
-    with provider._zombie_registry_lock:
-        assert provider._zombie_reap_reservations == {reservation}
-    assert provider._reserve_zombie_admission() is None
-    provider._release_zombie_reservation(reservation)
-    with provider._zombie_registry_lock:
-        assert not provider._zombie_reap_reservations
+    with provider.CLAUDE_CLI_PROCESS_POOL._lock:
+        assert provider.CLAUDE_CLI_PROCESS_POOL._reservations == {reservation}
+    assert provider.CLAUDE_CLI_PROCESS_POOL.reserve() is None
+    provider.CLAUDE_CLI_PROCESS_POOL.release(reservation)
+    with provider.CLAUDE_CLI_PROCESS_POOL._lock:
+        assert not provider.CLAUDE_CLI_PROCESS_POOL._reservations
 
 
 def test_zombie_reap_reservation_has_no_toctou_window_under_real_concurrency(
@@ -3516,14 +3544,14 @@ def test_zombie_reap_reservation_has_no_toctou_window_under_real_concurrency(
 ) -> None:
     """The same property, proven with two genuinely concurrent threads
     racing the same 1-slot pool rather than two sequential calls."""
-    monkeypatch.setattr(provider, "CLAUDE_CLI_MAX_CONCURRENT_PROCESSES", 1)
+    set_claude_process_limit(monkeypatch, 1)
     both_may_proceed = threading.Barrier(2)
     results: list[object | None] = []
     results_lock = threading.Lock()
 
     def _attempt() -> None:
         both_may_proceed.wait(timeout=5)
-        reserved = provider._reserve_zombie_admission()
+        reserved = provider.CLAUDE_CLI_PROCESS_POOL.reserve()
         with results_lock:
             results.append(reserved)
 
@@ -3538,14 +3566,14 @@ def test_zombie_reap_reservation_has_no_toctou_window_under_real_concurrency(
     finally:
         for reservation in results:
             if reservation is not None:
-                provider._release_zombie_reservation(reservation)
+                provider.CLAUDE_CLI_PROCESS_POOL.release(reservation)
 
 
 def test_probe_runner_start_failure_is_a_closed_probe_failure_that_frees_its_reservation(
     monkeypatch, caplog, capfd,
 ) -> None:
     watch = RunnerFailureWatch(monkeypatch, caplog, capfd)
-    monkeypatch.setattr(provider, "CLAUDE_CLI_MAX_CONCURRENT_PROCESSES", 1)
+    set_claude_process_limit(monkeypatch, 1)
     thread_start_error = RuntimeError(f"thread start failed {A_RUNNER_FAILURE_CANARY}")
     fail_to_start_the_runner_thread(monkeypatch, thread_start_error)
 
@@ -3555,9 +3583,9 @@ def test_probe_runner_start_failure_is_a_closed_probe_failure_that_frees_its_res
 
     assert str(raised.value) == "Claude CLI probe failed to run"
     assert watch.reported_steps() == ["start RuntimeError"]
-    reservation = provider._reserve_zombie_admission()
+    reservation = provider.CLAUDE_CLI_PROCESS_POOL.reserve()
     assert reservation is not None
-    provider._release_zombie_reservation(reservation)
+    provider.CLAUDE_CLI_PROCESS_POOL.release(reservation)
     watch.assert_nothing_leaked(raised.value)
     assert "thread start failed" not in caplog.text
 
@@ -3612,7 +3640,7 @@ def test_a_probe_failure_message_carries_no_runner_exception_text(
     monkeypatch, caplog, capfd, failed_outcome,
 ) -> None:
     watch = RunnerFailureWatch(monkeypatch, caplog, capfd)
-    monkeypatch.setattr(provider, "CLAUDE_CLI_MAX_CONCURRENT_PROCESSES", 1)
+    set_claude_process_limit(monkeypatch, 1)
     homes = _a_probe_runner_that_reports(failed_outcome, monkeypatch)
 
     deadline = time.monotonic() + 1
@@ -3622,9 +3650,9 @@ def test_a_probe_failure_message_carries_no_runner_exception_text(
     assert str(raised.value) == "Claude CLI probe failed to run"
     assert raised.value.__cause__ is None
     assert raised.value.__context__ is None
-    reservation = provider._reserve_zombie_admission()
+    reservation = provider.CLAUDE_CLI_PROCESS_POOL.reserve()
     assert reservation is not None
-    provider._release_zombie_reservation(reservation)
+    provider.CLAUDE_CLI_PROCESS_POOL.release(reservation)
     assert not homes[0].path.exists()
     watch.assert_nothing_leaked(raised.value)
 
@@ -3633,18 +3661,18 @@ def test_a_probe_whose_cleanup_overruns_fails_at_the_settle_instant_not_the_asyn
     claude_binary, monkeypatch, caplog, capfd,
 ) -> None:
     watch = RunnerFailureWatch(monkeypatch, caplog, capfd)
-    monkeypatch.setattr(provider, "CLAUDE_CLI_MAX_CONCURRENT_PROCESSES", 1)
+    set_claude_process_limit(monkeypatch, 1)
     monkeypatch.setattr(process, "CLI_TERMINATION_GRACE_SECONDS", 0.01)
     monkeypatch.setattr(process, "CLI_PROBE_CALLER_TIMEOUT_MARGIN_SECONDS", 0.01)
     release_cleanup = threading.Event()
     slot_released = threading.Event()
-    real_release = provider._release_zombie_reservation
+    real_release = provider.CLAUDE_CLI_PROCESS_POOL.release
 
     def release_and_signal(reservation) -> None:
         real_release(reservation)
         slot_released.set()
 
-    monkeypatch.setattr(provider, "_release_zombie_reservation", release_and_signal)
+    monkeypatch.setattr(provider.CLAUDE_CLI_PROCESS_POOL, "release", release_and_signal)
     monkeypatch.setattr(spawn.subprocess, "Popen", lambda *_cmd, **_kw: fake_cli_process(None))
     monkeypatch.setattr(
         provider.process,
@@ -3661,13 +3689,13 @@ def test_a_probe_whose_cleanup_overruns_fails_at_the_settle_instant_not_the_asyn
         assert str(raised.value) == "Claude CLI probe cleanup did not finish within its budget"
         assert process.cli_settle_deadline(deadline) <= failed_at
         assert failed_at < process.cli_settle_deadline(deadline) + 0.5
-        assert provider._reserve_zombie_admission() is None
+        assert provider.CLAUDE_CLI_PROCESS_POOL.reserve() is None
     finally:
         release_cleanup.set()
     assert slot_released.wait(timeout=2)
-    reservation = provider._reserve_zombie_admission()
+    reservation = provider.CLAUDE_CLI_PROCESS_POOL.reserve()
     assert reservation is not None
-    provider._release_zombie_reservation(reservation)
+    provider.CLAUDE_CLI_PROCESS_POOL.release(reservation)
     watch.assert_nothing_leaked()
 
 
@@ -3788,7 +3816,7 @@ def test_stream_reap_completes_before_a_twice_cancelled_closer_returns(monkeypat
     """
     deadline = ScenarioDeadline()
     reap_gate = EventGate(deadline)
-    real_reap = provider._reap_process_group
+    real_reap = anchored_turn._reap_process_group
     monkeypatch.setattr(
         provider, "verify_cli_tool_surface", AsyncMock(return_value=Path("/usr/bin/claude")),
     )
@@ -3808,7 +3836,7 @@ def test_stream_reap_completes_before_a_twice_cancelled_closer_returns(monkeypat
             reaper_finished.set()
 
         monkeypatch.setattr(provider, "_consume_stream", fake_consume)
-        monkeypatch.setattr(provider, "_reap_process_group", fake_reap)
+        monkeypatch.setattr(anchored_turn, "_reap_process_group", fake_reap)
 
         tasks: list[asyncio.Future[Any]] = []
         async with scenario_holds([reap_gate], tasks, set()):
@@ -3842,7 +3870,7 @@ def test_closing_a_claude_stream_keeps_its_private_home_until_confirmed_reap(
     source = current_config().claude_cli_auth_file
     deadline = ScenarioDeadline()
     reap_gate = EventGate(deadline)
-    real_reap = provider._reap_process_group
+    real_reap = anchored_turn._reap_process_group
     child = a_claude_cli_child(
         returncode=None,
         stream_lines=[
@@ -3867,7 +3895,7 @@ def test_closing_a_claude_stream_keeps_its_private_home_until_confirmed_reap(
             await _reap_after_holds(real_reap, reaped_child, reservation, reap_gate)
 
         install_claude_cli_children(monkeypatch, factory=child_started_in_a_private_home)
-        monkeypatch.setattr(provider, "_reap_process_group", reap_process_group)
+        monkeypatch.setattr(anchored_turn, "_reap_process_group", reap_process_group)
         monkeypatch.setattr(
             provider,
             "verify_cli_tool_surface",
@@ -3938,14 +3966,14 @@ def test_stream_reap_does_not_spin_under_anyio_level_cancellation(
                 await anyio.lowlevel.checkpoint()
             reaper_finished.set()
 
-        monkeypatch.setattr(provider, "_reap_process_group", fake_reap)
+        monkeypatch.setattr(anchored_turn, "_reap_process_group", fake_reap)
 
         async def close_after_cancellation() -> None:
             process = a_claude_cli_child(returncode=None)
-            reservation = provider._ZombieReservation()
+            reservation = anchored_turn.CliProcessReservation(pool=provider.CLAUDE_CLI_PROCESS_POOL)
             closing.append(asyncio.current_task())
             with pytest.raises(asyncio.CancelledError):
-                await provider._reap_behind_shield(process, reservation)
+                await anchored_turn._reap_behind_shield(process, reservation)
             close_finished.set()
 
         with anyio.fail_after(deadline.remaining()):
@@ -4070,7 +4098,7 @@ def _write_no_mcp_config_file(monkeypatch: pytest.MonkeyPatch) -> None:
 def _replace_the_reap(
     monkeypatch: pytest.MonkeyPatch, reap: Callable[[object, object], object],
 ) -> None:
-    monkeypatch.setattr(provider, "_reap_process_group", reap)
+    monkeypatch.setattr(anchored_turn, "_reap_process_group", reap)
 
 
 @dataclass
@@ -4082,7 +4110,7 @@ def _record_the_real_reap(
     monkeypatch: pytest.MonkeyPatch, before_reaping: EventGate | None = None,
 ) -> _ReapRecorder:
     recorder = _ReapRecorder()
-    real_reap = provider._reap_process_group
+    real_reap = anchored_turn._reap_process_group
 
     async def counting_reap(child, reservation) -> None:
         recorder.invocations += 1
@@ -4184,7 +4212,7 @@ def test_a_one_shot_cancelled_twice_completes_one_reap_before_delivering_the_can
     deadline = ScenarioDeadline()
     first_stage = EventGate(deadline)
     second_stage = EventGate(deadline)
-    real_reap = provider._reap_process_group
+    real_reap = anchored_turn._reap_process_group
     reaps_completed = 0
     turn_child = _install_child_in_a_home(
         monkeypatch, returncode=None, communicate=RuntimeError("turn broke"),
@@ -4269,7 +4297,7 @@ def test_the_reaps_own_exception_wins_over_the_turns_exit(
 ) -> None:
     reap_gate = EventGate(ScenarioDeadline())
     reap_fault = boundary.make_reap_fault()
-    real_reap = provider._reap_process_group
+    real_reap = anchored_turn._reap_process_group
     _install_child_in_a_home(
         monkeypatch, returncode=None, communicate=boundary.make_turn_failure(),
     )
@@ -4437,7 +4465,7 @@ def test_sigkill_ends_a_leader_that_survives_sigterm_before_its_slot_and_home_ar
 ) -> None:
     reap_without_waiting(monkeypatch)
     turn = _prepare_the_turn(
-        monkeypatch, ending, returncode=None, natural_exit=None, survives={provider.signal.SIGTERM},
+        monkeypatch, ending, returncode=None, natural_exit=None, survives={signal.SIGTERM},
     )
 
     run_bounded(_end_the_turn_with_its_own_error(ending))
@@ -4453,7 +4481,7 @@ def _provider_records_after(caplog: pytest.LogCaptureFixture, spawned_at: int) -
     return [
         f"{record.levelname} {record.getMessage()}"
         for record in caplog.records[spawned_at:]
-        if record.name == provider.log.name
+        if record.name in {provider.log.name, anchored_turn.log.name}
     ]
 
 
@@ -4487,7 +4515,7 @@ def test_a_leader_that_outlives_sigkill_keeps_its_slot_and_home_until_its_group_
             assert _provider_records_after(caplog, records_before_spawn[0]) == []
 
             reset_config()
-            child.publish_exit(-provider.signal.SIGKILL)
+            child.publish_exit(-signal.SIGKILL)
             assert await lost_groups.confirm_group_gone(group)
             assert operations(child.log) == [
                 ("SIGTERM", pid), ("SIGKILL", pid), ("kill", pid), ("release", pid),
@@ -4544,14 +4572,14 @@ def test_a_failing_anchor_is_retained_with_its_slot_and_home(
     turn = _prepare_the_turn(monkeypatch, ending, **failing.script)
     child = turn.child
     retentions: list[tuple[RetainedGroup, Callable[[], None]]] = []
-    real_retain = provider.retain_lost_group
+    real_retain = anchored_turn.retain_lost_group
 
     def keep_the_retention(retained_child, release_slot) -> RetainedGroup:
         group = real_retain(retained_child, release_slot)
         retentions.append((group, release_slot))
         return group
 
-    monkeypatch.setattr(provider, "retain_lost_group", keep_the_retention)
+    monkeypatch.setattr(anchored_turn, "retain_lost_group", keep_the_retention)
 
     async def scenario() -> None:
         with pytest.raises(ContainmentLost) as lost:
@@ -5041,10 +5069,10 @@ class _PoolLockProbe:
         self.found_the_lock_free: list[bool] = []
 
     def __call__(self) -> None:
-        acquired = provider._zombie_registry_lock.acquire(blocking=False)
+        acquired = provider.CLAUDE_CLI_PROCESS_POOL._lock.acquire(blocking=False)
         self.found_the_lock_free.append(acquired)
         if acquired:
-            provider._zombie_registry_lock.release()
+            provider.CLAUDE_CLI_PROCESS_POOL._lock.release()
 
 
 class _PoolLockProbingHandler(logging.Handler):
@@ -5062,37 +5090,39 @@ def test_the_pool_lock_is_not_held_while_a_home_is_released() -> None:
     probe = _PoolLockProbe()
     home_reservation = MagicMock(spec_set=["release"])
     home_reservation.release.side_effect = probe
-    reservation = provider._ZombieReservation(home_reservation=home_reservation)
-    with provider._zombie_registry_lock:
-        provider._zombie_reap_reservations.add(reservation)
+    reservation = anchored_turn.CliProcessReservation(
+        pool=provider.CLAUDE_CLI_PROCESS_POOL, home_reservation=home_reservation,
+    )
+    with provider.CLAUDE_CLI_PROCESS_POOL._lock:
+        provider.CLAUDE_CLI_PROCESS_POOL._reservations.add(reservation)
     try:
-        call_within_deadline(provider._release_zombie_reservation, reservation)
+        call_within_deadline(provider.CLAUDE_CLI_PROCESS_POOL.release, reservation)
 
         assert probe.found_the_lock_free == [True]
         assert held_claude_slots() == 0
     finally:
-        with provider._zombie_registry_lock:
-            provider._zombie_reap_reservations.discard(reservation)
+        with provider.CLAUDE_CLI_PROCESS_POOL._lock:
+            provider.CLAUDE_CLI_PROCESS_POOL._reservations.discard(reservation)
 
 
 def test_the_pool_lock_is_not_held_while_the_pool_limit_is_logged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(provider, "CLAUDE_CLI_MAX_CONCURRENT_PROCESSES", 1)
+    set_claude_process_limit(monkeypatch, 1)
     probe = _PoolLockProbe()
     handler = _PoolLockProbingHandler(probe)
-    own_reservation = provider._reserve_zombie_admission()
+    own_reservation = provider.CLAUDE_CLI_PROCESS_POOL.reserve()
     assert own_reservation is not None
-    provider.log.addHandler(handler)
+    anchored_turn.log.addHandler(handler)
     try:
-        refused = call_within_deadline(provider._reserve_zombie_admission)
+        refused = call_within_deadline(provider.CLAUDE_CLI_PROCESS_POOL.reserve)
 
         assert refused is None
-        assert handler.messages == [provider._claude_cli_process_pool_limit_message()]
+        assert handler.messages == [provider.CLAUDE_CLI_PROCESS_POOL.limit_message()]
         assert probe.found_the_lock_free == [True]
     finally:
-        provider.log.removeHandler(handler)
-        provider._release_zombie_reservation(own_reservation)
+        anchored_turn.log.removeHandler(handler)
+        provider.CLAUDE_CLI_PROCESS_POOL.release(own_reservation)
 
 
 def _cli_root_removed(tmp_path: Path) -> None:

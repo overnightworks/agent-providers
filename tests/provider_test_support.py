@@ -50,9 +50,8 @@ import pytest
 from anchored_support import TEST_WAIT_SECONDS
 
 from agent_client.tools import ToolDeclaration
-from agent_providers import process
+from agent_providers import anchored_turn, lost_groups, process
 from agent_providers.catalog import ProviderRoute
-from agent_providers.claude import lost_groups
 from agent_providers.claude import provider as claude_provider
 from agent_providers.config import (
     ProviderRuntimeConfig,
@@ -1380,13 +1379,18 @@ def install_claude_cli_children(
             pytest.fail(f"a Claude child was spawned with none queued: {child.command}")
         return factory(child, stream_buffer_limit)
 
-    monkeypatch.setattr(claude_provider, "open_anchored_pipes", open_anchored_pipes)
+    monkeypatch.setattr(anchored_turn, "open_anchored_pipes", open_anchored_pipes)
     return spawns
 
 
 def held_claude_slots() -> int:
-    with claude_provider._zombie_registry_lock:
-        return len(claude_provider._zombie_reap_reservations)
+    pool = claude_provider.CLAUDE_CLI_PROCESS_POOL
+    with pool._lock:
+        return len(pool._reservations)
+
+
+def set_claude_process_limit(monkeypatch: pytest.MonkeyPatch, limit: int) -> None:
+    monkeypatch.setattr(claude_provider.CLAUDE_CLI_PROCESS_POOL, "limit", limit)
 
 
 def run_bounded[T](scenario: Coroutine[Any, Any, T]) -> T:
@@ -1450,14 +1454,16 @@ def a_child_that_outlives_sigkill(**script: Any) -> ScriptedClaudeChild:
 
 def reap_without_waiting(monkeypatch: pytest.MonkeyPatch) -> None:
     """Give the reap's grace and bound no time, so an unpublished exit expires at once."""
-    monkeypatch.setattr(claude_provider, "CLAUDE_CLI_SIGTERM_GRACE_SECONDS", 0)
-    monkeypatch.setattr(claude_provider, "CLAUDE_CLI_ZOMBIE_REAP_TIMEOUT_SECONDS", 0)
+    for module in (anchored_turn, claude_provider):
+        monkeypatch.setattr(module, "CLAUDE_CLI_SIGTERM_GRACE_SECONDS", 0)
+        monkeypatch.setattr(module, "CLAUDE_CLI_ZOMBIE_REAP_TIMEOUT_SECONDS", 0)
 
 
 def reset_cli_process_pool_for_test() -> None:
     """Test isolation only; production cache invalidation keeps live slots."""
-    with claude_provider._zombie_registry_lock:
-        claude_provider._zombie_reap_reservations.clear()
+    pool = claude_provider.CLAUDE_CLI_PROCESS_POOL
+    with pool._lock:
+        pool._reservations.clear()
     with claude_provider._tool_surface_lock:
         claude_provider._tool_surface_probe_tasks.clear()
 

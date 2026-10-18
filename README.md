@@ -224,13 +224,21 @@ arguments instead and reads no installed configuration.
 
 The configuration is cut along the two ways into this library. `ProviderRuntimeConfig`
 carries what the catalog path reads — the CLI binaries, the search path a bare
-binary name is resolved against, the credential files, and the working root
-below which every private directory and temporary file is created. A host that
+binary name is resolved against, the login sources, and the working root
+below which every private directory and temporary file is created. A provider
+the host runs through its CLI has its own block: `claude` holds
+`ClaudeCliRuntime(binary, binary_search_globs, token_file)`, and a host that
+does not run Claude leaves it `None`. `token_file` is the provider's login
+source; the provider decides its format. A Claude call under a configuration
+without the block raises `ProviderNotConfiguredError(provider, block)` naming
+the provider, in turns and in the catalog alike; the catalog never reports it as
+not logged in. A provider with an API key is ready without its block, and its
+CLI is not looked for. A host that
 also runs turns adds a `TurnRuntimeConfig` as `turns`: the
 Codex mounts and process caps, the prompt-file names, and an optional
 `McpServerSpec` describing the host's MCP server. A catalog-only host passes no
 `turns` at all and never invents a value it does not have; a host that runs no
-MCP server passes `mcp_server=None` inside `turns`. A host migrates at its pin bump: see [Migrating to 0.3.0](#migrating-to-030).
+MCP server passes `mcp_server=None` inside `turns`. A host migrates at its pin bump: see [Migrating to 0.4.0](#migrating-to-040) and [Migrating to 0.3.0](#migrating-to-030).
 
 A turn path reached
 without `turns` raises `TurnRuntimeNotConfiguredError` instead of running against a
@@ -275,6 +283,18 @@ The other host obligations arrive as arguments where they are needed:
   is `agent_client.wire`, not this union.
 
 **Interruptions.** Python can raise an exception asynchronously inside a library call: a signal handler raises one between two bytecode instructions of the main thread, as the default `SIGINT` handler raises `KeyboardInterrupt`, and `PyThreadState_SetAsyncExc` injects one into any thread. Python's documentation says that most code, the standard library included, cannot be made robust against this ([Note on Signal Handlers and Exceptions](https://docs.python.org/3/library/signal.html#note-on-signal-handlers-and-exceptions)), and this library is no exception. A host that needs orderly shutdown or continued service uses signal handlers that do not raise for the whole time library calls can run, its startup included, and never injects an exception into a thread that runs library code. After such an interruption, stop using the library and end the process: a later call may wait forever on a lock the interruption left held, and graceful shutdown may stall. A resource failure such as `MemoryError` inside `start_anchored_leader`'s ownership handoff or rollback likewise requires the host to stop using the library and end the process. Normal interpreter exit attempts the private-home cleanup without taking any of this library's locks, but the cleanup is not guaranteed when shutdown cannot complete or a removal fails.
+
+## Migrating to 0.4.0
+
+A host migrates at its pin bump to 0.4.0; the configuration model refuses
+unknown fields, so a host that still sets a removed name fails at startup and
+the error names the field.
+
+| Before (`ProviderRuntimeConfig`) | Now |
+|---|---|
+| `claude_cli_binary` | `claude.binary` |
+| `claude_cli_binary_search_globs` | `claude.binary_search_globs` |
+| `claude_cli_auth_file` | `claude.token_file`, still the credentials file until the setup-token contract lands |
 
 ## Migrating to 0.3.0
 

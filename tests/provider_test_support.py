@@ -54,6 +54,7 @@ from agent_providers import anchored_turn, lost_groups, process
 from agent_providers.catalog import ProviderRoute
 from agent_providers.claude import provider as claude_provider
 from agent_providers.config import (
+    ClaudeCliRuntime,
     ProviderRuntimeConfig,
     configure,
     current_config,
@@ -455,6 +456,33 @@ def override_provider_runtime(**deployment_facts: Any) -> None:
     )
     reset_config()
     configure(replacement)
+
+
+def override_claude_runtime(**claude_facts: Any) -> None:
+    """Replace named Claude facts for the current test only, or give it a block."""
+    claude = current_config().claude
+    replacement = (
+        claude.model_copy(update=claude_facts)
+        if claude is not None
+        else ClaudeCliRuntime(**claude_facts)
+    )
+    override_provider_runtime(claude=replacement)
+
+
+def override_cli_binary(provider: str, binary: str) -> None:
+    """Point one provider's CLI binary at ``binary`` for the current test only."""
+    if provider == "claude":
+        override_claude_runtime(binary=binary)
+    else:
+        override_provider_runtime(**{f"{provider}_cli_binary": binary})
+
+
+def override_login_source(provider: str, login_source: Path) -> None:
+    """Point one provider's login source at ``login_source`` for the current test only."""
+    if provider == "claude":
+        override_claude_runtime(token_file=login_source)
+    else:
+        override_provider_runtime(**{f"{provider}_cli_auth_file": login_source})
 
 
 def call_within_deadline(

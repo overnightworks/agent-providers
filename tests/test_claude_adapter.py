@@ -36,7 +36,7 @@ from agent_providers.claude.provider import (
     CliUnavailableError,
     UnavailableError,
 )
-from agent_providers.config import current_config
+from agent_providers.config import current_claude_runtime
 from agent_providers.errors import ContainmentLost, ProviderUnavailableError, SafeRouteReasonCode
 from agent_providers.events import AssistantTextEvent, StreamEvent
 from agent_providers.process import CliEnvironmentUnavailableError, CliLoginUnusableError
@@ -295,7 +295,7 @@ async def _drive_real_claude_turn() -> None:
 
 
 def _a_credential_that(fault: str, tmp_path) -> None:
-    source = current_config().claude_cli_auth_file
+    source = current_claude_runtime().token_file
     source.unlink()
     if fault == "linked":
         target = tmp_path / "elsewhere.json"

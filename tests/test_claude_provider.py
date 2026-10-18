@@ -50,6 +50,7 @@ from provider_test_support import (
     install_claude_cli_children,
     lines_that_fail,
     operations,
+    override_claude_runtime,
     override_provider_runtime,
     override_turn_runtime,
     reap_without_waiting,
@@ -94,6 +95,7 @@ from agent_providers.claude.provider import (
 )
 from agent_providers.config import (
     McpServerSpec,
+    current_claude_runtime,
     current_config,
     current_turn_config,
     reset_config,
@@ -1224,7 +1226,7 @@ def test_a_claude_child_gets_a_private_credential_home_not_the_operators(
     monkeypatch.setenv("ANTHROPIC_API_KEY", "value-the-child-must-not-see")
     credential = tmp_path / "claude-credentials.json"
     credential.write_text("{}")
-    override_provider_runtime(claude_cli_auth_file=credential)
+    override_claude_runtime(token_file=credential)
 
     home = provider._claude_private_home()
     child = provider._claude_child_process(Path("/usr/bin/claude"), ["-p"], home.path)
@@ -1242,7 +1244,7 @@ def test_sync_claude_call_owns_a_private_credential_home_until_completion(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    source = current_config().claude_cli_auth_file
+    source = current_claude_runtime().token_file
     homes: list[Path] = []
 
     def run_capturing(child, **_kwargs):
@@ -1547,7 +1549,7 @@ def test_async_claude_entrypoints_own_private_credential_homes_until_reap(
     tmp_path: Path,
     entrypoint: str,
 ) -> None:
-    source = current_config().claude_cli_auth_file
+    source = current_claude_runtime().token_file
     homes: list[Path] = []
 
     def child_started_in_a_private_home(child, _stream_buffer_limit):
@@ -1594,7 +1596,7 @@ def test_claude_surface_probe_owns_a_private_home_until_its_runner_reaps(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    source = current_config().claude_cli_auth_file
+    source = current_claude_runtime().token_file
     homes: list[Path] = []
 
     def run_cli_bounded(child, **kwargs):
@@ -1649,7 +1651,7 @@ def test_claude_surface_probe_keeps_its_home_until_late_runner_confirmation(
     reason: CliRunReason,
     callback: str,
 ) -> None:
-    source = current_config().claude_cli_auth_file
+    source = current_claude_runtime().token_file
     captured: dict[str, object] = {}
 
     def run_cli_bounded(child, **kwargs):
@@ -1714,8 +1716,8 @@ def test_find_binary_takes_the_newest_match_from_a_configured_search_location(
 ) -> None:
     _install_vscode_style_binary(tmp_path, "1.0.0")
     newest = _install_vscode_style_binary(tmp_path, "2.0.0")
-    override_provider_runtime(
-        claude_cli_binary_search_globs=(
+    override_claude_runtime(
+        binary_search_globs=(
             str(tmp_path / "anthropic.claude-code-*" / "resources" / "native-binary" / "claude"),
         ),
     )
@@ -1727,8 +1729,8 @@ def test_find_binary_takes_the_newest_match_from_a_configured_search_location(
 def test_find_binary_refuses_a_search_location_match_it_cannot_run(tmp_path: Path) -> None:
     """A glob hit is a candidate, not an answer: a child needs a runnable file."""
     _install_vscode_style_binary(tmp_path, "1.0.0", executable=False)
-    override_provider_runtime(
-        claude_cli_binary_search_globs=(
+    override_claude_runtime(
+        binary_search_globs=(
             str(tmp_path / "anthropic.claude-code-*" / "resources" / "native-binary" / "claude"),
         ),
     )
@@ -1738,7 +1740,7 @@ def test_find_binary_refuses_a_search_location_match_it_cannot_run(tmp_path: Pat
 
 
 def test_find_binary_not_found() -> None:
-    override_provider_runtime(claude_cli_binary_search_globs=())
+    override_claude_runtime(binary_search_globs=())
 
     with patch("agent_providers.claude.provider.resolve_cli_binary", return_value=None):
         assert _find_claude_binary() is None
@@ -3867,7 +3869,7 @@ def test_closing_a_claude_stream_keeps_its_private_home_until_confirmed_reap(
     tmp_path: Path,
     killpg_signals,
 ) -> None:
-    source = current_config().claude_cli_auth_file
+    source = current_claude_runtime().token_file
     deadline = ScenarioDeadline()
     reap_gate = EventGate(deadline)
     real_reap = anchored_turn._reap_process_group
@@ -5133,7 +5135,7 @@ def _cli_root_removed(tmp_path: Path) -> None:
 
 
 def _credential_source_replaced_by_a_link(tmp_path: Path) -> None:
-    source = current_config().claude_cli_auth_file
+    source = current_claude_runtime().token_file
     target = tmp_path / "elsewhere.json"
     target.write_text("{}")
     source.unlink()

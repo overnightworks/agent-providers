@@ -427,7 +427,6 @@ def provider_configuration(
     states their sets; this package answers for the provider.
     """
     credential = _provider_api_credential(provider, current_config())
-    cli_method = _cli_setup_method(provider)
     if _secret(credential.secret):
         if provider == ProviderName.CLAUDE and not _anthropic_sdk_available():
             return ProviderCapabilityMissing(provider, _ANTHROPIC_SDK_DISTRIBUTION)
@@ -436,6 +435,7 @@ def provider_configuration(
             ProviderSetupMethod.API_KEY,
             credential.environment_key,
         )
+    cli_method = _cli_setup_method(provider)
     if cli_method is None:
         return ProviderNotLoggedIn(provider, credential.environment_key)
     if isinstance(cli_method, CliEnvironmentCause):

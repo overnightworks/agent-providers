@@ -21,6 +21,7 @@ from agent_providers.catalog import (
     probe_provider_route,
 )
 from agent_providers.config import (
+    ProviderNotConfiguredError,
     ProviderRuntimeAlreadyConfiguredError,
     ProviderRuntimeConfig,
     ProviderRuntimeNotConfiguredError,
@@ -29,6 +30,7 @@ from agent_providers.config import (
     WorkingRootNotPrivateError,
     WorkingRootViolation,
     configure,
+    current_claude_runtime,
     current_config,
     current_turn_config,
     reset_config,
@@ -37,11 +39,9 @@ from agent_providers.config import (
 
 def _catalog_only_runtime(tmp_path: Path) -> ProviderRuntimeConfig:
     return ProviderRuntimeConfig(
-        claude_cli_binary="/bin/sh",
         grok_cli_binary="/bin/sh",
         codex_cli_binary="/bin/sh",
         cli_binary_search_path=(Path("/usr/bin"),),
-        claude_cli_auth_file=tmp_path / "claude.json",
         grok_cli_auth_file=tmp_path / "grok.json",
         codex_cli_auth_file=tmp_path / "codex.json",
         cli_working_directory_root=tmp_path,
@@ -344,3 +344,30 @@ def test_a_refusal_survives_being_copied_with_its_violation(
 
     assert duplicated.violation is original.violation
     assert duplicated.args == original.args
+
+
+def test_a_claude_call_without_a_claude_block_names_the_provider(tmp_path: Path) -> None:
+    override_provider_runtime(**_catalog_only_runtime(tmp_path).model_dump())
+
+    with pytest.raises(ProviderNotConfiguredError) as refused:
+        current_claude_runtime()
+
+    assert (refused.value.provider, refused.value.block) == ("claude", "claude")
+    assert "claude" in str(refused.value)
+
+
+@pytest.mark.parametrize(
+    "removed_flat_field",
+    [
+        pytest.param("claude_cli_binary", id="binary"),
+        pytest.param("claude_cli_binary_search_globs", id="binary-search-globs"),
+        pytest.param("claude_cli_auth_file", id="auth-file"),
+    ],
+)
+def test_a_host_with_a_removed_flat_claude_field_is_refused_naming_the_field(
+    removed_flat_field: str, tmp_path: Path,
+) -> None:
+    facts = {**_catalog_only_runtime(tmp_path).model_dump(), removed_flat_field: "/bin/sh"}
+
+    with pytest.raises(ValidationError, match=removed_flat_field):
+        ProviderRuntimeConfig(**facts)

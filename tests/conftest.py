@@ -36,6 +36,7 @@ from provider_test_support import MCP_TOOL_NAMES, close_fake_cli_pipes
 
 from agent_providers import procfs
 from agent_providers.config import (
+    ClaudeCliRuntime,
     McpServerSpec,
     ProviderRuntimeConfig,
     TurnRuntimeConfig,
@@ -69,14 +70,15 @@ _SAMPLE_TURNS = TurnRuntimeConfig(
 _SAMPLE_RUNTIME = ProviderRuntimeConfig(
     # An absolute path that exists on every host, so binary resolution is a
     # real answer in the suite rather than a patched one.
-    claude_cli_binary="/bin/sh",
     grok_cli_binary="/bin/sh",
     codex_cli_binary="/bin/sh",
     cli_binary_search_path=(Path("/usr/local/bin"), Path("/usr/bin"), Path("/bin")),
-    claude_cli_auth_file=_SAMPLE_ROOT / "claude" / "credentials.json",
     grok_cli_auth_file=_SAMPLE_ROOT / "grok" / "auth.json",
     codex_cli_auth_file=_SAMPLE_ROOT / "codex" / "auth.json",
     cli_working_directory_root=_SAMPLE_ROOT / "working-root",
+    claude=ClaudeCliRuntime(
+        binary="/bin/sh", token_file=_SAMPLE_ROOT / "claude" / "credentials.json",
+    ),
     turns=_SAMPLE_TURNS,
 )
 
@@ -94,7 +96,7 @@ def _configure_agent_provider_runtime(tmp_path: Path):
     configure(
         _SAMPLE_RUNTIME.model_copy(
             update={
-                "claude_cli_auth_file": claude_auth,
+                "claude": _SAMPLE_RUNTIME.claude.model_copy(update={"token_file": claude_auth}),
                 "grok_cli_auth_file": grok_auth,
                 "codex_cli_auth_file": codex_auth,
                 "cli_working_directory_root": tmp_path,

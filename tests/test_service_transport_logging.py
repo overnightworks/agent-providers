@@ -37,7 +37,7 @@ from service_support import (
     logging_state_snapshot,  # noqa: F401 - a fixture, requested by name
     plain_service_config,
 )
-from test_service_claude_version import PRINTS_THE_PIN, _config_file_naming, _printing
+from test_service_cli_version import PRINTS_THE_PIN, _config_file_naming, _printing
 
 import agent_service.app as app_module
 from agent_service.app import create_app

@@ -2,7 +2,7 @@
 
 A platform other than Linux, a root process, a process that cannot be made non-dumpable (so the
 Claude program and anything it starts could read the service's memory), a configuration the
-service refuses, or a Claude program that does not report the pinned version ends the process
+service refuses, or a pinned program that does not report its version ends the process
 with exit status 2 and one line naming the reason; nothing is served.
 """
 
@@ -47,7 +47,7 @@ def main(argv: list[str] | None = None) -> int:
 
     from agent_providers.secret_file import shown_text
     from agent_service.app import create_app
-    from agent_service.claude_version import ClaudeVersionRefused, require_pinned_version
+    from agent_service.cli_version import ProgramVersionRefused, require_pinned_versions
     from agent_service.config import ConfigError, load_config
 
     try:
@@ -57,10 +57,8 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_BAD_CONFIG
     try:
         if config.cli is not None:
-            require_pinned_version(
-                config.cli.claude_binary, config.cli.claude_version, config.cli.working_root
-            )
-    except ClaudeVersionRefused as error:
+            require_pinned_versions(config.cli)
+    except ProgramVersionRefused as error:
         print(
             f"agent-service: refusing to start: {shown_text(str(arguments.config))}: {error}",
             file=sys.stderr,

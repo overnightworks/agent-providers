@@ -204,8 +204,8 @@ async def test_one_error_line_names_the_run_and_every_group_and_retries_write_no
     await rig.clock.step_to_next_deadline()
 
     assert quarantine_lines(caplog) == [(run_id, [FIRST.pgid, SECOND.pgid])]
-    assert str(FIRST.generation) not in caplog.text
-    assert str(SECOND.generation) not in caplog.text
+    text_without_run_id = caplog.text.replace(str(run_id), "<run>")
+    assert [str(group.generation) in text_without_run_id for group in (FIRST, SECOND)] == [False, False]
 
 
 @in_loop

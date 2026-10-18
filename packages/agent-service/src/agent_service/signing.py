@@ -21,7 +21,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from jwt.algorithms import RSAAlgorithm
 
-from agent_service.secret_file import UnsoundSecretFile, read_secret_file, shown_text
+from agent_providers.secret_file import UnsoundSecretFile, read_secret_file, shown_text
 
 SIGNING_KEY_BITS: Final = 3072
 SIGNING_KEY_EXPONENT: Final = 65537

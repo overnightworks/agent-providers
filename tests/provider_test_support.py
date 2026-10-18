@@ -43,6 +43,7 @@ from collections.abc import (
 )
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
+from enum import Enum, auto
 from pathlib import Path
 from typing import Any, Final
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1420,6 +1421,12 @@ class ScriptedAnchoredChild:
 CLAUDE_CLI_STDIN_SURFACE: Final = ("write", "drain", "close")
 
 
+class ExitOnKill(Enum):
+    PUBLISHED = auto()
+    COMMITTED_UNANNOUNCED = auto()
+    NONE = auto()
+
+
 class ScriptedClaudeChild(ScriptedAnchoredChild):
     """The Claude turns' ``AnchoredChild`` double: stream pipes, an exit model and a log.
 
@@ -1446,7 +1453,7 @@ class ScriptedClaudeChild(ScriptedAnchoredChild):
         release_failures: Sequence[Exception] = (),
         censuses: Sequence[GroupCensus | BaseException] = (GroupCensus.EMPTY,),
         gone: Sequence[KillUntilGoneResult | BaseException] = (),
-        publishes_on_kill: bool = True,
+        exit_on_kill: ExitOnKill = ExitOnKill.PUBLISHED,
         communicate: tuple[bytes, bytes] | BaseException = (b"", b""),
         communicate_gate: EventGate | None = None,
         stream_lines: Sequence[bytes] = (),
@@ -1469,7 +1476,7 @@ class ScriptedClaudeChild(ScriptedAnchoredChild):
         self._exit_loss = exit_loss
         self._signal_failure = signal_failure
         self._gone = deque(gone)
-        self._publishes_on_kill = publishes_on_kill
+        self._exit_on_kill = exit_on_kill
         self.kill_bounds: list[float] = []
         self._exit_published = asyncio.Event()
         if returncode is not None:
@@ -1482,8 +1489,11 @@ class ScriptedClaudeChild(ScriptedAnchoredChild):
         self.stdin = MagicMock(spec_set=CLAUDE_CLI_STDIN_SURFACE)
         self.stdin.drain = AsyncMock()
 
-    def publish_exit(self, returncode: int) -> None:
+    def commit_exit(self, returncode: int) -> None:
         self.returncode = returncode
+
+    def publish_exit(self, returncode: int) -> None:
+        self.commit_exit(returncode)
         self._exit_published.set()
 
     def signal_group(self, sig: signal.Signals) -> None:
@@ -1511,9 +1521,15 @@ class ScriptedClaudeChild(ScriptedAnchoredChild):
     def _group_reap_model(self) -> KillUntilGoneResult:
         if signal.SIGKILL in self._survives:
             return KillUntilGoneResult(GroupCensus.LIVE, ended_in_time=True)
-        if self._publishes_on_kill and self.returncode is None:
-            self.publish_exit(-signal.SIGKILL)
+        if self.returncode is None:
+            self._exit_through_the_kill()
         return KillUntilGoneResult(GroupCensus.EMPTY, ended_in_time=True)
+
+    def _exit_through_the_kill(self) -> None:
+        if self._exit_on_kill is ExitOnKill.PUBLISHED:
+            self.publish_exit(-signal.SIGKILL)
+        elif self._exit_on_kill is ExitOnKill.COMMITTED_UNANNOUNCED:
+            self.commit_exit(-signal.SIGKILL)
 
     async def exited(self) -> int:
         if self._exit_loss is not None:

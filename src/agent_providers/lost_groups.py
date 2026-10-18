@@ -8,12 +8,13 @@ It closes nothing and signals nothing. ``confirm_group_gone`` makes one attempt 
 old retention never reaches a newer one with the same pgid. An unknown or cleaned-up
 group gives ``True`` and nothing is signalled. Otherwise one SIGKILL and one ``/proc``
 count go through the leader's anchor, in the attempt's own worker thread, never on a loop
-thread. Only an ``EMPTY`` count with a published exit leads on, on the calling loop's
+thread. Only an ``EMPTY`` count with a committed exit leads on, on the calling loop's
 thread and in this order, each at most once: the leader's ``release()``, the slot's
 release, the entry's removal, then ``True``. Any other count, or an exit not yet
-published, gives ``False`` and releases nothing; the next attempt kills and counts again.
-An attempt checks ``returncode`` rather than awaiting ``exited()``, which waits forever
-once the opening loop has closed.
+committed, gives ``False`` and releases nothing; the next attempt kills and counts again.
+The attempt's exit evidence is the committed ``returncode``, not an awaited ``exited()``,
+which waits forever once the opening loop has closed. ``release_leader_if_gone`` is the one
+decider of the leader's release, for this attempt and for the turn's reap alike.
 
 **One attempt at a time.** A call for a group that has an attempt returns ``False`` at
 once and signals nothing. The attempt has up to two holders, the call and its census
@@ -119,11 +120,21 @@ def _remove(group: RetainedGroup) -> None:
         del _lost_groups[group]
 
 
+def release_leader_if_gone(child: AnchoredChild, *, counted_empty: bool, exit_known: bool) -> bool:
+    if not (counted_empty and exit_known):
+        return False
+    child.release()
+    return True
+
+
 async def _release_leader_if_empty(entry: _LostGroup, attempt: _Attempt) -> bool:
     census = await _kill_and_count_off_the_loop(entry, attempt)
-    if census is not GroupCensus.EMPTY or entry.child.returncode is None:
+    if not release_leader_if_gone(
+        entry.child,
+        counted_empty=census is GroupCensus.EMPTY,
+        exit_known=entry.child.returncode is not None,
+    ):
         return False
-    entry.child.release()
     with _registry_lock:
         entry.leader_released = True
     return True

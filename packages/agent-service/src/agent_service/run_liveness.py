@@ -517,6 +517,11 @@ def containment_losses(error: BaseException) -> tuple[RetainedGroup, ...]:
     return tuple(groups)
 
 
+def reported_by_the_quarantine(error: BaseException) -> bool:
+    """Whether the quarantine's line reports ``error``, so no ``log_failure`` line may."""
+    return isinstance(error, ContainmentLost)
+
+
 async def _one_step(events: AsyncGenerator[StreamEvent, None]) -> RunnerOutcome:
     try:
         return RunnerYielded(await anext(events))
@@ -816,7 +821,7 @@ class SupervisedRun:
     def _log_runner_close(self) -> None:
         """Log how the runner closed in a frame of its own, so no later failure keeps it alive."""
         closing_failure = _failure_of(self._pump)
-        if closing_failure is None or isinstance(closing_failure, ContainmentLost):
+        if closing_failure is None or reported_by_the_quarantine(closing_failure):
             return
         log_failure(log, f"Closing the runner of run {self._run_id} failed", closing_failure)
         if isinstance(closing_failure, asyncio.CancelledError):

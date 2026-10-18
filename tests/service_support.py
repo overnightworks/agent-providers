@@ -828,8 +828,8 @@ FAILURE_LINE = re.compile(r"(?P<event>.+?): (?P<kind>\w+) at (?P<positions>.+)")
 POSITION = re.compile(r"[\w.]+\.py:\d+:[\w<>]+")
 QUARANTINE_LOGGER: Final = "agent_service.quarantine"
 QUARANTINE_LINE = re.compile(
-    r"The process groups (?P<pgids>\d+(?:, \d+)*) of run (?P<run_id>[0-9a-f-]{36})"
-    r" were not confirmed gone after SIGKILL; the run's place stays taken until they are"
+    r"Not confirmed gone after SIGKILL: process groups? (?P<pgids>\d+(?:, \d+)*)"
+    r" of run (?P<run_id>[0-9a-f-]{36}); the run's place stays taken until then"
 )
 
 
@@ -838,6 +838,15 @@ class QuarantineLineFails(logging.Filter):
 
     def filter(self, record: logging.LogRecord) -> bool:
         if record.name == QUARANTINE_LOGGER and record.levelno >= logging.ERROR:
+            raise OSError("the log handler broke")
+        return True
+
+
+class RunnerCloseLineFails(logging.Filter):
+    """A handler filter that raises on the line of a failed runner close."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.getMessage().startswith("Closing the runner of run"):
             raise OSError("the log handler broke")
         return True
 
@@ -1049,7 +1058,7 @@ async def respond_through_the_app(
         runners=runners or Runners(cli=drive.runner),
         records=drive.records,
         fetch_key_set=shared_mint().fetch_key_set,
-        confirm_group_gone=drive.confirmation,
+        confirm_group_gone=ScriptedConfirmation(clock=drive.clock),
     )
     response = asyncio.create_task(app(client.scope, client.receive, client.send))
     answering = asyncio.create_task(client.answering.wait())

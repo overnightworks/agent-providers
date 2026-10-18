@@ -25,7 +25,7 @@ class AdmissionSlot:
         self._holders.discard(lease)
 
     def hand_over(self, lease: Lease) -> Lease:
-        """The lease that holds the place ``lease`` held, or nothing if it held none."""
+        """The lease holding the place ``lease`` held; a stale lease yields one holding nothing."""
         successor = Lease(self)
         if lease in self._holders:
             self._holders.remove(lease)

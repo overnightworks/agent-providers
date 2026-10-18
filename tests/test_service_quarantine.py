@@ -23,6 +23,7 @@ from service_support import (
     Drive,
     GatedRunner,
     QuarantineLineFails,
+    RunnerCloseLineFails,
     ScriptedConfirmation,
     SplitFailureRunner,
     StepClock,
@@ -52,6 +53,14 @@ FINAL = FinalEvent(text="Done.")
 @pytest.fixture
 def quarantine_line_fails(caplog: pytest.LogCaptureFixture) -> Iterator[None]:
     line_fails = QuarantineLineFails()
+    caplog.handler.addFilter(line_fails)
+    yield
+    caplog.handler.removeFilter(line_fails)
+
+
+@pytest.fixture
+def runner_close_line_fails(caplog: pytest.LogCaptureFixture) -> Iterator[None]:
+    line_fails = RunnerCloseLineFails()
     caplog.handler.addFilter(line_fails)
     yield
     caplog.handler.removeFilter(line_fails)
@@ -417,6 +426,25 @@ async def test_a_loss_carried_by_another_error_keeps_the_place_and_that_errors_o
 
     _assert_place_held_for(drive, caplog, FIRST)
     assert [line[1] for line in failure_lines(caplog)] == [kind]
+
+
+@in_loop
+async def test_a_close_line_that_fails_cannot_keep_the_place_from_the_quarantine(
+    runner_close_line_fails, caplog
+):
+    caplog.set_level(logging.ERROR)
+    runner = GatedRunner()
+    runner.close_error = ExceptionGroup("close", [_lost()])
+    async with driven(runner) as drive:
+        runner.release(FINAL)
+        await drive.run_to_end()
+        await asyncio.gather(drive.reader, return_exceptions=True)
+
+        assert len(drive.quarantine_retries()) == 1
+        drive.lease.release()
+        assert drive.slot_is_full()
+        await drive.quarantine_clock.step_to_next_deadline()
+        assert not drive.slot_is_full()
 
 
 @in_loop

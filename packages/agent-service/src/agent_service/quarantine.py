@@ -47,8 +47,9 @@ class Quarantine:
         self._retries[run_id] = retry
         retry.add_done_callback(lambda _: self._retries.pop(run_id, None))
         log.error(
-            "The process groups %s of run %s were not confirmed gone after SIGKILL;"
-            " the run's place stays taken until they are",
+            "Not confirmed gone after SIGKILL: process %s %s of run %s;"
+            " the run's place stays taken until then",
+            "group" if len(groups) == 1 else "groups",
             ", ".join(str(group.pgid) for group in groups),
             run_id,
         )
@@ -56,12 +57,10 @@ class Quarantine:
     async def _free_when_gone(
         self, run_id: UUID, lease: Lease | None, groups: tuple[RetainedGroup, ...]
     ) -> None:
-        unconfirmed = groups
+        unconfirmed = list(groups)
         while unconfirmed:
             await self._clock.wait_until(self._clock() + QUARANTINE_RETRY_SECONDS)
-            unconfirmed = tuple(
-                [group for group in unconfirmed if not await self._confirmed(group)]
-            )
+            unconfirmed = [group for group in unconfirmed if not await self._confirmed(group)]
         if lease is not None:
             lease.release()
         log.info("Every process group of run %s is gone; its place is free", run_id)

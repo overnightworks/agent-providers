@@ -53,7 +53,7 @@ from agent_client.wire import (
     ToolCall,
     ToolResult,
 )
-from agent_providers.errors import ContainmentLost, RetainedGroup
+from agent_providers.errors import RetainedGroup
 from agent_providers.events import (
     AssistantTextEvent,
     FinalEvent,
@@ -74,6 +74,7 @@ from agent_service.run_liveness import (
     RunnerYielded,
     SupervisedRun,
     log_failure,
+    reported_by_the_quarantine,
 )
 from agent_service.run_records import RunRecorder, RunRecords
 from agent_service.runners import AdmittedRun, Runner
@@ -261,7 +262,7 @@ class _WireRun:
             case RunnerExhausted():
                 self.decide_failure(FailureCode.PROVIDER_ERROR, NO_ANSWER_MESSAGE)
             case RunnerRaised(error=error):
-                if not isinstance(error, ContainmentLost):
+                if not reported_by_the_quarantine(error):
                     log_failure(log, f"The runner of run {self._run_id} failed", error)
                 self.decide_failure(FailureCode.PROVIDER_ERROR, RUNNER_FAILED_MESSAGE)
             case RunnerYielded(event=FinalEvent() as final):

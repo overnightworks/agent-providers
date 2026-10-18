@@ -1077,9 +1077,9 @@ Rules:
    once the runner is stopped, so a recording defect cuts the stream the way a
    supervision failure does. No step of a run's ending raises its failure past
    the decider: the supervision (its clock, its drive and the drop report it
-   makes) and the cleanup (the disconnect report, the quarantine's hand-over and the record's end) record
-   each failure in the run's one collection (`run_liveness.RunFailures`), in
-   the order the failures happened. One pure decider (`run_liveness._exit_of`)
+   makes) and the cleanup (the disconnect report, the quarantine's hand-over
+   and the record's end) record each failure in the run's one collection
+   (`run_liveness.RunFailures`), in the order the failures happened. One pure decider (`run_liveness._exit_of`)
    reads that collection, any cancellation and the body's outcome: a
    cancellation always wins, whether it was caught during teardown or arrived
    in the body; then the first cleanup failure; then the first supervision
@@ -1122,8 +1122,8 @@ Rules:
     closed makes `aclose()` return at once. The close stops the runner once and
     returns only after the runner's close has finished, so when the response
     call ends, a started run's runner is closed, its record is ended and no
-    task of the run is alive, except the quarantine's retry of a run whose group is
-   not confirmed gone. Nothing relies on finalization: no
+    task of the run is alive, except the quarantine's retry of a run whose group
+    is not confirmed gone. Nothing relies on finalization: no
     `gc.collect()`, no reference count reaching zero, no event-loop
     async-generator hook. Below ASGI spec 2.4, which is what uvicorn 0.54.0
     speaks, a disconnect is reported at `receive` and seen at once. Under ASGI
@@ -1156,8 +1156,9 @@ Beyond the limit a request gets `429 busy` with `Retry-After: 10` at once. Refus
 and API runs take nothing. The lease is released once the run has stopped, even if
 its record fails, unless the runner's pump met a containment loss (line 20): then the
 run's place moves to the quarantine at the run's end, which frees it only once
-`confirm_group_gone` answers `True` for every group the pump met; a response that ends before its run began releases it too. Only a
-lease that still holds its place can free it. The limit lives in one process,
+`confirm_group_gone` answers `True` for every group the pump met; a response
+that ends before its run began releases its lease too. Only a lease that still
+holds its place can free it. The limit lives in one process,
 because the service runs one replica with one worker (A1d). There is no queue and
 no fallback to the API route.
 

@@ -1,0 +1,8 @@
+claim_id = "7739d96d8d694ac0874bc1205554f86f"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "cee2f09af71a9668127c33e281f743d9b4eae06f"
+branch = "claude/issue-276-bounded-close"
+scope = ["README.md", "docs/decisions/0001-agent-service.md", "packages/agent-service/src/agent_service/run_liveness.py", "packages/agent-service/src/agent_service/run_tools.py", "packages/agent-service/src/agent_service/tool_relay.py", "tests/mcp_app_fake.py", "tests/test_service_run_tools.py"]
+opened_commit = "7ae81725d4e60e85354ef0021c44fb83a8e71665"
+whole_reason = "One close owner and the two seams it needs: the new run_tools module with its open and its five bounded steps, the relay's listener stop and the barrier's forward abort split out in tool_relay, the one bounded-wait and outlasting-waiter helpers in run_liveness, one new test module with the fake app's ended-connection count, and the README rows and ADR bullet that state it, the slot wording included. Splitting would land a close owner without its seams or seams without a caller."

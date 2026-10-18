@@ -281,11 +281,14 @@ TOKEN_REJECTIONS = [
         id="user-token-wrong-issuer",
     ),
     pytest.param(
-        MINT.workload, lambda: MINT.user(groups="/ki-abo"), UNAUTHORIZED, id="groups-not-a-list"
+        MINT.workload,
+        lambda: MINT.user(groups="/subscription-members"),
+        UNAUTHORIZED,
+        id="groups-not-a-list",
     ),
     pytest.param(
         MINT.workload,
-        lambda: MINT.user(groups=["/ki-abo", 7]),
+        lambda: MINT.user(groups=["/subscription-members", 7]),
         UNAUTHORIZED,
         id="groups-with-a-non-string",
     ),

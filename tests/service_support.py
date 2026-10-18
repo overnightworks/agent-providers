@@ -169,7 +169,6 @@ def _service_config_document(
     issuer: str,
     runs: Mapping[str, object] | None,
     songmaker: Mapping[str, object] | None,
-    subscription_group: str,
 ) -> dict[str, Any]:
     return {
         **({} if runs is None else {"runs": runs}),
@@ -177,7 +176,7 @@ def _service_config_document(
             "issuer": issuer,
             "jwks_url": TEST_JWKS_URL,
             "audience": AUDIENCE,
-            "subscription_group": subscription_group,
+            "subscription_group": SUBSCRIPTION_GROUP,
             "group_claim": GROUP_CLAIM,
         },
         "cli": {
@@ -208,11 +207,8 @@ def service_config(
     runs: Mapping[str, object] | None = None,
     *,
     songmaker: Mapping[str, object] | None = None,
-    subscription_group: str = SUBSCRIPTION_GROUP,
 ) -> ServiceConfig:
-    return ServiceConfig.model_validate(
-        _service_config_document(issuer, runs, songmaker, subscription_group)
-    )
+    return ServiceConfig.model_validate(_service_config_document(issuer, runs, songmaker))
 
 
 def plain_service_config() -> ServiceConfig:
@@ -227,7 +223,7 @@ def capable_service_config(
     songmaker: Mapping[str, object] | None = None,
 ) -> ServiceConfig:
     """``service_config`` signing with a key written under ``directory``."""
-    document = _service_config_document(issuer, None, songmaker, SUBSCRIPTION_GROUP)
+    document = _service_config_document(issuer, None, songmaker)
     document["signing"] = {"key_file": str(written_key_file(directory, generated_rsa_key()))}
     return ServiceConfig.model_validate(document)
 

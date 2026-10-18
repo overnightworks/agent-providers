@@ -65,7 +65,6 @@ CLI_SCRIPT = (AssistantTextEvent(text="Hello from the CLI."), FinalEvent(text="C
 API_SCRIPT = (AssistantTextEvent(text="Hello from the API."), FinalEvent(text="API done."))
 
 RUN = "00000000-0000-4000-8000-000000000000"
-REALM_SUBSCRIPTION_GROUP = "/ki-abo"
 
 
 def _frozen_frames(route: str) -> bytes:
@@ -111,7 +110,7 @@ def runners() -> Runners:
 @pytest.fixture(scope="module")
 def service(runners) -> Iterator[str]:
     app = create_app(
-        service_config(issuer=_realm_url(), subscription_group=REALM_SUBSCRIPTION_GROUP),
+        service_config(issuer=_realm_url()),
         runners=runners,
         fetch_key_set=_fetch_key_set_from_test_keycloak,
     )
@@ -181,7 +180,7 @@ def test_only_the_user_who_started_a_run_reads_it_with_real_tokens(verify):  # n
         Principal(str(alice_claims["iss"]), str(alice_claims["sub"])),
     )
     app = create_app(
-        service_config(issuer=_realm_url(), subscription_group=REALM_SUBSCRIPTION_GROUP),
+        service_config(issuer=_realm_url()),
         records=records,
         fetch_key_set=_fetch_key_set_from_test_keycloak,
     )
@@ -189,9 +188,7 @@ def test_only_the_user_who_started_a_run_reads_it_with_real_tokens(verify):  # n
         songmaker = _songmaker_workload()
         alice = get_run(base_url, run_headers(songmaker, _user_token("alice")), str(run_id))
         bob = get_run(base_url, run_headers(songmaker, _user_token("bob")), str(run_id))
-        never_begun = get_run(
-            base_url, run_headers(songmaker, _user_token("alice")), str(uuid4())
-        )
+        never_begun = get_run(base_url, run_headers(songmaker, _user_token("alice")), str(uuid4()))
         through_presentator = get_run(
             base_url,
             run_headers(
@@ -216,7 +213,7 @@ def test_a_token_of_an_unpublished_key_is_unavailable_once_the_key_set_origin_st
         return _fetch_key_set_from_test_keycloak(url)
 
     app = create_app(
-        service_config(issuer=_realm_url(), subscription_group=REALM_SUBSCRIPTION_GROUP),
+        service_config(issuer=_realm_url()),
         fetch_key_set=key_set_origin,
         monotonic_clock=clock,
     )

@@ -36,8 +36,7 @@ class _Gate:
 
 
 async def _parked() -> None:
-    for _turn in range(5):
-        await asyncio.sleep(0)
+    await asyncio.get_running_loop().settled()
 
 
 class _Cut:
@@ -180,7 +179,8 @@ async def test_a_level_cancellation_is_taken_only_from_the_callers_own_cancelled
             await ask()
             if taken[0] is not None:
                 raise taken[0]
-    await asyncio.gather(*raw)
+        with anyio.CancelScope(shield=True):
+            await asyncio.gather(*raw)
 
     assert (taken[0] is not None, scope.cancelled_caught) == (delivered, caught)
 
@@ -192,8 +192,6 @@ async def test_the_wait_returns_nothing_for_a_failed_or_cancelled_task_and_leave
 ):
     failure = RuntimeError("the task broke")
     gate = _Gate(failure)
-    waiter = asyncio.current_task()
-    assert waiter is not None
     waiting = asyncio.get_running_loop().create_task(wait_outlasting_cancellation(gate.task))
     await _parked()
     if fails:
@@ -204,7 +202,7 @@ async def test_the_wait_returns_nothing_for_a_failed_or_cancelled_task_and_leave
     returned = await waiting
 
     assert returned is None
-    assert waiter.cancelling() == 0
+    assert waiting.cancelling() == 0
     if fails:
         assert gate.task.exception() is failure
     else:

@@ -29,11 +29,9 @@ async def wait_outlasting_cancellation(task: asyncio.Task[object]) -> asyncio.Ca
     completion = asyncio.ensure_future(asyncio.wait({task}))
     interrupted: asyncio.CancelledError | None = None
     while not completion.done():
-        try:
-            with anyio.CancelScope(shield=True):
-                await asyncio.shield(completion)
-        except asyncio.CancelledError as cancelled:  # NOSONAR(S7497) returned once done (rule 10)
-            interrupted = interrupted or cancelled
+        with _Kept() as kept, anyio.CancelScope(shield=True):
+            await asyncio.shield(completion)
+        interrupted = interrupted or kept.cancellation
     return interrupted
 
 

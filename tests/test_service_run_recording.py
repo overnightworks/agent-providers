@@ -1128,10 +1128,13 @@ async def _spun_until(done: Callable[[], bool]) -> None:
     raise AssertionError("the run never got there")
 
 
-def _propagated(closer: asyncio.Task[object], *, delivered: bool) -> str:
-    """What the closer ended with; a cancellation nobody delivered is a raised failure."""
+def _propagated(closer: asyncio.Task[object], *, delivered: bool, by_level: bool = False) -> str:
+    """What the closer ended with; a cancellation nobody delivered is a raised failure.
+
+    A level cut ends as a scope's catch, never as a cancelled task.
+    """
     if closer.cancelled():
-        return "cancelled" if delivered else "CancelledError"
+        return "cancelled" if delivered and not by_level else "CancelledError"
     failure = closer.exception()
     if failure:
         return type(failure).__name__
@@ -1184,7 +1187,7 @@ async def test_every_failure_of_a_run_s_ending_propagates_or_is_logged_once(capl
     async with _watched_loop() as unretrieved:
         closer, cancelled, _drive = await _end_a_run(ending)
 
-    propagated = _propagated(closer, delivered=cancelled)
+    propagated = _propagated(closer, delivered=cancelled, by_level=ending.cancellation.is_level)
     assert cancelled is (ending.cancellation is not _Cancellation.NONE)
     if cancelled:
         assert propagated == "cancelled"
@@ -1302,7 +1305,10 @@ async def test_which_failure_of_a_run_s_ending_propagates_and_which_are_logged(
     async with _watched_loop() as unretrieved:
         closer, delivered, drive = await _end_a_run(ending)
 
-    assert _propagated(closer, delivered=delivered) == propagates
+    assert (
+        _propagated(closer, delivered=delivered, by_level=ending.cancellation.is_level)
+        == propagates
+    )
     assert [(event, kind) for event, kind, _raiser in failure_lines(caplog)] == [
         (event.format(drive.run_id), kind) for event, kind in logged
     ]
@@ -1327,6 +1333,48 @@ async def test_a_closer_cancelled_while_the_record_ends_is_cancelled_and_the_fai
     assert unretrieved == []
 
 
+class _CutDuringTheTeardown(enum.Enum):
+    """Where the closer is first cancelled directly, before its scope is cut in the teardown."""
+
+    READING = enum.auto()
+    CLOSING = enum.auto()
+
+
+@pytest.mark.parametrize("first_cut", _CutDuringTheTeardown)
+@in_loop
+async def test_a_direct_cancellation_wins_over_a_level_cut_of_the_same_closer(first_cut):
+    runner = GatedRunner()
+    runner.hold_close()
+    scope = anyio.CancelScope()
+    ran_after_the_scope: list[bool] = []
+
+    async def closed_inside_the_scope(closing: Coroutine[Any, Any, object]) -> None:
+        with scope:
+            await closing
+        ran_after_the_scope.append(True)
+
+    async with driven(runner, read=False) as drive:
+        drive.took(await anext(drive.frames))
+        await drive.clock.parked()
+        reading = first_cut is _CutDuringTheTeardown.READING
+        closer = asyncio.create_task(
+            closed_inside_the_scope(drive.drain() if reading else drive.frames.aclose())
+        )
+        await drive.clock.parked()
+        closer.cancel()
+        if reading:
+            await drive.clock.parked()
+        scope.cancel()
+        await drive.clock.parked()
+        runner.release_close()
+        await asyncio.wait({closer})
+
+    status = drive.status()
+    assert (closer.cancelled(), scope.cancelled_caught, ran_after_the_scope) == (True, False, [])
+    assert status is not None
+    assert (status.state, status.client_lost) == (RunState.CANCELLED, ClientLoss.DISCONNECTED)
+
+
 async def _observed_ending(
     ending: _Ending, caplog: pytest.LogCaptureFixture
 ) -> tuple[str, list[tuple[str, str]], list[str], tuple[RunState, ClientLoss | None] | None]:
@@ -1335,7 +1383,7 @@ async def _observed_ending(
     closer, delivered, drive = await _end_a_run(ending)
     status = drive.status()
     return (
-        _propagated(closer, delivered=delivered),
+        _propagated(closer, delivered=delivered, by_level=ending.cancellation.is_level),
         [
             (event.replace(str(drive.run_id), "{}"), kind)
             for event, kind, _raiser in failure_lines(caplog)

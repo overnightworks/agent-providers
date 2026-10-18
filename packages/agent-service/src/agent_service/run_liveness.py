@@ -520,7 +520,8 @@ class SupervisedRun:
 
     Use it as an async context manager around ``frames()``. Leaving it stops
     the runner exactly once and returns only after the runner's close has
-    finished.
+    finished. Leaving raises the closer's cancellation, direct or AnyIO's
+    level one, as ``_exit_of`` decides.
     """
 
     def __init__(

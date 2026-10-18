@@ -62,6 +62,7 @@ from agent_providers.config import (
     HostWiringError,
     ProviderRuntimeConfig,
     configure,
+    current_codex_runtime,
     current_config,
     reset_config,
 )
@@ -492,6 +493,12 @@ def override_codex_runtime(**codex_facts: Any) -> None:
         else CodexCliRuntime(**codex_facts)
     )
     override_provider_runtime(codex=replacement)
+
+
+def remove_the_codex_turn_block_with_no_login_and_no_binary() -> None:
+    current_codex_runtime().token_file.unlink(missing_ok=True)
+    override_codex_runtime(binary="no-such-codex-binary-7c1d")
+    override_turn_runtime(codex=None)
 
 
 CLI_RUNTIME_OVERRIDES: dict[str, Callable[..., None]] = {

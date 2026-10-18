@@ -37,7 +37,6 @@ from agent_providers.codex.protocol import (
     run_reserved_codex_cli,
     top_level_error_message,
 )
-from agent_providers.config import current_codex_turn_runtime
 from agent_providers.constants import TURN_TIMEOUT_SECONDS
 from agent_providers.errors import (
     CodexProcessPoolSaturatedError,
@@ -122,7 +121,7 @@ class CodexCliToolTransport:
 
     def __init__(self, *, model: str | None, catalog: ToolCatalog) -> None:
         refuse_empty_model("codex", "cli", model)
-        current_codex_turn_runtime()
+        self._process_pool = get_codex_process_pool()
         self._model = model
         self._catalog = catalog
         try:
@@ -254,7 +253,7 @@ class CodexCliToolTransport:
             )
         home_reservation = self._turn_home.home.reserve()
         try:
-            reservation = get_codex_process_pool().reserve(CodexProcessKind.TEXT)
+            reservation = self._process_pool.reserve(CodexProcessKind.TEXT)
         except CodexProcessPoolSaturatedError as exc:
             home_reservation.release()
             raise ProviderUnavailableError(

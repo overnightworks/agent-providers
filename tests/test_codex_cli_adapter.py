@@ -65,7 +65,7 @@ from provider_test_support import (
     override_codex_runtime,
     override_codex_turn_runtime,
     override_provider_runtime,
-    override_turn_runtime,
+    remove_the_codex_turn_block_with_no_login_and_no_binary,
     shell_child,
     start_then_raise,
     traceback_frames_hold,
@@ -83,7 +83,7 @@ from agent_providers.codex.pool import (
     get_codex_process_pool,
 )
 from agent_providers.codex_login import blanked_copy
-from agent_providers.config import ProviderNotConfiguredError, current_codex_runtime, current_config
+from agent_providers.config import ProviderNotConfiguredError, current_config
 from agent_providers.errors import (
     CodexProcessPoolSaturatedError,
     ProviderModelCatalogUnavailableError,
@@ -2855,12 +2855,6 @@ def test_a_tool_turn_without_a_binary_reserves_nothing(
     image_turn.watch.assert_nothing_leaked(turn.error)
 
 
-def _remove_the_codex_turn_block_with_no_login_and_no_binary() -> None:
-    current_codex_runtime().token_file.unlink(missing_ok=True)
-    override_codex_runtime(binary="no-such-codex-binary-7c1d")
-    override_turn_runtime(codex=None)
-
-
 def _the_tool_turn_streams() -> object:
     return asyncio.run(_collect_tool_responses(_transport()))
 
@@ -2875,7 +2869,7 @@ def _the_tool_turn_streams() -> object:
             id="image-capability-codex-block",
         ),
         pytest.param(
-            _remove_the_codex_turn_block_with_no_login_and_no_binary,
+            remove_the_codex_turn_block_with_no_login_and_no_binary,
             "turns.codex",
             codex_image.codex_image_turn_is_available,
             id="image-capability-turns-codex-block",
@@ -2887,7 +2881,7 @@ def _the_tool_turn_streams() -> object:
             id="image-turn-codex-block",
         ),
         pytest.param(
-            _remove_the_codex_turn_block_with_no_login_and_no_binary,
+            remove_the_codex_turn_block_with_no_login_and_no_binary,
             "turns.codex",
             _generate_image,
             id="image-turn-turns-codex-block",
@@ -2899,7 +2893,7 @@ def _the_tool_turn_streams() -> object:
             id="tool-turn-codex-block",
         ),
         pytest.param(
-            _remove_the_codex_turn_block_with_no_login_and_no_binary,
+            remove_the_codex_turn_block_with_no_login_and_no_binary,
             "turns.codex",
             _the_tool_turn_streams,
             id="tool-turn-turns-codex-block",

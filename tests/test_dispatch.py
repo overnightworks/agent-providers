@@ -25,6 +25,7 @@ from provider_test_support import (
     override_codex_runtime,
     override_provider_runtime,
     override_turn_runtime,
+    remove_the_codex_turn_block_with_no_login_and_no_binary,
 )
 from pydantic import SecretStr
 
@@ -40,7 +41,6 @@ from agent_providers.config import (
     ProviderRuntimeNotConfiguredError,
     TurnRuntimeConfig,
     TurnRuntimeNotConfiguredError,
-    current_codex_runtime,
     current_config,
     reset_config,
 )
@@ -70,12 +70,6 @@ def test_stream_turn_refuses_an_unknown_provider_before_any_route_runs(monkeypat
     assert routes_started == []
 
 
-def _remove_the_codex_turn_block_with_no_login_and_no_binary() -> None:
-    current_codex_runtime().token_file.unlink(missing_ok=True)
-    override_codex_runtime(binary="no-such-codex-binary-7c1d")
-    override_turn_runtime(codex=None)
-
-
 @pytest.mark.parametrize(
     ("provider", "remove_block", "block"),
     [
@@ -93,7 +87,7 @@ def _remove_the_codex_turn_block_with_no_login_and_no_binary() -> None:
         ),
         pytest.param(
             "codex",
-            _remove_the_codex_turn_block_with_no_login_and_no_binary,
+            remove_the_codex_turn_block_with_no_login_and_no_binary,
             "turns.codex",
             id="turns-codex-block",
         ),
@@ -117,7 +111,7 @@ def test_a_turn_without_the_providers_block_raises_the_named_wiring_error(
     [
         pytest.param(lambda: override_provider_runtime(codex=None), "codex", id="codex-block"),
         pytest.param(
-            _remove_the_codex_turn_block_with_no_login_and_no_binary,
+            remove_the_codex_turn_block_with_no_login_and_no_binary,
             "turns.codex",
             id="turns-codex-block",
         ),

@@ -295,9 +295,10 @@ class DescendantRow:
             raise HarnessInterrupted
         pidfd = pidfd_open(self._pid)
         self._child_cleanup.close_at_cleanup(pidfd)
+        identity = process_identity(self._pid)
+        assert identity is not None
+        assert identity[1] == self._start_time, "the pid names another process"
         self._pidfd = pidfd
-        assert process_identity(self._pid) is not None
-        assert process_identity(self._pid)[1] == self._start_time, "the pid names another process"
         if interrupt_at is Stage.PIDFD_REGISTERED:
             raise HarnessInterrupted
         os.write(self._ack_fd, b"x")
@@ -375,7 +376,7 @@ async def _answer_of_an_mcp_one_shot() -> str:
 async def _failure_of_a_one_shot() -> BaseException:
     try:
         await provider.acall_claude("hi")
-    except Exception as failure:
+    except provider.UnavailableError as failure:
         return failure
     raise AssertionError("the one-shot did not fail")
 
@@ -398,7 +399,7 @@ LINGERING_TURNS = {
     ),
     "acall_claude_cli_failure": LingeringTurn(
         _failure_of_a_one_shot, ANSWERS_ONCE, 1, False, AfterHandshake.AWAIT_THE_TURN, 1,
-        lambda settled: isinstance(settled, Exception),
+        lambda settled: isinstance(settled, provider.UnavailableError),
     ),
     "acall_claude_with_mcp_success": LingeringTurn(
         _answer_of_an_mcp_one_shot, ANSWERS_ONCE, 0, False, AfterHandshake.AWAIT_THE_TURN, 0,

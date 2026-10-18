@@ -3,8 +3,8 @@
 The pool bounds the CLI processes a host runs at once, shared by probes and real
 turns. ``anchored_turn_child`` reserves a slot, opens the child on its anchor and,
 whatever ends the turn, reaps the child behind a shield before the slot is freed.
-A leader that cannot be shown gone is retained by :mod:`agent_providers.lost_groups`
-and keeps its slot.
+A group that cannot be shown empty is retained by :mod:`agent_providers.lost_groups`
+and its leader keeps the slot.
 """
 
 from __future__ import annotations

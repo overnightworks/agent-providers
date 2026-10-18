@@ -258,7 +258,7 @@ def test_a_confirmed_count_whose_exit_is_never_published_keeps_the_slot_without_
 
 
 def test_a_lost_anchor_inside_the_count_is_retained_with_the_loss_as_cause(
-    a_turn, retentions,
+    a_turn, retentions, monkeypatch,
 ) -> None:
     pool = a_pool()
     loss = ChildIdentityLost("something else reaped the leader")
@@ -278,11 +278,46 @@ def test_a_lost_anchor_inside_the_count_is_retained_with_the_loss_as_cause(
         finally:
             retentions.free_every_slot()
 
-    with killpg_forbidden():
+    with killpg_forbidden(), recorded_census_workers(monkeypatch):
         run_bounded(scenario())
 
     assert not slot_is_held(pool)
     assert not turn.home_is_present()
+
+
+class AnInterruption(BaseException):
+    pass
+
+
+def test_an_interruption_of_the_count_is_raised_unchanged_and_is_not_a_retention(
+    a_turn, monkeypatch,
+) -> None:
+    pool = a_pool()
+    interruption = AnInterruption()
+    turn = a_turn(pool, returncode=0, gone=[interruption])
+    reservations: list[Any] = []
+    real_reserve = pool.reserve
+
+    def reserve_and_note(home_reservation=None):
+        reservation = real_reserve(home_reservation)
+        reservations.append(reservation)
+        return reservation
+
+    monkeypatch.setattr(pool, "reserve", reserve_and_note)
+
+    async def scenario() -> None:
+        try:
+            with pytest.raises(AnInterruption) as raised:
+                await turn.enter()
+            assert raised.value is interruption
+        finally:
+            for reservation in reservations:
+                pool.release(reservation)
+
+    with killpg_forbidden(), recorded_census_workers(monkeypatch):
+        run_bounded(scenario())
+
+    assert not slot_is_held(pool)
 
 
 @pytest.mark.parametrize("field_name", ["sigterm_grace_seconds", "confirmation_seconds"])

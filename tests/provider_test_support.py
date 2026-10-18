@@ -57,6 +57,7 @@ from agent_providers.config import (
     ClaudeCliRuntime,
     GrokCliRuntime,
     GrokTurnRuntime,
+    HostWiringError,
     ProviderRuntimeConfig,
     configure,
     current_config,
@@ -889,7 +890,7 @@ def drive_turn(
                 correlation_id=correlation_id,
             ):
                 events.append(event)
-        except ProviderUnavailableError as error:
+        except (ProviderUnavailableError, HostWiringError) as error:
             return error
         return None
 

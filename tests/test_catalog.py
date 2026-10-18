@@ -12,7 +12,7 @@ import dataclasses
 import enum
 import json
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import httpx
@@ -61,6 +61,7 @@ from agent_providers.process import (
     CliEnvironmentUnavailableError,
     CliLoginUnusableError,
     clear_agent_cli_caches,
+    grok_cli_status,
 )
 
 CLAUDE_MODEL_CATALOG_ALIASES = sorted([
@@ -437,14 +438,29 @@ def test_an_api_key_makes_a_provider_ready_without_its_cli_block(
     assert configuration.environment_key == environment_key
 
 
-@pytest.mark.parametrize("provider", ["claude", "grok"])
+@pytest.mark.parametrize(
+    ("provider", "ask_catalog"),
+    [
+        pytest.param("claude", lambda: provider_configuration("claude", frozenset()), id="claude"),
+        pytest.param("grok", lambda: provider_configuration("grok", frozenset()), id="grok"),
+        pytest.param(
+            "grok", lambda: probe_provider_route("grok", ProviderRoute.CLI), id="grok-probe",
+        ),
+        pytest.param(
+            "grok", lambda: list_provider_models("grok", ProviderRoute.CLI), id="grok-models",
+        ),
+        pytest.param("grok", grok_cli_status, id="grok-status"),
+    ],
+)
 def test_a_host_without_a_providers_block_is_refused_not_reported_as_logged_out(
-    provider: str,
+    provider: str, ask_catalog: Callable[[], object],
 ) -> None:
     override_provider_runtime(**{provider: None})
 
-    with pytest.raises(ProviderNotConfiguredError, match=provider):
-        provider_configuration(provider, frozenset())
+    with pytest.raises(ProviderNotConfiguredError) as refused:
+        ask_catalog()
+
+    assert (refused.value.provider, refused.value.block) == (provider, provider)
 
 
 SIGNED_IN_CLI_ANSWERS = {

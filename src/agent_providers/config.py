@@ -170,7 +170,11 @@ class ProviderRuntimeConfig(BaseModel):
     turns: TurnRuntimeConfig | None = None
 
 
-class ProviderRuntimeNotConfiguredError(RuntimeError):
+class HostWiringError(RuntimeError):
+    """The host did not install what a call needs; no call can fix it."""
+
+
+class ProviderRuntimeNotConfiguredError(HostWiringError):
     """A provider ran before its host installed a runtime configuration."""
 
 
@@ -178,7 +182,7 @@ class ProviderRuntimeAlreadyConfiguredError(RuntimeError):
     """A second, differing configuration was installed over a live one."""
 
 
-class ProviderNotConfiguredError(RuntimeError):
+class ProviderNotConfiguredError(HostWiringError):
     """A provider ran under a configuration that holds no block for it."""
 
     def __init__(self, provider: str, block: str) -> None:
@@ -193,7 +197,7 @@ class ProviderNotConfiguredError(RuntimeError):
         return (type(self), (self.provider, self.block))
 
 
-class TurnRuntimeNotConfiguredError(RuntimeError):
+class TurnRuntimeNotConfiguredError(HostWiringError):
     """A turn path ran under a configuration that covers only the catalog."""
 
 

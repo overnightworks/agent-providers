@@ -57,6 +57,7 @@ from provider_test_support import (
     order_the_thread_start_claims,
     override_cli_binary,
     override_grok_runtime,
+    override_grok_turn_runtime,
     override_login_source,
     override_provider_runtime,
     pool_callbacks,
@@ -3647,6 +3648,26 @@ def test_a_private_prompt_file_is_written_below_the_host_named_root(
 
     assert outcome.complete is True
     assert Path(outcome.stdout).parent == working_root
+
+
+def test_the_host_named_prompt_file_prefix_starts_the_private_prompt_file_name(
+    tmp_path,
+) -> None:
+    working_root = tmp_path / "host-root"
+    working_root.mkdir(mode=0o700)
+    override_provider_runtime(cli_working_directory_root=working_root)
+    override_grok_turn_runtime(prompt_file_prefix="host-prefix-")
+
+    outcome = run_cli_bounded(
+        shell_child("-c", 'printf %s "$1"', "unused", "placeholder"),
+        stdin_payload=None,
+        read="all",
+        deadline=time.monotonic() + 1,
+        prompt_file_bytes=b"private prompt",
+        prompt_file_arg_index=3,
+    )
+
+    assert Path(outcome.stdout).name.startswith("host-prefix-")
 
 
 def test_catalog_spawn_refuses_an_environment_without_home(tmp_path) -> None:

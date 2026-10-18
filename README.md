@@ -245,7 +245,9 @@ MCP server passes `mcp_server=None` inside `turns`. A host migrates at its pin b
 
 A turn path reached
 without `turns` raises `TurnRuntimeNotConfiguredError` instead of running against a
-guess.
+guess. These errors and `ProviderRuntimeNotConfiguredError` share the base
+`HostWiringError`, and `dispatch.stream_turn` raises them unchanged instead of
+reporting `ROUTE_FAILED`, so a host sees which part of its wiring is missing.
 
 `configure()` refuses a `cli_working_directory_root` that is not private: it
 must be an absolute path to an existing directory, not a symlink, owned by the
@@ -302,6 +304,7 @@ the error names the field.
 | `grok_cli_auth_file` | `grok.token_file`, still a full `auth.json` copy |
 | `turns.cli_prompt_file_prefix` | `turns.grok.prompt_file_prefix` |
 | `turns.cli_prompt_file_placeholder` | `turns.grok.prompt_file_placeholder` |
+| `dispatch.stream_turn` raised `ProviderUnavailableError` with `ROUTE_FAILED` when the Claude or Grok block, or `turns`, was missing | it raises `ProviderNotConfiguredError(provider, block)` or `TurnRuntimeNotConfiguredError` unchanged, both `config.HostWiringError`s; a host that caught `ProviderUnavailableError` for a wiring fault catches `HostWiringError` too |
 | `process.PrivateCredentialHomeReservation` | `process.PrivateHomeReservation`, the reservation of the base `PrivateHome`; no alias remains |
 
 ## Migrating to 0.3.0

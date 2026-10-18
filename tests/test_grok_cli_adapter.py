@@ -261,15 +261,19 @@ def test_grok_tool_command_names_the_hosts_prompt_file_placeholder() -> None:
 def test_grok_turn_without_a_grok_block_is_refused_naming_the_provider() -> None:
     override_provider_runtime(grok=None)
 
-    with pytest.raises(ProviderNotConfiguredError, match="grok"):
+    with pytest.raises(ProviderNotConfiguredError) as refused:
         _transport()
+
+    assert (refused.value.provider, refused.value.block) == ("grok", "grok")
 
 
 def test_grok_round_without_a_turns_grok_block_is_refused_naming_the_provider() -> None:
     override_turn_runtime(grok=None)
 
-    with pytest.raises(ProviderNotConfiguredError, match="turns.grok"):
+    with pytest.raises(ProviderNotConfiguredError) as refused:
         grok_cli_adapter._grok_cli_tool_arguments(None)
+
+    assert (refused.value.provider, refused.value.block) == ("grok", "turns.grok")
 
 
 @pytest.mark.parametrize("model", [None, "grok-4.5"])

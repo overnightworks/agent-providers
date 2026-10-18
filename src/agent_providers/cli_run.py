@@ -91,11 +91,13 @@ async def astream_cli_run(
     """Stream one run's events; the ending comes last, after the reap and the removal attempt."""
     with run_directories(root, adapter.run_files()) as directories:
         start = adapter.start(directories.home, directories.working_directory)
+        pool = adapter.pool
+        stream_buffer_limit = adapter.line_limit_bytes
         async with anchored_turn_child(
-            adapter.pool,
+            pool,
             start.child,
             home_reservation=directories.reserve(),
-            stream_buffer_limit=adapter.line_limit_bytes,
+            stream_buffer_limit=stream_buffer_limit,
         ) as proc:
             drain = asyncio.create_task(drain_without_keeping(proc.stderr))
             try:

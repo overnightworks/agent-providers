@@ -19,7 +19,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from anchored_kernel import join_watcher, recorded_watcher_starts
 from anchored_leaders import spawn_warnings
 from anchored_support import GONE, ChildCleanup
 from provider_test_support import (
@@ -31,6 +30,7 @@ from provider_test_support import (
     a_credential_destination_that_fails,
     a_private_root,
     confirm_the_retained_group_gone,
+    drive_real_children,
     fail_mkdtemp,
     fail_the_directory_named,
     held_claude_slots,
@@ -396,13 +396,7 @@ class RealRuns:
         )
 
     def drive(self, scenario: Coroutine[Any, Any, None]) -> None:
-        children_before = len(self.child_cleanup.listed())
-        with recorded_watcher_starts(self.monkeypatch) as watchers:
-            try:
-                self.child_cleanup.capture(lambda: run_bounded(scenario))
-            finally:
-                for owned in self.child_cleanup.listed()[children_before:]:
-                    join_watcher(watchers.thread(owned.pid))
+        drive_real_children(self.child_cleanup, self.monkeypatch, scenario)
 
 
 @pytest.fixture

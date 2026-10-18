@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import stat
 import uuid
 from pathlib import Path
@@ -339,6 +340,7 @@ def test_an_error_result_fails_at_its_line(error_line: bytes) -> None:
 def test_a_refused_login_fails_with_the_closed_cause_and_no_cli_text(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.DEBUG)
     decoder = ClaudeStreamDecoder()
     refused = line(
         {
@@ -369,6 +371,7 @@ def test_a_non_zero_exit_fails_after_a_success_result() -> None:
 def test_a_malformed_line_before_the_result_is_skipped_without_cli_bytes(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.DEBUG)
     decoder = ClaudeStreamDecoder()
 
     steps = events_of_lines(decoder, b"\xff" + CLI_MARKER.encode() + b"\n", SUCCESS_LINE)
@@ -383,6 +386,7 @@ def test_a_malformed_line_before_the_result_is_skipped_without_cli_bytes(
 def test_an_object_as_a_text_block_fails_closed_with_no_cli_bytes(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.DEBUG)
     decoder = ClaudeStreamDecoder()
     object_as_text = line(
         {

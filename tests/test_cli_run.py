@@ -7,7 +7,9 @@ scripted rows answer the door with a scripted child and use the process-wide Cla
 from __future__ import annotations
 
 import asyncio
+import gc
 import hashlib
+import logging
 import os
 from collections.abc import AsyncIterator, Callable, Coroutine, Iterator, Mapping
 from contextlib import asynccontextmanager
@@ -457,7 +459,8 @@ def test_stderr_is_drained_and_never_kept(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     script = f"echo {MARKER} >&2; head -c {STDERR_BYTES} /dev/zero >&2; echo say:a\n"
-    adapter = LineScriptAdapter(pool, script=script)
+    adapter = LineScriptAdapter(pool, script=script, line_limit_bytes=LINE_LIMIT_BYTES)
+    caplog.set_level(logging.DEBUG)
 
     assert events_of_run(drive, root, adapter) == [text("a"), ended(0)]
     assert MARKER not in caplog.text
@@ -578,7 +581,9 @@ def test_a_failed_reap_keeps_the_original_failure_as_its_context(
     root: PrivateWorkingRoot,
     private_root: Path,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.DEBUG)
     refusal = ScriptRefused()
     drain_failure = OSError("stderr read failed")
     child = a_child_that_outlives_sigkill(
@@ -602,8 +607,15 @@ def test_a_failed_reap_keeps_the_original_failure_as_its_context(
         await free_the_retained_group(child, lost.value.group, private_root)
 
     drive_scripted(monkeypatch, child, scenario())
+    del adapter, refusal
+    caplog.clear()
+    gc.collect()
 
-    assert (held_claude_slots(), list(private_root.iterdir())) == (0, [])
+    assert (
+        held_claude_slots(),
+        list(private_root.iterdir()),
+        [r for r in caplog.records if r.name == "asyncio" and r.levelno >= logging.ERROR],
+    ) == (0, [], [])
 
 
 def test_a_stdin_write_failure_propagates_after_the_reap(

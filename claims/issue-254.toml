@@ -1,0 +1,8 @@
+claim_id = "fe15193b78be4e5ca4b23bcd7f1c4c46"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "ed820c9b31300fd56bec75e2b3ed6d1870b782d3"
+branch = "claude/issue-254-reap-confirms-group"
+scope = ["README.md", "src/agent_providers/anchored_turn.py", "src/agent_providers/claude/provider.py", "src/agent_providers/constants.py", "tests/anchored_kernel.py", "tests/provider_test_support.py", "tests/test_anchored_turn.py", "tests/test_async_claude_spawn_seam.py", "tests/test_claude_anchored_turns.py", "tests/test_claude_provider.py", "tests/test_claude_provider_streaming.py"]
+opened_commit = "502acb8860de61cd9f2db8b47b4b9bc81a4de835"
+whole_reason = "The neutral reap's confirmation and its failure retention, the bounds it now takes from its pool instead of Claude's module names, the constants that rename once with it, the fake's group-reap model every reap row shares, the neutral and real rows that prove it, and the README sentences that describe it; the reap without the bounds would read Claude's names again, and the rename without the reap would churn the constants twice."

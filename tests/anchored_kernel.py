@@ -67,7 +67,8 @@ class RecordingKernel:
     ``hold_before_waitpid``) or after it returned (``hold_after_call``, which sets ``reached``).
     A pid that a forwarded ``waitpid`` returned, or that an injected loss named, is reaped for
     good: every later call naming it is a recorded violation answered with ``ChildProcessError``
-    and never forwarded.
+    and never forwarded. A ``waitpid`` is admitted only with ``reap_options``, the non-blocking
+    reap of a release by default.
     """
 
     def __init__(
@@ -77,6 +78,7 @@ class RecordingKernel:
         hold_after_call: int | None = None,
         hold_before_waitpid: int | None = None,
         waitpid_answer: WaitpidAnswer | None = None,
+        reap_options: int = os.WNOHANG,
     ) -> None:
         self._changed = threading.Condition()
         self.calls: list[WaitidCall] = []
@@ -89,6 +91,7 @@ class RecordingKernel:
             ("waitpid", "before"): hold_before_waitpid,
         }
         self._waitpid_answer = waitpid_answer
+        self._reap_options = reap_options
         self._reaped: set[int] = set()
         self._leader_pid: int | None = None
 
@@ -130,7 +133,7 @@ class RecordingKernel:
     def _waitpid_refusal(self, pid: int, options: int) -> str | None:
         if pid != self._leader_pid:
             return f"a waitpid named pid {pid}, not the bound leader"
-        if options != os.WNOHANG:
+        if options != self._reap_options:
             return f"a waitpid carried options {options:#x}"
         return self._reaped_refusal(pid)
 

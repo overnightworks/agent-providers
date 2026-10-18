@@ -31,6 +31,7 @@ from anchored_leaders import (
 )
 from anchored_support import (
     GONE,
+    IMPORT_ROOT_PRELUDE,
     RUNNING,
     TEST_WAIT_SECONDS,
     ChildCleanup,
@@ -38,6 +39,7 @@ from anchored_support import (
     ProcessState,
     _pidfd_open,
     _wait_for_exits,
+    absolute_import_roots,
 )
 from provider_test_support import call_within_deadline
 
@@ -57,10 +59,11 @@ LeaderEnd = Callable[
     [Leaders, ChildCleanup, pytest.MonkeyPatch], tuple[Started, ProcessState | Exited]
 ]
 
-SIGCHLD_IGNORED_START = """
-import os, subprocess, sys, threading
+SIGCHLD_IGNORED_START = (
+    IMPORT_ROOT_PRELUDE
+    + """
+import subprocess, threading
 from pathlib import Path
-sys.path[:0] = sys.argv[1].split(os.pathsep)
 import signal
 signal.signal(signal.SIGCHLD, signal.SIG_IGN)
 launched = []
@@ -86,6 +89,7 @@ else:
 watchers = [t for t in threading.enumerate() if t.name.startswith("child-exit:")]
 sys.exit(0 if refused and not launched and not watchers else 2)
 """
+)
 
 
 def signal_within_bound(started: Started, sig: signal.Signals) -> None:
@@ -365,14 +369,12 @@ def test_a_group_signal_runs_inside_the_lock_that_covers_the_final_reap(
 def test_an_ignored_sigchld_refuses_the_start_before_any_child_exists(
     child_cleanup: ChildCleanup, tmp_path: Path
 ) -> None:
-    import_roots = [entry for entry in sys.path if entry]
-    assert all(os.path.isabs(entry) for entry in import_roots)
     reader, writer = os.pipe()
     child_cleanup.close_at_cleanup(writer)
     isolated = child_cleanup.start_bare_child(
         ChildProcess(
             binary=Path(sys.executable),
-            arguments=("-I", "-c", SIGCHLD_IGNORED_START, os.pathsep.join(import_roots)),
+            arguments=("-I", "-c", SIGCHLD_IGNORED_START, absolute_import_roots()),
             environment=closed_environment(tmp_path),
             working_directory=tmp_path,
         ),

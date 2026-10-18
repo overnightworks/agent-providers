@@ -1,8 +1,0 @@
-claim_id = "c17173610acb4351b9d95a61e983a1a8"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "e4872bb0bcfda43a8513e6b1f857760998c2ce3e"
-branch = "claude/issue-248-neutral-cli-core"
-scope = ["README.md", "packages/agent-service/src/agent_service/run_liveness.py", "src/agent_providers/anchored_turn.py", "src/agent_providers/claude/lost_groups.py", "src/agent_providers/claude/provider.py", "src/agent_providers/codex/transport.py", "src/agent_providers/grok/transport.py", "src/agent_providers/lost_groups.py", "src/agent_providers/transcript.py", "tests/provider_test_support.py", "tests/test_async_claude_spawn_seam.py", "tests/test_claude_lost_groups.py", "tests/test_claude_provider.py", "tests/test_lost_groups.py"]
-opened_commit = "7724d5a3929a76116ccd57f2e29e30460a1a85ef"
-whole_reason = "One behaviour-keeping move of three owners out of the Claude module; every importer and patch target moves in the same commit, or a module would import a name from where it no longer lives."

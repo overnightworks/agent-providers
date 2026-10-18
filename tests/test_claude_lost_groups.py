@@ -437,13 +437,6 @@ def test_a_failed_worker_start_keeps_the_group_excluded_exactly_while_a_claimed_
     assert trail(log) == expected_trail
 
 
-@pytest.fixture
-def own_runner() -> Iterator[asyncio.Runner]:
-    with asyncio.Runner() as runner:
-        runner.get_loop()
-        yield runner
-
-
 def open_watched_door(
     runner: asyncio.Runner,
     child_cleanup: ChildCleanup,
@@ -472,7 +465,7 @@ def hold_the_grandchild_stdin_open(
     ids=["a_sigterm_ignoring_grandchild", "a_running_leader"],
 )
 def test_a_real_retained_group_ends_dead_reaped_and_released_once(
-    own_runner: asyncio.Runner,
+    door_runner: asyncio.Runner,
     child_cleanup: ChildCleanup,
     leaders: Leaders,
     monkeypatch: pytest.MonkeyPatch,
@@ -481,31 +474,31 @@ def test_a_real_retained_group_ends_dead_reaped_and_released_once(
 ) -> None:
     description = {} if script is None else {"script": script}
     opened, watchers = open_watched_door(
-        own_runner, child_cleanup, leaders, monkeypatch, **description
+        door_runner, child_cleanup, leaders, monkeypatch, **description
     )
     child, owned = opened.child, opened.owned
     grandchild_pidfd = None
     try:
         if script is not None:
-            grandchild_pidfd = hold_the_grandchild_stdin_open(own_runner, child_cleanup, opened)
-            assert own_runner.run(bounded(child.exited())) == 3
+            grandchild_pidfd = hold_the_grandchild_stdin_open(door_runner, child_cleanup, opened)
+            assert door_runner.run(bounded(child.exited())) == 3
         group = retain_lost_group(child, slot_releases(log, owned.pid))
 
-        first = own_runner.run(bounded(confirm_group_gone(group)))
+        first = door_runner.run(bounded(confirm_group_gone(group)))
 
         if grandchild_pidfd is not None:
             assert wait_for_exits([grandchild_pidfd], TEST_WAIT_SECONDS) == {grandchild_pidfd}
         else:
-            assert own_runner.run(bounded(child.exited())) == SIGKILLED
+            assert door_runner.run(bounded(child.exited())) == SIGKILLED
         if first is False:
             child_cleanup.wait_exited(owned)
         join_watcher(watchers.thread(owned.pid))
         if first is False:
-            assert own_runner.run(bounded(confirm_group_gone(group))) is True
+            assert door_runner.run(bounded(confirm_group_gone(group))) is True
 
         assert child_cleanup.state(owned) is GONE
         assert trail(log, owned.pid) == [SLOT]
-        assert own_runner.run(bounded(confirm_group_gone(group))) is True
+        assert door_runner.run(bounded(confirm_group_gone(group))) is True
     finally:
         if grandchild_pidfd is not None and not wait_for_exits([grandchild_pidfd], 0):
             with contextlib.suppress(ProcessLookupError):
@@ -513,7 +506,7 @@ def test_a_real_retained_group_ends_dead_reaped_and_released_once(
 
 
 def test_a_real_lost_leader_is_never_confirmed_and_never_frees_its_place(
-    own_runner: asyncio.Runner,
+    door_runner: asyncio.Runner,
     child_cleanup: ChildCleanup,
     leaders: Leaders,
     monkeypatch: pytest.MonkeyPatch,
@@ -521,16 +514,16 @@ def test_a_real_lost_leader_is_never_confirmed_and_never_frees_its_place(
 ) -> None:
     model = KernelModel(loses_at="wait")
     install_kernel(monkeypatch, model)
-    opened = open_door(own_runner, child_cleanup, leaders.describe())
+    opened = open_door(door_runner, child_cleanup, leaders.describe())
     exited = bounded(opened.child.exited())
     with pytest.raises(ChildIdentityLost):
-        own_runner.run(exited)
+        door_runner.run(exited)
     group = retain_lost_group(opened.child, slot_releases(log, opened.owned.pid))
 
     for _ in range(2):
         confirmation = bounded(confirm_group_gone(group))
         with pytest.raises(ChildIdentityLost):
-            own_runner.run(confirmation)
+            door_runner.run(confirmation)
 
     assert operations(log) == []
     assert model.violations == []
@@ -540,18 +533,25 @@ def test_a_real_lost_leader_is_never_confirmed_and_never_frees_its_place(
 
 
 def test_a_group_is_confirmed_and_cleaned_up_from_a_new_loop_after_its_opening_loop_closed(
-    own_runner: asyncio.Runner,
+    door_runner: asyncio.Runner,
     child_cleanup: ChildCleanup,
     leaders: Leaders,
     monkeypatch: pytest.MonkeyPatch,
     expected_spawn_warnings: list[str],
+    expected_resource_warnings: list[str],
     log: list[Recorded],
 ) -> None:
-    opened, watchers = open_watched_door(own_runner, child_cleanup, leaders, monkeypatch)
+    opened, watchers = open_watched_door(door_runner, child_cleanup, leaders, monkeypatch)
     child, owned = opened.child, opened.owned
     group = retain_lost_group(child, slot_releases(log, owned.pid))
     expected_spawn_warnings.append(f"on_exit of anchored leader {owned.pid} raised RuntimeError")
-    own_runner.close()
+    expected_resource_warnings += [
+        "_UnixReadPipeTransport",
+        "_UnixReadPipeTransport",
+        "_UnixWritePipeTransport",
+        "NoneType",
+    ]
+    door_runner.close()
 
     first = confirm(group)
 

@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import signal
 import subprocess
@@ -391,6 +392,20 @@ def _lifecycle_lock() -> threading.Lock:
 
 def _ownership_gate() -> threading.Lock:
     return threading.Lock()
+
+
+class _CensusClock:
+    """The event loop's own clock, and the wait that ends on it."""
+
+    def now(self) -> float:
+        return asyncio.get_running_loop().time()
+
+    async def wait_until(self, instant: float) -> None:
+        await asyncio.sleep(max(0.0, instant - self.now()))
+
+
+def _census_clock() -> _CensusClock:
+    return _CensusClock()
 
 
 class _WatcherOwnership(Enum):
@@ -772,12 +787,32 @@ class _DoorPipes:
             transport.abort()
 
 
+GROUP_CENSUS_INTERVAL_SECONDS: Final = 0.1
+
+
+@dataclass(frozen=True)
+class KillUntilGoneResult:
+    """The last count of :meth:`AnchoredChild.kill_until_gone` and whether it ended in time.
+
+    Only :attr:`confirmed` means that the group is gone, in time: an ``EMPTY`` count
+    that ended no later than the bound. Any other result means the group must be retained.
+    """
+
+    census: procfs.GroupCensus
+    ended_in_time: bool
+
+    @property
+    def confirmed(self) -> bool:
+        return self.ended_in_time and self.census is procfs.GroupCensus.EMPTY
+
+
 class AnchoredChild:
     """The async face of an :class:`AnchoredLeader`: three pipes, an exit event, no reaper.
 
     Only :func:`open_anchored_pipes` creates one. ``pid``, ``returncode``,
     ``done_with_pid``, ``signal_group`` and ``kill_and_census`` are the leader's,
-    unchanged; ``stdin`` is a writer whose ``drain()`` and ``wait_closed()`` work
+    unchanged; ``kill_until_gone`` is this face's own method, not a leader delegate;
+    ``stdin`` is a writer whose ``drain()`` and ``wait_closed()`` work
     as on asyncio's door, ``stdout`` and ``stderr`` are readers.
 
     ``exited()`` returns the leader's code once the exit is published. It
@@ -803,6 +838,24 @@ class AnchoredChild:
     loop transports cannot be closed, so only the file objects are closed, buffered
     output is lost with the loop and asyncio's transport destructor warns with its
     own ``ResourceWarning``. A second ``release()`` does nothing.
+
+    ``kill_until_gone(within=)`` repeats the leader's ``kill_and_census``, each attempt in a
+    worker thread, ``GROUP_CENSUS_INTERVAL_SECONDS`` after the end of each live count, and
+    returns a :class:`KillUntilGoneResult`. The bound is measured from the clock read just
+    before the first attempt is handed to the worker, so never later than the first SIGKILL.
+    The first attempt is unconditional, even for a zero bound, which therefore makes one kill
+    and one count and on a real clock practically never confirms. No subsequent attempt
+    starts at or after the deadline, planned or actual. An ``EMPTY`` or unavailable count
+    ends the call at once, unchanged. Only a count that ended no later than the deadline
+    confirms; a later one is returned as it is, ``EMPTY`` included, with ``ended_in_time``
+    false, so a place is never freed on a count seen too late. A bound that is not finite
+    and non-negative raises ``ValueError``, a non-number ``TypeError``, both before any
+    signal. An attempt's exception propagates at once with no further attempt. A cancelled
+    call propagates ``CancelledError`` at once and starts nothing more, but the attempt
+    already running completes under the lock, its result dropped and a loss it meets still
+    committed; the worker thread keeps running until then, and closing the loop's default
+    executor waits for it. The call returns at the latest one wait overrun plus one attempt
+    after the deadline, because an attempt has no timeout.
 
     The start runs on the event-loop thread, as asyncio's own door runs ``Popen``.
     ``Popen`` blocks that loop until the child has executed its binary or failed,
@@ -858,6 +911,24 @@ class AnchoredChild:
 
     def kill_and_census(self) -> procfs.GroupCensus:
         return self._leader.kill_and_census()
+
+    async def kill_until_gone(self, *, within: float) -> KillUntilGoneResult:
+        if not (math.isfinite(within) and within >= 0):
+            raise ValueError(f"the bound must be finite and not negative, not {within!r}")
+        clock = _census_clock()
+        deadline = clock.now() + within
+        while True:
+            census = await asyncio.to_thread(self._leader.kill_and_census)
+            ended = clock.now()
+            if census is not procfs.GroupCensus.LIVE:
+                break
+            next_start = ended + GROUP_CENSUS_INTERVAL_SECONDS
+            if next_start >= deadline:
+                break
+            await clock.wait_until(next_start)
+            if clock.now() >= deadline:
+                break
+        return KillUntilGoneResult(census, ended_in_time=ended <= deadline)
 
     async def exited(self) -> int:
         await self._exit_published.wait()

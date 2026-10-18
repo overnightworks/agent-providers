@@ -2899,13 +2899,14 @@ _AN_EMPTY_GROUP = KillUntilGoneResult(GroupCensus.EMPTY, ended_in_time=True)
 
 
 @pytest.mark.parametrize(
-    ("groups_counted", "expected_failure", "slots_and_home_at_the_return"),
+    ("groups_counted", "expected_failure", "slots_and_home_at_the_return", "returns_the_binary"),
     (
-        ((), nullcontext(), (0, False)),
+        ((), nullcontext(), (0, False), True),
         (
             (_A_LIVE_GROUP, _AN_EMPTY_GROUP),
             pytest.raises(provider._ZombieProbeError, match="not confirmed gone after SIGKILL"),
             (1, True),
+            False,
         ),
     ),
     ids=("confirmed", "confirmed-only-in-the-background"),
@@ -2917,6 +2918,7 @@ def test_a_tool_surface_probe_frees_its_slot_and_home_only_when_the_runner_confi
     groups_counted,
     expected_failure,
     slots_and_home_at_the_return,
+    returns_the_binary,
 ) -> None:
     set_claude_process_limit(monkeypatch, 2)
     hold = Hold()
@@ -2929,8 +2931,9 @@ def test_a_tool_surface_probe_frees_its_slot_and_home_only_when_the_runner_confi
 
     install_cli_door(monkeypatch, door)
 
+    verdict = None
     with expected_failure:
-        asyncio.run(verify_cli_tool_surface())
+        verdict = asyncio.run(verify_cli_tool_surface())
     [home] = homes
     at_the_return = (held_claude_slots(), home.exists())
     hold.proceed.set()
@@ -2938,6 +2941,8 @@ def test_a_tool_surface_probe_frees_its_slot_and_home_only_when_the_runner_confi
 
     assert at_the_return == slots_and_home_at_the_return
     assert (held_claude_slots(), home.exists()) == (0, False)
+    if returns_the_binary:
+        assert verdict == claude_binary
 
 
 def test_tool_surface_a_clean_read_followed_by_a_zombie_gets_the_zombie_ttl(

@@ -190,6 +190,8 @@ def test_a_late_start_or_an_overran_settle_keeps_the_home_until_its_callback(
     recorder.callback(late_callback, *late_arguments)
 
     assert isinstance(run, CliRun) is returns_a_run
+    if returns_a_run:
+        assert run.complete is False
     assert present_after_the_return is True
     assert recorder.home.exists() is False
 

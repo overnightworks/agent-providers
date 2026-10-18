@@ -555,6 +555,7 @@ def test_grok_turn_keeps_its_private_home_until_late_runner_confirmation(
         captured[callback](2468, True)
     assert not home.exists()
 
+
 def test_grok_round_keeps_its_home_until_the_background_confirms_the_group(
     monkeypatch, failure_watch,
 ) -> None:

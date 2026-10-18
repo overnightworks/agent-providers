@@ -584,9 +584,9 @@ def override_codex_turn_runtime(**codex_turn_facts: Any) -> None:
 
 def use_codex_process_pool(monkeypatch, process_pool) -> None:
     """Give every Codex module that admits a process the same test pool."""
-    from agent_providers.codex import image, protocol, transport
+    from agent_providers.codex import image, transport
 
-    for module in (image, protocol, transport):
+    for module in (image, transport):
         monkeypatch.setattr(module, "get_codex_process_pool", lambda: process_pool)
 
 

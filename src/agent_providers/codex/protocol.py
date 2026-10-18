@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from agent_providers.codex.pool import CodexProcessReservation, get_codex_process_pool
+from agent_providers.codex.pool import CodexProcessPool, CodexProcessReservation
 from agent_providers.codex_login import blanked_copy
 from agent_providers.config import current_codex_runtime
 from agent_providers.errors import SafeRouteReasonCode, raise_without_chain
@@ -120,6 +120,7 @@ def release_turn_reservations(
 
 
 def run_reserved_codex_cli(
+    process_pool: CodexProcessPool,
     reservation: CodexProcessReservation,
     home_reservation: PrivateHomeReservation,
     child: ChildProcess,
@@ -133,8 +134,6 @@ def run_reserved_codex_cli(
     The runner releases both reservations through its callbacks; a failure of
     this step ends the channel instead of raising.
     """
-    process_pool = get_codex_process_pool()
-
     def on_spawned(process_id: int) -> None:
         process_pool.bind(reservation, process_id)
 

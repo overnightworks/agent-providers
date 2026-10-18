@@ -724,6 +724,7 @@ def test_deadline_before_spawn_keeps_the_codex_slot_until_late_reap(monkeypatch)
     turn_home = codex_protocol.create_codex_turn_home(CODEX_TOOL_TURN_DIRECTORY_PREFIX)
 
     codex_protocol.run_reserved_codex_cli(
+        process_pool,
         reservation,
         turn_home.home.reserve(),
         shell_child("-c", ":"),
@@ -2904,7 +2905,7 @@ def test_a_codex_entry_point_without_its_block_is_refused_naming_it_and_spawns_n
     monkeypatch, remove_block, block: str, enter: Callable[[], object],
     spawned_children: list[str],
 ) -> None:
-    for module in (codex_image, codex_protocol, codex_transport):
+    for module in (codex_image, codex_transport):
         monkeypatch.setattr(module, "get_codex_process_pool", get_codex_process_pool)
     remove_block()
 
@@ -2912,6 +2913,24 @@ def test_a_codex_entry_point_without_its_block_is_refused_naming_it_and_spawns_n
         enter()
 
     assert (refused.value.provider, refused.value.block) == ("codex", block)
+    assert spawned_children == []
+
+
+def test_an_already_initialized_pool_does_not_bypass_the_missing_block_refusal(
+    monkeypatch, spawned_children: list[str],
+) -> None:
+    for module in (codex_image, codex_transport):
+        monkeypatch.setattr(module, "get_codex_process_pool", get_codex_process_pool)
+    get_codex_process_pool()
+    remove_the_codex_turn_block_with_no_login_and_no_binary()
+
+    tool_turn = drive_turn("codex")
+    with pytest.raises(ProviderNotConfiguredError) as image_refusal:
+        _generate_image()
+
+    assert type(tool_turn.error) is ProviderNotConfiguredError
+    for refusal in (tool_turn.error, image_refusal.value):
+        assert (refusal.provider, refusal.block) == ("codex", "turns.codex")
     assert spawned_children == []
 
 

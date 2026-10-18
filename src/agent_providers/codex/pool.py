@@ -105,9 +105,9 @@ _process_pool_lock = threading.Lock()
 def get_codex_process_pool() -> CodexProcessPool:
     """Return the one process-wide Codex admission owner."""
     global _process_pool
+    turns = current_codex_turn_runtime()
     with _process_pool_lock:
         if _process_pool is None:
-            turns = current_codex_turn_runtime()
             _process_pool = CodexProcessPool(
                 maximum_processes=turns.max_concurrent_processes,
                 maximum_image_runs=turns.max_concurrent_image_runs,

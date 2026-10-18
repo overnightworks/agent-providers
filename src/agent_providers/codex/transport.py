@@ -167,6 +167,7 @@ class CodexCliToolTransport:
         runner = asyncio.create_task(
             asyncio.to_thread(
                 run_reserved_codex_cli,
+                self._process_pool,
                 reservation,
                 home_reservation,
                 child,

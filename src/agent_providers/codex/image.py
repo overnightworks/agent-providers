@@ -309,7 +309,7 @@ def _start_codex_image_runner(
 ) -> None:
     runner = ClaimedStartThread(
         target=run_reserved_codex_cli,
-        args=(reservation, home_reservation, child),
+        args=(process_pool, reservation, home_reservation, child),
         kwargs={
             "stdin_payload": stdin_payload,
             "deadline": deadline,

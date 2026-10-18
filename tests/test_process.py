@@ -55,6 +55,8 @@ from provider_test_support import (
     fail_the_work_directory,
     fail_to_start_the_runner_thread,
     order_the_thread_start_claims,
+    override_cli_binary,
+    override_login_source,
     override_provider_runtime,
     pool_callbacks,
     shell_child,
@@ -116,8 +118,8 @@ CODEX_LOGGED_IN = "Logged in using ChatGPT"
 CODEX_LOGGED_OUT = "Not logged in"
 _CATALOG_AUTH_PAYLOAD = '{"auth_mode":"catalog-probe"}'
 _CATALOG_PROVIDERS = (
-    ("GROK_HOME", "grok_cli_auth_file"),
-    ("CODEX_HOME", "codex_cli_auth_file"),
+    ("GROK_HOME", "grok"),
+    ("CODEX_HOME", "codex"),
 )
 
 
@@ -1588,9 +1590,8 @@ def test_a_missing_binary_is_an_environment_fault_naming_the_provider(
     provider: str, ask: Callable[[], object], detail: str, tmp_path: Path,
 ) -> None:
     configured_value = "a-secret-binary-name"
-    override_provider_runtime(
-        cli_binary_search_path=(tmp_path,), **{f"{provider}_cli_binary": configured_value},
-    )
+    override_provider_runtime(cli_binary_search_path=(tmp_path,))
+    override_cli_binary(provider, configured_value)
 
     with pytest.raises(CliEnvironmentUnavailableError) as raised:
         ask()
@@ -1613,7 +1614,7 @@ def _prepare_catalog_credential(
     tmp_path: Path,
     monkeypatch,
     *,
-    auth_field: str,
+    provider: str,
     auth_payload: str = _CATALOG_AUTH_PAYLOAD,
 ) -> tuple[Path, Path]:
     original_home = tmp_path / "operator-home"
@@ -1624,7 +1625,7 @@ def _prepare_catalog_credential(
     credential.write_text(auth_payload)
     monkeypatch.setenv("HOME", str(original_home))
     monkeypatch.setenv("CATALOG_ENV_LEAK", "should-not-appear")
-    override_provider_runtime(**{auth_field: credential})
+    override_login_source(provider, credential)
     return original_home, credential
 
 
@@ -1633,12 +1634,12 @@ def _run_catalog_python(
     monkeypatch,
     *,
     credential_home_variable: str,
-    auth_field: str,
+    provider: str,
     script: str,
     auth_payload: str = _CATALOG_AUTH_PAYLOAD,
 ) -> tuple[CliRun, Path, Path]:
     original_home, credential = _prepare_catalog_credential(
-        tmp_path, monkeypatch, auth_field=auth_field, auth_payload=auth_payload,
+        tmp_path, monkeypatch, provider=provider, auth_payload=auth_payload,
     )
     run = _run_credentialed_catalog_cli(
         Path(sys.executable),
@@ -3402,12 +3403,12 @@ def test_a_forked_child_uses_a_fresh_home_while_a_parent_thread_is_mid_removal(
     assert completed.stdout.split() == ["True", "0"]
 
 
-@pytest.mark.parametrize(("credential_home_variable", "auth_field"), _CATALOG_PROVIDERS)
+@pytest.mark.parametrize(("credential_home_variable", "provider"), _CATALOG_PROVIDERS)
 def test_catalog_child_sees_only_the_closed_environment_variables(
-    tmp_path, monkeypatch, credential_home_variable: str, auth_field: str,
+    tmp_path, monkeypatch, credential_home_variable: str, provider: str,
 ) -> None:
     original_home, credential = _prepare_catalog_credential(
-        tmp_path, monkeypatch, auth_field=auth_field,
+        tmp_path, monkeypatch, provider=provider,
     )
     monkeypatch.setenv("TMPDIR", str(tmp_path / "operator-tmp"))
 
@@ -3433,9 +3434,9 @@ def test_catalog_child_sees_only_the_closed_environment_variables(
     assert not Path(observed["HOME"]).exists()
 
 
-@pytest.mark.parametrize(("credential_home_variable", "auth_field"), _CATALOG_PROVIDERS)
+@pytest.mark.parametrize(("credential_home_variable", "provider"), _CATALOG_PROVIDERS)
 def test_catalog_child_reads_the_host_named_credential_file(
-    tmp_path, monkeypatch, credential_home_variable: str, auth_field: str,
+    tmp_path, monkeypatch, credential_home_variable: str, provider: str,
 ) -> None:
     script = (
         "import os, sys\n"
@@ -3447,7 +3448,7 @@ def test_catalog_child_reads_the_host_named_credential_file(
         tmp_path,
         monkeypatch,
         credential_home_variable=credential_home_variable,
-        auth_field=auth_field,
+        provider=provider,
         script=script,
     )
 
@@ -3457,9 +3458,9 @@ def test_catalog_child_reads_the_host_named_credential_file(
     assert credential.read_text() == _CATALOG_AUTH_PAYLOAD
 
 
-@pytest.mark.parametrize(("credential_home_variable", "auth_field"), _CATALOG_PROVIDERS)
+@pytest.mark.parametrize(("credential_home_variable", "provider"), _CATALOG_PROVIDERS)
 def test_catalog_child_cannot_write_the_original_credential_directory(
-    tmp_path, monkeypatch, credential_home_variable: str, auth_field: str,
+    tmp_path, monkeypatch, credential_home_variable: str, provider: str,
 ) -> None:
     script = (
         "import os, sys\n"
@@ -3474,7 +3475,7 @@ def test_catalog_child_cannot_write_the_original_credential_directory(
         tmp_path,
         monkeypatch,
         credential_home_variable=credential_home_variable,
-        auth_field=auth_field,
+        provider=provider,
         script=script,
     )
 
@@ -3488,7 +3489,7 @@ def test_catalog_child_cannot_write_the_original_credential_directory(
 
 def test_claude_catalog_child_never_sees_the_operator_home(tmp_path, monkeypatch) -> None:
     original_home, _credential = _prepare_catalog_credential(
-        tmp_path, monkeypatch, auth_field="claude_cli_auth_file",
+        tmp_path, monkeypatch, provider="claude",
     )
 
     run = run_claude_catalog_cli(Path("/usr/bin/env"), ())
@@ -3509,7 +3510,7 @@ def test_claude_catalog_child_never_sees_the_operator_home(tmp_path, monkeypatch
 
 def test_claude_catalog_child_writes_stay_in_the_private_home(tmp_path, monkeypatch) -> None:
     original_home, _credential = _prepare_catalog_credential(
-        tmp_path, monkeypatch, auth_field="claude_cli_auth_file",
+        tmp_path, monkeypatch, provider="claude",
     )
     script = (
         "import os, pathlib, sys\n"
@@ -3531,7 +3532,7 @@ def test_claude_catalog_child_writes_stay_in_the_private_home(tmp_path, monkeypa
 
 
 def test_the_claude_catalog_child_reads_the_host_named_credential(tmp_path, monkeypatch) -> None:
-    _prepare_catalog_credential(tmp_path, monkeypatch, auth_field="claude_cli_auth_file")
+    _prepare_catalog_credential(tmp_path, monkeypatch, provider="claude")
     script = (
         "import os, pathlib, sys\n"
         "credential = pathlib.Path(os.environ['HOME']) / '.claude' / '.credentials.json'\n"
@@ -3547,7 +3548,7 @@ def test_the_claude_catalog_child_reads_the_host_named_credential(tmp_path, monk
 
 def test_a_direct_overwrite_of_the_credential_copy_fails(tmp_path, monkeypatch) -> None:
     """The README hands hosts this sentence; only this much of it is true."""
-    _prepare_catalog_credential(tmp_path, monkeypatch, auth_field="claude_cli_auth_file")
+    _prepare_catalog_credential(tmp_path, monkeypatch, provider="claude")
     script = (
         "import os, pathlib, sys\n"
         "copy = pathlib.Path(os.environ['HOME']) / '.claude' / '.credentials.json'\n"
@@ -3570,7 +3571,7 @@ def test_a_credential_path_that_names_nothing_is_reported_not_swallowed(
 ) -> None:
     """A typo in the configured path must not read as a logged-out provider."""
     missing = tmp_path / "typo" / "auth.json"
-    override_provider_runtime(claude_cli_auth_file=missing)
+    override_login_source("claude", missing)
     caplog.set_level("WARNING", logger="agent_providers.process")
 
     run = run_claude_catalog_cli(Path("/bin/sh"), ("-c", ":"))

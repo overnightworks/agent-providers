@@ -30,7 +30,12 @@ from agent_providers.anchored_turn import (
     CliProcessPoolSaturated,
     anchored_turn_child,
 )
-from agent_providers.config import McpServerSpec, current_config, current_turn_config
+from agent_providers.config import (
+    McpServerSpec,
+    current_claude_runtime,
+    current_config,
+    current_turn_config,
+)
 from agent_providers.constants import (
     CLAUDE_CLI_COMPLETION_TIMEOUT_SECONDS,
     CLAUDE_CLI_CURRENT_MODEL_MARKER,
@@ -745,7 +750,7 @@ def _faults_in_the_claude_family() -> Iterator[None]:
 def _claude_private_home() -> process.PrivateCredentialHome:
     with _faults_in_the_claude_family():
         return process.PrivateCredentialHome(
-            current_config().claude_cli_auth_file,
+            current_claude_runtime().token_file,
             _CLAUDE_CREDENTIAL_PATH,
             prefix=_CLAUDE_TURN_HOME_PREFIX,
             missing_credential_is_error=True,
@@ -1992,8 +1997,8 @@ async def _acall_cli(
 
 
 def _find_claude_binary() -> Path | None:
-    config = current_config()
-    found = resolve_cli_binary(config.claude_cli_binary)
+    claude = current_claude_runtime()
+    found = resolve_cli_binary(claude.binary)
     if found is not None:
         log.debug("Found claude binary on the configured search path: %s", found)
         return found
@@ -2001,7 +2006,7 @@ def _find_claude_binary() -> Path | None:
     # The mirror image of resolve_cli_binary: a glob may match a relative or
     # unexecutable path, and a child is only ever started from an absolute
     # binary this process can run.
-    for pattern in config.claude_cli_binary_search_globs:
+    for pattern in claude.binary_search_globs:
         for candidate in sorted(glob.glob(pattern), reverse=True):
             path = Path(candidate).resolve()
             if path.is_file() and os.access(path, os.X_OK):

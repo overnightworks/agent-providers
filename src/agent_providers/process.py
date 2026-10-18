@@ -29,7 +29,7 @@ from types import TracebackType
 from typing import Any, Final, Literal, NotRequired, Required, TypedDict, Unpack, cast
 
 from agent_providers.codex_login import CodexLoginVerdict, assess_codex_login, blanked_copy
-from agent_providers.config import current_config, current_turn_config
+from agent_providers.config import current_claude_runtime, current_config, current_turn_config
 from agent_providers.constants import (
     CLAUDE_CLI_AUTH_METHOD_FIELD,
     CLAUDE_CLI_LOGGED_IN_FIELD,
@@ -560,7 +560,7 @@ def run_claude_catalog_cli(
     operator's own directory, where a renewal write would succeed.
     """
     with _catalog_credential_home(
-        current_config().claude_cli_auth_file,
+        current_claude_runtime().token_file,
         _CLAUDE_CATALOG_CREDENTIAL_PATH,
     ) as home:
         return run_catalog_cli(

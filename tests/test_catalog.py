@@ -27,11 +27,13 @@ from provider_test_support import (
     a_symlink_to_a_login,
     call_within_deadline,
     fake_cli_executable,
+    override_claude_runtime,
+    override_cli_binary,
     override_provider_runtime,
 )
 from pydantic import SecretStr
 
-from agent_providers import process
+from agent_providers import catalog, process
 from agent_providers.catalog import (
     ProviderCliUnavailable,
     ProviderNeedsKey,
@@ -45,6 +47,7 @@ from agent_providers.catalog import (
     probe_provider_route,
     provider_configuration,
 )
+from agent_providers.config import ProviderNotConfiguredError
 from agent_providers.constants import ProviderName
 from agent_providers.errors import (
     ProviderModelCatalogUnavailableError,
@@ -99,7 +102,7 @@ def _configure_cli(
     calls_log: Path | None = None,
 ) -> None:
     binary = fake_cli_executable(tmp_path, answers, calls_log=calls_log)
-    override_provider_runtime(**{f"{provider}_cli_binary": str(binary)})
+    override_cli_binary(provider, str(binary))
 
 
 CLI_OFFERS = [
@@ -270,7 +273,8 @@ def _a_claude_cli_route_with_a_broken_catalogue(
 def _a_claude_cli_route_without_a_binary(
     tmp_path: Path, _monkeypatch: pytest.MonkeyPatch,
 ) -> ProviderRoute:
-    override_provider_runtime(claude_cli_binary="missing-cli", cli_binary_search_path=(tmp_path,))
+    override_claude_runtime(binary="missing-cli")
+    override_provider_runtime(cli_binary_search_path=(tmp_path,))
     return ProviderRoute.CLI
 
 
@@ -415,19 +419,28 @@ def test_each_api_route_lists_the_chat_models_its_api_offers(
 
 
 @pytest.mark.parametrize(("provider", "key_setting", "environment_key"), [
+    ("claude", "anthropic_api_key", "ANTHROPIC_API_KEY"),
     ("grok", "xai_api_key", "XAI_API_KEY"),
     ("codex", "openai_api_key", "OPENAI_API_KEY"),
 ])
-def test_a_provider_with_an_api_key_is_ready_through_the_api_key(
-    provider: str, key_setting: str, environment_key: str,
+def test_an_api_key_makes_a_provider_ready_without_its_cli_block(
+    provider: str, key_setting: str, environment_key: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    override_provider_runtime(**{key_setting: SecretStr("a-key")})
+    monkeypatch.setattr(catalog, "_anthropic_sdk_available", lambda: True)
+    override_provider_runtime(claude=None, **{key_setting: SecretStr("a-key")})
 
     configuration = provider_configuration(provider, frozenset())
 
     assert isinstance(configuration, ProviderReady)
     assert configuration.method is ProviderSetupMethod.API_KEY
     assert configuration.environment_key == environment_key
+
+
+def test_a_claude_host_without_its_block_is_refused_not_reported_as_logged_out() -> None:
+    override_provider_runtime(claude=None)
+
+    with pytest.raises(ProviderNotConfiguredError, match="claude"):
+        provider_configuration("claude", frozenset())
 
 
 SIGNED_IN_CLI_ANSWERS = {
@@ -448,9 +461,8 @@ def test_a_signed_in_cli_route_is_disturbed_once_its_binary_is_gone(
     provider: str, tmp_path: Path,
 ) -> None:
     fake_cli_executable(tmp_path, SIGNED_IN_CLI_ANSWERS[provider])
-    override_provider_runtime(
-        cli_binary_search_path=(tmp_path,), **{f"{provider}_cli_binary": "fake-cli"},
-    )
+    override_provider_runtime(cli_binary_search_path=(tmp_path,))
+    override_cli_binary(provider, "fake-cli")
     with_binary = probe_provider_route(provider, ProviderRoute.CLI)
     (tmp_path / "fake-cli").unlink()
     clear_agent_cli_caches()
@@ -632,13 +644,12 @@ def _cli_root_removed(tmp_path: Path) -> None:
 
 
 def _claude_credential_replaced_by_a_link(tmp_path: Path) -> None:
-    override_provider_runtime(claude_cli_auth_file=a_symlink_to_a_login(tmp_path))
+    override_claude_runtime(token_file=a_symlink_to_a_login(tmp_path))
 
 
 def _claude_binary_removed(tmp_path: Path) -> None:
-    override_provider_runtime(
-        cli_binary_search_path=(tmp_path,), claude_cli_binary="absent-claude-cli",
-    )
+    override_provider_runtime(cli_binary_search_path=(tmp_path,))
+    override_claude_runtime(binary="absent-claude-cli")
 
 
 CLAUDE_LISTING_FAULTS = [

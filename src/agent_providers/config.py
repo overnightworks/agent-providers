@@ -87,6 +87,19 @@ class TurnRuntimeConfig(BaseModel):
     mcp_server: McpServerSpec | None
 
 
+class ClaudeCliRuntime(BaseModel):
+    """The deployment facts of the Claude CLI, present only on a host that runs it.
+
+    ``token_file`` is the provider's login source; Claude defines its format.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    binary: str
+    binary_search_globs: tuple[str, ...] = ()
+    token_file: Path
+
+
 class ProviderRuntimeConfig(BaseModel):
     """Every deployment fact the provider layer needs, as one immutable value.
 
@@ -107,9 +120,10 @@ class ProviderRuntimeConfig(BaseModel):
     against the parent's inherited ``PATH`` would put that choice back in the
     environment this layer closed.
 
-    ``claude_cli_auth_file``, ``grok_cli_auth_file`` and ``codex_cli_auth_file``
-    are the credential files the catalog paths copy, mode 0400, into a private
-    child home. Those children receive only that home, the provider's own home
+    ``claude.token_file``, ``grok_cli_auth_file`` and ``codex_cli_auth_file``
+    are each provider's login source: the credential files the catalog paths
+    copy, mode 0400, into a private child home. The provider defines the
+    format of its own file. Those children receive only that home, the provider's own home
     variable, ``PATH`` and the machine's locale, proxy and CA settings — never
     the operator's credential directory, whose renewal writes would otherwise
     succeed with the parent's rights.
@@ -121,13 +135,12 @@ class ProviderRuntimeConfig(BaseModel):
     xai_api_key: SecretStr | None = None
     openai_api_key: SecretStr | None = None
 
-    claude_cli_binary: str
+    claude: ClaudeCliRuntime | None = None
+
     grok_cli_binary: str
     codex_cli_binary: str
-    claude_cli_binary_search_globs: tuple[str, ...] = ()
     cli_binary_search_path: tuple[Path, ...]
 
-    claude_cli_auth_file: Path
     grok_cli_auth_file: Path
     codex_cli_auth_file: Path
 
@@ -142,6 +155,21 @@ class ProviderRuntimeNotConfiguredError(RuntimeError):
 
 class ProviderRuntimeAlreadyConfiguredError(RuntimeError):
     """A second, differing configuration was installed over a live one."""
+
+
+class ProviderNotConfiguredError(RuntimeError):
+    """A provider ran under a configuration that holds no block for it."""
+
+    def __init__(self, provider: str, block: str) -> None:
+        super().__init__(
+            f"The {provider} provider is not configured: the runtime "
+            f"configuration has no {block!r} block."
+        )
+        self.provider = provider
+        self.block = block
+
+    def __reduce__(self) -> tuple[type[ProviderNotConfiguredError], tuple[str, str]]:
+        return (type(self), (self.provider, self.block))
 
 
 class TurnRuntimeNotConfiguredError(RuntimeError):
@@ -265,3 +293,11 @@ def reset_config() -> None:
     global _configured
     with _configuration_lock:
         _configured = None
+
+
+def current_claude_runtime() -> ClaudeCliRuntime:
+    """Return the installed Claude block, or refuse naming the missing provider."""
+    claude = current_config().claude
+    if claude is None:
+        raise ProviderNotConfiguredError("claude", "claude")
+    return claude

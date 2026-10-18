@@ -22,11 +22,12 @@ from provider_test_support import held_claude_slots, run_bounded
 from agent_providers.claude import provider
 from agent_providers.events import FinalEvent, StreamEvent
 
-READS_STDIN_AND_ANSWERS_ONCE = "cat >/dev/null\nprintf '%s' '{\"result\":\"ok\"}'\n"
+CONSUMES_STDIN = "while IFS= read -r line; do :; done\n"
+READS_STDIN_AND_ANSWERS_ONCE = CONSUMES_STDIN + "printf '%s' '{\"result\":\"ok\"}'\n"
 READS_STDIN_AND_STREAMS_A_RESULT = (
-    'cat >/dev/null\nprintf \'%s\\n\' \'{"type":"result","result":"ok"}\'\n'
+    CONSUMES_STDIN + 'printf \'%s\\n\' \'{"type":"result","result":"ok"}\'\n'
 )
-WAITS_FOR_A_LINE_THAT_NEVER_COMES = "read line\n"
+WAITS_WITHOUT_READING_STDIN = "exec sleep 60\n"
 
 
 @pytest.fixture
@@ -103,7 +104,7 @@ def test_a_real_timeout_ends_its_leader_by_sigterm_through_the_anchor(
     leader_running,
     drive_the_turn,
 ) -> None:
-    leader_running(WAITS_FOR_A_LINE_THAT_NEVER_COMES)
+    leader_running(WAITS_WITHOUT_READING_STDIN)
 
     async def turn() -> Exception:
         try:

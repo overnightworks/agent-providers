@@ -945,8 +945,8 @@ def _mcp_turn_cli_arguments(
 #   grace, then the post-SIGKILL wait) has its own, separate, small bound —
 #   cleanup must always be attempted regardless of how much of the answer
 #   budget is left. See ``_probe_cli_surface_async``/``_sync``.
-# - A process that survives SIGKILL is handed to a background reaper. One
-#   reservation, bound to its PID at spawn, caps that work so a run of bad
+# - A process that survives SIGKILL is handed to ``process.run_cli_bounded``'s
+#   reaper. One reservation per process caps that work so a run of bad
 #   probes cannot grow an unbounded pool of waiting
 #   tasks/threads — and its failure is cached for
 #   ``CLAUDE_CLI_ZOMBIE_FAILURE_CACHE_SECONDS`` (much longer than an
@@ -1140,7 +1140,7 @@ async def shutdown_tool_surface_background_tasks() -> None:
 
     A retained group stays as it is: it receives no signal and keeps its pool
     slot and home until ``confirm_group_gone`` frees them. A leader still
-    unreaped when the process exits is reaped by the process's parent (under
+    unreaped when the process exits is re-parented to and reaped by init (under
     a container, its init), while the exit sweep removes the home.
     """
     with _tool_surface_lock:

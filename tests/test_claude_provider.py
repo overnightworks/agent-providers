@@ -12,7 +12,7 @@ import sys
 import threading
 import time
 import weakref
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from enum import Enum, auto
 from functools import partial
@@ -25,6 +25,7 @@ import anyio
 import pytest
 from provider_test_support import (
     A_RUNNER_FAILURE_CANARY,
+    A_STREAMED_LINE,
     CLAUDE_MODEL_CATALOG_STDOUT,
     DESTINATION_FAULTS,
     MCP_TOOL_NAMES,
@@ -46,11 +47,13 @@ from provider_test_support import (
     fake_cli_process,
     held_claude_slots,
     install_claude_cli_children,
+    lines_that_fail,
     operations,
     override_provider_runtime,
     override_turn_runtime,
     reap_without_waiting,
     recorded_census_workers,
+    reset_cli_process_pool_for_test,
     run_bounded,
     scenario_holds,
 )
@@ -121,14 +124,6 @@ def _configured_mcp_server():
     return current_turn_config().mcp_server
 
 
-def _reset_cli_process_pool_for_test() -> None:
-    """Test isolation only; production cache invalidation keeps live slots."""
-    with provider._zombie_registry_lock:
-        provider._zombie_reap_reservations.clear()
-    with provider._tool_surface_lock:
-        provider._tool_surface_probe_tasks.clear()
-
-
 @pytest.fixture(autouse=True)
 def killpg_signals():
     """Record the signals a reap sends; the group is already gone, so no real pid is signalled.
@@ -150,12 +145,12 @@ def _clear_claude_clients():
     clear_client_cache()
     clear_cli_login_status_cache()
     clear_cli_tool_surface_cache()
-    _reset_cli_process_pool_for_test()
+    reset_cli_process_pool_for_test()
     yield
     clear_client_cache()
     clear_cli_login_status_cache()
     clear_cli_tool_surface_cache()
-    _reset_cli_process_pool_for_test()
+    reset_cli_process_pool_for_test()
 
 
 def _run_with_clock(coroutine, clock: dict[str, float]):
@@ -3479,9 +3474,8 @@ def test_a_tool_surface_probe_is_refused_while_retained_groups_fill_the_pool(
         assert await refused_probe() == claude_binary
         assert len(commands) == 1
 
-    with recorded_census_workers(monkeypatch) as census_workers:
+    with recorded_census_workers(monkeypatch):
         run_bounded(_run())
-        census_workers.join_all()
     assert held_claude_slots() == 0
 
 
@@ -3948,9 +3942,10 @@ def test_stream_reap_does_not_spin_under_anyio_level_cancellation(
 
         async def close_after_cancellation() -> None:
             process = a_claude_cli_child(returncode=None)
+            reservation = provider._ZombieReservation()
             closing.append(asyncio.current_task())
             with pytest.raises(asyncio.CancelledError):
-                await provider._reap_behind_shield(process, provider._ZombieReservation())
+                await provider._reap_behind_shield(process, reservation)
             close_finished.set()
 
         with anyio.fail_after(deadline.remaining()):
@@ -4306,7 +4301,7 @@ def test_the_reaps_own_exception_wins_over_the_turns_exit(
 
 
 def test_a_stream_that_ends_normally_reaps_once_and_releases_its_slot_and_home(
-    monkeypatch,
+    monkeypatch, killpg_signals,
 ) -> None:
     deadline = ScenarioDeadline()
     exit_wait = EventGate(deadline)
@@ -4344,6 +4339,7 @@ def test_a_stream_that_ends_normally_reaps_once_and_releases_its_slot_and_home(
 
     run_bounded(scenario())
     assert operations(turn_child.child.log) == [("release", turn_child.child.pid)]
+    assert killpg_signals == []
 
 
 async def _stream_to_its_end() -> None:
@@ -4355,14 +4351,6 @@ async def _stream_closed_after_its_first_event() -> None:
     stream = provider.acall_claude_with_mcp_stream("hi", user_id="u-1")
     await anext(stream)
     await stream.aclose()
-
-
-async def _lines_that_fail(*_arguments: object) -> AsyncIterator[bytes]:
-    raise RuntimeError("stream read failed")
-    yield b""
-
-
-A_STREAMED_LINE = b'{"type":"assistant","message":{"content":[{"type":"text","text":"partial"}]}}\n'
 
 
 @dataclass(frozen=True)
@@ -4413,7 +4401,7 @@ def _prepare_the_turn(
 ) -> _ChildInAHome:
     _write_no_mcp_config_file(monkeypatch)
     if ending.iteration_failure:
-        monkeypatch.setattr(provider, "_iter_lines", _lines_that_fail)
+        monkeypatch.setattr(provider, "_iter_lines", lines_that_fail)
     return _install_child_in_a_home(
         monkeypatch, build_child, **{**ending.child_script, **child_script},
     )
@@ -4455,11 +4443,11 @@ def test_sigkill_ends_a_leader_that_survives_sigterm_before_its_slot_and_home_ar
     assert killpg_signals == []
 
 
-def _provider_records_at_warning(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+def _provider_records_after_the_turn_started(caplog: pytest.LogCaptureFixture) -> list[str]:
     return [
-        record
+        record.getMessage()
         for record in caplog.records
-        if record.name == provider.log.name and record.levelno >= logging.WARNING
+        if record.name == provider.log.name and not record.getMessage().startswith("Claude: ")
     ]
 
 
@@ -4471,7 +4459,7 @@ def test_a_leader_that_outlives_sigkill_keeps_its_slot_and_home_until_its_group_
     turn = _prepare_the_turn(monkeypatch, ending, a_child_that_outlives_sigkill)
     child = turn.child
     pid = child.pid
-    caplog.set_level(logging.WARNING)
+    caplog.set_level(logging.DEBUG)
 
     async def scenario() -> None:
         with pytest.raises(ContainmentLost) as lost:
@@ -4484,7 +4472,7 @@ def test_a_leader_that_outlives_sigkill_keeps_its_slot_and_home_until_its_group_
             assert operations(child.log) == [("SIGTERM", pid), ("SIGKILL", pid)]
             assert held_claude_slots() == 1
             assert turn.home.exists()
-            assert _provider_records_at_warning(caplog) == []
+            assert _provider_records_after_the_turn_started(caplog) == []
 
             reset_config()
             child.publish_exit(-provider.signal.SIGKILL)
@@ -4499,9 +4487,8 @@ def test_a_leader_that_outlives_sigkill_keeps_its_slot_and_home_until_its_group_
         finally:
             assert await confirm_the_retained_group_gone(child, group)
 
-    with recorded_census_workers(monkeypatch) as census_workers:
+    with recorded_census_workers(monkeypatch):
         run_bounded(scenario())
-        census_workers.join_all()
     assert killpg_signals == []
 
 
@@ -4570,14 +4557,17 @@ def test_a_failing_anchor_is_retained_with_its_slot_and_home(
                         await lost_groups.confirm_group_gone(lost.value.group)
                 assert held_claude_slots() == 1
         finally:
-            if not failing.recoverable:
+            if failing.recoverable:
+                assert await confirm_the_retained_group_gone(child, lost.value.group)
+            else:
                 for _group, release_slot in retentions:
                     release_slot()
 
-    with recorded_census_workers(monkeypatch) as census_workers:
+    with recorded_census_workers(monkeypatch):
         run_bounded(scenario())
-        census_workers.join_all()
     assert held_claude_slots() == 0
+    if failing.recoverable:
+        assert not turn.home.exists()
     assert killpg_signals == []
 
 
@@ -4617,9 +4607,8 @@ def test_shutdown_leaves_a_retained_group_as_it_is(
         assert held_claude_slots() == 0
         assert not turn.home.exists()
 
-    with recorded_census_workers(monkeypatch) as census_workers:
+    with recorded_census_workers(monkeypatch):
         run_bounded(scenario())
-        census_workers.join_all()
     assert killpg_signals == []
 
 

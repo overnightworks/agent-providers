@@ -338,7 +338,7 @@ def test_the_spawn_owners_process_type_starts_nothing() -> None:
         spawn.PipedProcess(["/bin/true"])
 
 
-OWNER_SPAWN_CALLS = frozenset({"Popen", "run"})
+OWNER_SPAWN_CALLS = frozenset({"Popen", "run", "create_subprocess_exec"})
 
 
 def test_the_spawn_owner_hands_every_primitive_an_explicit_environment() -> None:
@@ -576,3 +576,15 @@ def test_an_anchored_leader_inherits_no_descriptor_the_parent_holds_open(
                     os.close(descriptor)
 
     _run_descriptor_probe(tmp_path, stdout_of_anchored_leader)
+
+
+def test_the_spawn_owner_holds_no_asyncio_door() -> None:
+    """The anchored child is the only async door; a stock asyncio spawn would bypass its anchor."""
+    tree = ast.parse(SPAWN_OWNER.read_text(encoding="utf-8"))
+    asyncio_spawns = [
+        f"line {node.lineno}"
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name | ast.Attribute)
+        and (getattr(node, "id", None) or node.attr) in SPAWNING_ASYNCIO_NAMES
+    ]
+    assert asyncio_spawns == []

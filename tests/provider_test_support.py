@@ -1258,7 +1258,8 @@ class ScriptedClaudeChild(ScriptedAnchoredChild):
 
     ``returncode`` is the published exit (``None`` while the leader runs).
     ``exited()`` passes ``exit_gate``, publishes ``natural_exit`` unless it is
-    ``None``, and then only waits for a published exit; ``signal_group(sig)``
+    ``None``, and then waits for a published exit, failing the test at the
+    scenario's deadline rather than hanging; ``signal_group(sig)``
     publishes ``-sig`` unless the leader ``survives`` it. Like the real handle it
     refuses ``release()`` while the leader runs. Every group call is recorded in
     ``log``, and nothing here ever reaches a real process.
@@ -1327,7 +1328,12 @@ class ScriptedClaudeChild(ScriptedAnchoredChild):
             await self._exit_gate.pass_through()
         if self._natural_exit is not None and not self._exit_published.is_set():
             self.publish_exit(self._natural_exit)
-        await self._exit_published.wait()
+        bound = self._exit_gate.deadline.remaining() if self._exit_gate else TEST_WAIT_SECONDS
+        try:
+            async with asyncio.timeout(bound):
+                await self._exit_published.wait()
+        except TimeoutError:
+            raise AssertionError("the fake's exit was never published within the bound") from None
         assert self.returncode is not None
         return self.returncode
 
@@ -1415,7 +1421,7 @@ class CensusWorkers:
 
 @contextmanager
 def recorded_census_workers(monkeypatch: pytest.MonkeyPatch) -> Iterator[CensusWorkers]:
-    """Keep every census worker at its start, so one that fails before recording is joined."""
+    """Keep every census worker at its start; join them all when the block ends, however it ends."""
     workers = CensusWorkers()
     real_start = threading.Thread.start
 
@@ -1426,7 +1432,10 @@ def recorded_census_workers(monkeypatch: pytest.MonkeyPatch) -> Iterator[CensusW
 
     with monkeypatch.context() as patched:
         patched.setattr(threading.Thread, "start", start)
-        yield workers
+        try:
+            yield workers
+        finally:
+            workers.join_all()
 
 
 def a_child_that_outlives_sigkill(**script: Any) -> ScriptedClaudeChild:
@@ -1443,6 +1452,22 @@ def reap_without_waiting(monkeypatch: pytest.MonkeyPatch) -> None:
     """Give the reap's grace and bound no time, so an unpublished exit expires at once."""
     monkeypatch.setattr(claude_provider, "CLAUDE_CLI_SIGTERM_GRACE_SECONDS", 0)
     monkeypatch.setattr(claude_provider, "CLAUDE_CLI_ZOMBIE_REAP_TIMEOUT_SECONDS", 0)
+
+
+def reset_cli_process_pool_for_test() -> None:
+    """Test isolation only; production cache invalidation keeps live slots."""
+    with claude_provider._zombie_registry_lock:
+        claude_provider._zombie_reap_reservations.clear()
+    with claude_provider._tool_surface_lock:
+        claude_provider._tool_surface_probe_tasks.clear()
+
+
+A_STREAMED_LINE = b'{"type":"assistant","message":{"content":[{"type":"text","text":"partial"}]}}\n'
+
+
+async def lines_that_fail(*_arguments: object) -> AsyncIterator[bytes]:
+    raise RuntimeError("stream read failed")
+    yield b""
 
 
 async def confirm_the_retained_group_gone(child: ScriptedClaudeChild, group: RetainedGroup) -> bool:

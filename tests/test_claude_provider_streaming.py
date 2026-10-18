@@ -8,7 +8,13 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-from provider_test_support import a_claude_cli_child, install_claude_cli_children, operations
+from provider_test_support import (
+    a_claude_cli_child,
+    install_claude_cli_children,
+    operations,
+    reap_without_waiting,
+    run_bounded,
+)
 
 from agent_providers.claude import provider
 from agent_providers.claude.provider import (
@@ -336,6 +342,7 @@ def test_stream_binary_missing_raises(monkeypatch) -> None:
 
 
 def test_stream_timeout_ends_the_leader_through_its_anchor(monkeypatch) -> None:
+    reap_without_waiting(monkeypatch)
     monkeypatch.setattr(
         provider, "_require_claude_binary", lambda: "/bin/claude",
     )
@@ -347,20 +354,21 @@ def test_stream_timeout_ends_the_leader_through_its_anchor(monkeypatch) -> None:
     )
     collected = _collect(stream)
     with pytest.raises(UnavailableError):
-        asyncio.run(collected)
+        run_bounded(collected)
 
     assert operations(child.log) == [("SIGTERM", child.pid), ("release", child.pid)]
     provider.os.killpg.assert_not_called()
 
 
 def test_completed_stream_releases_its_leader_without_a_signal(monkeypatch) -> None:
+    reap_without_waiting(monkeypatch)
     monkeypatch.setattr(
         provider, "_require_claude_binary", lambda: "/bin/claude",
     )
     child = a_claude_cli_child(stream_lines=[_result_line("ok")])
     install_claude_cli_children(monkeypatch, child)
 
-    events = asyncio.run(_collect(
+    events = run_bounded(_collect(
         acall_claude_with_mcp_stream(prompt="hi", user_id="u"),
     ))
 

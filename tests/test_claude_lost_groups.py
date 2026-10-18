@@ -432,6 +432,7 @@ def test_a_failed_worker_start_keeps_the_group_excluded_exactly_while_a_claimed_
                 if worker.ident is not None:
                     join_ended(worker)
 
+    assert len(workers) == 1
     assert confirm(retained.group) is True
     assert trail(log) == expected_trail
 

@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 from anchored_kernel import KernelModel, install_kernel, join_watcher, watcher_thread
-from anchored_leaders import Leaders, spawn_warnings
+from anchored_leaders import ALL_PHASES, Leaders, Phases, spawn_warnings
 from anchored_support import GONE, TEST_WAIT_SECONDS, ChildCleanup, Exited, OwnedChild
 from test_anchored_child import watcher_names
 from test_zombie_anchor import SIGKILLED
@@ -94,16 +94,11 @@ async def bounded[Result](awaitable: Awaitable[Result]) -> Result:
         return await awaitable
 
 
-ALL_PHASES = ("call", "teardown")
-
-
-def asyncio_errors(
-    caplog: pytest.LogCaptureFixture, phases: tuple[str, ...] = ("call",)
-) -> list[str]:
+def asyncio_errors(caplog: pytest.LogCaptureFixture, phases: Phases = ("call",)) -> list[str]:
     return [
         record.getMessage()
         for phase in phases
-        for record in caplog.get_records(phase)  # type: ignore[arg-type]
+        for record in caplog.get_records(phase)
         if record.name == "asyncio" and record.levelno >= logging.ERROR
     ]
 
@@ -466,6 +461,7 @@ def test_a_loss_before_the_exit_raises_from_exited_and_release_still_frees_the_c
             assert child.returncode is None
             with pytest.raises(ChildIdentityLost):
                 child.release()
+            assert child.stdin.transport.is_closing()
         finally:
             child.stdin.close()
 
@@ -571,20 +567,28 @@ def test_the_handle_is_returned_without_an_await_after_the_start_on_the_loop_thr
         except RuntimeError:
             running_loop = None
         started_on.append((running_loop, thread))
-        task = asyncio.current_task()
-        assert task is not None
-        task.cancel()
+        if running_loop is not None:
+            task = asyncio.current_task()
+            assert task is not None
+            task.cancel()
         return leader
 
     monkeypatch.setattr(spawn, "start_anchored_leader", start_then_request_cancellation)
     handed: list[AnchoredChild] = []
+    cancelled_after_the_hand_over: list[bool] = []
 
     async def caller() -> None:
         handed.append(await spawn.open_anchored_pipes(leaders.describe()))
-        await asyncio.sleep(0)
+        try:
+            await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            cancelled_after_the_hand_over.append(True)
+            raise
 
-    with pytest.raises(asyncio.CancelledError):
+    with contextlib.suppress(asyncio.CancelledError):
         child_cleanup.capture(lambda: door_runner.run(bounded(caller())))
+    assert started_on == [(door_runner.get_loop(), threading.get_ident())]
+    assert cancelled_after_the_hand_over == [True]
     (owned,) = child_cleanup.listed()
     child = handed[0]
 
@@ -595,5 +599,4 @@ def test_the_handle_is_returned_without_an_await_after_the_start_on_the_loop_thr
 
     door_runner.run(bounded(finish()))
 
-    assert started_on == [(door_runner.get_loop(), threading.get_ident())]
     assert child_cleanup.state(owned) == GONE

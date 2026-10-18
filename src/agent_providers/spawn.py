@@ -671,9 +671,10 @@ class _DoorPipes:
         """Create one pipe whose both ends the next cleanup closes.
 
         Both descriptors are registered in the statement after ``os.pipe()``
-        returns, so any later synchronous failure closes them; only an
-        asynchronous interruption between the two statements can leak them, which
-        is the host's Interruptions obligation.
+        returns, so a failure of any operation this method calls closes them. The
+        residual is the host's Interruptions obligation: an asynchronous
+        interruption, or a ``MemoryError`` inside this method's own bookkeeping,
+        which can leak a descriptor or close one twice.
         """
         read_end, write_end = os.pipe()
         parent_end, child_end = (read_end, write_end) if parent_reads else (write_end, read_end)

@@ -99,8 +99,7 @@ def require_pinned_versions(cli: CliConfig) -> None:
     that cannot be removed is logged by the core and never changes the outcome.
     """
     for provider, pin in cli.programs().items():
-        refusal = _refusal(
-            provider, pin, _probe(pin.binary, cli.working_root), VERSION_READERS[provider]
-        )
+        read_version = VERSION_READERS[provider]
+        refusal = _refusal(provider, pin, _probe(pin.binary, cli.working_root), read_version)
         if refusal is not None:
             raise ProgramVersionRefused(refusal)

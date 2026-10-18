@@ -1405,9 +1405,13 @@ def test_a_claude_profile_without_its_program_table_is_refused_before_its_token_
 def test_the_former_flat_program_keys_stop_the_start_naming_each_key(
     tmp_path, capsys, cli_text, refusal
 ):
-    text = NO_PROFILE.replace(CLI_SECTION, cli_text)
+    probe_log = tmp_path / "probe-starts"
+    program = fake_cli_executable(tmp_path, {("--version",): "any"}, calls_log=probe_log)
+    logged_binary_line = f"binary = {json.dumps(str(program))}"
+    text = NO_PROFILE.replace(CLI_SECTION, cli_text.replace(CLAUDE_BINARY_LINE, logged_binary_line))
 
     assert _refused_on_one_line(_written(tmp_path, text), capsys) == refusal
+    assert _the_probe_never_started(probe_log)
 
 
 @pytest.mark.parametrize("provider", ["codex", "grok"])

@@ -6,6 +6,7 @@ import json
 import re
 import socket
 import struct
+from collections import Counter
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -29,7 +30,13 @@ from agent_service.mcp_wire import (
     RequestId,
 )
 from agent_service.run_liveness import LoopClock, RunClock
-from agent_service.tool_relay import LOOPBACK_HOST, Relay, RelayOwner, RelayRequest
+from agent_service.tool_relay import (
+    LOOPBACK_HOST,
+    Relay,
+    RelayOwner,
+    RelayRequest,
+    Unanswered,
+)
 
 RUN_ID = "run-under-test"
 _READ_BYTES = 65_536
@@ -45,7 +52,7 @@ class ScriptedOwner:
 
     def __init__(
         self,
-        answers: Sequence[HttpAnswer] = (),
+        answers: Sequence[HttpAnswer | Unanswered] = (),
         failure: Exception | None = None,
         *,
         gated: bool = False,
@@ -62,7 +69,7 @@ class ScriptedOwner:
     def release(self) -> None:
         self._gate.set()
 
-    async def answer(self, request: RelayRequest) -> HttpAnswer:
+    async def answer(self, request: RelayRequest) -> HttpAnswer | Unanswered:
         self.requests.append(request)
         self.entered.set()
         await self._wait_for_gate()
@@ -87,10 +94,11 @@ class ScriptedOwner:
 
 
 class ScriptedCalls:
-    """A fake of the ``ToolCalls`` port: records calls, can gate, and records a cancellation."""
+    """A fake of the ``ToolCalls`` port: records calls and cancels, can gate, and be cancelled."""
 
-    def __init__(self, replies: Sequence[Reply] = (), *, gated: bool = False) -> None:
+    def __init__(self, replies: Sequence[Reply | Unanswered] = (), *, gated: bool = False) -> None:
         self.calls: list[tuple[RequestId, CallToolParams]] = []
+        self.cancelled_ids: list[RequestId] = []
         self.entered = asyncio.Event()
         self.cancelled = False
         self.unoffered_count = 0
@@ -102,7 +110,7 @@ class ScriptedCalls:
     def release(self) -> None:
         self._gate.set()
 
-    async def call(self, request_id: RequestId, params: CallToolParams) -> Reply:
+    async def call(self, request_id: RequestId, params: CallToolParams) -> Reply | Unanswered:
         self.calls.append((request_id, params))
         self.entered.set()
         try:
@@ -111,6 +119,9 @@ class ScriptedCalls:
             self.cancelled = True
             raise
         return self._replies.pop(0) if self._replies else clean_reply(request_id)
+
+    def cancel(self, request_id: RequestId) -> None:
+        self.cancelled_ids.append(request_id)
 
     def unoffered(self) -> None:
         self.unoffered_count += 1
@@ -408,6 +419,28 @@ def record_task_names() -> list[str]:
 
     asyncio.get_running_loop().set_task_factory(factory)
     return names
+
+
+def count_retrievals() -> Counter[str]:
+    """Counts ``result()`` and ``exception()`` calls per name of every task created from now on."""
+    retrievals: Counter[str] = Counter()
+
+    class CountingTask(asyncio.Task):
+        def result(self) -> object:
+            retrievals[self.get_name()] += 1
+            return super().result()
+
+        def exception(self) -> BaseException | None:
+            retrievals[self.get_name()] += 1
+            return super().exception()
+
+    def factory(
+        loop: asyncio.AbstractEventLoop, coro: object, **kwargs: contextvars.Context
+    ) -> asyncio.Task:
+        return CountingTask(coro, loop=loop, **kwargs)
+
+    asyncio.get_running_loop().set_task_factory(factory)
+    return retrievals
 
 
 def relay_tasks(run_id: str = RUN_ID) -> list[str]:

@@ -281,6 +281,10 @@ class InitializeParams(_Tolerant):
     protocol_version: UnicodeText
 
 
+class CancelledParams(_Tolerant):
+    request_id: RequestId
+
+
 class _ServerInfo(_Model):
     name: str = _SERVER_NAME
     version: str = _SERVER_VERSION

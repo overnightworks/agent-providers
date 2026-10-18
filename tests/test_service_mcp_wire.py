@@ -44,6 +44,7 @@ from agent_service.mcp_wire import (
     require_json_answer,
     require_session_id,
     require_supported_version,
+    tool_result_response,
     tools_list_response,
 )
 
@@ -469,6 +470,27 @@ def test_an_error_response_writes_a_closed_message_and_echoes_only_the_id(
     request_id: int | str, code: JsonRpcErrorCode, expected: dict[str, Any]
 ) -> None:
     assert encode_message(error_response(request_id, code)) == json.dumps(expected).encode()
+
+
+@pytest.mark.parametrize("outcome", [ToolOutcome("a\nb", True), ToolOutcome("ok", False)])
+def test_a_tool_result_response_is_written_by_alias_and_reads_back_to_the_same_outcome(
+    outcome: ToolOutcome,
+) -> None:
+    written = encode_message(tool_result_response(5, outcome))
+
+    assert written == body_of(
+        {
+            "jsonrpc": "2.0",
+            "id": 5,
+            "result": {
+                "content": [{"type": "text", "text": outcome.content}],
+                "isError": outcome.is_error,
+            },
+        }
+    )
+    parsed = parse_message(written)
+    assert isinstance(parsed, JsonRpcResponse)
+    assert read_tool_outcome(parsed.result) == outcome
 
 
 def test_a_tools_list_response_writes_kept_definitions_by_alias_without_a_null_description() -> (

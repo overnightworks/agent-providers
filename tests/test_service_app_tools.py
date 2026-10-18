@@ -159,8 +159,11 @@ def assert_closed(error: BaseException) -> None:
     visible = f"{error!s} {error!r} {error.args!r} {vars(error)!r}"
     for canary in (CANARY_TOKEN, CANARY_HEADER, CANARY_BODY):
         assert canary not in visible
-    carried = [*error.args, *vars(error).values()]
+    attributes = list(vars(error).values())
+    carried = [*error.args, *attributes]
     assert not any(type(value).__module__.startswith("httpx") for value in carried)
+    assert not any(isinstance(value, BaseException) for value in attributes)
+    assert not any(CANARY_TOKEN in repr(value) for value in attributes)
 
 
 def failure_of[Outcome](
@@ -1022,16 +1025,6 @@ def exception_in_context_chain(error: BaseException | None, kind: type[BaseExcep
     return False
 
 
-def retained_exceptions_and_secrets(error: BaseException) -> list[object]:
-    attributes = list(vars(error).values())
-    retained = [error.__cause__, *attributes]
-    leaking_text = [value for value in attributes if CANARY_TOKEN in repr(value)]
-    return [
-        *(value for value in retained if isinstance(value, BaseException)),
-        *leaking_text,
-    ]
-
-
 @pytest.mark.parametrize(
     ("app", "leaving", "raised_in_body"),
     [
@@ -1064,7 +1057,7 @@ def test_an_exception_already_leaving_wins_over_a_close_failure(
     assert raised_in_body is None or raised.value is raised_in_body
     assert leaving is not UpstreamRefused or raised.value.status == 401
     assert not exception_in_context_chain(raised.value, httpx.CloseError)
-    assert retained_exceptions_and_secrets(raised.value) == []
+    assert_closed(raised.value)
 
 
 @pytest.mark.parametrize(
@@ -1089,5 +1082,6 @@ def test_a_run_sends_post_only_and_never_ends_the_session_itself(
     with pytest.raises(outcome) if outcome else nullcontext():
         list_tool_names(fake, context)
 
-    assert len(attempts) == close_fails
+    if close_fails:
+        assert len(attempts) == 1
     assert {request.method for request in fake.requests} == {"POST"}

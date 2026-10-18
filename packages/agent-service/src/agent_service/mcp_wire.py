@@ -373,3 +373,10 @@ def read_tool_outcome(result: Mapping[str, Any]) -> ToolOutcome:
         return ToolOutcome(NON_TEXT_BLOCK_MESSAGE, is_error=True)
     texts = (block.text for block in called.content if isinstance(block, _TextBlock))
     return ToolOutcome(_TEXT_BLOCK_SEPARATOR.join(texts), called.is_error)
+
+
+def tool_result_response(request_id: RequestId, outcome: ToolOutcome) -> JsonRpcResponse:
+    written = _CallToolResult.model_validate(
+        {"content": [{"type": "text", "text": outcome.content}], "isError": outcome.is_error}
+    )
+    return JsonRpcResponse(id=request_id, result=written.model_dump(mode="json", by_alias=True))

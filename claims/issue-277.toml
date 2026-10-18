@@ -1,0 +1,8 @@
+claim_id = "359f8e2601af49b2ba9816ab83221aca"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "37a9a9af0ef9224350b4d959b215f3febc23a109"
+branch = "claude/issue-277-3b1-the-bounded-runner-confirms-its-grou"
+scope = ["README.md", "src/agent_providers/claude/provider.py", "src/agent_providers/constants.py", "src/agent_providers/lost_groups.py", "src/agent_providers/process.py", "src/agent_providers/spawn.py", "tests/descendant_support.py", "tests/provider_test_support.py", "tests/test_blocking_anchored_child.py", "tests/test_bounded_runner_containment.py", "tests/test_claude_provider.py", "tests/test_codex_cli_adapter.py", "tests/test_grok_cli_adapter.py", "tests/test_process.py", "tests/test_procfs.py", "tests/test_spawn_owner.py"]
+opened_commit = "d9da6151ea3b796df9f07246a3b2051d161c94ae"
+whole_reason = "The blocking anchored door has one production caller, the bounded runner; once the runner holds an anchored handle its reap, background retry, settle margins and every test that fakes its handle must change with it, and landing the door alone would ship unused production code."

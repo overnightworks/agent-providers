@@ -10,7 +10,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from provider_test_support import a_credential_destination_that_fails, override_provider_runtime
+from provider_test_support import (
+    a_credential_destination_that_fails,
+    install_claude_cli_children,
+    override_provider_runtime,
+)
 
 from agent_providers.claude import adapter as claude_adapter
 from agent_providers.claude import provider as claude_provider
@@ -80,11 +84,7 @@ def test_claude_adapter_refuses_an_empty_model_before_any_child_or_client_exists
     monkeypatch.setattr(
         claude_provider, "run_capturing", lambda *_a, **_k: pytest.fail("no child may start"),
     )
-    monkeypatch.setattr(
-        claude_provider,
-        "_spawn_reserved_async_cli_process",
-        lambda *_a, **_k: pytest.fail("no child may start"),
-    )
+    install_claude_cli_children(monkeypatch)
 
     async def drive() -> None:
         if entry_point == "call_claude_once":

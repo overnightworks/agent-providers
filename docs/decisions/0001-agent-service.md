@@ -1842,6 +1842,480 @@ g0a.report("A1", "ACP initialize and session/new over agent stdio", r)
 ```
 
 
+### A1b measured: codex 0.163.0
+
+Measured on 18.10.2026 on the installed `codex`, whose native executable prints
+`codex-cli 0.163.0` (V1). No cell used a login, a token, an auth file or a model
+turn; the probe never ran `login` or `logout`, never opened any auth file, and
+each cell's home started empty, and every `codex` run inside the harness used a
+scratch `CODEX_HOME`. One possible run of the shim in the ordinary environment is
+unrecorded (see the V1 caveat); the probe itself never opened `~/.codex`. Operator ruling 18.10.2026: C0a uses no login.
+
+#### A1b-C0a the Codex CLI without a login (flags, stream, MCP client, files, egress)
+
+**V1 the binary.** `codex` on the path is a symlink to a Node script
+(`@openai/codex/bin/codex.js`) that starts a static musl executable from the
+optional package `@openai/codex-linux-x64`, with a sibling `codex-code-mode-host`.
+The pin, read-only commands run on 18.10.2026 after the series (paths shortened;
+`<shim>` is the resolved `codex.js`, `<native>` the musl executable):
+
+```text
+$ readlink -f "$(command -v codex)"
+<node-lib>/@openai/codex/bin/codex.js
+$ stat -c %s <shim> <native>
+8790
+296865480
+$ sha256sum <shim> <native>      (first 12 hex digits)
+61b0194f3bb6  <shim>
+399ff69c431c  <native>
+```
+
+The series itself recorded only the native executable, by `os.path.getsize` and
+`sha256sum` in cell V1 of both passes (296,865,480 bytes, sha256 prefix
+`399ff69c431c`, equal before and after); the shim size and hash have no
+in-series record, only the command above, run once after the series. The
+harness resolved the shim with `command -v codex` and executed neither it nor
+`codex.js`: every cell ran the native executable directly, bound read-only as
+`/opt/codex`, so the sibling host was not bound. `codex --version` as run by
+the harness (native executable, in the sandbox) prints one line, exit 0:
+
+```text
+codex-cli 0.163.0
+```
+
+It is not recorded whether the first version line came from a run of the shim in
+the ordinary environment; such a run would create `tmp/arg0-linux/` under the
+real `CODEX_HOME` (F1); that it reads no auth file is inferred from what
+`--version` does, not observed. Outside the sandbox the harness ran
+only `command -v codex`, `sha256sum` and `os.path.getsize` on the native
+executable, `find`, `rm -rf` and `pgrep` in scratch, and `python3` with the
+scripts below; every `codex` process ran inside `bwrap`, with `HOME` and
+`CODEX_HOME` in scratch. The earlier logs `all1.log`, `all2.log` and `v2.log`
+are development runs of the same scripts; whether they held
+`/tmp/probe-stack.lock` or passed the load check is not recorded (the `flock` is in
+`both.sh`, which postdates those logs, and the logs show no lock or load line; one `B1` run died on a harness
+`AttributeError`, fixed before the series); the evidence below is the two passes
+of the locked series.
+
+The regex `^codex-cli (\d+\.\d+\.\d+)$` parses it. `codex version` is not a
+subcommand: the word is taken as the prompt of the interactive mode, which prints
+`Error: stdin is not a terminal` and exits 1.
+
+**Harness (every cell).** Each run is the native executable under `bwrap` with
+`--die-with-parent` (and no `--unshare-pid`), the system directories bound
+read-only, a throwaway home and an empty working directory in scratch (fresh per
+cell: `run.sh` deletes the cell's directory, calls within a cell share it), the
+network unshared (cells E1 share it, E1-dns also binds the resolver stub) and
+exactly this environment: `PATH`, `HOME`, `CODEX_HOME`, `TMPDIR` and
+`FAKE_MCP_SECRET` in every cell (a random value made per harness process, never
+on argv; only M1 passes it on to a server and a `-c` switch). The driver runs inside the
+sandbox, writes the prompt `hello` to stdin, closes stdin, waits at most `WAIT`
+seconds (30 unless a cell says 8 or 15) and kills the process group; the outer
+harness kills its own group 15 s later. After each cell `run.sh` counts
+`pgrep -fc` matches of the `drive.py` path (0 each time); that check does not see a
+leftover `codex` process, and the sandbox has no PID namespace of its own. One
+locked series (`/tmp/probe-stack.lock`, via `both.sh` below) ran all cells, once
+fresh and once repeated, with the load average checked per cell by `run.sh`
+(limit 18). `BASE` is the argv of the issue:
+`exec --json --sandbox read-only --skip-git-repo-check --ignore-user-config
+--ignore-rules --ephemeral` plus the `-c` switches listed in cell T1, with the
+prompt `-` (stdin). Every line of the `ev/` evidence passed `write_record`, which drops
+any line holding the random bearer string or one of its 12-character windows; the
+`strace` files in `raw/` (B1, E1) are written by `strace` itself and were not
+passed through it.
+The scripts, verbatim (scratch only, the repository gains none):
+
+`drive.py`, run inside the sandbox (the fake MCP server is part of it, on an
+ephemeral `127.0.0.1` port; it logs header names, whether `Authorization` equals
+the expected bearer, and the JSON body):
+
+```python
+import os, sys, json, time, signal, secrets, subprocess, threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+wait = float(sys.argv[1]); stdin_text = sys.argv[2]; serve_log = sys.argv[3]; cmd = sys.argv[sys.argv.index('--') + 1:]
+SECRET = os.environ.get('FAKE_MCP_SECRET', ''); T0 = time.monotonic(); lock = threading.Lock()
+def log(rec):
+    with lock, open(serve_log, 'a') as f: f.write(json.dumps(rec) + '\n')
+class H(BaseHTTPRequestHandler):
+    protocol_version = 'HTTP/1.1'
+    def log_message(self, *a): pass
+    def _record(self, body):
+        names = [k for k, _ in self.headers.items()]
+        auth = self.headers.get('Authorization')
+        log({'t': round(time.monotonic() - T0, 3), 'method': self.command, 'path': self.path, 'header_names': names,
+             'authorization_matches': None if auth is None else auth == 'Bearer ' + SECRET,
+             'accept': self.headers.get('Accept'), 'content_type': self.headers.get('Content-Type'),
+             'protocol_header': self.headers.get('MCP-Protocol-Version'), 'body': body})
+    def _send(self, code, obj=None):
+        data = b'' if obj is None else json.dumps(obj).encode()
+        self.send_response(code)
+        if obj is not None: self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(data))); self.end_headers(); self.wfile.write(data)
+    def do_POST(self):
+        raw = self.rfile.read(int(self.headers.get('Content-Length', 0)) or 0).decode()
+        try: body = json.loads(raw)
+        except Exception: body = raw
+        self._record(body)
+        if not isinstance(body, dict) or 'id' not in body: return self._send(202)
+        m = body.get('method')
+        if m == 'initialize': res = {'protocolVersion': body['params']['protocolVersion'], 'capabilities': {'tools': {}}, 'serverInfo': {'name': 'fake-mcp', 'version': '0'}}
+        elif m == 'tools/list': res = {'tools': [{'name': 'echo', 'description': 'echo', 'inputSchema': {'type': 'object', 'properties': {}}}]}
+        else: return self._send(200, {'jsonrpc': '2.0', 'id': body['id'], 'error': {'code': -32601, 'message': 'method not found'}})
+        self._send(200, {'jsonrpc': '2.0', 'id': body['id'], 'result': res})
+    def do_GET(self): self._record(None); self._send(405)
+port = '0'
+if serve_log != '-':
+    server = ThreadingHTTPServer(('127.0.0.1', 0), H); port = str(server.server_address[1])
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+cmd = [a.replace('{PORT}', port) for a in cmd]
+p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+def pump(stream, tag):
+    for line in stream: print(f'{time.monotonic() - T0:8.3f} {tag} {line.rstrip()[:4000]}', flush=True)
+th = [threading.Thread(target=pump, args=(p.stdout, 'out')), threading.Thread(target=pump, args=(p.stderr, 'err'))]
+[t.start() for t in th]
+if stdin_text: p.stdin.write(stdin_text + '\n')
+p.stdin.close()
+try: p.wait(timeout=wait)
+except subprocess.TimeoutExpired:
+    print(f'{time.monotonic() - T0:8.3f} --- deadline; killing process group', flush=True)
+    os.killpg(p.pid, signal.SIGKILL); p.wait()
+[t.join(timeout=2) for t in th]
+print(f'{time.monotonic() - T0:8.3f} --- exit {p.returncode}')
+```
+
+`harness.py`, the outer side (`BASE`, the sandbox command line, `write_record`):
+
+```python
+import os, sys, re, json, time, secrets, signal, subprocess, pathlib
+S = pathlib.Path(os.environ['C0A']); NATIVE = os.environ['CODEX_NATIVE']
+BEARER = secrets.token_urlsafe(24); WINDOW = 12
+WINDOWS = [BEARER[i:i + WINDOW] for i in range(len(BEARER) - WINDOW + 1)]
+FEATURES = ['shell_tool', 'unified_exec', 'browser_use', 'computer_use', 'multi_agent', 'image_generation', 'plugins', 'hooks', 'code_mode_host', 'code_mode', 'code_mode_only']
+BASE_HEAD = ['exec', '--json', '--sandbox', 'read-only', '--skip-git-repo-check', '--ignore-user-config', '--ignore-rules', '--ephemeral']
+BASE_CONFIG = [('approval_policy="never"',), ('mcp_servers={}',)] + [(f'features.{f}=false',) for f in FEATURES[:6]] + [('web_search="disabled"',)] + [(f'features.{f}=false',) for f in FEATURES[6:]]
+class Argv(list):
+    label = None
+def base(extra_config=(), strict=False, drop=()):
+    a = Argv(BASE_HEAD + (['--strict-config'] if strict else []))
+    for (c,) in BASE_CONFIG:
+        if c.split('=')[0] not in drop: a += ['-c', c]
+    for c in extra_config: a += ['-c', c]
+    a.label = 'BASE' + (' --strict-config' if strict else '') + ''.join(f' -{d}' for d in drop) + ''.join(f' -c {e}' for e in extra_config)
+    a.append('-')
+    return a
+
+def write_record(path, kind, text):
+    kept = []
+    for line in str(text).splitlines():
+        if BEARER in line or any(w in line for w in WINDOWS): continue
+        kept.append(f'{kind}: {line}')
+    with open(path, 'a') as f: f.write('\n'.join(kept) + ('\n' if kept else ''))
+def sandbox(cell, args, share_net=False, stdin_text='', serve=False, wrapper=(), wait=30, cap_drop=False, resolver=False):
+    run = S / 'run' / cell; (run / 'home' / 'tmp').mkdir(parents=True, exist_ok=True); (run / 'work').mkdir(exist_ok=True)
+    home = run / 'home'
+    env = {'PATH': '/usr/bin:/bin', 'HOME': str(home), 'CODEX_HOME': str(home / '.codex'), 'TMPDIR': str(home / 'tmp'), 'FAKE_MCP_SECRET': BEARER}
+    (home / '.codex').mkdir(exist_ok=True)
+    srvlog = str(run / 'server.jsonl') if serve else '-'
+    bw = ['bwrap', '--ro-bind', '/usr', '/usr', '--symlink', 'usr/bin', '/bin', '--symlink', 'usr/lib', '/lib', '--symlink', 'usr/lib64', '/lib64',
+          '--ro-bind', '/etc', '/etc', '--tmpfs', '/home', '--ro-bind', NATIVE, '/opt/codex', '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp',
+          '--bind', str(S), str(S), *(['--ro-bind', '/run/systemd/resolve', '/run/systemd/resolve'] if resolver else []), '--share-net' if share_net else '--unshare-net', '--die-with-parent', *(['--cap-drop', 'ALL'] if cap_drop else []), '--chdir', str(run / 'work'),
+          'python3', '-I', str(S / 'bin' / 'drive.py'), str(wait), stdin_text, srvlog, '--', *wrapper, '/opt/codex', *args]
+    t0 = time.monotonic()
+    p = subprocess.Popen(bw, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True)
+    try: out, _ = p.communicate(timeout=wait + 15)
+    except subprocess.TimeoutExpired:
+        os.killpg(p.pid, signal.SIGKILL); out, _ = p.communicate(); out += '\n--- outer deadline kill'
+    ev = S / 'ev' / f'{cell}.txt'
+    write_record(ev, 'cmd', 'codex ' + (getattr(args, 'label', None) or ' '.join(args)).replace(str(S), '<scratch>') + (' [cap-drop ALL]' if cap_drop else '') + (' [net shared]' if share_net else '') + (' [resolver bound]' if resolver else ''))
+    write_record(ev, 'out', out.replace(str(S), '<scratch>'))
+    if serve and os.path.exists(srvlog): write_record(ev, 'srv', open(srvlog).read())
+    return out
+def tree(cell):
+    home = S / 'run' / cell / 'home'
+    r = subprocess.run(['find', str(home), '-printf', '%y %s %P\n'], capture_output=True, text=True).stdout
+    return sorted(l for l in r.splitlines() if l.split(' ', 2)[-1] not in ('', 'tmp'))
+
+def tree_summary(cell):
+    import collections
+    entries = [l.split(' ', 2) for l in tree(cell)]
+    shown, skills = [], collections.Counter()
+    for kind, size, path in entries:
+        path = re.sub(r'codex-arg0\w+', 'codex-arg0*', path)
+        if path.startswith('.codex/skills/.system/'): skills[kind] += 1
+        elif path.startswith('.codex/tmp/arg0-linux/'): shown.append(f'{kind} {size} {path}')
+        else: shown.append(f'{kind} {size} {re.sub(r"[0-9a-f]{8}-[0-9a-f-]{27}", "<id>", path)}')
+    shown.append(f'under .codex/skills/.system: {skills["d"]} dirs, {skills["f"]} files')
+    return sorted(set(shown))
+```
+
+`cells.py`, one branch per cell, and `run.sh`, the per-cell wrapper (the series
+held the lock around all cells of a pass):
+
+```python
+import os, sys, json, subprocess, shlex
+sys.path.insert(0, os.path.dirname(__file__))
+from harness import *
+cell = sys.argv[1]
+if cell == 'V1':
+    for a in (['--version'], ['version']): sandbox('V1', a, wait=15)
+    shim = os.environ['CODEX_SHIM']
+    r = subprocess.run(['sha256sum', NATIVE], capture_output=True, text=True).stdout.split()[0][:12]
+    write_record(S / 'ev' / 'V1.txt', 'native', f'size={os.path.getsize(NATIVE)} sha256_12={r}')
+elif cell == 'V2':
+    sandbox('V2', ['exec', '--help'], wait=15); sandbox('V2', ['--help'], wait=15)
+    sandbox('V2', ['--invented-flag'], wait=15)
+    sandbox('V2', base(['invented_key_c0a=1'], strict=True), stdin_text='hello', wait=30)
+    sandbox('V2', base(['invented_key_c0a=1'], strict=False), stdin_text='hello', wait=8)
+    for tok in BASE_HEAD[1:]:
+        if tok.startswith('--') and tok != '--skip-git-repo-check':
+            sandbox('V2', ['exec', '--skip-git-repo-check', tok] + (['read-only'] if tok == '--sandbox' else []) + ['-'], stdin_text='hello', wait=8)
+    sandbox('V2', ['exec', '--skip-git-repo-check', '--invented-flag', '-'], stdin_text='hello', wait=8)
+    sandbox('V2', ['exec', '--skip-git-repo-check', '-'], stdin_text='hello', wait=8)
+elif cell == 'N1':
+    sandbox('N1', base(), stdin_text='hello', wait=30)
+elif cell == 'T1':
+    sandbox('T1', ['features', 'list'], wait=15)
+    for key_value in [x for (x,) in BASE_CONFIG] + ['features.invented_c0a=false']:
+        sandbox('T1', ['exec', '--json', '--skip-git-repo-check', '--ignore-user-config', '--ephemeral', '--strict-config', '-c', key_value, '-'], stdin_text='hello', wait=8)
+elif cell == 'S1':
+    (S / 'instructions.md').write_text('Answer in one word.\n')
+    for c in ('model_instructions_file="' + str(S / 'instructions.md') + '"', 'developer_instructions="x"', 'instructions="x"', 'invented_key_c0a="x"'):
+        sandbox('S1', base([c], strict=True), stdin_text='hello', wait=8)
+elif cell == 'L1':
+    sandbox('L1', ['exec', '--help'], wait=15)
+    for c in ('max_turns=1', 'agent.max_turns=1', 'model_max_turns=1', 'invented_key_c0a=1'):
+        sandbox('L1', base([c], strict=True), stdin_text='hello', wait=8)
+elif cell == 'M1':
+    sandbox('M1', ['mcp', 'add', '--help'], wait=15); sandbox('M1', ['mcp', 'list', '--json'], wait=15)
+    sandbox('M1', base(['mcp_servers.fake.url="http://127.0.0.1:{PORT}/mcp"', 'mcp_servers.fake.bearer_token_env_var="FAKE_MCP_SECRET"'], drop=['mcp_servers']), stdin_text='hello', serve=True, wait=30)
+elif cell == 'M2':
+    sandbox('M2', ['mcp', 'add', '--help'], wait=15)
+    for c in ('mcp_servers.fake.enabled_tools=["echo"]', 'mcp_servers.fake.disabled_tools=["echo"]', 'mcp_servers.fake.invented_c0a=1'):
+        sandbox('M2', base([c, 'mcp_servers.fake.url="http://127.0.0.1:1/mcp"'], strict=True, drop=['mcp_servers']), stdin_text='hello', wait=8)
+elif cell == 'F1':
+    for name, args in (('version', ['--version']), ('ephemeral', base()), ('persistent', [a for a in base() if a != '--ephemeral'])):
+        sandbox(f'F1-{name}', args, stdin_text='hello', wait=30)
+        write_record(S / 'ev' / 'F1.txt', f'tree[{name}]', '\n'.join(tree_summary(f'F1-{name}')))
+elif cell == 'B1':
+    trace = ['strace', '-f', '-qq', '-o', str(S / 'raw' / 'B1-execve.txt'), '-e', 'trace=execve,clone,clone3,unshare']
+    sandbox('B1', base(), stdin_text='hello', wrapper=trace + ['setpriv', '--no-new-privs'], cap_drop=True, wait=30)
+    trace2 = ['strace', '-f', '-qq', '-o', str(S / 'raw' / 'B1-control.txt'), '-e', 'trace=execve,clone,clone3,unshare']
+    sandbox('B1-control', ['sandbox', 'linux', '--', 'true'], wrapper=trace2 + ['setpriv', '--no-new-privs'], cap_drop=True, wait=30)
+elif cell == 'E1':
+    trace = ['strace', '-f', '-qq', '-s', '200', '-o', str(S / 'raw' / 'E1-net.txt'), '-e', 'trace=connect,sendto']
+    sandbox('E1', base(), share_net=True, stdin_text='hello', wrapper=trace, wait=30)
+    trace2 = ['strace', '-f', '-qq', '-s', '200', '-o', str(S / 'raw' / 'E1-net-dns.txt'), '-e', 'trace=connect,sendto']
+    sandbox('E1-dns', base(), share_net=True, resolver=True, stdin_text='hello', wrapper=trace2, wait=30)
+```
+
+```bash
+#!/bin/bash
+# usage: run.sh CELL ; load check, run, survivor check
+S=<scratch>
+load=$(cut -d' ' -f1 /proc/loadavg); awk -v l=$load 'BEGIN{exit !(l>18)}' && { echo "load $load too high"; exit 9; }
+export C0A=$S CODEX_NATIVE=<native-codex> CODEX_SHIM=$(command -v codex)
+rm -rf $S/run/$1* $S/ev/$1.txt $S/raw/$1-*
+timeout 600 python3 -I $S/bin/cells.py $1; rc=$?
+echo "cell $1 rc=$rc survivors=$(pgrep -fc "$S/bin/drive.py")"
+```
+
+`<native-codex>` is the package-relative path
+`<npm-global>/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex`,
+found by resolving the shim with `readlink -f "$(command -v codex)"` and reading
+the `node_modules/@openai/codex-linux-x64` layout next to it.
+
+`series.sh` (one pass over all cells) and `both.sh` (the lock wrapper that ran
+two passes), with the scratch path replaced by `<scratch>`:
+
+```bash
+#!/bin/bash
+S=<scratch>
+pass=$1
+rm -rf $S/ev $S/raw $S/run; mkdir -p $S/ev $S/raw
+for c in V1 N1 V2 T1 S1 L1 M1 M2 F1 B1 E1; do $S/bin/run.sh $c; done
+rm -rf $S/ev-$pass $S/raw-$pass; cp -r $S/ev $S/ev-$pass; cp -r $S/raw $S/raw-$pass
+echo "pass $pass done"
+```
+
+```bash
+#!/bin/bash
+S=<scratch>
+for pass in 1 2; do flock -o /tmp/probe-stack.lock $S/bin/series.sh $pass; done
+```
+
+The lock is therefore taken once per pass by `flock -o`, so no child inherits
+it; `run.sh` itself takes no lock.
+
+**V2 flags and config keys.** `codex exec --help` and `codex --help` exit 0. Each
+head flag of `BASE` (`--json`, `--sandbox read-only`, `--ignore-user-config`,
+`--ignore-rules`, `--ephemeral`, `--skip-git-repo-check`) was accepted: run alone
+with `--skip-git-repo-check` it ran until the 8 s deadline instead of exiting 1 or 2
+(with `--json` it printed `thread.started`). The control `--invented-flag` exits
+2 with `error: unexpected argument '--invented-flag' found`, at the top level and
+under `exec`. An unknown `-c` key under `--strict-config` exits 1 in 0.02 s with
+`unknown configuration field` followed by the key. Without `--strict-config` the
+same key is accepted and the stream carries two `item.completed` events whose
+`item.type` is `error` and whose message says the setting is ignored. Flags
+`exec --help` also lists and that C2 may need: `--strict-config`, `--enable` and
+`--disable FEATURE` (short for `-c features.NAME=true|false`), `-s/--sandbox`,
+`--approve-for-me`, `--dangerously-bypass-approvals-and-sandbox`,
+`--dangerously-bypass-hook-trust`, `-C/--cd`, `--add-dir`, `-p/--profile`,
+`--oss`, `--worktree`, `--thread-source`. No flag or key reached a "login
+required" error, because without a login the CLI does not stop at start-up (N1).
+
+**N1 start-up without a login.** The CLI does not refuse at start-up. With the
+network unshared (DNS cannot answer) the stream is
+
+| Order | Line | Keys |
+|---|---|---|
+| 1 | `{"type":"thread.started",...}` | `thread_id` |
+| 2 | `{"type":"item.completed",...}` | `item.id`, `item.type` = `error`, `item.message` (the notice that code mode is unavailable because `code_mode_host` is off, from `BASE`) |
+| 3 | `{"type":"turn.started"}` | none |
+| 4 and on | `{"type":"error","message":"Reconnecting... n/5 (stream disconnected before completion: failed to lookup address information: Try again)"}`, first with `n` = 2 after about 15 s | `message` |
+
+Stderr carries tracing `ERROR` lines (`failed to connect to websocket ...`) every
+5 s from the start. The run had not ended when the 30 s deadline killed it
+(exit -9 in the harness); the last counter seen was `Reconnecting... 4/5` at
+26.7 s. With a resolver and the network shared (E1-dns) it ends
+on its own after 16 s: five websocket reconnects, one `item.completed` error
+`Falling back from WebSockets to HTTPS transport`, five HTTPS reconnects, an
+`{"type":"error","message":...}` and
+`{"type":"turn.failed","error":{"message":...}}`; exit 1. Every message names
+`401 Unauthorized: Missing bearer or basic authentication in header` and the
+URL `https://api.openai.com/v1/responses` (or its `wss` twin), plus a request id.
+So the refusal is an HTTP 401 inside a started turn, not a login message: C1 must
+treat `turn.failed` with a 401 text as the "no usable login" signal, not wait for
+a start-up error. The wall time before the verdict is 16 s, mostly retries.
+
+**T1 tool switches.** `codex features list` exists (exit 0, columns name, stage,
+effective value) and lists every feature of `BASE` (`shell_tool`, `unified_exec`,
+`browser_use`, `computer_use`, `multi_agent`, `image_generation`, `plugins`,
+`hooks`, `code_mode_host` stable and on by default; `code_mode` and
+`code_mode_only` under development and off). Each `-c` switch of `BASE`
+(`approval_policy="never"`, `mcp_servers={}`, the eleven `features.*=false`,
+`web_search="disabled"`) was run alone under `--strict-config`: all 14 reached
+`thread.started`. The control `features.invented_c0a=false` under
+`--strict-config` exits 1 with `unknown configuration field`, so a renamed or
+removed feature name would be refused, not ignored. Nothing vanished or was
+renamed on 0.163.0. Whether the tools are really off is a model-turn fact:
+deferred to C0b.
+
+**S1 system text.** Under `--strict-config` the keys `model_instructions_file`
+(with a real file), `developer_instructions` and `instructions` were all accepted
+by name (`thread.started`); the invented control was refused. Whether any
+replaces or appends is deferred.
+
+**L1 turn limit.** `max_turns`, `agent.max_turns` and `model_max_turns` are each
+refused under `--strict-config` (`unknown configuration field`, exit 1; for
+`agent.max_turns` the field named is `agent`). `exec --help` and `--help` name no
+turn limit. Verdict: none found on 0.163.0 by these names; HQ6 must not rely on
+a CLI turn limit.
+
+**A1 start-up announcement.** None. Everything before the failing turn is the
+three events of N1; no event lists tools or a surface. Whether a listing appears
+after the model starts is not reachable without a login: deferred.
+
+**M1 the CLI as an MCP client.** With
+`-c mcp_servers.fake.url=http://127.0.0.1:PORT/mcp -c mcp_servers.fake.bearer_token_env_var=FAKE_MCP_SECRET`
+and the variable only in the child's environment, the CLI contacts the fake
+server without a login, at 0.48 s, at the same moment as `turn.started` and
+before any model call. Three requests, all `POST /mcp`, in this order:
+
+| # | Method | Notes |
+|---|---|---|
+| 1 | `initialize` (id 0) | `protocolVersion` `2025-06-18`; `capabilities` `{"elicitation":{"form":{},"url":{}}}`; `clientInfo` `{"name":"codex-mcp-client","title":"Codex","version":"0.163.0"}`; no `MCP-Protocol-Version` header |
+| 2 | `notifications/initialized` | `MCP-Protocol-Version: 2025-06-18` |
+| 3 | `tools/list` (id 1) | `params._meta.progressToken` 0; same header |
+
+Header names present on every request: `user-agent`, `accept`, `content-type`,
+`authorization`, `host`, `content-length` (plus `mcp-protocol-version` from request 2).
+`Accept: text/event-stream, application/json` and `Content-Type: application/json`.
+The `Authorization` value equals `Bearer` plus the random value on all three
+(compared in memory, never recorded). The CLI opened no `GET` stream. The fake server answered plain `application/json`, with a
+`202` for the notification. `codex mcp list --json` in an empty home prints `[]`
+and exits 0. `codex mcp add --help` lists `--url`, `--bearer-token-env-var`,
+`--env`, `--oauth-client-id`, `--oauth-client-secret`,
+`--oauth-client-registration`, `--oauth-resource`, `-c`, `--enable`, `--disable`;
+it has no approval option. `mcp add` itself was not run (it writes the config
+file).
+
+**M2 MCP deny and approval switches.** Config keys that exist and were accepted
+under `--strict-config`: `mcp_servers.NAME.enabled_tools` and
+`mcp_servers.NAME.disabled_tools` (control `mcp_servers.fake.invented_c0a` refused),
+`approval_policy` (T1, `approval_policy="never"` under `--strict-config`),
+`-s/--sandbox` (V2, as a flag), plus the flags `--approve-for-me` and
+`--dangerously-bypass-approvals-and-sandbox`. The config key `sandbox_mode` was
+not driven: the harness run `-c sandbox_mode="read-only"` under `--strict-config`
+(empty throwaway home, no login) waited for `/tmp/probe-stack.lock` for over an
+hour behind other probes and was withdrawn, so the verdict is "not driven (probe
+lock unavailable)"; only the flag form `--sandbox read-only` is measured. Whether
+any of them blocks an MCP tool call is a model-turn fact: deferred.
+
+**F1 files in an empty `CODEX_HOME`** (type, bytes; the random directory suffix
+shown as `*`; the harness also gives the process its `TMPDIR`):
+
+| Flag set | Created |
+|---|---|
+| `--version` | `tmp/arg0-linux/codex-arg0*/` with `.lock` (0 bytes) and three symlinks (`apply_patch`, `applypatch`, `codex-linux-sandbox`) |
+| `BASE` (with `--ephemeral`) | the same, plus `installation_id` (36 bytes), `shell_snapshots/` (one file, about 2.2 kB), `skills/.system/` (21 directories, 49 files, with a `.codex-system-skills.marker`), and the SQLite stores `goals_1`, `logs_2`, `memories_1`, `queue_1`, `state_5` (each with `-wal` and `-shm`; the databases 4 to 49 kB, the `-wal` files up to about 2 MB) |
+| `BASE` without `--ephemeral` | all of the above, plus `sessions/YYYY/MM/DD/rollout-*.jsonl` (about 38 kB, from a run that the 30 s deadline killed, not a completed turn), `thread-writer-locks/` (a coordination lock and one lock per thread), `thread_history_1.sqlite` (with `-wal` and `-shm`) |
+
+So `--ephemeral` removes the session file and the thread history only; the
+installation id, logs, state databases and the unpacked system skills still land
+in `CODEX_HOME`, which therefore must be a throwaway or per-run directory.
+
+**B1 bubblewrap or user namespaces at start-up.** `setpriv --bounding-set=-all`
+failed in the harness (`Operation not permitted`, exit 127), so the same condition was
+set from outside: `bwrap --cap-drop ALL` plus `setpriv --no-new-privs` around
+the CLI, traced with `strace -f -qq -e trace=execve,clone,clone3,unshare`. The
+`BASE` start-up shows no `execve` of `bwrap` or `unshare`, no `unshare` call and
+no `CLONE_NEW*` flag; its children are the shell-snapshot helpers
+(`lsb_release`, `getconf`, `bash`, `locale`, `awk`, `sed` and friends). The
+control `codex sandbox linux -- true` runs `codex-linux-sandbox`, which executes
+`bwrap` (three `execve`s) and clones with `CLONE_NEWUSER`, `CLONE_NEWNS`,
+`CLONE_NEWPID`, `CLONE_NEWIPC` and `CLONE_NEWNET`; `true` ran once, in bwrap's
+namespace probe. The argv `sandbox linux -- true` then reached the second bwrap
+with `CLONE_NEW*` and the re-executed `codex-linux-sandbox` tried to run
+`linux -- true` (`execve` ENOENT three times), so it exited 101
+(`Failed to execvp linux`); the requested inner `true` did not run. So bubblewrap and user namespaces are needed by the
+sandboxed command path, not by the start-up of a turn with every feature off.
+The half with a model turn is deferred to C0b.
+
+**E1 egress.** `strace -f -qq -s 200 -e trace=connect,sendto` (no read or write
+calls), no proxy variables. With the network shared but no resolver in the
+sandbox: the only name looked up is `api.openai.com` (A and AAAA queries, UDP 53),
+repeatedly; no connection follows. With the host resolver stub bound (E1-dns):
+the same name, then `connect` to two Cloudflare IPv4 and two IPv6 addresses
+(the port-65535 connects are address-selection probes) and to port 443; the only
+host is `api.openai.com:443`. No update, telemetry or other host appeared before
+the 401. The unauthenticated E1-dns request carried the prompt `hello` and Codex's
+environment context, including the scratch working path, to OpenAI. The CLI
+contacts the OpenAI API with no credential at all, so C1 and
+the network policy must assume that a CLI started without a usable login still
+calls out.
+
+**Deferred to C0b and C0c (need a login and quota).** Stream of a completed
+tool-free turn and its ending; tools really off under `BASE`; whether the three
+system-text keys replace or append; whether any turn limit ends a run (none found
+by name); MCP tool-call naming, parallel calls and whether `approval_policy`,
+`--sandbox` or `disabled_tools` block MCP calls; files a completed run writes;
+bubblewrap need in a model turn (HQ9, second half); the held reply and
+JSON-only answers of M-live; a tool listing after the model starts (A1); hosts
+of a model turn; token
+lifetime and refresh by the child; refused or expired login.
+
+**What each consumer may rely on.** C1: without a login the CLI starts a turn and
+fails with `turn.failed` carrying a 401 text after about 16 s (exit 1), after
+contacting `api.openai.com:443`. C2: `BASE` is accepted on 0.163.0 and
+`--strict-config` refuses misnamed keys, so a run spec should pass it;
+`CODEX_HOME` must be a per-run directory because even `--ephemeral` fills it.
+C3: the event lines are `thread.started`, `item.completed` (with `item.type`
+`error` for notices), `turn.started`, `error` and `turn.failed`. C5: the CLI
+connects to a configured HTTP MCP server before the first model call, with
+`initialize` at `2025-06-18`, the bearer from the named environment variable and
+no `GET` stream. Adapter-port review: no CLI turn limit exists by name. HQ9: a
+start-up with every feature off executes no `bwrap` and creates no namespace.
+
 ### A1b measured: claude 2.1.302
 
 Measured on 17.10.2026 on `$HOME/.local/share/claude/versions/2.1.302`

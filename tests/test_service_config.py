@@ -1243,8 +1243,10 @@ def test_a_loaded_config_shows_no_working_root_in_its_repr_or_str(tmp_path):
 
 
 def test_a_refused_working_root_leaves_no_validation_error_behind_to_leak_it(tmp_path):
+    config_file = _config_naming_a_marked_root(tmp_path, make_the_root=False)
+
     with pytest.raises(ConfigError) as refusal:
-        load_config(_config_naming_a_marked_root(tmp_path, make_the_root=False))
+        load_config(config_file)
 
     assert (refusal.value.__cause__, refusal.value.__context__) == (None, None)
     assert ROOT_MARKER not in str(refusal.value)

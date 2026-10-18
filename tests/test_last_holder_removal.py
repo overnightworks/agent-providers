@@ -215,18 +215,15 @@ class Race:
 
 @contextmanager
 def interleaved(paused: ThreadedOperation, other: ThreadedOperation, contended: threading.Event):
-    other_started = False
     try:
         paused.start()
         other.start(or_when=contended)
-        other_started = True
         yield
     finally:
         try:
             paused.finish()
         finally:
-            if other_started:
-                other.finish()
+            other.finish()
 
 
 def step_through(
@@ -399,4 +396,24 @@ def test_an_expired_pause_fails_the_row_after_both_threads_are_joined(
         operation.finish()
 
     assert operation.outcome == "the end"
+    assert threading.active_count() == threads_before
+
+
+class StartThatLaunchesThenHangs(ThreadedOperation):
+    def start(self, or_when: threading.Event | None = None) -> None:
+        self._thread.start()
+        raise AssertionError("the operation hung")
+
+
+def test_an_interleaving_whose_second_thread_hangs_on_start_still_joins_it() -> None:
+    threads_before = threading.active_count()
+    lines = code_of(an_operation_with_lines)
+    paused = ThreadedOperation(an_operation_with_lines, pause_in=lines, at_line=1)
+    other = StartThatLaunchesThenHangs(an_operation_with_lines, pause_in=lines, at_line=1)
+
+    with pytest.raises(AssertionError, match="the operation hung"):
+        with interleaved(paused, other, threading.Event()):
+            pass
+
+    assert (paused.outcome, other.outcome) == ("the end", "the end")
     assert threading.active_count() == threads_before

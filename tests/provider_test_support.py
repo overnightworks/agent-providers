@@ -422,8 +422,9 @@ class ThreadedOperation:
 
     def finish(self) -> None:
         self._resume.set()
-        self._thread.join(self._BOUND_SECONDS)
-        assert not self._thread.is_alive()
+        if self._thread.ident is not None:
+            self._thread.join(self._BOUND_SECONDS)
+            assert not self._thread.is_alive()
         assert not self.pause_expired, "the pause expired before the row resumed it"
 
     def _wait_for_resume(self) -> bool:

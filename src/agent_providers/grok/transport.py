@@ -33,7 +33,7 @@ from agent_providers.process import (
     CliLoginUnusableError,
     CliRunOutcome,
     PrivateCredentialHome,
-    PrivateCredentialHomeReservation,
+    PrivateHomeReservation,
     cli_settle_deadline,
     resolve_cli_binary,
     run_cli_bounded,
@@ -237,7 +237,7 @@ def _run_grok_round(
     prompt: bytes,
     deadline: float,
     channel: CliLineChannel,
-    home_reservation: PrivateCredentialHomeReservation,
+    home_reservation: PrivateHomeReservation,
 ) -> None:
     run_publishing_failures(
         channel,

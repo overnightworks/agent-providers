@@ -1337,7 +1337,7 @@ def _claude_output(binary: Path) -> str | None:
     return run.stdout
 
 
-class PrivateCredentialHome:
+class PrivateHome:
     """One disposable CLI home whose cleanup follows its child processes.
 
     Removal never decides a call's outcome. A home that cannot be removed is
@@ -1348,16 +1348,7 @@ class PrivateCredentialHome:
     are attribute stores and single operations on identity-hashed containers.
     """
 
-    def __init__(
-        self,
-        auth_file: Path,
-        relative_destination: Path,
-        *,
-        prefix: str,
-        missing_credential_is_error: bool,
-        credential_copy: CredentialCopy | None = None,
-        mode: int = _PRIVATE_HOME_COPY_MODE,
-    ) -> None:
+    def __init__(self, *, prefix: str) -> None:
         registry_key = object()
         created: str | None = None
         try:
@@ -1377,7 +1368,7 @@ class PrivateCredentialHome:
             )
             self._registry_key = registry_key
             self._home = Path(created)
-            self._reservation_tokens: set[PrivateCredentialHomeReservation] = set()
+            self._reservation_tokens: set[PrivateHomeReservation] = set()
             self._cleanup_requested = False
             self._cleaned = False
             self._removal_claim = threading.Lock()
@@ -1389,13 +1380,6 @@ class PrivateCredentialHome:
                         _CREDENTIAL_COPY_FAILED_DETAIL, cause=CliEnvironmentCause.HOME_NOT_CREATED,
                     )
                 )
-            install_credential_file(
-                auth_file,
-                self._home / relative_destination,
-                mode=mode,
-                credential_copy=credential_copy,
-                missing_credential_is_error=missing_credential_is_error,
-            )
         except BaseException:  # NOSONAR(S5754) removes the tree, re-raises
             _discard_failed_home(created, registry_key)
             raise
@@ -1404,8 +1388,8 @@ class PrivateCredentialHome:
     def path(self) -> Path:
         return self._home
 
-    def reserve(self) -> PrivateCredentialHomeReservation:
-        token = PrivateCredentialHomeReservation(self)
+    def reserve(self) -> PrivateHomeReservation:
+        token = PrivateHomeReservation(self)
         self._reservation_tokens.add(token)
         if self._cleanup_requested:
             self._reservation_tokens.discard(token)
@@ -1418,7 +1402,7 @@ class PrivateCredentialHome:
         self._cleanup_requested = True
         self._remove_if_unused()
 
-    def _release(self, token: PrivateCredentialHomeReservation) -> None:
+    def _release(self, token: PrivateHomeReservation) -> None:
         self._reservation_tokens.discard(token)
         self._remove_if_unused()
 
@@ -1436,8 +1420,33 @@ class PrivateCredentialHome:
             self._removal_claim.release()
 
 
-class PrivateCredentialHomeReservation:
-    def __init__(self, home: PrivateCredentialHome) -> None:
+class PrivateCredentialHome(PrivateHome):
+    def __init__(
+        self,
+        auth_file: Path,
+        relative_destination: Path,
+        *,
+        prefix: str,
+        missing_credential_is_error: bool,
+        credential_copy: CredentialCopy | None = None,
+        mode: int = _PRIVATE_HOME_COPY_MODE,
+    ) -> None:
+        super().__init__(prefix=prefix)
+        try:
+            install_credential_file(
+                auth_file,
+                self._home / relative_destination,
+                mode=mode,
+                credential_copy=credential_copy,
+                missing_credential_is_error=missing_credential_is_error,
+            )
+        except BaseException:  # NOSONAR(S5754) removes the tree, re-raises
+            _discard_failed_home(str(self._home), self._registry_key)
+            raise
+
+
+class PrivateHomeReservation:
+    def __init__(self, home: PrivateHome) -> None:
         self._home = home
 
     def release(self) -> None:

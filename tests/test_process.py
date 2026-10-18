@@ -2840,7 +2840,7 @@ _HOME_CODES = {
     "reserve": _RESERVE_CODE_OF_A_HOME,
     "refused reserve": _RESERVE_CODE_OF_A_HOME,
     "release": (
-        process.PrivateCredentialHomeReservation.release,
+        process.PrivateHomeReservation.release,
         PrivateCredentialHome._release,
         PrivateCredentialHome._remove_if_unused,
         process._remove_private_tree,
@@ -5606,7 +5606,7 @@ def _with_recorded_calls(callbacks: dict) -> tuple[dict, list[str]]:
 
 
 def _releasing_both(
-    token: process.PrivateCredentialHomeReservation, release_slot: Callable[[], None],
+    token: process.PrivateHomeReservation, release_slot: Callable[[], None],
 ) -> Callable[[], None]:
     def release() -> None:
         token.release()

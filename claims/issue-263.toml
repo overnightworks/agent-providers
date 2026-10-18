@@ -1,0 +1,8 @@
+claim_id = "45f45f1fddce40618b02ed035d7a6d1a"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "f0a6b84351b2f9270c034ec04dc822b88b50c2f5"
+branch = "claude/issue-263-private-home-without-credential"
+scope = ["README.md", "src/agent_providers/anchored_turn.py", "src/agent_providers/claude/provider.py", "src/agent_providers/codex/image.py", "src/agent_providers/codex/protocol.py", "src/agent_providers/codex/transport.py", "src/agent_providers/grok/transport.py", "src/agent_providers/process.py", "tests/test_codex_cli_adapter.py", "tests/test_process.py"]
+opened_commit = "686439df0bcfd8accd96870863b1d223bb5de628"
+whole_reason = "One type extraction and rename: every consumer of the reservation type must change in the same commit or the tree does not import"

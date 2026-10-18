@@ -1,7 +1,0 @@
-claim_id = "9b7ceb5b763f4681b33b9833e37f9b87"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "3d545e24e91e1a73a6b9487c96aa4f6a42a57037"
-branch = "claude/issue-250-codex-probe-no-login"
-scope = ["docs/decisions/0001-agent-service.md"]
-opened_commit = "97613dcdb649a81d1fb02de1183e78ac5e486a26"

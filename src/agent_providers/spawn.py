@@ -766,6 +766,13 @@ class _DoorPipes:
 GROUP_CENSUS_INTERVAL_SECONDS: Final = 0.1
 
 
+def _next_census_start(census: procfs.GroupCensus, ended: float, deadline: float) -> float | None:
+    if census is not procfs.GroupCensus.LIVE:
+        return None
+    next_start = ended + GROUP_CENSUS_INTERVAL_SECONDS
+    return next_start if next_start < deadline else None
+
+
 @dataclass(frozen=True)
 class KillUntilGoneResult:
     """The last count of :meth:`AnchoredChild.kill_until_gone` and whether it ended in time.
@@ -896,10 +903,8 @@ class AnchoredChild:
         while True:
             census = await asyncio.to_thread(self._leader.kill_and_census)
             ended = clock.now()
-            if census is not procfs.GroupCensus.LIVE:
-                break
-            next_start = ended + GROUP_CENSUS_INTERVAL_SECONDS
-            if next_start >= deadline:
+            next_start = _next_census_start(census, ended, deadline)
+            if next_start is None:
                 break
             await clock.wait_until(next_start)
             if clock.now() >= deadline:

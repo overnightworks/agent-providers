@@ -453,13 +453,14 @@ def test_the_model_catalog_runs_the_closed_catalog_spawn(
     tmp_path, monkeypatch,
 ) -> None:
     fake = tmp_path / "claude"
-    fake.write_text(
-        "#!/bin/sh\n"
-        "if [ -n \"${CATALOG_ENV_LEAK+x}\" ]; then exit 2; fi\n"
-        "printf '%s\\n' "
-        "'Usage: /model <name>. Available: sonnet, opus.'\n"
-    )
-    fake.chmod(0o755)
+    fake.write_bytes(b"")
+    spawned: list[spawn.ChildProcess] = []
+
+    def catalog_door(child, **_kw):
+        spawned.append(child)
+        return fake_cli_process(b"Usage: /model <name>. Available: sonnet, opus.\n")
+
+    install_cli_door(monkeypatch, catalog_door)
     monkeypatch.setenv("CATALOG_ENV_LEAK", "should-not-appear")
     with patch(
         "agent_providers.claude.provider._find_claude_binary",
@@ -468,6 +469,7 @@ def test_the_model_catalog_runs_the_closed_catalog_spawn(
         catalog = cli_model_catalog()
 
     assert catalog.aliases == ("sonnet", "opus")
+    assert "CATALOG_ENV_LEAK" not in spawned[0].environment
 
 
 # ── _call_api ───────────────────────────────────────────────────────
@@ -1447,6 +1449,7 @@ def _claude_catalog_probe(fails: bool, monkeypatch: pytest.MonkeyPatch) -> objec
             raise RuntimeError("catalog probe broke")
 
         monkeypatch.setattr(process, "run_catalog_cli", broken_probe)
+    install_cli_door(monkeypatch, lambda *_cmd, **_kw: fake_cli_process(b"ok\n"))
     run = process.run_claude_catalog_cli(Path(sys.executable), ("-c", "print('ok')"))
     assert run is not None
     return run.stdout.strip()
@@ -2239,22 +2242,30 @@ def test_tool_surface_gate_refuses_any_tool_when_no_mcp_server_is_configured(
     assert provider.claude_cli_tool_surface_health() == "drift"
 
 
+def test_the_follower_waits_the_runners_settle_margin_and_its_own_margin_past_the_probe_timeout(
+) -> None:
+    margin = provider._cleanup_margin_seconds()
+
+    assert margin == process.cli_settle_margin_seconds() + provider._FOLLOWER_WAIT_MARGIN_SECONDS
+    assert margin == pytest.approx(13.1)
+    assert provider._follower_wait_budget_seconds(15.0) == 15.0 + margin
+
+
+def _signals_sent(child) -> list[signal.Signals]:
+    return [operation[1] for operation in child.operations if operation[0] == "signal_group"]
+
+
 def test_tool_surface_probe_stops_the_session_it_started(
     claude_binary,
     monkeypatch,
 ) -> None:
-    killed: list[int] = []
-
-    def fake_popen(*_cmd, **_kw):
-        return fake_cli_process(_init_line(_ALL_SAMPLE_TOOLS), still_running=True)
-
-    install_cli_door(monkeypatch, fake_popen)
-    monkeypatch.setattr(provider.os, "killpg", lambda pid, _sig: killed.append(pid))
-    monkeypatch.setattr(provider.process, "_process_group_exists", lambda _pid: False)
+    child = fake_cli_process(_init_line(_ALL_SAMPLE_TOOLS), still_running=True)
+    install_cli_door(monkeypatch, lambda *_cmd, **_kw: child)
 
     asyncio.run(verify_cli_tool_surface())
 
-    assert killed == [4343]
+    assert _signals_sent(child) == [signal.SIGTERM]
+    assert child.released
 
 
 # ── the shared process pool ────────────────────────────────────────
@@ -2846,7 +2857,7 @@ def test_zombie_probe_keeps_its_pool_slot_until_the_runner_confirms_reap(
     def await_background_reap(process, callback) -> None:
         background_started.set()
         assert allow_background_reap.wait(timeout=1)
-        process.poll()
+        process.release()
         provider.process._notify_reaped(callback, process.pid, became_zombie=True)
         background_finished.set()
 
@@ -2887,7 +2898,9 @@ def test_tool_surface_a_clean_read_followed_by_a_zombie_gets_the_zombie_ttl(
     # it already made, not the original exception's exact type).
     clock["now"] += provider.CLAUDE_CLI_TOOL_SURFACE_FAILURE_CACHE_SECONDS + 1
     cached_probe = verify_cli_tool_surface()
-    with pytest.raises(UnavailableError, match="outlived SIGKILL"):
+    with pytest.raises(
+        UnavailableError, match="was not confirmed gone after SIGKILL",
+    ):
         _run_with_clock(cached_probe, clock)
     assert len(commands) == 1
 
@@ -2951,7 +2964,6 @@ def test_tool_surface_probe_normalizes_a_broken_pipe_during_write(
     def fake_popen(*_cmd, **_kw):
         proc = fake_cli_process(None)
         proc.pid = 9090
-        proc.poll.return_value = 0
         proc._stdin_reader.close()
         return proc
 
@@ -3693,6 +3705,7 @@ def test_a_probe_whose_cleanup_overruns_fails_at_the_settle_instant_not_the_asyn
     watch = RunnerFailureWatch(monkeypatch, caplog, capfd)
     set_claude_process_limit(monkeypatch, 1)
     monkeypatch.setattr(process, "CLI_TERMINATION_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr(process, "CLI_GROUP_CONFIRMATION_SECONDS", 0.2)
     monkeypatch.setattr(process, "CLI_PROBE_CALLER_TIMEOUT_MARGIN_SECONDS", 0.01)
     release_cleanup = threading.Event()
     slot_released = threading.Event()
@@ -4775,18 +4788,13 @@ def test_no_builtin_gate_sync_twin_kills_a_still_running_probe(
     claude_binary,
     monkeypatch,
 ) -> None:
-    killed: list[int] = []
-
-    def fake_popen(_cmd, **_kw):
-        return fake_cli_process(_init_line([]), still_running=True)
-
-    install_cli_door(monkeypatch, fake_popen)
-    monkeypatch.setattr(provider.os, "killpg", lambda pid, _sig: killed.append(pid))
-    monkeypatch.setattr(provider.process, "_process_group_exists", lambda _pid: False)
+    child = fake_cli_process(_init_line([]), still_running=True)
+    install_cli_door(monkeypatch, lambda *_cmd, **_kw: child)
 
     verify_no_builtin_cli_tools()
 
-    assert killed == [4343]
+    assert _signals_sent(child) == [signal.SIGTERM]
+    assert child.released
 
 
 def test_no_builtin_gate_sync_single_flight_waits_for_the_real_result_not_a_placeholder(

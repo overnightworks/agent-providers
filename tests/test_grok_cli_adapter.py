@@ -465,6 +465,7 @@ def test_a_tool_consumer_ends_at_the_settle_instant(monkeypatch, caplog, capfd) 
     watch = RunnerFailureWatch(monkeypatch, caplog, capfd)
     tiny = 0.01
     monkeypatch.setattr(process, "CLI_TERMINATION_GRACE_SECONDS", tiny)
+    monkeypatch.setattr(process, "CLI_GROUP_CONFIRMATION_SECONDS", 0.2)
     monkeypatch.setattr(process, "CLI_PROBE_CALLER_TIMEOUT_MARGIN_SECONDS", tiny)
     monkeypatch.setattr(grok_cli_adapter, "TURN_TIMEOUT_SECONDS", 1.0)
     override_grok_runtime(binary="/bin/true")

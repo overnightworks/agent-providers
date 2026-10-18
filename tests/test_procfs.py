@@ -6,7 +6,6 @@ import dataclasses
 import os
 import select
 import signal
-import subprocess
 import sys
 import time
 from collections.abc import Callable, Iterator
@@ -28,7 +27,12 @@ from agent_providers.procfs import (
     holds_mount_point,
     parse_stat,
 )
-from agent_providers.spawn import ChildProcess, closed_environment, open_pipes
+from agent_providers.spawn import (
+    BlockingAnchoredChild,
+    ChildProcess,
+    closed_environment,
+    open_blocking_anchored_pipes,
+)
 
 OBSERVATION_DEADLINE_SECONDS = 10.0
 CLEANUP_ALLOWANCE_SECONDS = 10.0
@@ -456,27 +460,19 @@ class ChildNotReapedError(Exception):
 
 
 def reap_group(
-    process: subprocess.Popen[bytes],
+    process: BlockingAnchoredChild,
     *,
     clock: Callable[[], float] = time.monotonic,
 ) -> None:
     cleanup_deadline = clock() + CLEANUP_ALLOWANCE_SECONDS
     try:
         if process.returncode is None:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            process.signal_group(signal.SIGKILL)
     finally:
-        try:
-            for pipe in (process.stdin, process.stdout):
-                if pipe is not None:
-                    pipe.close()
-        finally:
-            try:
-                process.wait(timeout=max(cleanup_deadline - clock(), 0))
-            except subprocess.TimeoutExpired as expired:
-                raise ChildNotReapedError(f"child {process.pid} outlived its cleanup") from expired
+        process.close_streams()
+    if not process.wait_for_exit(max(cleanup_deadline - clock(), 0)):
+        raise ChildNotReapedError(f"child {process.pid} outlived its cleanup")
+    process.release()
 
 
 class SteppingClock:
@@ -580,15 +576,19 @@ class ScriptedWait:
         self.expires = expires
         self.timeouts: list[float] = []
 
-    def __call__(self, *, timeout: float) -> int:
+    def __call__(self, timeout: float) -> bool:
         self.timeouts.append(timeout)
-        if self.expires:
-            raise subprocess.TimeoutExpired("child", timeout)
-        return 0
+        return not self.expires
 
 
-def finished_process(wait: ScriptedWait) -> subprocess.Popen[bytes]:
-    return SimpleNamespace(pid=7, returncode=0, stdin=None, stdout=None, wait=wait)
+def finished_process(wait: ScriptedWait) -> BlockingAnchoredChild:
+    return SimpleNamespace(
+        pid=7,
+        returncode=0,
+        close_streams=lambda: None,
+        wait_for_exit=wait,
+        release=lambda: None,
+    )
 
 
 def test_cleanup_waits_only_for_the_allowance_left_since_its_own_start():
@@ -617,7 +617,7 @@ def test_cleanup_fails_loudly_when_the_child_outlives_the_allowance():
 
 @dataclasses.dataclass(frozen=True)
 class RunningChild:
-    process: subprocess.Popen[bytes]
+    process: BlockingAnchoredChild
     observation_deadline: float
 
     @property
@@ -639,7 +639,7 @@ def start_child(tmp_path: Path) -> Iterator[Callable[[str], RunningChild]]:
                 environment=closed_environment(tmp_path),
                 working_directory=tmp_path,
             )
-            process = open_pipes(description, stderr="devnull")
+            process = open_blocking_anchored_pipes(description, stderr="devnull")
             cleanup.callback(reap_group, process)
             return RunningChild(process, time.monotonic() + OBSERVATION_DEADLINE_SECONDS)
 
@@ -660,7 +660,8 @@ def wait_until_a_zombie(child: RunningChild) -> None:
 
 def wait_until_reaped(child: RunningChild) -> None:
     child.process.stdin.close()
-    child.process.wait(timeout=child.remaining_observation_time())
+    assert child.process.wait_for_exit(child.remaining_observation_time())
+    child.process.release()
 
 
 def keep_running(child: RunningChild) -> None:

@@ -65,7 +65,7 @@ from agent_providers.process import (
     CliLoginUnusableError,
     CliRunOutcome,
     CliRunReason,
-    PrivateCredentialHomeReservation,
+    PrivateHomeReservation,
     cli_settle_deadline,
     resolve_cli_binary,
 )
@@ -295,7 +295,7 @@ def _run_codex_image_cli(
 def _start_codex_image_runner(
     *,
     reservation: CodexProcessReservation,
-    home_reservation: PrivateCredentialHomeReservation,
+    home_reservation: PrivateHomeReservation,
     child: ChildProcess,
     stdin_payload: bytes,
     deadline: float,

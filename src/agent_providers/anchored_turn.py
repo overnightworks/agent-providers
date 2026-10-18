@@ -47,7 +47,7 @@ class CliProcessReservation:
     """One pool slot, and the home reservation that is released with it."""
 
     pool: CliProcessPool
-    home_reservation: process.PrivateCredentialHomeReservation | None = None
+    home_reservation: process.PrivateHomeReservation | None = None
 
 
 class CliProcessPool:
@@ -71,7 +71,7 @@ class CliProcessPool:
 
     def reserve(
         self,
-        home_reservation: process.PrivateCredentialHomeReservation | None = None,
+        home_reservation: process.PrivateHomeReservation | None = None,
     ) -> CliProcessReservation | None:
         """Reserve one slot before spawning, or ``None`` when the pool is full."""
         reservation = CliProcessReservation(pool=self, home_reservation=home_reservation)
@@ -167,7 +167,7 @@ async def anchored_turn_child(
     pool: CliProcessPool,
     child: ChildProcess,
     *,
-    home_reservation: process.PrivateCredentialHomeReservation,
+    home_reservation: process.PrivateHomeReservation,
     stream_buffer_limit: int | None = None,
 ) -> AsyncIterator[AnchoredChild]:
     """Run one async turn's child on an anchor that holds a pool slot.

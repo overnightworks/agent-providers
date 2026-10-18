@@ -290,11 +290,12 @@ A host migrates at its pin bump to 0.4.0; the configuration model refuses
 unknown fields, so a host that still sets a removed name fails at startup and
 the error names the field.
 
-| Before (`ProviderRuntimeConfig`) | Now |
+| Before | Now |
 |---|---|
 | `claude_cli_binary` | `claude.binary` |
 | `claude_cli_binary_search_globs` | `claude.binary_search_globs` |
 | `claude_cli_auth_file` | `claude.token_file`, still the credentials file until the setup-token contract lands |
+| `process.PrivateCredentialHomeReservation` | `process.PrivateHomeReservation`, the reservation of the base `PrivateHome`; no alias remains |
 
 ## Migrating to 0.3.0
 

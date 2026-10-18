@@ -1,0 +1,7 @@
+claim_id = "657027d9ad14416eb892af21f9eb08b4"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "0d6d91652fd4d101a6d582f6926c12984868d630"
+branch = "fix/lost-groups-teardown-leak"
+scope = ["tests/conftest.py", "tests/test_claude_lost_groups.py"]
+opened_commit = "e18478957b2f446fa2ea2b6aa87ff6f829c333c2"

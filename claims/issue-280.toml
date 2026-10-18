@@ -1,0 +1,8 @@
+claim_id = "2688b173af0441a9a49ba5b6a39093bf"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "7d410b818d869293ea2b82b45c9caa6f698eb4c9"
+branch = "claude/issue-280-terminal-after-stop"
+scope = ["README.md", "docs/decisions/0001-agent-service.md", "packages/agent-service/src/agent_service/run_events.py", "packages/agent-service/src/agent_service/run_liveness.py", "tests/service_support.py", "tests/test_service_containment_ending.py", "tests/test_service_run_recording.py"]
+opened_commit = "f7c67380ee1114d360f03d5610a5bd3ccb36ca1a"
+whole_reason = "The terminal's decision, stream acceptance and recording must move together for every ending path, and the loss collection is the only thing that makes the move observable; split, one half is a seam nobody uses."

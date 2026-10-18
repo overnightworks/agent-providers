@@ -194,9 +194,7 @@ def expected_resource_warnings() -> list[str]:
 
 def unclosed_resources(raised: list[warnings.WarningMessage]) -> list[str]:
     return [
-        type(warning.source).__name__
-        for warning in raised
-        if warning.category is ResourceWarning
+        type(warning.source).__name__ for warning in raised if warning.category is ResourceWarning
     ]
 
 

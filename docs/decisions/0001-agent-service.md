@@ -1147,7 +1147,7 @@ the parallel-run limit stands once, in H7's Decision.
 Measured on 17.10.2026 on `$HOME/.local/share/claude/versions/2.1.302`
 (`claude --version` prints `2.1.302 (Claude Code)`), a 285,793,528-byte Bun
 executable. No cell used a login, a token or an Anthropic account, except
-A1b-0b1 and A1b-0b2, which used the dedicated measurement token. Nothing here
+A1b-0b1, A1b-0b2 and A1b-0e, which used the dedicated measurement token. Nothing here
 reads `~/.claude`.
 
 **Harness (every cell).** Each run is the CLI under `bwrap` with the network
@@ -1893,6 +1893,215 @@ lists register one was not read). The run then ends `error_max_turns`, which
 `_raise_for_error_result` turns into `failed: provider_error`, never into a success. No call runs
 that the service has not accepted, because the relay holds every call. The end-to-end proof is
 A1b-8's. A larger k would be a guess no measurement supports and would weaken the backstop.
+
+#### A1b-0e tool calls over http, live
+
+Measured on 18.10.2026 on 2.1.302 (`claude --version` prints `2.1.302 (Claude Code)`,
+checked without the token in the same sandbox) with the operator's dedicated
+measurement token, authorized for this cell on 17.10.2026. It reached the CLI only as
+`CLAUDE_CODE_OAUTH_TOKEN` in the child's environment (the A1b-0b1 route); `<token>`
+stands for it, and the token-aware scan found it and every other definite signature
+neither in the stored evidence nor in this section's diff. Live runs: 5 (cap 5), no
+retry, E4 under its guard.
+
+**Harness: A1b-0b2's, with these changes.** Same sandbox, bounded runner, private
+`<home>` and empty working directory (deleted after each run), environment `PATH`,
+`HOME`, `TMPDIR`, `DISABLE_AUTOUPDATER=1` and `<token>`, and the same `ARGS` with a
+per-run `--max-turns N`, `--model haiku`, the tool `mcp__fake__step` without
+annotations. `MCP_TOOL_TIMEOUT` is set per run (`600000`, `5000` or unset).
+- The loopback server is a scripted fake, not the relay: per tool argument `n` and
+  arrival it takes one action (reply, hold then reply, hold until teardown, JSON-RPC
+  error, `isError` result, HTTP 500, drop), enforces a permit cap on answered calls,
+  numbers connections, watches held sockets for a client close and logs integer
+  millisecond times on the drive's clock. It stores no string taken from a request:
+  header and `params` properties are logged as booleans, counts and members of fixed
+  sets. It answers `initialize` with the pinned `2025-11-25`, the relay's only version.
+- Fidelity: the JSON-RPC error is byte-equal in its body, and field-equal in its
+  framing, to the relay's `answer_for(error_response(id, INVALID_PARAMS))`; the empty 500
+  is field-equal to the relay's `_empty(INTERNAL_SERVER_ERROR)`; the other answers are the
+  A1b-0b2 shape. Not reproduced: the relay's accept-time abort of a fifth connection. E2's
+  fourth failure reads the request whole and then closes the socket: a disconnect after the
+  request.
+- A small anchor process starts the CLI as its child and hands the drive a pidfd for it
+  (`os.pidfd_open`, `socket.send_fds`), so that E5 can signal the CLI alone through the
+  pidfd and leave the group's reap to the runner. Production's leader is the CLI itself;
+  here the leader is the sandbox, which would turn a SIGTERM into a SIGKILL a few
+  milliseconds later. The anchor writes the CLI's exit code as one integer, which the drive
+  reads after the teardown (`unknown` when it was not written in time).
+- E5's planned stop: 2,000 ms after the server logs the first held arrival of n=2, the
+  drive checks that n=2 is still pending, sends SIGTERM through the pidfd once, observes a
+  window of up to 1 s (`CLI_TERMINATION_GRACE_SECONDS`, 10 ms ticks), then calls
+  `request_abort()`.
+- The probe lock was held for every run. The judge reads the stream and the server log
+  through one set of identity rules: a model call is a distinct `tool_use` id; a request
+  occurrence is one `tools/call` record; an occurrence is attributed to the model call
+  whose `n` it carries when exactly one call carries that `n`, and only on a complete
+  stream (reason `complete`, `aborted_by` `none`); on any other stream the association is
+  provisional, and a class that reads it is `insufficient (provisional-attribution)` beside
+  its direct observations. A re-send is a later occurrence of an attributed call, `same-id`
+  or `new-id`.
+
+**Hypotheses read from the binary (not facts).** A read-only `strings` search of the
+pinned binary suggested: Hc2, an MCP tool without `readOnlyHint` is not concurrency-safe,
+so the calls of one response run one at a time; Hc6, a per-call limit from
+`MCP_TOOL_TIMEOUT` or the per-server `timeout` (default unresolved), a per-request HTTP
+budget of `max(MCP_TOOL_TIMEOUT, 60000)` ms and an idle limit
+set by the MCP tool client's idle-timeout variable, defaulting to 300,000 ms for an http server; Hc8, the string
+`notifications/cancelled` appears 18 times.
+
+**The fixed measurement constants.** The tool is `step(n)`. Every run's prompt, verbatim:
+
+- E1 (ten calls in one response, `N` 1, 10 permits, 90 s, `MCP_TOOL_TIMEOUT=600000`):
+  > This is a measurement. In your first answer, first write one short sentence, then call the tool step ten times in parallel in that same answer, with n=1, n=2, n=3, n=4, n=5, n=6, n=7, n=8, n=9 and n=10. Make no other call.
+
+  Script: every `step(n)` is held 3,000 ms from its arrival, then answered `Recorded n=<n>.`.
+- E2 (error answers, `N` 6, 9 permits, 150 s, `600000`):
+  > This is a measurement. Call the tool step five times, one call per answer: first with n=1, then n=2, then n=3, then n=4, then n=5. Make the next call whatever the previous result says, even if it is an error. Write no text. After the fifth result, reply with the single word done and call no tool.
+
+  Script, first arrival of each n: n=1 the relay's JSON-RPC error (-32602, `Invalid params`); n=2 the result `{"content":[{"type":"text","text":"Step failed."}],"isError":true}`; n=3 HTTP 500 with an empty body and no `Content-Type`; n=4 the request is read whole and the socket is closed without a byte; n=5 `Recorded n=5.`. A later arrival of n 1 to 4 would be answered `Recorded n=<n>.`.
+- E3 (default timeout, `N` 2, 1 permit, 200 s, `MCP_TOOL_TIMEOUT` unset) and E4 (the
+  same with `600000`):
+  > This is a measurement. Call the tool step once, with n=1. If its result is an error, reply with the single word failed; otherwise reply with the single word done. Make no other call and write no other text.
+
+  Script: every arrival of n=1 is held until 130,000 ms after the first arrival, then the earliest arrival whose connection is still open is answered `Recorded n=1.`. One bounded hold, not the longest a pending call can wait.
+- E5 (short timeout then SIGTERM, `N` 2, 0 permits, 60 s, `5000`):
+  > This is a measurement. Call the tool step with n=1. When its result arrives, whatever it says, call the tool step with n=2. Write no text and make no other call.
+
+  Script: every arrival of n=1 and n=2 is held until teardown.
+
+**Assumption B and the allowance.** B: the CLI counts every response against
+`--max-turns N` whatever fed it. Under B a run makes at most `N + 1` visible responses,
+18 over the series (15 without E4), a conditional allowance, not a guarantee. Used: 13
+responses (1 + 6 + 2 + 2 + 2), the expected number; no run exceeded `N`, and no response
+above `N` was seen, so B stayed unrefuted on these five runs (a first observation, not a
+measurement of B). No breach and no `system/api_retry` was detected. Quota exposure,
+apart: only responses visible in the stream are counted; requests the CLI makes outside it
+are not measured, and the exposure is bounded only by each run's wall deadline (90, 150,
+200, 200 and 60 s). The token is a subscription setup token: the runs used plan quota,
+and `total_cost_usd` is the CLI's notional estimate, never a cap.
+
+**The runs.** Init lists `tools` exactly `mcp__fake__step`, `mcp_servers` exactly `fake`
+`connected` and `model` `"claude-haiku-5-5"` in all five runs. Every run's layer 1
+(evidence integrity) is `intact`, layer 2 (sequence compliance) `compliant`, no run
+stopped the series, every teardown was confirmed (`became_zombie` false), and every home,
+working directory, `cli.exit` and `cli.sock` was deleted.
+
+| Run | Layer 3 / cause | Responses (assistant events) | Calls made / requests / answered by the server / held / re-sent | Text blocks | `subtype`, `is_error`, `terminal_reason`, `stop_reason`, `num_turns` | Exit | `total_cost_usd` (estimate) | Stream complete |
+|---|---|---|---|---|---|---|---|---|
+| E1 | complete / ending | 1 (11) | 10 / 10 / 10 / 10 (3,000 ms each) / 0 | 1 | `error_max_turns`, true, `max_turns`, `tool_use`, 2 | 1 | 0.00106 | yes |
+| E2 | complete / completion | 6 (7) | 5 / 5 / 4 / 0 / 0 | 1 | `success`, false, `completed`, `end_turn`, 6 | 0 | 0.00112 | yes |
+| E3 | complete / completion | 2 (2) | 1 / 1 / 0 / 1 / 0 | 1 | `success`, false, `completed`, `end_turn`, 2 | 0 | 0.00068 | yes |
+| E4 | complete / completion | 2 (2) | 1 / 1 / 1 / 1 / 0 | 1 | `success`, false, `completed`, `end_turn`, 2 | 0 | 0.00068 | yes |
+| E5 | planned-stop / planned-stop | 2 (3) | 2 / 3 / 0 / 3 / 1 (n=2, new id, new connection, inside the window) | 0 | no `result` | `cli_exit` 143 | none | no |
+
+E4 ran under its guard: E3's c6 was `fired` with `ms` 60,006, below 130,000. E2 and E5
+each had a `thinking` block in response 2 (not counted as text). E5's stop path:
+`aborted_by` `planned-sigterm`, precondition `n2-pending`, `signal_outcome` `sent`,
+`signal_ms` 10,982, `exit_seen_ms` = `window_end_ms` = `abort_ms` = 11,516 (observation
+times on the drive's clock), `abort_late_ms` 0, `window_complete` true, no `result` after
+the signal (`signal-result` nothing), no after-window observation. Run times from first
+event to `result`: E1 32.6 s, E2 9.1 s, E3 63.0 s, E4 132.7 s.
+
+**Cells.** `insufficient` appears only where stated.
+
+- **c1 Request shape** (all runs; 20 `tools/call` requests): `relay-compatible` in every
+  run. Every `tools/call` carried `MCP-Protocol-Version: 2025-11-25`, a correct `Host`, no
+  `Origin`, the bearer, no session id, and a body of `name`, `arguments` and `_meta` (no
+  other `params` key; every `_meta` held a progress token and one further key, counted not
+  named); ids are integers, the originals' ids are distinct (E5: provisional), the tool
+  name is the bare `step`. `initialize` requested `2025-11-25` and was answered
+  `2025-11-25`. Before `initialize` the CLI sends a `server/discover` request with
+  `MCP-Protocol-Version: 2026-07-28`, and after `notifications/initialized` a `GET` whose
+  `Accept` check fails; neither is a `tools/call`. For 11: the landed relay
+  serves the pinned CLI's `tools/call`, and 11 c1 is built on the bare name. The relay
+  was not run; its answers to `server/discover` and the `GET` are not part of this record.
+- **c2 Concurrency and connections** (E1): `serial-one-connection(10)`. The ten calls of
+  one response arrived one after another, each 3,015 to 3,055 ms after the previous
+  arrival (hold 3,000 ms), most outstanding 1, one connection, the first arrival at
+  2,153 ms and the last answer at 32,592 ms (Hc2 predicted this). For 10b1: with the pinned
+  CLI at most one call of a run waits at a time, so 10b1's c1 and c5 stay protocol cells
+  against a fake CLI and no production path reaches the limit of 8; the head re-estimates
+  10b1 downward and may put line 22's example to the operator in its true form. Not
+  measured: tools with `readOnlyHint`.
+- **c3 Re-sends** (E2 n 1 to 4): `none` for all four, on a complete run. E3: `none`.
+  E4: no failure to read. E5 n=1: `none` (no later n=1 occurrence; the stream is not
+  complete, so only the direct class stands). For 10b1: no re-send after a JSON-RPC
+  error, an `isError` result, a 500, a drop or the 60 s give-up, so the duplicate rule
+  guards only a misbehaving client. Separately observed in E5 (below, c5): during its
+  SIGTERM handling the CLI reconnected and sent n=2 again with a new id (1) on a new
+  connection.
+- **c4 Order of text and request** (E1): `text-first(133)`: the text event was received
+  at 2,020 ms, the first request arrived at 2,153 ms (receipt lags the CLI's write, so the
+  CLI wrote the text first). For 11: its fake CLI emits the text before the request.
+- **c5 SIGTERM while a call waits** (E5): `exited-within-grace(143, 534)`: exit observed
+  534 ms after the signal, code 143 (`cli.exit` written). Close: `closed-in-window(10985)`
+  for the held n=2 occurrence (3 ms after `signal_ms`; the n=1 occurrence was closed at
+  the same instant). Sent in the window: `other(GET, initialize, notifications/initialized,
+  server/discover, tools/call)`, so no `notifications/cancelled` in the window, but a new
+  connection with the full handshake and a `tools/call` for n=2 (id 1, held, closed at
+  11,509 ms). After-window observations: none. Residuals: an exit between the last
+  readability check and the signal cannot be told from one the signal caused; what the CLI
+  wrote after the signal but the drive never consumed is unseen; times are observation
+  times. For 10b2: its fake CLI's stop reproduces the outcome in c5 and c7. No design
+  change follows: Q3 (a) sends SIGKILL after the grace either way. For 10b1: a pending
+  call whose CLI is signalled can be followed by a re-send of that call on a new
+  connection with an id lower than any earlier id of the run, so an id is not unique across
+  the run, and a forward must not repeat after the run is ending.
+- **c6 The CLI's own call timeout**: E3 (unset) `fired(60006, closed)`: the CLI handed
+  the model a `local-timeout` `is_error` result (receipt 62,184 ms), 60,006 ms after the
+  first arrival, and the server saw the connection closed at 62,179 ms with no
+  `notifications/cancelled` (Hc6 predicted about 60 s). E4 (`600000`): `survived-and-delivered`:
+  the held call was answered at 131,846 ms, 130,066 ms after its arrival, with no close and
+  no cancel, and the result reached the model as `server-reply` (receipt 131,858 ms). E5
+  (`5000`, n=1): `insufficient (provisional-attribution)`, with the two sides apart: the
+  stream's n=1 result is a `local-timeout` `is_error` result received at 7,292 ms, 5,004 ms
+  after the first n=1 arrival; the server's n=1 occurrence ended `client-closed` at 10,985
+  ms (the SIGTERM), and a `notifications/cancelled` for its id arrived at 7,303 ms. Only an
+  E3 `fired` below 130,000 ms authorizes E4, and it did. For 11, in every outcome: the run
+  environment is `ClaudeRun`'s (`_RUN_SWITCHES`), which sets no tool timeout. The default
+  gave up at 60 s and `MCP_TOOL_TIMEOUT=600000` survived this 130 s hold, so 11 adds
+  `MCP_TOOL_TIMEOUT` to `ClaudeRun`'s environment (or the per-server `timeout` to the
+  relay's MCP config, which 11 chooses and proves) against the pending call's actual
+  lifetime, up to `max_duration_s` (600 s by default), including the relay's acceptance and
+  result-release waits, not `idle_timeout_s`; the 300 s idle hypothesis (Hc6) stays a
+  residual for any wait above 300 s. For 10b1 and 10b2: E5 records the give-up at 5 s as
+  its two sides, apart; E3's paired class on a complete stream is `fired(60006, closed)`.
+- **c7 Error answers** (E2, per class): all four are `error-result-and-continued`. The
+  server answered the original with the JSON-RPC error, the `isError` result, the 500
+  and `dropped`; the CLI received `is_error` results of origin `server-error-text`
+  (length 14), `server-error-text` (12), `local-other` (26, the 500) and `local-other` (135,
+  the drop), none with an MCP error code, and each next call reached the server (n=5 on a
+  new connection, after the drop, answered as `server-reply`). For 10b1 and 10b2: after the
+  JSON-RPC error the next call still reached the server, so answering the ninth call, a
+  duplicate or an off-list name with it does not cost the run its next call; the same
+  holds after an `isError` result, an owner failure (500) and a dropped connection. The
+  class that records a locally answered next call did not occur, so `later-server-use` has
+  nothing to record.
+- **c8 Cancel**: E2 n 1 to 4 `neither`; E3 n=1 `closed-only` (a close at 62,179 ms, no
+  cancel); E4 n=1 `neither` (answered); E5 n=1 `cancelled-with-id` (a
+  `notifications/cancelled` with a `reason`, `requestId` equal to the n=1 occurrence's id,
+  sent at 7,303 ms on a second connection, which then carried n=2). `cancelled-other-id`
+  0 in every run. For 10b1: a give-up is signalled to the relay in the two different ways
+  seen here (the default 60 s path closed the connection; the 5 s path sent a cancel, and
+  closed the first connection only at the SIGTERM), so the relay must treat both a client
+  close and a `notifications/cancelled` as the end of a pending call, or state that a
+  pending call is still forwarded after the CLI gave up. The two runs differ in
+  `MCP_TOOL_TIMEOUT` and in whether a second call followed; the cause of the difference is
+  not measured.
+- **c9 The whole-response gap, a live check of 4a's reading** (E1, `--max-turns 1`):
+  `whole-response-served`: S = 10, all ten calls of the one response had a server reply
+  and a `server-reply` result; then `terminal_reason` `max_turns`, `subtype`
+  `error_max_turns`, `num_turns` 2 (`N + 1`). The live run agrees with 4a's reading,
+  condition 1: one ten-call response cost one turn on haiku, and no correction at
+  `TURNS_BEYOND_TOOL_CALLS` follows.
+
+**Not measured.** Tools with `readOnlyHint`; holds beyond 130 s, a pending call's lifetime
+up to `max_duration_s`, and the 300 s idle hypothesis; `MCP_TOOL_TIMEOUT`'s exact default
+and the per-server `timeout` field of the MCP config; the CLI's handling of a connection
+aborted at accept (E2's n=4 observed a disconnect after the request); a SIGTERM to the
+whole group in production (E5 signals the CLI alone, so its `rg` and `git` children were
+not signalled); an SSE answer or a session id; other models; what the model writes after
+an error. Every run was driven and none was withheld.
 
 ## H8 atelier-2
 

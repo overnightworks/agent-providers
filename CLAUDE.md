@@ -57,7 +57,8 @@ uv build --all-packages      # the three wheels the release attaches
   (complete environment, absolute binary, explicit `cwd`) created only in
   `agent_providers.spawn`; the bounded runner
   `agent_providers.process.run_cli_bounded` owns start, stdin, first line,
-  deadline, and process-group cleanup.
+  deadline, and process-group cleanup, and the async Claude turns run on
+  `spawn.AnchoredChild`, whose leader only its own handle reaps.
 - **No inline comments.** Names carry the meaning; a comment explains only a
   non-obvious *why*.
 - **Tests name the behaviour they pin** and use the builders in

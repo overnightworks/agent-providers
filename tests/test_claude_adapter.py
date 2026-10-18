@@ -11,9 +11,18 @@ from types import SimpleNamespace
 
 import pytest
 from provider_test_support import (
+    A_STREAMED_LINE,
+    a_child_that_outlives_sigkill,
     a_credential_destination_that_fails,
+    confirm_the_retained_group_gone,
     install_claude_cli_children,
+    killpg_forbidden,
+    lines_that_fail,
     override_provider_runtime,
+    reap_without_waiting,
+    recorded_census_workers,
+    reset_cli_process_pool_for_test,
+    run_bounded,
 )
 
 from agent_providers.claude import adapter as claude_adapter
@@ -28,7 +37,7 @@ from agent_providers.claude.provider import (
     UnavailableError,
 )
 from agent_providers.config import current_config
-from agent_providers.errors import ProviderUnavailableError, SafeRouteReasonCode
+from agent_providers.errors import ContainmentLost, ProviderUnavailableError, SafeRouteReasonCode
 from agent_providers.events import AssistantTextEvent, StreamEvent
 from agent_providers.process import CliEnvironmentUnavailableError, CliLoginUnusableError
 from agent_providers.tool_loop import ToolOutcome
@@ -73,6 +82,85 @@ def test_closing_claude_adapter_stream_closes_provider_stream(monkeypatch) -> No
     asyncio.run(_close_stream())
 
     assert provider_stream.aclose_calls == 1
+
+
+class _StreamNotingWhatItRaises(AsyncIterator[StreamEvent]):
+    """The provider's own stream, noting every exception it raises to its caller."""
+
+    def __init__(self, stream: AsyncIterator[StreamEvent]) -> None:
+        self._stream = stream
+        self.raised: list[BaseException] = []
+
+    def __aiter__(self) -> _StreamNotingWhatItRaises:
+        return self
+
+    async def __anext__(self) -> StreamEvent:
+        try:
+            return await anext(self._stream)
+        except StopAsyncIteration:
+            raise
+        except BaseException as raised:
+            self.raised.append(raised)
+            raise
+
+    async def aclose(self) -> None:
+        try:
+            await self._stream.aclose()
+        except BaseException as raised:
+            self.raised.append(raised)
+            raise
+
+
+@pytest.fixture(autouse=True)
+def _empty_process_pool():
+    reset_cli_process_pool_for_test()
+    yield
+    reset_cli_process_pool_for_test()
+
+
+@pytest.mark.parametrize("ending", ["iteration_fails", "closed_after_the_first_event"])
+def test_a_containment_loss_passes_the_adapter_unchanged(
+    monkeypatch: pytest.MonkeyPatch, ending: str,
+) -> None:
+    reap_without_waiting(monkeypatch)
+    child = a_child_that_outlives_sigkill(stream_lines=[A_STREAMED_LINE], stdout_stalls=True)
+    install_claude_cli_children(monkeypatch, child)
+    provider_streams: list[_StreamNotingWhatItRaises] = []
+    real_provider_stream = claude_adapter.acall_claude_with_mcp_stream
+
+    def noted_provider_stream(**arguments: object) -> _StreamNotingWhatItRaises:
+        provider_streams.append(_StreamNotingWhatItRaises(real_provider_stream(**arguments)))
+        return provider_streams[-1]
+
+    monkeypatch.setattr(claude_adapter, "acall_claude_with_mcp_stream", noted_provider_stream)
+    if ending == "iteration_fails":
+        monkeypatch.setattr(claude_provider, "_iter_lines", lines_that_fail)
+
+    async def end_the_turn() -> ContainmentLost:
+        stream = claude_adapter.stream_claude_turn(
+            user_id="user-1", system="system", model="claude-test", messages=[],
+        )
+        try:
+            if ending == "closed_after_the_first_event":
+                assert await anext(stream) == AssistantTextEvent(text="partial")
+                await stream.aclose()
+            else:
+                await anext(stream)
+        except ContainmentLost as lost:
+            return lost
+        finally:
+            await stream.aclose()
+        pytest.fail("the turn ended without a containment loss")
+
+    with killpg_forbidden(), recorded_census_workers(monkeypatch):
+        lost = run_bounded(end_the_turn())
+        try:
+            assert lost.group.pgid == child.pid
+            (provider_raised,) = provider_streams[0].raised
+            assert lost is provider_raised
+            assert lost.__cause__ is None
+        finally:
+            assert run_bounded(confirm_the_retained_group_gone(child, lost.group))
 
 
 @pytest.mark.parametrize("entry_point", ["stream_claude_turn", "call_claude_once"])

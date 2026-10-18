@@ -2,9 +2,9 @@
 
 Async Claude behaviour tests take their child from ``a_claude_cli_child`` and
 install it with ``install_claude_cli_children``, the only place that names
-``provider.open_async_pipes``. The guard walks the modules listed in
+``provider.open_anchored_pipes``. The guard walks the modules listed in
 ``GUARDED_MODULES`` and fails on any patch of ``asyncio.create_subprocess_exec``
-or of ``open_async_pipes`` there.
+or of ``open_anchored_pipes`` there.
 
 Two modules are deliberate exceptions and are not listed: ``test_spawn_owner.py``
 (the spawn-policy tests, which name ``create_subprocess_exec`` as a string and
@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import signal
 import textwrap
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractContextManager, nullcontext
@@ -31,19 +32,22 @@ from provider_test_support import (
     ScenarioDeadline,
     a_claude_cli_child,
     install_claude_cli_children,
+    killpg_forbidden,
+    operations,
     scenario_holds,
 )
 
 from agent_providers.claude import provider
-from agent_providers.spawn import ChildProcess, closed_environment
+from agent_providers.spawn import AnchorStateError, ChildProcess, closed_environment
 
 GUARDED_MODULES = (
     "test_claude_provider.py",
     "test_claude_adapter.py",
     "test_claude_provider_streaming.py",
+    "test_claude_anchored_turns.py",
 )
 PATCHING_CALLS = frozenset({"setattr", "patch", "object"})
-GUARDED_DOOR_NAMES = frozenset({"create_subprocess_exec", "open_async_pipes"})
+GUARDED_DOOR_NAMES = frozenset({"create_subprocess_exec", "open_anchored_pipes"})
 
 
 def patched_door_lines(source: str) -> list[int]:
@@ -96,11 +100,11 @@ def _names_a_door(argument: ast.expr) -> bool:
         'monkeypatch.setattr(asyncio, "create_subprocess_exec", f)',
         'monkeypatch.setattr(provider.asyncio, "create_subprocess_exec", f)',
         'monkeypatch.setattr(\n    provider.asyncio,\n    "create_subprocess_exec",\n    f,\n)',
-        'monkeypatch.setattr(provider, "open_async_pipes", f)',
-        'patch("agent_providers.claude.provider.open_async_pipes", f)',
+        'monkeypatch.setattr(provider, "open_anchored_pipes", f)',
+        'patch("agent_providers.claude.provider.open_anchored_pipes", f)',
         'from unittest.mock import patch as replace\nreplace("asyncio.create_subprocess_exec", f)',
         'patch(target="asyncio.create_subprocess_exec", new=f)',
-        'monkeypatch.setattr(target=provider, name="open_async_pipes", value=f)',
+        'monkeypatch.setattr(target=provider, name="open_anchored_pipes", value=f)',
     ],
 )
 def test_the_guard_flags_every_spelling_of_a_door_patch(patch_spelling: str) -> None:
@@ -140,10 +144,10 @@ def test_the_builder_answers_communicate_and_exposes_the_child_surface() -> None
             await child.communicate(b"prompt"),
             await child.stdout.readline(),
             await child.stderr.read(),
-            await child.wait(),
+            await child.exited(),
         )
 
-    assert asyncio.run(drive()) == ((b"out", b"err"), b"line\n", b"warning", 0)
+    assert asyncio.run(drive()) == ((b"out", b"err"), b"line\n", b"warning", 3)
     assert (child.pid, child.returncode) == (77, 3)
     child.communicate.assert_awaited_once_with(b"prompt")
 
@@ -165,11 +169,48 @@ def test_the_builder_raises_the_communicate_error_it_was_given() -> None:
         asyncio.run(communicating)
 
 
-def test_the_builder_runs_without_stdin_and_while_still_running() -> None:
-    child = a_claude_cli_child(returncode=None, has_stdin=False)
+def test_the_builder_child_always_has_a_stdin_and_runs_without_an_exit() -> None:
+    child = a_claude_cli_child(returncode=None)
 
-    assert child.stdin is None
+    assert child.stdin is not None
     assert child.returncode is None
+
+
+@pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGKILL])
+def test_an_unsurvived_signal_publishes_the_exit_it_causes(sig: signal.Signals) -> None:
+    child = a_claude_cli_child(returncode=None, natural_exit=None)
+
+    async def signal_then_observe_the_exit() -> int:
+        child.signal_group(sig)
+        return await child.exited()
+
+    with killpg_forbidden():
+        assert asyncio.run(signal_then_observe_the_exit()) == -sig
+    assert operations(child.log) == [(sig.name, child.pid)]
+
+
+def test_a_survived_signal_publishes_nothing_so_the_exit_stays_pending() -> None:
+    child = a_claude_cli_child(returncode=None, natural_exit=None, survives={signal.SIGTERM})
+
+    async def signal_then_wait_for_the_exit() -> None:
+        child.signal_group(signal.SIGTERM)
+        async with asyncio.timeout(0):
+            await child.exited()
+
+    waiting = signal_then_wait_for_the_exit()
+    with killpg_forbidden(), pytest.raises(TimeoutError):
+        asyncio.run(waiting)
+    assert child.returncode is None
+    assert operations(child.log) == [("SIGTERM", child.pid)]
+
+
+def test_releasing_a_running_child_is_refused_and_logged() -> None:
+    child = a_claude_cli_child(returncode=None)
+
+    with pytest.raises(AnchorStateError):
+        child.release()
+
+    assert operations(child.log) == [("release", child.pid)]
 
 
 def test_the_builder_reader_refuses_a_line_beyond_the_limit_it_was_built_with() -> None:
@@ -180,11 +221,14 @@ def test_the_builder_reader_refuses_a_line_beyond_the_limit_it_was_built_with() 
         asyncio.run(reading)
 
 
-@pytest.mark.parametrize("gated_call", ["communicate", "wait"])
+GATE_KNOBS = {"communicate": "communicate_gate", "exited": "exit_gate"}
+
+
+@pytest.mark.parametrize("gated_call", GATE_KNOBS)
 def test_a_gated_child_call_completes_only_after_its_release(gated_call: str) -> None:
     deadline = ScenarioDeadline()
     gate = EventGate(deadline)
-    child = a_claude_cli_child(**{f"{gated_call}_gate": gate})
+    child = a_claude_cli_child(**{GATE_KNOBS[gated_call]: gate})
     call = getattr(child, gated_call)
 
     async def drive() -> None:
@@ -373,8 +417,8 @@ def test_the_installer_hands_out_queued_children_in_order_and_records_each_spawn
 
     async def start_twice() -> list[object]:
         return [
-            await provider.open_async_pipes(to_start, stream_buffer_limit=4096),
-            await provider.open_async_pipes(to_start),
+            await provider.open_anchored_pipes(to_start, stream_buffer_limit=4096),
+            await provider.open_anchored_pipes(to_start),
         ]
 
     assert asyncio.run(start_twice()) == [first, second]
@@ -395,7 +439,7 @@ def test_the_installer_builds_a_child_from_the_factory_once_the_queue_is_empty(
 
     async def start_twice() -> list[int]:
         return [
-            (await provider.open_async_pipes(to_start, stream_buffer_limit=64)).pid
+            (await provider.open_anchored_pipes(to_start, stream_buffer_limit=64)).pid
             for _ in range(2)
         ]
 
@@ -408,7 +452,7 @@ def test_the_installer_fails_a_spawn_with_nothing_queued(
 ) -> None:
     spawns = install_claude_cli_children(monkeypatch)
 
-    spawning = provider.open_async_pipes(_a_child_to_start())
+    spawning = provider.open_anchored_pipes(_a_child_to_start())
     with pytest.raises(pytest.fail.Exception, match="none queued"):
         asyncio.run(spawning)
 

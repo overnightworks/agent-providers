@@ -158,9 +158,20 @@ a fresh private home below
 are mode 0400. The source is opened only for reading. A turn's home remains
 until its direct child has exited, including a delayed spawn or background
 reap; a grandchild that outlives that child is not waited for, and the
-synchronous call's timeout kills only the direct child. A process group that
-survives SIGKILL for 60 s is logged once, and its reservation and home stay held
-until the process exits, when the exit sweep removes the home. A catalog home
+synchronous call's timeout kills only the direct child. The async Claude turns
+on the CLI route (`acall_claude` without an `api_key`, which uses the API
+otherwise, `acall_claude_with_mcp` and `acall_claude_with_mcp_stream`) run on a
+`spawn.AnchoredChild`: when the turn ends, its reap sends SIGTERM to the leader's
+process group if the leader still runs, then SIGKILL after 1 s if it still runs,
+and releases the leader once its exit is published; the turn's core pool slot and
+home are held until then. A leader that has not exited 5 s after that SIGKILL,
+whose anchor was lost, or that the kernel did not reap after its exit is
+retained: the turn raises `ContainmentLost(group)`, and the slot and home stay
+held until `confirm_group_gone(group)` returns `True` or the library process
+exits, when the exit sweep removes the home. A process group of a bounded run
+(`process.run_cli_bounded`) that survives SIGKILL for 60 s is logged once, and
+its reservation and home stay held until the process exits, when the exit sweep
+removes the home. A catalog home
 lasts for its bounded probe. Each Codex turn uses a fresh private home below
 `cli_working_directory_root`, with its blanked login copy at mode 0600. Removal is
 requested when the image turn returns or at the tool turn's `aclose`; like a Claude
@@ -255,6 +266,7 @@ The other host obligations arrive as arguments where they are needed:
   `vars()`, and traceback locals can hold the whole response. The library logs
   the rule and the numbers, never the text, and keeps no copy; whether the text
   is written anywhere is the host's decision.
+- `ContainmentLost` and `RetainedGroup` (`agent_providers.errors`) — an async Claude turn on the CLI route raises `ContainmentLost(group)` when its reap cannot release the turn's leader, in one of three cases: the leader had not exited 5 s after its group's SIGKILL (expiry); its anchor was lost, because something else reaped it (identity loss); or releasing the exited leader failed because the kernel had not reaped it (failed leader release). It is a plain `Exception`, neither a `ProviderUnavailableError` nor an `UnavailableError`; after a turn error it carries that error as `__context__`. The library logs nothing for it. `group` names this one retention: its `pgid`, and a generation valid only in the process that minted it, so never persist it, pass it to another process, or use it after a restart. In all three cases the core pool slot and the home stay held. Whether the leader is still unreaped and its pipes still open depends on the case: an identity loss found while the exited leader is being released has already closed the three pipes. Call `agent_providers.claude.lost_groups.confirm_group_gone(group)` until it returns `True`: a coroutine awaited on the loop that opened the child, or on any loop after that one closed. A call admitted as a new attempt while the leader's release has not yet succeeded sends one SIGKILL to the group and counts it once in `/proc`, in its own worker thread. It releases the leader and runs the slot callback only if the census is EMPTY and the leader's exit is published; otherwise it returns `False`. Once the leader's release has succeeded, a failing slot callback is retried alone by the next admitted attempt, with no signal and no count. A call for an unknown or already confirmed group returns `True` and one made while another attempt for the same group runs returns `False`, and neither signals. `False` or an exception means "not confirmed", and the slot and home stay held. A group whose anchor was lost raises `ChildIdentityLost` on every call and stays held until the library process exits. If it never returns `True`, restart the container to stop the remaining run processes. `shutdown_tool_surface_background_tasks()` leaves a retained group as it is.
 - The `StreamEvent` union (`agent_providers.events`) — what a turn emits
   in-process, which a host calling the core consumes. The agent service's wire
   is `agent_client.wire`, not this union.

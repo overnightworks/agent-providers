@@ -598,24 +598,39 @@ def its_cli_directory(tree: Path) -> Path:
     return tree / "home" / ".cli"
 
 
+def a_root_named(name: str) -> Callable[[Path], Path]:
+    return lambda parent: a_private_root(parent, name)
+
+
+def a_root_behind_a_link(parent: Path) -> Path:
+    real = parent / "real"
+    real.mkdir()
+    a_private_root(real)
+    (parent / "alias").symlink_to(real)
+    return parent / "alias" / "root"
+
+
 @pytest.mark.parametrize(
-    ("root_name", "locate", "reason"),
+    ("make_root", "locate", "reason"),
     (
-        pytest.param("root", the_tree, "mount_point", id="at-the-tree"),
-        pytest.param("root", its_cli_directory, "mount_point", id="below-the-tree"),
-        pytest.param("root with space", the_tree, "mount_point", id="escaped-mount-point"),
-        pytest.param("root", None, "mount_table_unreadable", id="unreadable-table"),
+        pytest.param(a_root_named("root"), the_tree, "mount_point", id="at-the-tree"),
+        pytest.param(a_root_named("root"), its_cli_directory, "mount_point", id="below-the-tree"),
+        pytest.param(
+            a_root_named("root with space"), the_tree, "mount_point", id="escaped-mount-point",
+        ),
+        pytest.param(a_root_behind_a_link, the_tree, "mount_point", id="root-behind-a-link"),
+        pytest.param(a_root_named("root"), None, "mount_table_unreadable", id="unreadable-table"),
     ),
 )
 def test_a_tree_holding_a_mount_point_or_an_unreadable_mount_table_is_left_and_logged_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
-    root_name: str,
+    make_root: Callable[[Path], Path],
     locate: Callable[[Path], Path] | None,
     reason: str,
 ) -> None:
-    root = a_private_root(tmp_path, root_name)
+    root = make_root(tmp_path)
     answer = (
         PermissionError(errno.EACCES, "synthetic")
         if locate is None

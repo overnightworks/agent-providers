@@ -7,7 +7,8 @@ owns, not values this package may guess. Its catalog and turn paths
 therefore read them from one frozen value the host installs once per process
 via :func:`configure`, instead of reaching into an application settings
 module; the subscription run
-(:class:`agent_providers.claude.provider.ClaudeRun`) and the working root
+(:class:`agent_providers.claude.provider.ClaudeRun`, in the directories of
+:func:`agent_providers.process.run_directories`) and the working root
 (:class:`PrivateWorkingRoot`) take them as explicit arguments instead.
 
 The configuration is cut along the two ways into this library. A host that only
@@ -144,9 +145,9 @@ class CodexCliRuntime(BaseModel):
 class ProviderRuntimeConfig(BaseModel):
     """Every deployment fact the provider layer needs, as one immutable value.
 
-    ``cli_working_directory_root`` is the directory below which every child
-    creates its private working directory and every temporary file this layer
-    writes, so a deployment states that root once instead of inheriting
+    ``cli_working_directory_root`` is the directory below which the catalog and
+    turn paths create every child's private working directory and every
+    temporary file this layer writes, so a deployment states that root once instead of inheriting
     whatever ``TMPDIR`` happens to be. It holds every credential copy, so
     :func:`configure` refuses a root that is not private: an absolute path to an
     existing directory, not a symlink, owned by the process's effective user,

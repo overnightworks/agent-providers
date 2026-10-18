@@ -54,6 +54,7 @@ from service_support import (
     decoded_events,
     failure_lines,
     fake_app_authority,  # noqa: F401 - a fixture, requested by name
+    quarantine_on,
 )
 
 from agent_client.tools import ToolEffect
@@ -440,6 +441,7 @@ def streamed(runner: BarrierRunner, runs: RunConfig | None = None) -> asyncio.Ta
         runs or RunConfig(),
         LoopClock(),
         RunRecords(),
+        quarantine=quarantine_on(),
     )
 
     async def collected() -> bytes:
@@ -1491,6 +1493,7 @@ def test_a_result_is_released_only_after_the_service_resumed_the_runner_past_it(
             RunConfig(),
             LoopClock(),
             RunRecords(),
+            quarantine=quarantine_on(),
         )
         async with contextlib.aclosing(frames):
             rig.fake.release()

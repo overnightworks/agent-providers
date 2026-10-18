@@ -51,6 +51,7 @@ from service_support import (
     in_loop,
     instant,
     post_run,
+    quarantine_on,
     reaches_text,
     respond_through_the_app,
     run_headers,
@@ -293,7 +294,13 @@ def _frames_of_a_run_without_a_runner(
 ) -> tuple[uuid.UUID, AsyncGenerator[bytes, None]]:
     run_id = uuid.uuid4()
     frames = run_frames(
-        alice_admitted_run(run_id), None, SONGMAKER, RunConfig(), LoopClock(), records
+        alice_admitted_run(run_id),
+        None,
+        SONGMAKER,
+        RunConfig(),
+        LoopClock(),
+        records,
+        quarantine=quarantine_on(),
     )
     return run_id, frames
 

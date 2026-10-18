@@ -23,13 +23,17 @@ from service_support import (
     SONGMAKER,
     SONGMAKER_GROUP,
     ClientSocket,
+    ScriptedConfirmation,
     ScriptedRunner,
+    StepClock,
     TokenMint,
     alice_admitted_run,
     assert_rejected,
     capable_service_config,
     decoded_events,
+    in_loop,
     post_run,
+    quarantine_on,
     record_signed_tokens,
     run_body,
     run_headers,
@@ -41,7 +45,8 @@ from starlette.requests import ClientDisconnect
 from test_service_capability import QUOTATION_MARKS_256, TUNED_AT_THE_LIMIT
 from webauth.https_client import KeySetFetchError
 
-from agent_client.wire import RejectionCode, RunStarted
+from agent_client.wire import Failed, FailureCode, RejectionCode, RunStarted
+from agent_providers.errors import ContainmentLost, RetainedGroup
 from agent_providers.events import AssistantTextEvent, FinalEvent
 from agent_service.admission import AdmissionSlot
 from agent_service.app import create_app
@@ -288,6 +293,7 @@ def _consumed(runner: Runner | None, lease, *, recorder_fails: bool = False) -> 
             LoopClock(),
             RunRecords(),
             lease,
+            quarantine=quarantine_on(),
         )
         with suppress(*tolerated):
             [frame async for frame in frames]
@@ -400,8 +406,8 @@ async def _bounded(awaitable):
 class _Asking:
     """One more CLI request over the ASGI app, answered or still streaming."""
 
-    def __init__(self, app, spec_version: str = "2.3") -> None:
-        self.client = ClientSocket(spec_version=spec_version)
+    def __init__(self, app, spec_version: str = "2.3", **client) -> None:
+        self.client = ClientSocket(spec_version=spec_version, **client)
         self.response = asyncio.create_task(
             app(self.client.scope, self.client.receive, self.client.send)
         )
@@ -487,3 +493,72 @@ def test_the_next_run_is_admitted_while_the_old_connection_hangs_and_the_old_res
         return old_still_hanging, while_successor_runs, await after_successor.status()
 
     assert asyncio.run(scenario()) == (True, 429, 200)
+
+
+LOST_GROUP = RetainedGroup(pgid=4242, generation=1)
+
+
+class LosingRunner:
+    """A CLI runner whose first run loses containment, at a step or at its close.
+
+    Later runs stream until ``later_runs_proceed`` is set.
+    """
+
+    def __init__(self, *, loses_at_the_close: bool) -> None:
+        self.loses_at_the_close = loses_at_the_close
+        self.runs = 0
+        self.later_runs_proceed = asyncio.Event()
+
+    async def run(self, admitted):
+        self.runs += 1
+        if self.runs > 1:
+            yield AssistantTextEvent(text="streaming")
+            await self.later_runs_proceed.wait()
+            yield FinalEvent(text="done")
+        elif self.loses_at_the_close:
+            try:
+                yield FinalEvent(text="done")
+            finally:
+                raise ContainmentLost(LOST_GROUP)
+        else:
+            raise ContainmentLost(LOST_GROUP)
+
+
+@pytest.mark.parametrize(
+    "loses_at_the_close", [False, True], ids=["at-a-step", "at-the-close-of-a-final-answer"]
+)
+@in_loop
+async def test_a_place_whose_group_is_not_confirmed_gone_refuses_cli_runs_until_it_is(
+    loses_at_the_close, monkeypatch
+):
+    clock = StepClock()
+    monkeypatch.setattr("agent_service.app.LoopClock", lambda: clock)
+    runner = LosingRunner(loses_at_the_close=loses_at_the_close)
+    confirmation = ScriptedConfirmation({LOST_GROUP: [False, True]}, clock)
+    app = create_app(
+        service_config(runs=ONE_PLACE),
+        runners=Runners(cli=runner, api=ScriptedRunner(FINAL)),
+        fetch_key_set=shared_mint().fetch_key_set,
+        confirm_group_gone=confirmation,
+    )
+    lost = ClientSocket()
+    await _bounded(app(lost.scope, lost.receive, lost.send))
+    bob = shared_mint().user(**BOB_ON_THE_API_ROUTE)
+
+    busy = _Asking(app)
+    api = _Asking(app, user_token=bob)
+    statuses = [await busy.status(), await api.status()]
+    api.client.leave()
+    await _bounded(api.response)
+    await clock.step_to_next_deadline()
+    still_busy = await _Asking(app).status()
+    await clock.step_to_next_deadline()
+    admitted = _Asking(app)
+    admitted_status = await admitted.status()
+    await admitted.finished(runner)
+
+    terminal = decoded_events(lost.body)[-1]
+    assert isinstance(terminal, Failed)
+    assert terminal.code is FailureCode.PROVIDER_ERROR
+    assert (statuses, still_busy, admitted_status) == ([429, 200], 429, 200)
+    assert (dict(busy.client.messages[0]["headers"])[b"retry-after"], runner.runs) == (b"10", 2)

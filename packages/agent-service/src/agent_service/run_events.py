@@ -17,7 +17,8 @@ ended, ``run_liveness`` decides.
 A run's terminal is decided when its ending happens but encoded, charged,
 accepted and recorded only once, by ``run_over`` after the runner's close; a
 containment loss the runner's pump met turns that terminal, or the fallback of
-a cut stream, into ``failed: provider_error``.
+a cut stream, into ``failed: provider_error``, and passes the run's place to the
+quarantine (``agent_service.quarantine``) before the record ends.
 
 A tool call's input is deep-copied into its wire event, so the event never
 shares a list or dict with the runner that built it, and its effect comes from
@@ -52,7 +53,7 @@ from agent_client.wire import (
     ToolCall,
     ToolResult,
 )
-from agent_providers.errors import RetainedGroup
+from agent_providers.errors import ContainmentLost, RetainedGroup
 from agent_providers.events import (
     AssistantTextEvent,
     FinalEvent,
@@ -62,6 +63,7 @@ from agent_providers.events import (
 )
 from agent_service.admission import Lease
 from agent_service.config import AppConfig, RunConfig
+from agent_service.quarantine import Quarantine
 from agent_service.run_liveness import (
     FailedPart,
     RunClock,
@@ -122,8 +124,10 @@ async def run_frames(
     clock: RunClock,
     records: RunRecords,
     lease: Lease | None = None,
+    *,
+    quarantine: Quarantine,
 ) -> AsyncGenerator[bytes, None]:
-    wire = _WireRun(admitted, app, runs, records, lease)
+    wire = _WireRun(admitted, app, runs, records, lease, quarantine)
     failures = RunFailures(admitted.run_id)
     started = wire.started()
     started_at = clock()
@@ -169,6 +173,7 @@ class _WireRun:
         runs: RunConfig,
         records: RunRecords,
         lease: Lease | None,
+        quarantine: Quarantine,
     ) -> None:
         self._admitted = admitted
         self._run_id = admitted.run_id
@@ -176,6 +181,7 @@ class _WireRun:
         self._runs = runs
         self._records = records
         self._lease = lease
+        self._quarantine = quarantine
         self._recorder: RunRecorder | None = None
         self._stream = RunStream()
         self._seq = 0
@@ -197,6 +203,11 @@ class _WireRun:
                 heartbeat_interval_s=self._runs.heartbeat_interval_s,
             )
         )
+
+    def hand_over(self, losses: tuple[RetainedGroup, ...]) -> None:
+        """Pass the run's place to the quarantine when the runner's pump met a containment loss."""
+        if losses:
+            self._quarantine.hold(self._run_id, self._lease, losses)
 
     def run_over(self, losses: tuple[RetainedGroup, ...]) -> None:
         """Commit the decided terminal, then end the record; a loss makes either provider_error."""
@@ -250,7 +261,8 @@ class _WireRun:
             case RunnerExhausted():
                 self.decide_failure(FailureCode.PROVIDER_ERROR, NO_ANSWER_MESSAGE)
             case RunnerRaised(error=error):
-                log_failure(log, f"The runner of run {self._run_id} failed", error)
+                if not isinstance(error, ContainmentLost):
+                    log_failure(log, f"The runner of run {self._run_id} failed", error)
                 self.decide_failure(FailureCode.PROVIDER_ERROR, RUNNER_FAILED_MESSAGE)
             case RunnerYielded(event=FinalEvent() as final):
                 self._decide_success(final)

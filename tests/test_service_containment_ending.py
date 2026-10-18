@@ -132,6 +132,9 @@ class _RecordingWriter:
         self.ended = not isinstance(outcome, RunnerYielded) or isinstance(outcome.event, FinalEvent)
         return None if self.ended else b"frame"
 
+    def hand_over(self, losses: tuple[RetainedGroup, ...]) -> None:
+        pass
+
     def run_over(self, losses: tuple[RetainedGroup, ...]) -> None:
         self.overs.append(losses)
 
@@ -272,7 +275,7 @@ async def test_a_loss_at_a_step_ends_the_run_provider_error_after_the_close(
     _assert_ended_by_the_lost_runner(drive)
     assert runner.log.index(marker) < runner.log.index("taken:failed")
     _assert_recorded(drive.status(), RunState.FAILED, FailureCode.PROVIDER_ERROR, events=2, at=0)
-    assert _failure_classes(caplog) == [("The runner", "ContainmentLost")]
+    assert _failure_classes(caplog) == []
 
 
 @pytest.mark.parametrize(
@@ -299,7 +302,7 @@ async def test_a_decided_ending_followed_by_a_close_loss_is_replaced_by_provider
     _assert_ended_by_the_lost_runner(drive)
     assert runner.log.index("close raised") < runner.log.index("taken:failed")
     _assert_recorded(drive.status(), RunState.FAILED, FailureCode.PROVIDER_ERROR, events=2, at=0)
-    assert _failure_classes(caplog) == [("Closing the runner", "ContainmentLost")]
+    assert _failure_classes(caplog) == []
 
 
 @in_loop

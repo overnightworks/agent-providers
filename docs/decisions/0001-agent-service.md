@@ -470,7 +470,12 @@ compromise.
   verification keeps webauth's own clock.
 - **D16 the failure log line.** `run_liveness.log_failure` stays the one writer of
   failure lines, by class name and positions, never the message, notes, chained
-  exceptions or `exc_info`. Admission adds no category table and no log helper. A
+  exceptions or `exc_info`. The one other ERROR line of a run is the quarantine's
+  (A1b-3f2, line 20): `agent_service.quarantine` writes it once per held run, and it
+  names only the run id and the pgid of each group the pump met, never an exception,
+  the generation, `exc_info` or `stack_info`. It replaces the `log_failure` line of a
+  bare containment loss; an error that only carries one keeps its own. Admission adds
+  no category table and no log helper. A
   runner that names an exception class or a function after run data is outside the
   guarantee; that runner's slice owns it (A1b, A2b, under H7).
 
@@ -496,7 +501,9 @@ compromise.
     service log record (its message and its formatted output, uvicorn's included). The
     one new log line is item 12's WARNING, written from the app, the measured length
     and the limit, never `str` of the refusal and never `exc_info`. A runner's failure
-    and its close's failure reach the log only through `log_failure`. Deferred to A1b
+    and its close's failure reach the log only through `log_failure`; a bare containment
+    loss reaches it only as the quarantine's one ERROR line, naming the run and its
+    process groups. Deferred to A1b
     and A2b under H7: content a runner yields; a runner whose `run` raises before it
     returns its generator (`runners.py` states the contract); and a recorder failure
     whose chain carries a yielded event.
@@ -887,11 +894,18 @@ Piece 1 of A1a3 (`agent_service.run_liveness`):
 10. Closing the stream stops the runner the same way, once, and returns only
     after the close has finished, however often the closer is cancelled.
 11. A close that raises is logged at ERROR with the run id and changes
-    nothing else, unless it raises a containment loss: then the run ends
-    `failed: provider_error` (rule 9's terminal, or the cut run's record). An unexpected error in the supervision stops the runner and
-    then cuts the stream, so a decoder sees it truncated.
-12. When a stream ends no task of the run is alive and the runner was closed
-    once.
+    nothing else, unless it raises a containment loss, bare or carried by another
+    error or an exception group: then the run ends `failed: provider_error` (rule 9's
+    terminal, or the cut run's record) and its place passes to the quarantine
+    (rule 12). A bare loss is reported by the quarantine's one ERROR line instead of
+    this one (D16). An unexpected error in the supervision stops the runner and then
+    cuts the stream, so a decoder sees it truncated.
+12. When a stream ends no task of the run's supervision is alive and the runner was
+    closed once (the stalled cleanup tasks `RunTools.close()` tracks follow the
+    bounded close, A1b-10b2b). The quarantine's retry `quarantine:<run_id>` of a run
+    whose pump met a containment loss is not the supervision's: it belongs to the
+    app's quarantine, holds only that run's place and lives until every group the
+    pump met is confirmed gone or the process ends.
 13. A cut-short run says the service's own fixed text and keeps its code even
     after a side-effecting `tool_call` (ruling (c) holds).
 14. Bad numbers stop startup: strict types (no `true`, `15.5` or `inf`),
@@ -1063,7 +1077,7 @@ Rules:
    once the runner is stopped, so a recording defect cuts the stream the way a
    supervision failure does. No step of a run's ending raises its failure past
    the decider: the supervision (its clock, its drive and the drop report it
-   makes) and the cleanup (the disconnect report and the record's end) record
+   makes) and the cleanup (the disconnect report, the quarantine's hand-over and the record's end) record
    each failure in the run's one collection (`run_liveness.RunFailures`), in
    the order the failures happened. One pure decider (`run_liveness._exit_of`)
    reads that collection, any cancellation and the body's outcome: a
@@ -1072,12 +1086,17 @@ Rules:
    failure, unless the body raised. Every other failure is logged exactly
    once. Every failure the service logs, a runner's and a failed close
    included, is logged by its class and its stack positions
-   (`file:line:function`), never by its message, notes or chained exceptions.
+   (`file:line:function`), never by its message, notes or chained exceptions, except
+   a bare containment loss: the quarantine's one ERROR line reports it instead,
+   naming only the run id and the pgid of each group the pump met (A1b-3f2).
    A propagated failure is not logged by the service: Starlette and the ASGI
-   server log it in their own format, message and chain included. Every
-   failure that can propagate comes from the service's own recorder, clock or
-   loss report, so none carries provider or user text; a runner's failure is
-   logged through the one helper instead and never propagates. With no
+   server log it in their own format, message and chain included. Failures
+   from the service's recorder, clock, loss report or quarantine hand-over can
+   propagate, including a logging-handler filter failure during the hand-over. The
+   quarantine's log record contains only the run id and process-group ids, never
+   provider or user text. Runner failures themselves do not propagate: they are
+   reported through `log_failure`, except a bare containment loss, which is reported
+   by the quarantine's one ERROR line. With no
    runner, the run is recorded complete before its first frame is handed out.
 9. The ending is the committed terminal, or `failed: provider_error` when the
    pump met a loss; `cancellation_terminal()` is used only when no terminal was
@@ -1103,7 +1122,8 @@ Rules:
     closed makes `aclose()` return at once. The close stops the runner once and
     returns only after the runner's close has finished, so when the response
     call ends, a started run's runner is closed, its record is ended and no
-    task of the run is alive. Nothing relies on finalization: no
+    task of the run is alive, except the quarantine's retry of a run whose group is
+   not confirmed gone. Nothing relies on finalization: no
     `gc.collect()`, no reference count reaching zero, no event-loop
     async-generator hook. Below ASGI spec 2.4, which is what uvicorn 0.54.0
     speaks, a disconnect is reported at `receive` and seen at once. Under ASGI
@@ -1134,7 +1154,9 @@ max_parallel_cli_runs`, one limit for the whole service, not per profile or per 
 a CLI run takes a lease on one place before its run id or any signature exists.
 Beyond the limit a request gets `429 busy` with `Retry-After: 10` at once. Refusals
 and API runs take nothing. The lease is released once the run has stopped, even if
-its record fails; a response that ends before its run began releases it too. Only a
+its record fails, unless the runner's pump met a containment loss (line 20): then the
+run's place moves to the quarantine at the run's end, which frees it only once
+`confirm_group_gone` answers `True` for every group the pump met; a response that ends before its run began releases it too. Only a
 lease that still holds its place can free it. The limit lives in one process,
 because the service runs one replica with one worker (A1d). There is no queue and
 no fallback to the API route.
@@ -1162,7 +1184,7 @@ the parallel-run limit stands once, in H7's Decision.
     - No higher-ranked credential can reach the child: Bedrock, Vertex, Foundry, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY` and `apiKeyHelper`. The environment admits only named variables, `--setting-sources ""` drops the settings files, and `apiKeySource` is checked on every run.
     - Renewal: you replace the file the O1 way and restart (line 2). An expired token ends runs with the closed cause of line 11. Whether the CLI writes or refreshes a credential is measured in A1b-0b1.
     - Codex and Grok use device-code logins whose renewal only the service may own; that is decided when their routes arrive (A1r3).
-  - **Q8 What happens when termination cannot be confirmed? The quarantine, not an exit** (line 20). The place of a run whose end cannot be confirmed stays taken, and the service does not restart. It keeps sending `SIGKILL` and checking in the background, frees that one place once the group is empty, and logs one ERROR line. The other places keep working; if every place hangs, the service answers busy, and restarting the container is the way out; it also ends the remaining run processes. This replaces the earlier recommendation "the service exits", which dated from the single-slot design. The design is in the slice cards ("Design: containment lost", A1b-3f).
+  - **Q8 What happens when termination cannot be confirmed? The quarantine, not an exit** (line 20). The place of a run whose end cannot be confirmed stays taken, and the service does not restart. It keeps sending `SIGKILL` and checking in the background, frees that one place once the group is empty, and logs one ERROR line. The other places keep working; if every place hangs, the service answers busy, and restarting the container is the way out; it also ends the remaining run processes. This replaces the earlier recommendation "the service exits", which dated from the single-slot design. The design is #278's body (A1b-3f2), with the terminal in #280.
   - **The three principles stand as presented:** one long-lived token file per profile, whose absence or fault stops startup and which never appears in argv or a log, while the operator's own login stays untouched; Claude has no built-in tools and gets only the app's tools, every call accepted by the service first; at most 5 parallel subscription runs, and a place is reused only once its earlier run is confirmed ended.
   - **The lines:** 2, 14, 15, 16 and 17 are ruled as worded; 20 is ruled as reworded to the quarantine. Line 9 is ruled with the five places above.
 

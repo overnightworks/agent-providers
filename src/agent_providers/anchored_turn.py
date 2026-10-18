@@ -15,14 +15,13 @@ import math
 import signal
 import threading
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import partial
 
-import anyio
-
 from agent_providers.errors import ContainmentLost
 from agent_providers.lost_groups import release_leader_if_gone, retain_lost_group
+from agent_providers.outlasting import outlast
 from agent_providers.process import HomeReservation
 from agent_providers.spawn import AnchoredChild, ChildProcess, open_anchored_pipes
 
@@ -101,28 +100,12 @@ class CliProcessPool:
 async def _reap_behind_shield(child: AnchoredChild, reservation: CliProcessReservation) -> None:
     """Run the one bounded reap of ``child`` to completion, whatever cancels the caller.
 
-    The reap runs in its own task, started once, and is awaited behind an
-    AnyIO shield (ASGI cancel scopes) and ``asyncio.shield`` (direct
-    ``Task.cancel()``).  Every direct cancellation that arrives meanwhile is
-    absorbed until the task is done.  The reap's own exception then wins over
-    any cancellation; otherwise the cancellation is delivered afterwards.
+    The reap runs in its own task, started once, and ``outlast`` (which owns
+    the order) awaits it behind an AnyIO shield and ``asyncio.shield``.  The
+    reap's own exception wins over any cancellation; otherwise the caller's
+    cancellation is delivered afterwards.
     """
-    reap_task = asyncio.create_task(_reap_process_group(child, reservation))
-    try:
-        with anyio.CancelScope(shield=True):
-            await asyncio.shield(reap_task)
-    except asyncio.CancelledError:
-        with anyio.CancelScope(shield=True):
-            await _outlast_direct_cancellations(reap_task)
-        raise
-    await anyio.lowlevel.checkpoint_if_cancelled()
-
-
-async def _outlast_direct_cancellations(reap_task: asyncio.Task[None]) -> None:
-    while not reap_task.done():
-        with suppress(asyncio.CancelledError):
-            await asyncio.shield(reap_task)
-    reap_task.result()
+    await outlast(asyncio.create_task(_reap_process_group(child, reservation)))
 
 
 async def _reap_process_group(child: AnchoredChild, reservation: CliProcessReservation) -> None:

@@ -23,6 +23,7 @@ import platform
 import select
 import signal
 import subprocess
+import sys
 import time
 import weakref
 from collections.abc import Callable, Iterable, Iterator
@@ -36,6 +37,7 @@ from agent_providers.spawn import ChildProcess
 P_PIDFD = 3
 TEST_WAIT_SECONDS = 10
 DISARMED = object()
+IMPORT_ROOT_PRELUDE = "import os, sys\nsys.path[:0] = sys.argv[1].split(os.pathsep)\n"
 
 _PIDFD_SYSCALL_NUMBERS = {
     "x86_64": (434, 424),
@@ -45,6 +47,13 @@ _PIDFD_SYSCALL_NUMBERS = {
 _syscall = ctypes.CDLL(None, use_errno=True).syscall
 _syscall.restype = ctypes.c_long
 _syscall.argtypes = [ctypes.c_long]
+
+
+def absolute_import_roots() -> str:
+    """The absolute import roots an isolated interpreter takes through the prelude."""
+    roots = [entry for entry in sys.path if entry]
+    assert all(os.path.isabs(entry) for entry in roots), "an import root is relative"
+    return os.pathsep.join(roots)
 
 
 def _pidfd_syscall_numbers() -> tuple[int, int]:
@@ -460,10 +469,10 @@ class ChildCleanup:
         self._require_listed(owned)
         return state(owned)
 
-    def wait_exited(self, owned: OwnedChild) -> int:
+    def wait_exited(self, owned: OwnedChild, *, bound: float = TEST_WAIT_SECONDS) -> int:
         self._require_listed(owned)
-        if owned.pidfd not in _wait_for_exits([owned.pidfd], TEST_WAIT_SECONDS):
-            raise AssertionError(f"pid {owned.pid} did not exit within {TEST_WAIT_SECONDS}s")
+        if owned.pidfd not in _wait_for_exits([owned.pidfd], bound):
+            raise AssertionError(f"pid {owned.pid} did not exit within {bound}s")
         observed = state(owned)
         if not isinstance(observed, Exited):
             raise AssertionError(f"pid {owned.pid} is {observed}, not exited")

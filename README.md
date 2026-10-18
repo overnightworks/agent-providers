@@ -174,6 +174,13 @@ stays under the host's root, logged at error level. A direct overwrite of a 0400
 rename a replacement in its disposable directory; that renewal vanishes at
 cleanup. This is not evidence that a CLI refreshes credentials in practice.
 
+The permission repair that makes a child's read-only
+directories removable never follows a child-controlled symlink and, once a
+directory is acquired, acts on that acquired object; it promises no containment
+against concurrent same-user relocation. A home whose own path was replaced by a symlink is logged and left. The repair
+needs Linux's `O_PATH` and a mounted `/proc/self/fd`, which import and a removal
+that needs no repair do not.
+
 ## Safe diagnostic codes
 
 The library logs closed diagnostic codes for rejected Grok tool-protocol and
@@ -194,10 +201,12 @@ needed to observe these codes.
 
 ## The ports a host supplies
 
-Nothing is configured by default. A host installs one `ProviderRuntimeConfig`
-per process with `configure()`, and every module reads it back through
-`current_config()`; until then `current_config()` raises rather than guessing a
-binary path.
+Nothing is configured by default. A host that runs the catalog or turn paths
+installs one `ProviderRuntimeConfig` per process with `configure()`, and those
+paths read it back through `current_config()`; until then `current_config()`
+raises rather than guessing a binary path. The subscription run the agent
+service drives (`claude.provider.ClaudeRun`) takes its facts as explicit
+arguments instead and reads no installed configuration.
 
 The configuration is cut along the two ways into this library. `ProviderRuntimeConfig`
 carries what the catalog path reads — the CLI binaries, the search path a bare
@@ -250,7 +259,7 @@ The other host obligations arrive as arguments where they are needed:
   in-process, which a host calling the core consumes. The agent service's wire
   is `agent_client.wire`, not this union.
 
-**Interruptions.** Python can raise an exception asynchronously inside a library call: a signal handler raises one between two bytecode instructions of the main thread, as the default `SIGINT` handler raises `KeyboardInterrupt`, and `PyThreadState_SetAsyncExc` injects one into any thread. Python's documentation says that most code, the standard library included, cannot be made robust against this ([Note on Signal Handlers and Exceptions](https://docs.python.org/3/library/signal.html#note-on-signal-handlers-and-exceptions)), and this library is no exception. A host that needs orderly shutdown or continued service uses signal handlers that do not raise for the whole time library calls can run, its startup included, and never injects an exception into a thread that runs library code. After such an interruption, stop using the library and end the process: a later call may wait forever on a lock the interruption left held, and graceful shutdown may stall. Normal interpreter exit attempts the private-home cleanup without taking any of this library's locks, but the cleanup is not guaranteed when shutdown cannot complete or a removal fails.
+**Interruptions.** Python can raise an exception asynchronously inside a library call: a signal handler raises one between two bytecode instructions of the main thread, as the default `SIGINT` handler raises `KeyboardInterrupt`, and `PyThreadState_SetAsyncExc` injects one into any thread. Python's documentation says that most code, the standard library included, cannot be made robust against this ([Note on Signal Handlers and Exceptions](https://docs.python.org/3/library/signal.html#note-on-signal-handlers-and-exceptions)), and this library is no exception. A host that needs orderly shutdown or continued service uses signal handlers that do not raise for the whole time library calls can run, its startup included, and never injects an exception into a thread that runs library code. After such an interruption, stop using the library and end the process: a later call may wait forever on a lock the interruption left held, and graceful shutdown may stall. A resource failure such as `MemoryError` inside `start_anchored_leader`'s ownership handoff or rollback likewise requires the host to stop using the library and end the process. Normal interpreter exit attempts the private-home cleanup without taking any of this library's locks, but the cleanup is not guaranteed when shutdown cannot complete or a removal fails.
 
 ## Migrating to 0.3.0
 

@@ -246,6 +246,11 @@ def test_a_refused_kill_and_a_handle_still_holding_fail_the_session_and_stay_hel
             raise OSError(errno.EPERM, os.strerror(errno.EPERM))
         send_signal(pidfd, signal_number)
 
+    assert kill_children([held_by_handle]) == []
+    assert held_by_handle.pidfd in anchored_support._wait_for_exits(
+        [held_by_handle.pidfd], TEST_WAIT_SECONDS
+    )
+
     with monkeypatch.context() as refusing:
         refusing.setattr(anchored_support, "_pidfd_send_signal", refuse_one_pidfd)
         with pytest.raises(SessionCleanupFailed) as first_failure:

@@ -26,7 +26,8 @@ signal reach only this run.
 
 The host obligation: the anchor holds only while nothing else reaps this
 child. Forbidden are ``waitpid(-1)``, ``os.wait()``, ``wait3`` and ``wait4``
-on any child, ``SIGCHLD`` set to ``SIG_IGN``, ``SA_NOCLDWAIT``, the deprecated
+on any child, ``SIGCHLD`` set to ``SIG_IGN`` (which the start refuses),
+``SA_NOCLDWAIT``, the deprecated
 ``FastChildWatcher`` of Python 3.12 and 3.13, and any ptrace request of the
 service. Per-pid asyncio watchers do not consume this unregistered child. A
 foreign reap after a successful observation can invalidate the anchor without
@@ -47,6 +48,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import signal
 import subprocess
 import threading
 from collections.abc import Callable, Mapping
@@ -374,8 +376,45 @@ def _reap_exited(pid: int) -> tuple[int, int]:
     return os.waitpid(pid, os.WNOHANG)
 
 
+def _reap_after_kill(pid: int) -> tuple[int, int]:
+    return os.waitpid(pid, 0)
+
+
 def _lifecycle_lock() -> threading.Lock:
     return threading.Lock()
+
+
+def _ownership_gate() -> threading.Lock:
+    return threading.Lock()
+
+
+class _WatcherOwnership(Enum):
+    PENDING = "pending"
+    OWNED = "owned"
+    ABANDONED = "abandoned"
+
+
+class _WatcherHandoff:
+    """The start's one decision about its watcher, which the watcher awaits before any pid call.
+
+    The gate is shut at creation and opens only through :meth:`decide`, so a watcher
+    that never reads a decision never touches the pid.
+    """
+
+    __slots__ = ("_gate", "_ownership")
+
+    def __init__(self) -> None:
+        self._ownership = _WatcherOwnership.PENDING
+        self._gate = _ownership_gate()
+        self._gate.acquire()
+
+    def decide(self, ownership: _WatcherOwnership) -> None:
+        self._ownership = ownership
+        self._gate.release()
+
+    def await_decision(self) -> _WatcherOwnership:
+        self._gate.acquire()
+        return self._ownership
 
 
 class AnchoredLeader:
@@ -408,6 +447,23 @@ class AnchoredLeader:
     handle is RELEASED or LOST and its watcher ended, so it will never act on its
     pid again. False certifies nothing: it never waits, so a held lifecycle lock
     reads false even for a handle that is already done.
+
+    ``signal_group`` sends a signal to the leader's process group inside the
+    lifecycle lock, only while the leader is anchored (RUNNING or EXITED), so no
+    ``release()`` can free the number between the admission and the signal. After
+    RELEASED or LOST it refuses without a kernel call. ``ESRCH`` means that
+    something else reaped the leader: it is committed as a loss and raises
+    :class:`ChildIdentityLost`. Any other ``OSError`` propagates unchanged and
+    leaves the handle as it was. It waits for nothing and never reaps.
+
+    A loss committed by ``signal_group`` can overtake a stop report the watcher
+    holds, so after each stop report the watcher reads the state under the lock
+    and ends without a warning, a consume or a further wait unless it is still
+    RUNNING.
+
+    The watcher acts on its pid only once the start handed it ownership. A start
+    whose watcher launch raised abandons the watcher first; an abandoned watcher
+    ends without touching the pid.
     """
 
     def __init__(self, popen: subprocess.Popen[bytes], on_exit: Callable[[], None]) -> None:
@@ -417,6 +473,7 @@ class AnchoredLeader:
         self._lock = _lifecycle_lock()
         self._status = LEADER_STARTED
         self._stop_warned = False
+        self._handoff = _WatcherHandoff()
         self._watcher = threading.Thread(
             target=self._watch, name=f"child-exit:{self.pid}", daemon=True
         )
@@ -445,11 +502,15 @@ class AnchoredLeader:
         self._watcher.start()
 
     def _watch(self) -> None:
+        if self._handoff.await_decision() is not _WatcherOwnership.OWNED:
+            return
         try:
             while True:
                 observation = exit_observation(*_wait_for_exit(self.pid))
                 if isinstance(observation, LeaderExited):
                     break
+                if self.state is not AnchorState.RUNNING:
+                    return
                 self._warn_once_that_the_leader_is_stopped()
                 _consume_stop_report(self.pid)
         except ChildProcessError:
@@ -483,6 +544,33 @@ class AnchoredLeader:
             if isinstance(event, LeaderGone):
                 raise ChildIdentityLost("the leader was reaped elsewhere; nothing is left")
 
+    def signal_group(self, sig: signal.Signals) -> None:
+        with self._lock:
+            admit_group_signal(self._status.state)
+            try:
+                os.killpg(self.pid, sig)
+                return
+            except ProcessLookupError:
+                transition = self._apply(LeaderGone())
+        self._announce_when(transition)
+        raise ChildIdentityLost("the leader was reaped elsewhere; its process group is gone")
+
+    def _kill_and_reap(self) -> LeaderEvent:
+        with self._lock:
+            try:
+                os.killpg(self.pid, signal.SIGKILL)
+                event: LeaderEvent = self._reap_until_terminal()
+            except (ProcessLookupError, ChildProcessError):
+                event = LeaderGone()
+            self._apply(event)
+        return event
+
+    def _reap_until_terminal(self) -> LeaderReaped:
+        while True:
+            outcome = reap_outcome(*_reap_after_kill(self.pid))
+            if isinstance(outcome, LeaderReaped):
+                return outcome
+
     def _apply(self, event: LeaderEvent) -> LeaderTransition:
         transition = advance(self._status, event)
         state = transition.status.state
@@ -496,6 +584,9 @@ class AnchoredLeader:
     def _commit(self, event: LeaderEvent) -> None:
         with self._lock:
             transition = self._apply(event)
+        self._announce_when(transition)
+
+    def _announce_when(self, transition: LeaderTransition) -> None:
         if transition.announces:
             self._announce()
 
@@ -517,8 +608,22 @@ def start_anchored_leader(
     """Start one child in its own session that no asyncio watcher knows.
 
     The descriptors are the caller's and stay open. A failed start raises the
-    ``Popen`` error unchanged and starts no thread.
+    ``Popen`` error unchanged and starts no thread. An ignored ``SIGCHLD`` is
+    refused with :class:`AnchorStateError` before any child exists, because the
+    kernel would reap the leader at its exit.
+
+    Any raise from the watcher's launch, whether or not a thread exists, abandons
+    the watcher, kills the leader's group, reaps the leader through its own pid
+    and re-raises the error unchanged; a loss during that rollback raises
+    :class:`ChildIdentityLost` from the error. The rollback's blocking ``waitpid``
+    has no guaranteed elapsed-time bound, because a child in an uninterruptible
+    kernel wait ends only when that wait ends. A resource failure such as
+    ``MemoryError`` inside the ownership handoff or the rollback, like an
+    asynchronous interruption, can leave the child and a parked watcher until the
+    process ends; the host then stops using the library and ends the process.
     """
+    if signal.getsignal(signal.SIGCHLD) is signal.SIG_IGN:
+        raise AnchorStateError("SIGCHLD is ignored; the kernel would reap the leader at its exit")
     popen = subprocess.Popen(
         child.command,
         stdin=stdin,
@@ -529,5 +634,15 @@ def start_anchored_leader(
         start_new_session=True,
     )
     leader = AnchoredLeader(popen, on_exit)
-    leader._begin_watching()
+    try:
+        leader._begin_watching()
+    except BaseException as launch_failure:
+        leader._handoff.decide(_WatcherOwnership.ABANDONED)
+        if isinstance(leader._kill_and_reap(), LeaderGone):
+            raise ChildIdentityLost(
+                "the leader was lost while its start was rolled back"
+            ) from launch_failure
+        raise
+    else:
+        leader._handoff.decide(_WatcherOwnership.OWNED)
     return leader

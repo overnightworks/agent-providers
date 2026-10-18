@@ -15,9 +15,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from agent_providers.codex.pool import CodexProcessReservation, get_codex_process_pool
+from agent_providers.codex.pool import CodexProcessPool, CodexProcessReservation
 from agent_providers.codex_login import blanked_copy
-from agent_providers.config import current_config
+from agent_providers.config import current_codex_runtime
 from agent_providers.errors import SafeRouteReasonCode, raise_without_chain
 from agent_providers.process import (
     CODEX_CLI_BINARY_MISSING_DETAIL,
@@ -97,7 +97,7 @@ def codex_child_process(arguments: tuple[str, ...], turn_home: CodexTurnHome) ->
     the CLI discovers only the redacted login this turn installed under
     ``CODEX_HOME``.
     """
-    binary = require_cli_binary(current_config().codex_cli_binary, CODEX_CLI_BINARY_MISSING_DETAIL)
+    binary = require_cli_binary(current_codex_runtime().binary, CODEX_CLI_BINARY_MISSING_DETAIL)
     return ChildProcess(
         binary=binary,
         arguments=arguments,
@@ -120,6 +120,7 @@ def release_turn_reservations(
 
 
 def run_reserved_codex_cli(
+    process_pool: CodexProcessPool,
     reservation: CodexProcessReservation,
     home_reservation: PrivateHomeReservation,
     child: ChildProcess,
@@ -133,8 +134,6 @@ def run_reserved_codex_cli(
     The runner releases both reservations through its callbacks; a failure of
     this step ends the channel instead of raising.
     """
-    process_pool = get_codex_process_pool()
-
     def on_spawned(process_id: int) -> None:
         process_pool.bind(reservation, process_id)
 
@@ -167,7 +166,7 @@ def run_reserved_codex_cli(
 def create_codex_turn_home(prefix: str) -> CodexTurnHome:
     """Make one private Codex turn home holding ``work`` and the blanked login copy."""
     home = PrivateCredentialHome(
-        current_config().codex_cli_auth_file,
+        current_codex_runtime().token_file,
         Path(CODEX_HOME_DIRECTORY_NAME) / "auth.json",
         prefix=prefix,
         missing_credential_is_error=True,

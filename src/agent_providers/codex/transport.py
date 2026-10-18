@@ -121,6 +121,7 @@ class CodexCliToolTransport:
 
     def __init__(self, *, model: str | None, catalog: ToolCatalog) -> None:
         refuse_empty_model("codex", "cli", model)
+        self._process_pool = get_codex_process_pool()
         self._model = model
         self._catalog = catalog
         try:
@@ -166,6 +167,7 @@ class CodexCliToolTransport:
         runner = asyncio.create_task(
             asyncio.to_thread(
                 run_reserved_codex_cli,
+                self._process_pool,
                 reservation,
                 home_reservation,
                 child,
@@ -252,7 +254,7 @@ class CodexCliToolTransport:
             )
         home_reservation = self._turn_home.home.reserve()
         try:
-            reservation = get_codex_process_pool().reserve(CodexProcessKind.TEXT)
+            reservation = self._process_pool.reserve(CodexProcessKind.TEXT)
         except CodexProcessPoolSaturatedError as exc:
             home_reservation.release()
             raise ProviderUnavailableError(

@@ -101,6 +101,7 @@ class GrokCliToolTransport:
 
     def __init__(self, *, model: str | None, catalog: ToolCatalog) -> None:
         refuse_empty_model("grok", "cli", model)
+        current_grok_turn_runtime()
         self._model = model
         self._catalog = catalog
         try:
@@ -250,6 +251,7 @@ def _run_grok_round(
             stdout_line_channel=channel,
             prompt_file_bytes=prompt,
             prompt_file_arg_index=_PROMPT_FILE_ARGUMENT_INDEX,
+            prompt_file_prefix=current_grok_turn_runtime().prompt_file_prefix,
             on_spawn_failed=home_reservation.on_spawn_failed,
             on_reaped=home_reservation.on_reaped,
         ),

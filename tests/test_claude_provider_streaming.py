@@ -25,6 +25,7 @@ from agent_providers.claude.provider import (
     CLAUDE_CLI_UNAVAILABLE_DETAIL,
     CliLoginRefusedError,
     UnavailableError,
+    _parse_announced_surface,
     _parse_stream_event,
     _safe_json_loads,
     acall_claude_with_mcp_stream,
@@ -286,12 +287,12 @@ def test_a_line_nested_deeper_than_the_decoder_can_parse_is_skipped_with_a_class
     line = b"[" * depth + b"]" * depth + b"\n"
     caplog.set_level("WARNING")
     outcome: list[dict | None] = []
-    threading.stack_size(16 << 20)
+    previous_stack_size = threading.stack_size(16 << 20)
     try:
         worker = threading.Thread(target=lambda: outcome.append(_safe_json_loads(line)))
         worker.start()
     finally:
-        threading.stack_size(0)
+        threading.stack_size(previous_stack_size)
     worker.join()
 
     assert outcome == [None]
@@ -334,7 +335,43 @@ def test_a_refused_field_shape_fails_closed_and_unchained(payload, error_class, 
     assert error_class in record.message
 
 
-def test_a_refusal_raised_while_the_caller_handles_a_marker_error_keeps_no_chain(caplog) -> None:
+def _parse_an_error_result() -> None:
+    _parse_stream_event({"type": "result", "is_error": True}, A_CORRELATION_ID)
+
+
+def _parse_an_api_error() -> None:
+    _parse_stream_event({"type": "assistant", "is_api_error_message": True}, A_CORRELATION_ID)
+
+
+def _parse_a_login_refusal() -> None:
+    _parse_stream_event(
+        {"type": "assistant", "is_api_error_message": True, "error": "authentication_failed"},
+        A_CORRELATION_ID,
+    )
+
+
+def _parse_a_malformed_event() -> None:
+    _parse_stream_event({"type": "assistant", "message": A_MARKER}, A_CORRELATION_ID)
+
+
+def _parse_a_probe_init() -> None:
+    _parse_announced_surface(b"not json\n", mcp=None)
+
+
+@pytest.mark.parametrize(
+    "parse",
+    [
+        _parse_a_malformed_event,
+        _parse_an_error_result,
+        _parse_an_api_error,
+        _parse_a_login_refusal,
+        _parse_a_probe_init,
+    ],
+    ids=["malformed-event", "error-result", "api-error", "login-refused", "probe-init"],
+)
+def test_a_refusal_raised_while_the_caller_handles_a_marker_error_keeps_no_chain(
+    parse, caplog,
+) -> None:
     caplog.set_level("WARNING")
     marker_error = UnicodeDecodeError("utf-8", A_MARKER.encode(), 0, 1, "invalid start byte")
     refusal: UnavailableError | None = None
@@ -343,7 +380,7 @@ def test_a_refusal_raised_while_the_caller_handles_a_marker_error_keeps_no_chain
         raise marker_error
     except UnicodeDecodeError:
         try:
-            _parse_stream_event({"type": "assistant", "message": A_MARKER}, A_CORRELATION_ID)
+            parse()
         except UnavailableError as refused:
             refusal = refused
 

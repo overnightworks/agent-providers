@@ -486,7 +486,7 @@ def _dispatch_stream_event(payload: dict, correlation_id: str | None) -> list[St
 
 def _raise_for_error_result(payload: dict) -> None:
     if payload.get("is_error"):
-        raise UnavailableError(CLAUDE_CLI_UNAVAILABLE_DETAIL)
+        raise_without_chain(UnavailableError(CLAUDE_CLI_UNAVAILABLE_DETAIL))
 
 
 def _parse_result_events(payload: dict, correlation_id: str | None) -> list[StreamEvent]:
@@ -501,8 +501,8 @@ def _raise_for_api_error_message(payload: dict) -> None:
     if not payload.get("is_api_error_message"):
         return
     if payload.get("error") == _CLI_AUTHENTICATION_FAILED:
-        raise CliLoginRefusedError(CLAUDE_CLI_LOGIN_REFUSED_DETAIL)
-    raise UnavailableError(CLAUDE_CLI_UNAVAILABLE_DETAIL)
+        raise_without_chain(CliLoginRefusedError(CLAUDE_CLI_LOGIN_REFUSED_DETAIL))
+    raise_without_chain(UnavailableError(CLAUDE_CLI_UNAVAILABLE_DETAIL))
 
 
 def _parse_assistant_events(payload: dict, correlation_id: str | None) -> list[StreamEvent]:
@@ -1755,15 +1755,17 @@ def _parse_announced_surface(
         or payload.get("type") != _CLI_INIT_EVENT_TYPE
         or payload.get("subtype") != _CLI_INIT_EVENT_SUBTYPE
     ):
-        raise UnavailableError(
+        raise_without_chain(UnavailableError(
             "Claude CLI did not open with the expected session init event",
-        )
+        ))
     tools = payload.get("tools")
     if not isinstance(tools, list) or not all(isinstance(t, str) for t in tools):
-        raise UnavailableError("Claude CLI announced an unreadable tool list")
+        raise_without_chain(UnavailableError("Claude CLI announced an unreadable tool list"))
     commands = payload.get("slash_commands")
     if not isinstance(commands, list) or not all(isinstance(c, str) for c in commands):
-        raise UnavailableError("Claude CLI announced an unreadable slash-command list")
+        raise_without_chain(
+            UnavailableError("Claude CLI announced an unreadable slash-command list"),
+        )
     return _AnnouncedSurface(
         tools=tuple(tools),
         slash_commands=tuple(commands),

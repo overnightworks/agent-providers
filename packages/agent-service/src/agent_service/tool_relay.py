@@ -451,7 +451,6 @@ class _PendingCall:
     params: CallToolParams
     event: ToolCallEvent
     verdict: asyncio.Future[asyncio.Task[ToolOutcome] | None]
-    abandoned: bool = False
 
 
 class ToolCallBarrier:
@@ -501,7 +500,7 @@ class ToolCallBarrier:
             await asyncio.wait((forward,))
             outcome = forward.result()
         except asyncio.CancelledError:
-            pending.abandoned = True
+            self._watch_for_lost_failure(pending)
             raise
         finally:
             self._end(pending)
@@ -512,9 +511,9 @@ class ToolCallBarrier:
         self._changed.set()
 
     async def next_event(self) -> ToolCallEvent:
-        if self._handed_out is not None:
-            raise_without_chain(ToolCallsMisused())
         while True:
+            if self._handed_out is not None:
+                raise_without_chain(ToolCallsMisused())
             self._require_usable()
             if self._waiting:
                 break
@@ -532,7 +531,7 @@ class ToolCallBarrier:
             name=f"upstream:{self._run_id}:{event.tool_use_id}",
         )
         self._forwards.add(forward)
-        forward.add_done_callback(lambda done: self._retrieved(pending, done))
+        forward.add_done_callback(self._retrieved)
         pending.verdict.set_result(forward)
 
     def stop(self) -> None:
@@ -541,7 +540,8 @@ class ToolCallBarrier:
         self._waiting.clear()
         self._handed_out = None
         for pending in refused:
-            pending.verdict.set_result(None)
+            if not pending.verdict.done():
+                pending.verdict.set_result(None)
         self._changed.set()
 
     async def settle(self) -> None:
@@ -550,7 +550,11 @@ class ToolCallBarrier:
 
     def _handed_out_for(self, event: ToolCallEvent) -> _PendingCall:
         pending = self._handed_out
-        if pending is not None and pending.event.tool_use_id == event.tool_use_id:
+        if (
+            pending is not None
+            and not pending.verdict.done()
+            and pending.event.tool_use_id == event.tool_use_id
+        ):
             return pending
         raise_without_chain(ToolCallsMisused())
 
@@ -588,12 +592,21 @@ class ToolCallBarrier:
         if self._stopped:
             raise_without_chain(ToolCallsMisused())
 
-    def _retrieved(self, pending: _PendingCall, forward: asyncio.Task[ToolOutcome]) -> None:
+    def _retrieved(self, forward: asyncio.Task[ToolOutcome]) -> None:
         self._forwards.discard(forward)
+        if not forward.cancelled():
+            forward.exception()
+
+    def _watch_for_lost_failure(self, pending: _PendingCall) -> None:
+        verdict = pending.verdict
+        if verdict.done() and not verdict.cancelled() and (forward := verdict.result()) is not None:
+            forward.add_done_callback(self._log_lost_failure)
+
+    def _log_lost_failure(self, forward: asyncio.Task[ToolOutcome]) -> None:
         if forward.cancelled():
             return
         failure = forward.exception()
-        if failure is not None and pending.abandoned:
+        if failure is not None:
             log_failure(log, f"A forwarded call of run {self._run_id} failed", failure)
 
 

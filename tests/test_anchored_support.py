@@ -200,7 +200,7 @@ def test_a_refused_kill_is_reported_even_though_the_child_is_still_stopped_and_r
     child_cleanup.send_signal(owned, signal.SIGSTOP)
 
     with monkeypatch.context() as refused:
-        refused.setattr(anchored_support, "_pidfd_send_signal", refuse_with(errno.EPERM))
+        refused.setattr(anchored_support, "pidfd_send_signal", refuse_with(errno.EPERM))
         with pytest.raises(CleanupFailed) as failure:
             child_cleanup.cleanup(bound=SHORT_BOUND)
 
@@ -255,7 +255,7 @@ def test_drop_popen_hands_over_a_disarmed_popen_and_keeps_the_process(
     ("binding", "code", "step"),
     [
         ("pidfd_open", errno.ENOSYS, "pidfd_open"),
-        ("_pidfd_send_signal", errno.EPERM, "pidfd_send_signal"),
+        ("pidfd_send_signal", errno.EPERM, "pidfd_send_signal"),
         ("_waitid", errno.EINVAL, "waitid"),
     ],
 )

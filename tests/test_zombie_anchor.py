@@ -41,7 +41,7 @@ EXIT_WITH_LINE = (
     "import sys\nline = sys.stdin.readline()\nsys.exit(int(line) if line.strip() else 0)\n"
 )
 FORBIDDEN_NUMBERED_OPERATIONS = {"kill", "killpg", "waitpid", "wait", "wait3", "wait4"}
-KERNEL_BINDINGS = {"pidfd_open", "_pidfd_send_signal", "_waitid", "wait_for_exits"}
+KERNEL_BINDINGS = {"pidfd_open", "pidfd_send_signal", "_waitid", "wait_for_exits"}
 
 
 class Cell:
@@ -239,7 +239,7 @@ def test_a_refused_kill_and_a_handle_still_holding_fail_the_session_and_stay_hel
     anchor, successor = cell.anchor(), cell.anchor()
     handle = FakeHandle()
     held_by_handle, refused = cell.start_child(anchor, handle), cell.start_child(anchor)
-    send_signal = anchored_support._pidfd_send_signal
+    send_signal = anchored_support.pidfd_send_signal
 
     def refuse_one_pidfd(pidfd: int, signal_number: int) -> None:
         if pidfd == refused.pidfd:
@@ -252,7 +252,7 @@ def test_a_refused_kill_and_a_handle_still_holding_fail_the_session_and_stay_hel
     )
 
     with monkeypatch.context() as refusing:
-        refusing.setattr(anchored_support, "_pidfd_send_signal", refuse_one_pidfd)
+        refusing.setattr(anchored_support, "pidfd_send_signal", refuse_one_pidfd)
         with pytest.raises(SessionCleanupFailed) as first_failure:
             anchor.finalize(bound=0.2)
     states_after_failure = (state(held_by_handle), state(refused))

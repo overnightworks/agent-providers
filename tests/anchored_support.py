@@ -76,7 +76,7 @@ def pidfd_open(pid: int) -> int:
     return _checked(_syscall(open_number, ctypes.c_long(pid), ctypes.c_long(0)))
 
 
-def _pidfd_send_signal(pidfd: int, signal_number: int) -> None:
+def pidfd_send_signal(pidfd: int, signal_number: int) -> None:
     _, send_number = _pidfd_syscall_numbers()
     _checked(
         _syscall(
@@ -254,7 +254,7 @@ def kill_children(children: Iterable[OwnedChild]) -> list[ChildError]:
     errors = []
     for owned in children:
         try:
-            _pidfd_send_signal(owned.pidfd, signal.SIGKILL)
+            pidfd_send_signal(owned.pidfd, signal.SIGKILL)
         except OSError as refusal:
             if refusal.errno != errno.ESRCH:
                 errors.append(
@@ -493,7 +493,7 @@ class ChildCleanup:
 
     def send_signal(self, owned: OwnedChild, signal_number: int) -> None:
         self._require_listed(owned)
-        _pidfd_send_signal(owned.pidfd, signal_number)
+        pidfd_send_signal(owned.pidfd, signal_number)
 
     def drop_popen(self, owned: OwnedChild) -> weakref.ReferenceType[subprocess.Popen]:
         self._require_listed(owned)
@@ -543,7 +543,7 @@ def _prove_the_pidfd_calls_on_this_process() -> None:
 
 def _prove_signal_and_wait(pidfd: int) -> None:
     try:
-        _pidfd_send_signal(pidfd, 0)
+        pidfd_send_signal(pidfd, 0)
     except OSError as refusal:
         raise IdentityUnavailable(f"pidfd_send_signal refused: {refusal}") from refusal
     try:

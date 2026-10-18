@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import re
 from pathlib import Path
 from typing import Annotated, Final
@@ -21,8 +20,6 @@ from agent_providers.spawn import ChildProcess, closed_environment
 
 VERSION_PATTERN: Final = re.compile(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)", re.ASCII)
 VERSION_OUTPUT_SUFFIX: Final = " (Claude Code)"
-SHOWN_OUTPUT_CHARACTERS: Final = 60
-WORKING_ROOT_PLACEHOLDER: Final = "<working root>"
 MALFORMED_PIN: Final = (
     "must be three dot-separated integers without leading zeros, written as a string,"
     " such as 2.1.302"
@@ -62,22 +59,10 @@ def _unusable_run(run: CliRun | None) -> str | None:
     return None
 
 
-def _without_the_working_root(text: str, working_root: PrivateWorkingRoot) -> str:
-    spellings = {
-        str(working_root.path),
-        os.path.abspath(working_root.path),
-        os.path.realpath(working_root.path),
-    }
-    for spelling in sorted(spellings, key=len, reverse=True):
-        text = text.replace(spelling, WORKING_ROOT_PLACEHOLDER)
-    return text
-
-
-def _what_was_printed(stdout: str, working_root: PrivateWorkingRoot) -> str:
+def _what_was_printed(stdout: str) -> str:
     if not stdout:
         return "printed nothing"
-    first_line = _without_the_working_root(stdout, working_root).splitlines()[0]
-    return f"printed {shown_text(first_line[:SHOWN_OUTPUT_CHARACTERS])}"
+    return f"printed {len(stdout.encode(errors='replace'))} bytes"
 
 
 def _probe(binary: Path, working_root: PrivateWorkingRoot) -> CliRun | None:
@@ -95,14 +80,12 @@ def _probe(binary: Path, working_root: PrivateWorkingRoot) -> CliRun | None:
         return None
 
 
-def _refusal(
-    binary: Path, pinned: str, run: CliRun | None, working_root: PrivateWorkingRoot
-) -> str | None:
+def _refusal(binary: Path, pinned: str, run: CliRun | None) -> str | None:
     shown_binary = shown_text(str(binary))
     reason = _unusable_run(run)
     reported = parse_version_output(run.stdout) if run is not None and reason is None else None
     if reported is None:
-        why = reason or _what_was_printed(run.stdout, working_root)
+        why = reason or _what_was_printed(run.stdout)
         return (
             f"cli.claude_version: {shown_binary} did not print a version ({why});"
             f" the pinned version is {pinned}"
@@ -118,6 +101,6 @@ def require_pinned_version(binary: Path, pinned: str, working_root: PrivateWorki
     The tree goes only once the probe's spawn failed or its group is confirmed gone; a tree
     that cannot be removed is logged by the core and never changes the outcome.
     """
-    refusal = _refusal(binary, pinned, _probe(binary, working_root), working_root)
+    refusal = _refusal(binary, pinned, _probe(binary, working_root))
     if refusal is not None:
         raise ClaudeVersionRefused(refusal)

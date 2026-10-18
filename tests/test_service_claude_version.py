@@ -217,18 +217,18 @@ def test_a_program_reporting_another_version_refuses_the_start_naming_both(
 @pytest.mark.parametrize(
     ("stdout", "reason"),
     [
-        pytest.param("hello\n", "printed hello", id="another-text"),
-        pytest.param("2.1.302\n", "printed 2.1.302", id="without-the-product-suffix"),
+        pytest.param("hello\n", "printed 6 bytes", id="another-text"),
+        pytest.param("2.1.302\n", "printed 8 bytes", id="without-the-product-suffix"),
         pytest.param(
-            f"{PRINTS_THE_PIN}banner\n", f"printed {PRINTS_THE_PIN.strip()}", id="two-lines"
+            f"{PRINTS_THE_PIN}banner\n", f"printed {len(PRINTS_THE_PIN) + 7} bytes", id="two-lines"
         ),
         pytest.param("", "printed nothing", id="empty"),
-        pytest.param("   \n", "printed    ", id="only-spaces"),
-        pytest.param("\nhello\n", "printed ", id="blank-first-line"),
-        pytest.param("x" * 100 + "\n", "printed " + "x" * 60, id="long-line-cut"),
+        pytest.param("   \n", "printed 4 bytes", id="only-spaces"),
+        pytest.param("\nhello\n", "printed 7 bytes", id="blank-first-line"),
+        pytest.param("x" * 100 + "\n", "printed 101 bytes", id="long-line"),
     ],
 )
-def test_output_that_is_not_the_version_line_refuses_the_start_showing_what_was_printed(
+def test_output_that_is_not_the_version_line_refuses_the_start_naming_only_how_much_was_printed(
     tmp_path, capsys, served, stdout, reason
 ):
     program = _printing(tmp_path, stdout)
@@ -259,6 +259,13 @@ def _root_behind_a_symlinked_parent(tmp_path: Path) -> tuple[Path, Path]:
     return tmp_path / "alias" / PRIVATE_MARKER, tmp_path / "physical" / PRIVATE_MARKER
 
 
+def _root_behind_a_symlink_named_with_an_invalid_utf8_byte(tmp_path: Path) -> tuple[Path, Path]:
+    physical_parent = tmp_path / os.fsdecode(b"phys\xff")
+    physical_parent.mkdir()
+    (tmp_path / "alias").symlink_to(physical_parent)
+    return tmp_path / "alias" / PRIVATE_MARKER, physical_parent / PRIVATE_MARKER
+
+
 def _root_named_with_a_newline(tmp_path: Path) -> tuple[Path, Path]:
     physical = tmp_path / f"{PRIVATE_MARKER}\nrest"
     return physical, physical
@@ -271,6 +278,11 @@ def _root_named_with_a_newline(tmp_path: Path) -> tuple[Path, Path]:
         pytest.param(_root_with_a_parent_component, 'echo "$HOME"', id="parent-component"),
         pytest.param(_root_behind_a_symlinked_parent, "pwd -P", id="symlinked-parent"),
         pytest.param(_root_named_with_a_newline, 'echo "$HOME"', id="newline-in-the-root-name"),
+        pytest.param(
+            _root_behind_a_symlink_named_with_an_invalid_utf8_byte,
+            "pwd -P",
+            id="symlink-target-with-an-invalid-utf8-byte",
+        ),
     ],
 )
 def test_a_program_printing_where_it_runs_refuses_the_start_without_the_working_root(
@@ -286,7 +298,9 @@ def test_a_program_printing_where_it_runs_refuses_the_start_without_the_working_
     )
 
     assert PRIVATE_MARKER not in refusal
-    assert "printed <working root>/agent-run-" in refusal
+    assert "phys" not in refusal
+    assert " did not print a version (printed " in refusal
+    assert refusal.endswith(f" bytes); the pinned version is {PINNED_CLAUDE_VERSION}")
     assert list(physical.iterdir()) == []
     assert served == []
 

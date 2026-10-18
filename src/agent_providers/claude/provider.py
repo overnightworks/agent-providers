@@ -31,7 +31,16 @@ from agent_providers.anchored_turn import (
     ReapBounds,
     anchored_turn_child,
 )
-from agent_providers.cli_run import CliRunStart, StepEvent, drain_without_keeping
+from agent_providers.cli_run import (
+    CliRunStart,
+    RelayState,
+    RunSurface,
+    StepEvent,
+    SurfaceVerdict,
+    drain_without_keeping,
+    judge_announcement,
+    refuse_announcement,
+)
 from agent_providers.config import (
     McpServerSpec,
     current_claude_runtime,
@@ -149,6 +158,8 @@ _TOOL_SURFACE_PROBE_USER_ID: Final = "tool-surface-probe"
 _CLI_AUTHENTICATION_FAILED: Final = "authentication_failed"
 _CLI_INIT_EVENT_TYPE: Final = "system"
 _CLI_INIT_EVENT_SUBTYPE: Final = "init"
+_CLI_MCP_CONNECTED_STATUS: Final = "connected"
+_CLI_NO_API_KEY_SOURCE: Final = "none"
 _TOOL_SURFACE_PROBE_PROMPT: Final = "."
 
 _STREAM_BUFFER_LIMIT = 4 * 1024 * 1024
@@ -656,16 +667,88 @@ def _build_api_kwargs(
     return kwargs
 
 
-class ClaudeStreamDecoder:
-    """Claude's stream-json lines as events, and the ending from the result line."""
+def _is_init_event(payload: dict) -> bool:
+    return (
+        payload.get("type") == _CLI_INIT_EVENT_TYPE
+        and payload.get("subtype") == _CLI_INIT_EVENT_SUBTYPE
+    )
 
-    def __init__(self) -> None:
+
+def _announced_tools(payload: dict) -> tuple[str, ...] | None:
+    tools = payload.get("tools")
+    if not isinstance(tools, list) or not all(isinstance(tool, str) for tool in tools):
+        return None
+    return tuple(tools)
+
+
+def _announced_servers(payload: dict) -> tuple[tuple[str, str], ...] | None:
+    servers = payload.get("mcp_servers")
+    if not isinstance(servers, list):
+        return None
+    announced = []
+    for server in servers:
+        if not isinstance(server, dict):
+            return None
+        name, status = server.get("name"), server.get("status")
+        if not isinstance(name, str) or not isinstance(status, str):
+            return None
+        announced.append((name, status))
+    return tuple(announced)
+
+
+def _relay_state_of(servers: tuple[tuple[str, str], ...]) -> RelayState | None:
+    statuses = [status for name, status in servers if name == RELAY_SERVER_NAME]
+    if len(statuses) > 1:
+        return None
+    if not statuses:
+        return RelayState.ABSENT
+    if statuses[0] == _CLI_MCP_CONNECTED_STATUS:
+        return RelayState.CONNECTED
+    return RelayState.NOT_CONNECTED
+
+
+def _run_surface_of(payload: dict, *, relay_attached: bool) -> RunSurface:
+    tools = _announced_tools(payload)
+    servers = _announced_servers(payload)
+    api_key_source = payload.get("apiKeySource")
+    relay = None if servers is None else _relay_state_of(servers)
+    if tools is None or servers is None or relay is None or not isinstance(api_key_source, str):
+        refuse_announcement(SurfaceVerdict.UNREADABLE)
+    relay_prefix = _mcp_tool_prefix(RELAY_SERVER_NAME)
+    return RunSurface(
+        foreign_credential=api_key_source != _CLI_NO_API_KEY_SOURCE,
+        tool_beside_relay=any(
+            not (relay_attached and tool.startswith(relay_prefix)) for tool in tools
+        ),
+        server_beside_relay=any(name != RELAY_SERVER_NAME for name, _ in servers),
+        relay=relay,
+    )
+
+
+class ClaudeStreamDecoder:
+    """Claude's stream-json lines as events, and the ending from the result line.
+
+    The first object must be ``system/init``, and every init line is judged.
+    """
+
+    def __init__(self, *, relay_attached: bool) -> None:
+        self._relay_attached = relay_attached
+        self._announced = False
         self._result: str | None = None
 
     def events_of(self, line: bytes) -> list[StepEvent]:
         payload = _safe_json_loads(line)
         if payload is None:
             return []
+        if _is_init_event(payload):
+            judge_announcement(
+                _run_surface_of(payload, relay_attached=self._relay_attached),
+                relay_attached=self._relay_attached,
+            )
+            self._announced = True
+            return []
+        if not self._announced:
+            refuse_announcement(SurfaceVerdict.NOT_ANNOUNCED)
         steps: list[StepEvent] = []
         for event in _parse_stream_event(payload, None):
             if isinstance(event, FinalEvent):
@@ -732,7 +815,8 @@ class ClaudeRun:
             ),
             working_directory=working_directory,
         )
-        return CliRunStart(child, self.stdin_message(), ClaudeStreamDecoder())
+        decoder = ClaudeStreamDecoder(relay_attached=self.relay_config is not None)
+        return CliRunStart(child, self.stdin_message(), decoder)
 
     def stdin_message(self) -> bytes:
         transcript = flatten_messages(
@@ -1776,8 +1860,8 @@ def _parse_announced_surface(
         raise_without_chain(UnavailableError(
             "Claude CLI did not open with the expected session init event",
         ))
-    tools = payload.get("tools")
-    if not isinstance(tools, list) or not all(isinstance(t, str) for t in tools):
+    tools = _announced_tools(payload)
+    if tools is None:
         raise_without_chain(UnavailableError("Claude CLI announced an unreadable tool list"))
     commands = payload.get("slash_commands")
     if not isinstance(commands, list) or not all(isinstance(c, str) for c in commands):
@@ -1785,7 +1869,7 @@ def _parse_announced_surface(
             UnavailableError("Claude CLI announced an unreadable slash-command list"),
         )
     return _AnnouncedSurface(
-        tools=tuple(tools),
+        tools=tools,
         slash_commands=tuple(commands),
         mcp_connected=None if mcp is None else _mcp_connected(payload, mcp.spec.name),
     )
@@ -1795,15 +1879,8 @@ def _mcp_connected(payload: dict, server_name: str) -> bool:
     """Whether the init event's own ``mcp_servers`` list reports the attached
     server connected — read instead of assumed, because a failed connection
     reports the same empty ``tools`` a clean tool-free CLI would."""
-    servers = payload.get("mcp_servers")
-    if not isinstance(servers, list):
-        return False
-    return any(
-        isinstance(server, dict)
-        and server.get("name") == server_name
-        and server.get("status") == "connected"
-        for server in servers
-    )
+    servers = _announced_servers(payload)
+    return servers is not None and (server_name, _CLI_MCP_CONNECTED_STATUS) in servers
 
 
 def _parse_cli_output(stdout: str) -> str:

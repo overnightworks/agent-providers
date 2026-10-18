@@ -49,7 +49,7 @@ def _retire(task: asyncio.Task[None]) -> None:
 def _ending_of(task: asyncio.Task[None]) -> BaseException | None:
     try:
         return task.exception()
-    except asyncio.CancelledError as cancelled:  # NOSONAR(S7497) keeps its stack positions for the log
+    except asyncio.CancelledError as cancelled:  # NOSONAR(S7497) log needs its positions
         return cancelled
 
 

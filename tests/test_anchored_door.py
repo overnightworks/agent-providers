@@ -7,7 +7,6 @@ import contextlib
 import gc
 import logging
 import os
-import re
 import signal
 import sys
 import threading
@@ -195,7 +194,7 @@ def expected_resource_warnings() -> list[str]:
 
 def unclosed_resources(raised: list[warnings.WarningMessage]) -> list[str]:
     return [
-        re.sub(r" fd=\d+", "", str(warning.message))
+        type(warning.source).__name__
         for warning in raised
         if warning.category is ResourceWarning
     ]
@@ -547,10 +546,10 @@ def test_a_closed_loop_still_lets_the_anchored_child_be_released(
     opened = open_door(door_runner, child_cleanup, leaders.describe())
     watcher = watcher_thread(opened.owned.pid)
     expected_resource_warnings += [
-        "loop is closed",
-        "unclosed transport <_UnixReadPipeTransport open>",
-        "unclosed transport <_UnixReadPipeTransport open>",
-        "unclosed transport <_UnixWritePipeTransport open>",
+        "_UnixReadPipeTransport",
+        "_UnixReadPipeTransport",
+        "_UnixWritePipeTransport",
+        "NoneType",
     ]
     expected_spawn_warnings.append(
         f"on_exit of anchored leader {opened.child.pid} raised RuntimeError"

@@ -1,7 +1,0 @@
-claim_id = "d4260c20485040489378a1e4b59fc55c"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "46a378c92eccebb60833ab47ad865e5157986b5c"
-branch = "fix/door-transport-leak"
-scope = ["tests/test_anchored_child.py", "tests/test_anchored_door.py"]
-opened_commit = "ec14e8644e0d071146c2b70e23613b6934bafdaa"

@@ -1847,8 +1847,9 @@ g0a.report("A1", "ACP initialize and session/new over agent stdio", r)
 Measured on 18.10.2026 on the installed `codex`, whose native executable prints
 `codex-cli 0.163.0` (V1). No cell used a login, a token, an auth file or a model
 turn; the probe never ran `login` or `logout`, never opened any auth file, and
-every run had an empty throwaway home and an empty `CODEX_HOME`. Nothing here
-reads `~/.codex`. Operator ruling 18.10.2026: C0a uses no login.
+each cell's home started empty, and every `codex` run inside the harness used a
+scratch `CODEX_HOME`. One possible run of the shim in the ordinary environment is
+unrecorded (see the V1 caveat); the probe itself never opened `~/.codex`. Operator ruling 18.10.2026: C0a uses no login.
 
 #### A1b-C0a the Codex CLI without a login (flags, stream, MCP client, files, egress)
 
@@ -1884,12 +1885,15 @@ codex-cli 0.163.0
 
 It is not recorded whether the first version line came from a run of the shim in
 the ordinary environment; such a run would create `tmp/arg0-linux/` under the
-real `CODEX_HOME` (F1) but reads no auth file. Outside the sandbox the harness ran
+real `CODEX_HOME` (F1); that it reads no auth file is inferred from what
+`--version` does, not observed. Outside the sandbox the harness ran
 only `command -v codex`, `sha256sum` and `os.path.getsize` on the native
 executable, `find`, `rm -rf` and `pgrep` in scratch, and `python3` with the
 scripts below; every `codex` process ran inside `bwrap`, with `HOME` and
 `CODEX_HOME` in scratch. The earlier logs `all1.log`, `all2.log` and `v2.log`
-are development runs of the same scripts (one `B1` run died on a harness
+are development runs of the same scripts; whether they held
+`/tmp/probe-stack.lock` or passed the load check is not recorded (the `flock` is in
+`both.sh`, which postdates those logs, and the logs show no lock or load line) (one `B1` run died on a harness
 `AttributeError`, fixed before the series); the evidence below is the two passes
 of the locked series.
 
@@ -2328,11 +2332,16 @@ bwrap --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/lib /lib \
   DISABLE_AUTOUPDATER=1 /opt/claude ARGS
 ```
 
+`<native-codex>` is the package-relative path
+`<npm-global>/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex`,
+found by resolving the shim with `readlink -f "$(command -v codex)"` and reading
+the `node_modules/@openai/codex-linux-x64` layout next to it.
+
 Unless a cell says otherwise, `ARGS` is `-p --input-format stream-json
 --output-format stream-json --verbose`, and a small driver writes one
 `{"type":"user","message":{"role":"user","content":"hello"}}` line to stdin 0.5 s
 after the start and closes stdin 5 s later. "Init" is the `system/init` event.
-Every run held `/tmp/probe-stack.lock`. The fake servers and proxies of the
+Every run of the locked series held `/tmp/probe-stack.lock`. The fake servers and proxies of the
 cells below are scratch scripts on `127.0.0.1` inside the same unshared network.
 
 **Driver.** `python3 -I drive.py DELAY -- /opt/claude ARGS` (`DELAY` is 0.5 unless

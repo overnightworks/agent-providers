@@ -38,13 +38,20 @@ from provider_test_support import (
 )
 
 from agent_providers import anchored_turn
-from agent_providers.spawn import AnchorStateError, ChildProcess, closed_environment
+from agent_providers.procfs import GroupCensus
+from agent_providers.spawn import (
+    AnchorStateError,
+    ChildProcess,
+    KillUntilGoneResult,
+    closed_environment,
+)
 
 GUARDED_MODULES = (
     "test_claude_provider.py",
     "test_claude_adapter.py",
     "test_claude_provider_streaming.py",
     "test_claude_anchored_turns.py",
+    "test_anchored_turn.py",
 )
 PATCHING_CALLS = frozenset({"setattr", "patch", "object"})
 GUARDED_DOOR_NAMES = frozenset({"create_subprocess_exec", "open_anchored_pipes"})
@@ -202,6 +209,37 @@ def test_a_survived_signal_publishes_nothing_so_the_exit_stays_pending() -> None
         asyncio.run(waiting)
     assert child.returncode is None
     assert operations(child.log) == [("SIGTERM", child.pid)]
+
+
+def test_an_unsurvived_sigkill_confirms_the_group_and_publishes_the_exit_it_causes() -> None:
+    child = a_claude_cli_child(returncode=None, natural_exit=None)
+
+    result = asyncio.run(child.kill_until_gone(within=3.5))
+
+    assert result.confirmed
+    assert child.returncode == -signal.SIGKILL
+    assert child.kill_bounds == [3.5]
+    assert operations(child.log) == [("kill_until_gone", child.pid)]
+
+
+def test_a_survived_sigkill_answers_live_and_publishes_nothing() -> None:
+    child = a_claude_cli_child(returncode=None, natural_exit=None, survives={signal.SIGKILL})
+
+    result = asyncio.run(child.kill_until_gone(within=1))
+
+    assert result.census is GroupCensus.LIVE
+    assert not result.confirmed
+    assert child.returncode is None
+
+
+def test_a_scripted_group_answer_is_returned_and_its_bound_recorded() -> None:
+    late_count = KillUntilGoneResult(GroupCensus.EMPTY, ended_in_time=False)
+    child = a_claude_cli_child(gone=[late_count])
+
+    result = asyncio.run(child.kill_until_gone(within=2))
+
+    assert result is late_count
+    assert child.kill_bounds == [2]
 
 
 def test_releasing_a_running_child_is_refused_and_logged() -> None:

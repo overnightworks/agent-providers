@@ -644,7 +644,8 @@ with no MCP SDK dependency.
   pending ids only; others are ignored, as the MCP specification allows (E5 named the
   call's id on another connection). A give-up, by a cancel or by the cancellation of
   the call's task, is recorded before it returns, also through every task whose await
-  chain reaches the call through direct awaits, so an acceptance in the same step
+  chain reaches the call through awaits that forward `Task.cancel()` at once (a direct await or
+  `asyncio.gather`), so an acceptance in the same step
   forwards nothing. A call given up is never forwarded unless it already was, and its
   request is closed without a byte (`Unanswered`), because the MCP specification asks a
   receiver not to answer a cancelled request and the connection is needed for the next
@@ -655,6 +656,17 @@ with no MCP SDK dependency.
   that the CLI would not read an answer written after its cancel; E5's pairing of the
   cancel with the stream's timeout stays provisional (c8). Not measured: the CLI's
   reaction to the closed connection (A1b-12b).
+- *The CLI's close (A1b-10b1b2, 18.10.2026).* While the owner works, the relay watches
+  the connection: an end (FIN, half-close or RST) ends the request, because the pinned
+  CLI closed a call it gave up on (A1b-0e E3); bytes do not, because a pipelined request
+  is the next one (L7), and the watch keeps reading after them so a later close is still
+  seen. The watch cancels a pending answer in the very step it sees the end, and the
+  listener awaits the answer through an await chain that forwards `Task.cancel()` at once (`asyncio.gather`), so for a `tools/call` the barrier's give-up is
+  recorded before any later acceptance (A1b-10b1b1, guarantee G). An answer that
+  completed before the end is written, and the connection then ends. Retained unparsed
+  bytes are bounded by `MAX_PIPELINED_BYTES` (one further request), counted over
+  everything the connection holds unparsed, beyond which the request ends like a close.
+  Not measured: the CLI's reaction to the relay closing its connection (A1b-12b).
 - *H9.* Its import contract says "client → stdlib, pydantic, HTTP and the MCP SDK
   only". That sentence is about `agent-client` and is untouched; HD1 adds no
   MCP SDK to any package, so it stays true.

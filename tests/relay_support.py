@@ -32,6 +32,7 @@ from agent_service.mcp_wire import (
 from agent_service.run_liveness import LoopClock, RunClock
 from agent_service.tool_relay import (
     LOOPBACK_HOST,
+    RECEIVE_CHUNK_BYTES,
     Relay,
     RelayOwner,
     RelayRequest,
@@ -68,6 +69,9 @@ class ScriptedOwner:
 
     def release(self) -> None:
         self._gate.set()
+
+    def hold(self) -> None:
+        self._gate.clear()
 
     async def answer(self, request: RelayRequest) -> HttpAnswer | Unanswered:
         self.requests.append(request)
@@ -252,6 +256,67 @@ class RelayWrites:
 
     def to(self, client: "RawClient") -> bytes:
         return b"".join(data for peer, data in self._writes if peer == client.address)
+
+
+class RelayReads:
+    """Records how many bytes each relay task's stream reads returned, per task name.
+
+    A task name is reused across request cycles, so a test snapshots ``read_by`` before a send
+    and waits for that count plus the bytes sent.
+    """
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._bytes_by_task: Counter[str] = Counter()
+        self._aggregated_minimum: dict[str, int] = {}
+        original = asyncio.StreamReader.read
+
+        async def recording(reader: asyncio.StreamReader, size: int = -1) -> bytes:
+            name = _current_task_name()
+            if not name.startswith("relay:"):
+                return await original(reader, size)
+            minimum = self._aggregated_minimum.pop(name, None)
+            if minimum is None:
+                chunk = await original(reader, size)
+            else:
+                chunk = await _gathered(original, reader, size, minimum)
+            self._bytes_by_task[name] += len(chunk)
+            return chunk
+
+        monkeypatch.setattr(asyncio.StreamReader, "read", recording)
+
+    def aggregate_first_read(self, task_name: str, minimum_bytes: int) -> None:
+        """Make the named task's next read return one chunk of exactly ``minimum_bytes``."""
+        self._aggregated_minimum[task_name] = minimum_bytes
+
+    def read_by(self, task_name: str) -> int:
+        return self._bytes_by_task[task_name]
+
+    async def until_read(self, task_name: str, count: int) -> None:
+        await yield_until(lambda: self.read_by(task_name) >= count)
+
+
+def _current_task_name() -> str:
+    task = asyncio.current_task()
+    assert task is not None
+    return task.get_name()
+
+
+async def _gathered(
+    read: Callable[[asyncio.StreamReader, int], Awaitable[bytes]],
+    reader: asyncio.StreamReader,
+    size: int,
+    minimum: int,
+) -> bytes:
+    if not 0 < minimum <= size <= RECEIVE_CHUNK_BYTES:
+        raise ValueError(f"cannot aggregate {minimum} bytes into a read of {size}")
+    gathered = b""
+    async with asyncio.timeout(WAIT_SECONDS):
+        while len(gathered) < minimum:
+            chunk = await read(reader, minimum - len(gathered))
+            if not chunk:
+                raise AssertionError("EOF before the aggregated read was complete")
+            gathered += chunk
+    return gathered
 
 
 class RawClient:
@@ -450,6 +515,10 @@ def relay_tasks(run_id: str = RUN_ID) -> list[str]:
     )
 
 
+def task_named(name: str) -> asyncio.Task[Any]:
+    return next(task for task in asyncio.all_tasks() if task.get_name() == name)
+
+
 def retained_relay_tasks(run_id: str = RUN_ID) -> list[str]:
     """Names of the relay's tasks that are still referenced, finished or not."""
     gc.collect()
@@ -477,19 +546,39 @@ async def close_bounded(relay: Relay) -> None:
         await relay.close()
 
 
+_HeldCallback = tuple[Callable[..., object], tuple[object, ...], contextvars.Context | None]
+
+
 class HoldingSteppedLoop(SteppedLoop):
-    """A stepped loop that can hold the acceptance callback of one listening port."""
+    """A stepped loop that can hold the acceptance callback of one listening port.
+
+    It can also hold every step and wakeup of named tasks, so a test decides which task
+    resumes first after an event.
+    """
 
     def __init__(self) -> None:
         super().__init__()
         self._held_port: int | None = None
-        self._held: list[
-            tuple[Callable[..., object], tuple[object, ...], contextvars.Context | None]
-        ] = []
+        self._held: list[_HeldCallback] = []
+        self._held_task_names: frozenset[str] = frozenset()
+        self._held_wakeup_callbacks: list[_HeldCallback] = []
 
     @property
     def held_acceptances(self) -> int:
         return len(self._held)
+
+    @property
+    def held_wakeups(self) -> int:
+        return len(self._held_wakeup_callbacks)
+
+    def hold_wakeups(self, *task_names: str) -> None:
+        self._held_task_names = frozenset(task_names)
+
+    def release_wakeups(self) -> None:
+        self._held_task_names = frozenset()
+        held, self._held_wakeup_callbacks = self._held_wakeup_callbacks, []
+        for callback, args, context in held:
+            super().call_soon(callback, *args, context=context)
 
     def hold_acceptance(self, port: int) -> None:
         self._held_port = port
@@ -509,7 +598,14 @@ class HoldingSteppedLoop(SteppedLoop):
         if self._accepts_on_held_port(callback, args):
             self._held.append((callback, args, context))
             return asyncio.Handle(lambda: None, (), self)
+        if self._wakes_held_task(callback):
+            self._held_wakeup_callbacks.append((callback, args, context))
+            return asyncio.Handle(lambda: None, (), self)
         return super().call_soon(callback, *args, context=context)
+
+    def _wakes_held_task(self, callback: Callable[..., object]) -> bool:
+        owner = getattr(callback, "__self__", None)
+        return isinstance(owner, asyncio.Task) and owner.get_name() in self._held_task_names
 
     def _accepts_on_held_port(
         self, callback: Callable[..., object], args: tuple[object, ...]
@@ -521,6 +617,18 @@ class HoldingSteppedLoop(SteppedLoop):
             isinstance(transport, asyncio.Transport)
             and transport.get_extra_info("sockname")[1] == self._held_port
         )
+
+
+def holding_loop() -> HoldingSteppedLoop:
+    loop = asyncio.get_running_loop()
+    assert isinstance(loop, HoldingSteppedLoop), "run the scenario in a HoldingSteppedLoop"
+    return loop
+
+
+def release_held_wakeups() -> None:
+    loop = asyncio.get_running_loop()
+    if isinstance(loop, HoldingSteppedLoop):
+        loop.release_wakeups()
 
 
 def drive(
@@ -542,6 +650,7 @@ def drive(
                 if isinstance(gate, ScriptedOwner | ScriptedCalls):
                     gate.release()
             loop = asyncio.get_running_loop()
+            release_held_wakeups()
             if isinstance(loop, HoldingSteppedLoop):
                 loop.release_acceptance()
             await close_bounded(relay)

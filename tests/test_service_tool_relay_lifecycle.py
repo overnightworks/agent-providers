@@ -432,7 +432,7 @@ def test_a_close_the_owner_outlasts_raises_the_incomplete_outcome_and_keeps_the_
         with pytest.raises(ConnectionRefusedError):
             await RawClient.connect(old_port)
         assert len(connection_numbers(relay_tasks())) == 1
-        assert len(relay_tasks()) == 1
+        assert relay_tasks() == [f"relay:{RUN_ID}:conn-1", f"relay:{RUN_ID}:conn-1:answer"]
 
     drive_stepped(scenario, owner)
     assert relay_log_records(caplog) == []

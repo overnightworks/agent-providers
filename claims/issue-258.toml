@@ -1,8 +1,0 @@
-claim_id = "dd810cd27d044a95bbeb4cbf68108d4b"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "a239cb77d52d8751c770ae9f284b223332be82e2"
-branch = "claude/issue-258-provider-blocks-claude"
-scope = ["README.md", "src/agent_providers/catalog.py", "src/agent_providers/claude/provider.py", "src/agent_providers/config.py", "src/agent_providers/process.py", "tests/conftest.py", "tests/provider_test_support.py", "tests/test_catalog.py", "tests/test_claude_adapter.py", "tests/test_claude_provider.py", "tests/test_config.py", "tests/test_process.py"]
-opened_commit = "263eefb12f88e64220784e8a86dbc3edbfbb26d3"
-whole_reason = "One public config cut: the Claude block, its error and accessors and the API-first catalog order change together with their tests and README section; splitting leaves a red tree"

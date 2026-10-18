@@ -515,6 +515,14 @@ def test_a_tool_beside_the_relay_in_init_refuses_the_run(relay_attached: bool, t
     assert refusal.verdict is SurfaceVerdict.TOOL_BESIDE_RELAY
 
 
+def test_a_relay_entry_without_a_relay_attached_refuses_the_run() -> None:
+    decoder = ClaudeStreamDecoder(relay_attached=False)
+
+    refusal = refusal_of(decoder, an_init(mcp_servers=[RELAY_ENTRY]))
+
+    assert refusal.verdict is SurfaceVerdict.SERVER_BESIDE_RELAY
+
+
 def test_a_foreign_mcp_server_in_init_refuses_the_run() -> None:
     decoder = ClaudeStreamDecoder(relay_attached=True)
     servers = [RELAY_ENTRY, {"name": "notes", "status": "connected"}]
@@ -611,6 +619,8 @@ def test_an_event_before_init_refuses_the_run(first_object: bytes) -> None:
         an_init(mcp_servers=[RELAY_ENTRY, RELAY_ENTRY]),
         line({"type": "system", "subtype": "init", "tools": [], "mcp_servers": []}),
         an_init(apiKeySource=1),
+        line({"type": "system", "subtype": "init", "mcp_servers": [], "apiKeySource": "none"}),
+        line({"type": "system", "subtype": "init", "tools": [], "apiKeySource": "none"}),
     ],
     ids=[
         "tools-not-a-list",
@@ -621,6 +631,8 @@ def test_an_event_before_init_refuses_the_run(first_object: bytes) -> None:
         "two-relay-entries",
         "api-key-source-absent",
         "api-key-source-not-a-string",
+        "tools-absent",
+        "mcp-servers-absent",
     ],
 )
 def test_an_unreadable_init_refuses_the_run(init: bytes) -> None:

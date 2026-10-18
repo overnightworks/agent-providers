@@ -1,8 +1,0 @@
-claim_id = "09507eb0b8c441baaad3c7278411e31a"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "e7c6eba6d196a553e0bc6d717e60a04ddad59b9e"
-branch = "claude/issue-278-3f2-containment-lost-quarantine"
-scope = ["README.md", "docs/decisions/0001-agent-service.md", "packages/agent-service/src/agent_service/admission.py", "packages/agent-service/src/agent_service/app.py", "packages/agent-service/src/agent_service/quarantine.py", "packages/agent-service/src/agent_service/run_events.py", "packages/agent-service/src/agent_service/run_liveness.py", "tests/service_support.py", "tests/test_service_admission.py", "tests/test_service_containment_ending.py", "tests/test_service_quarantine.py", "tests/test_service_run_events.py", "tests/test_service_run_recording.py", "tests/test_service_tool_relay_barrier.py"]
-opened_commit = "8f35f38ed5f44498cd876340fa152aec995523b0"
-whole_reason = "The quarantine is only true end to end with its one hand-over at the run's end, the lease transfer, the app's one instance and the run_frames parameter every direct caller passes; a quarantine without the hand-over has no caller, and a hand-over without it must free or leak the place."

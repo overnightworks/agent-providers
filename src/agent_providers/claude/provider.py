@@ -1717,6 +1717,7 @@ async def _anchored_turn_child(
     unchanged, so a ``FileNotFoundError`` from there is never a missing binary.
     """
     turn = AsyncExitStack()
+    saturation_message = None
     try:
         anchored = await turn.enter_async_context(
             anchored_turn_child(
@@ -1727,9 +1728,11 @@ async def _anchored_turn_child(
             )
         )
     except CliProcessPoolSaturated as saturated:
-        raise _ClaudeCliProcessPoolSaturated(str(saturated)) from None
+        saturation_message = str(saturated)
     except FileNotFoundError as missing_binary:
         raise CliUnavailableError(CLAUDE_CLI_BINARY_NOT_FOUND_DETAIL) from missing_binary
+    if saturation_message is not None:
+        raise _ClaudeCliProcessPoolSaturated(saturation_message)
     async with turn:
         yield anchored
 

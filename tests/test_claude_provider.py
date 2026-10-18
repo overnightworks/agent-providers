@@ -1819,7 +1819,8 @@ def test_a_deployment_without_an_mcp_server_runs_the_tool_free_command_line(
         lambda *_args: pytest.fail("no MCP config may be written without a server"),
     )
     spawns = install_claude_cli_children(
-        monkeypatch, a_claude_cli_child(pid=1, communicate=(b'{"result":"ok"}', b"")),
+        monkeypatch,
+        a_claude_cli_child(pid=1, communicate=(b'{"result":"ok"}', b"")),
     )
 
     response = asyncio.run(provider.acall_claude_with_mcp("hi", user_id="u-1", model="opus"))
@@ -4168,7 +4169,8 @@ def _held_slots() -> int:
 
 
 def _install_a_start_that_raises(
-    monkeypatch: pytest.MonkeyPatch, error: BaseException,
+    monkeypatch: pytest.MonkeyPatch,
+    error: BaseException,
 ) -> ClaudeCliSpawns:
     def fail_to_start(_child, _stream_buffer_limit):
         raise error
@@ -4924,10 +4926,14 @@ def _a_claude_binary_missing_at(site: str, monkeypatch: pytest.MonkeyPatch):
 
 def _verify_the_claude_surfaces(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        provider, "averify_no_builtin_cli_tools", AsyncMock(return_value=Path("/usr/bin/claude")),
+        provider,
+        "averify_no_builtin_cli_tools",
+        AsyncMock(return_value=Path("/usr/bin/claude")),
     )
     monkeypatch.setattr(
-        provider, "verify_cli_tool_surface", AsyncMock(return_value=Path("/usr/bin/claude")),
+        provider,
+        "verify_cli_tool_surface",
+        AsyncMock(return_value=Path("/usr/bin/claude")),
     )
     monkeypatch.setattr(provider, "_write_mcp_config", lambda _spec, _user_id: "unused")
     monkeypatch.setattr(provider, "_unlink_quiet", lambda _path: None)
@@ -4961,7 +4967,10 @@ def test_a_missing_claude_binary_raises_cli_unavailable(
 
 @pytest.mark.parametrize("site", ["acall-cli", "mcp", "mcp-stream"])
 def test_a_missing_claude_binary_frees_the_turns_slot_and_home(
-    site: str, _no_tool_gate_open, monkeypatch: pytest.MonkeyPatch, killpg_signals,
+    site: str,
+    _no_tool_gate_open,
+    monkeypatch: pytest.MonkeyPatch,
+    killpg_signals,
 ) -> None:
     _verify_the_claude_surfaces(monkeypatch)
     spawns = _install_a_start_that_raises(monkeypatch, FileNotFoundError())
@@ -4977,7 +4986,8 @@ def test_a_missing_claude_binary_frees_the_turns_slot_and_home(
 
 
 def test_another_start_failure_is_not_a_missing_binary_and_frees_the_turns_slot_and_home(
-    monkeypatch: pytest.MonkeyPatch, killpg_signals,
+    monkeypatch: pytest.MonkeyPatch,
+    killpg_signals,
 ) -> None:
     _verify_the_claude_surfaces(monkeypatch)
     spawns = _install_a_start_that_raises(monkeypatch, PermissionError())
@@ -5024,16 +5034,20 @@ class _PoolLockProbingHandler(logging.Handler):
     [("object", True), ("bound-pid", True), ("unknown-pid", False)],
 )
 def test_the_pool_lock_is_not_held_while_a_home_is_released(
-    released_by: str, releases_a_home: bool,
+    released_by: str,
+    releases_a_home: bool,
 ) -> None:
     probe = _PoolLockProbe()
     home_reservation = MagicMock(spec_set=["release"])
     home_reservation.release.side_effect = probe
     reservation = provider._ZombieReservation(
-        pid=A_PROCESS_PID, home_reservation=home_reservation,
+        pid=A_PROCESS_PID,
+        home_reservation=home_reservation,
     )
     released = {
-        "object": reservation, "bound-pid": A_PROCESS_PID, "unknown-pid": A_PROCESS_PID + 1,
+        "object": reservation,
+        "bound-pid": A_PROCESS_PID,
+        "unknown-pid": A_PROCESS_PID + 1,
     }[released_by]
     with provider._zombie_registry_lock:
         provider._zombie_reap_reservations.add(reservation)

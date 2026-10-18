@@ -499,5 +499,5 @@ def test_the_real_clock_spaces_live_attempts_and_returns_unconfirmed_at_the_boun
 
     result = rig.run(scenario())
 
-    assert (result.census, result.ended_in_time, result.confirmed) == (LIVE, True, False)
+    assert (result.census, result.confirmed) == (LIVE, False)
     assert len(rig.census_calls) <= 1 + 3

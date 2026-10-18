@@ -498,7 +498,8 @@ class ToolCallBarrier:
             forward = await pending.verdict
             if forward is None:
                 return error_response(request_id, JsonRpcErrorCode.INVALID_PARAMS)
-            outcome = await asyncio.shield(forward)
+            await asyncio.wait((forward,))
+            outcome = forward.result()
         except asyncio.CancelledError:
             pending.abandoned = True
             raise
@@ -519,8 +520,9 @@ class ToolCallBarrier:
                 break
             self._changed.clear()
             await self._changed.wait()
-        self._handed_out = self._waiting.popleft()
-        return self._handed_out.event
+        handed_out = self._waiting.popleft()
+        self._handed_out = handed_out
+        return handed_out.event
 
     def accept(self, event: ToolCallEvent) -> None:
         pending = self._handed_out

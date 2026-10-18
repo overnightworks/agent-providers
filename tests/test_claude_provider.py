@@ -4406,7 +4406,10 @@ def _prepare_the_turn(
     if ending.iteration_failure:
         monkeypatch.setattr(provider, "_iter_lines", lines_that_fail)
     return _install_child_in_a_home(
-        monkeypatch, build_child, on_spawn, **{**ending.child_script, **child_script},
+        monkeypatch,
+        build_child,
+        on_spawn,
+        **{**ending.child_script, **child_script},
     )
 
 

@@ -1187,6 +1187,29 @@ def test_mcp_turn_refuses_a_healthy_turn_when_the_shared_process_pool_is_full(
     run_bounded(run_turns())
 
 
+def test_a_saturated_pool_refuses_a_turn_with_no_chained_cause_or_context(
+    monkeypatch,
+) -> None:
+    set_claude_process_limit(monkeypatch, 1)
+    monkeypatch.setattr(
+        provider, "verify_cli_tool_surface", AsyncMock(return_value=Path("/usr/bin/claude")),
+    )
+    monkeypatch.setattr(provider, "_write_mcp_config", lambda _spec, _user_id: "unused")
+    monkeypatch.setattr(provider, "_unlink_quiet", lambda _path: None)
+    install_claude_cli_children(monkeypatch)
+    held = provider.CLAUDE_CLI_PROCESS_POOL.reserve()
+    assert held is not None
+
+    with pytest.raises(provider._ClaudeCliProcessPoolSaturated) as refusal:
+        asyncio.run(provider.acall_claude_with_mcp("hi", user_id="u-1"))
+
+    assert str(refusal.value) == (
+        "Claude CLI process pool is at its concurrency limit (1); refusing to start another"
+    )
+    assert refusal.value.__cause__ is None
+    assert refusal.value.__context__ is None
+
+
 # ── the child a Claude turn runs as ─────────────────────────────────
 
 

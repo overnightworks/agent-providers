@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import gc
 import logging
 import os
 import signal
 import sys
 import threading
+import warnings
 from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -185,14 +187,29 @@ def expected_spawn_warnings() -> list[str]:
     return []
 
 
+@pytest.fixture
+def expected_resource_warnings() -> list[str]:
+    return []
+
+
+def unclosed_resources(raised: list[warnings.WarningMessage]) -> list[str]:
+    return [
+        type(warning.source).__name__ for warning in raised if warning.category is ResourceWarning
+    ]
+
+
 @pytest.fixture(autouse=True)
 def every_row_ends_clean(
     thread_failures: list[threading.ExceptHookArgs],
     caplog: pytest.LogCaptureFixture,
     expected_spawn_warnings: list[str],
+    expected_resource_warnings: list[str],
 ) -> Iterator[None]:
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.WARNING), warnings.catch_warnings(record=True) as raised:
+        warnings.simplefilter("always", ResourceWarning)
         yield
+        gc.collect()
+    assert sorted(unclosed_resources(raised)) == sorted(expected_resource_warnings)
     assert thread_failures == []
     assert asyncio_errors(caplog, ALL_PHASES) == []
     assert spawn_warnings(caplog, ALL_PHASES) == expected_spawn_warnings
@@ -521,10 +538,17 @@ def test_a_closed_loop_still_lets_the_anchored_child_be_released(
     child_cleanup: ChildCleanup,
     leaders: Leaders,
     expected_spawn_warnings: list[str],
+    expected_resource_warnings: list[str],
     descriptors_before_the_door: frozenset[int],
 ) -> None:
     opened = open_door(door_runner, child_cleanup, leaders.describe())
     watcher = watcher_thread(opened.owned.pid)
+    expected_resource_warnings += [
+        "_UnixReadPipeTransport",
+        "_UnixReadPipeTransport",
+        "_UnixWritePipeTransport",
+        "NoneType",
+    ]
     expected_spawn_warnings.append(
         f"on_exit of anchored leader {opened.child.pid} raised RuntimeError"
     )

@@ -31,7 +31,7 @@ failed worker start propagates its error and ends the exclusion at once when the
 won the start claim; otherwise the claimed worker ends it.
 
 **Cancellation** propagates at once and releases nothing. The worker finishes its kill and
-count and drops its outcome; until it has, every call for the group returns ``False``.
+count and its outcome is dropped; until it has, every call for the group returns ``False``.
 
 **The loop.** ``release()`` and ``release_slot`` run on the thread of the loop that awaits
 the call. Like every ``AnchoredChild`` call outside the leader's own, the call belongs on
@@ -75,8 +75,9 @@ _generations = itertools.count(1)
 
 
 def retain_lost_group(child: AnchoredChild, release_slot: Callable[[], None]) -> RetainedGroup:
+    pid = child.pid
     with _registry_lock:
-        group = RetainedGroup(child.pid, next(_generations))
+        group = RetainedGroup(pid, next(_generations))
         _lost_groups[group] = _LostGroup(child, release_slot)
     return group
 
@@ -150,7 +151,7 @@ def _kill_and_count(
 ) -> None:
     try:
         census = entry.child.kill_and_census()
-    except BaseException as error:
+    except BaseException as error:  # NOSONAR(S5754) the outcome carries it to the awaiting call
         _leave(entry, attempt)
         outcome.set_exception(error)
         return

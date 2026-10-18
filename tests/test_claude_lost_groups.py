@@ -52,10 +52,10 @@ from provider_test_support import (
 
 from agent_providers.claude import lost_groups
 from agent_providers.claude.lost_groups import confirm_group_gone, retain_lost_group
+from agent_providers.claude.provider import UnavailableError
 from agent_providers.errors import (
     ContainmentLost,
     ProviderError,
-    ProviderUnavailableError,
     RetainedGroup,
 )
 from agent_providers.process import ClaimedStartThread
@@ -328,7 +328,8 @@ def test_a_cancelled_attempt_keeps_the_group_excluded_until_its_census_call_has_
         assert trail(log) == [KILL]
     finally:
         hold.proceed.set()
-    join_ended(log[0].thread)
+        if log:
+            join_ended(log[0].thread)
 
     assert confirm(retained.group) is True
     assert trail(log) == [KILL, KILL, RELEASE, SLOT]
@@ -358,7 +359,7 @@ def test_containment_lost_names_only_the_group_and_a_retained_group_is_a_value()
     error = ContainmentLost(group)
 
     assert isinstance(error, Exception)
-    assert not isinstance(error, (ProviderError, ProviderUnavailableError))
+    assert not isinstance(error, (ProviderError, UnavailableError))
     assert vars(error) == {"group": group}
     assert str(error) == "process group 4242: its end after SIGKILL is not confirmed"
     assert "7731" not in str(error)
@@ -396,16 +397,16 @@ def test_a_failed_worker_start_keeps_the_group_excluded_exactly_while_a_claimed_
     cannot_start = RuntimeError("can't start new thread")
     workers: list[threading.Thread] = []
     gate = threading.Event()
-    try:
-        with monkeypatch.context() as failing:
-            real_start = threading.Thread.start
+    with monkeypatch.context() as failing:
+        real_start = threading.Thread.start
 
-            def keep_the_worker(thread: threading.Thread) -> None:
-                if isinstance(thread, ClaimedStartThread):
-                    workers.append(thread)
-                real_start(thread)
+        def keep_the_worker(thread: threading.Thread) -> None:
+            if isinstance(thread, ClaimedStartThread):
+                workers.append(thread)
+            real_start(thread)
 
-            failing.setattr(threading.Thread, "start", keep_the_worker)
+        failing.setattr(threading.Thread, "start", keep_the_worker)
+        try:
             gate = start_then_raise(
                 failing,
                 cannot_start,
@@ -423,12 +424,13 @@ def test_a_failed_worker_start_keeps_the_group_excluded_exactly_while_a_claimed_
                 assert confirm(retained.group) is False
                 assert trail(log) == [KILL]
                 hold.proceed.set()
-            (worker,) = workers
-            join_ended(worker)
-    finally:
-        gate.set()
-        if hold is not None:
-            hold.proceed.set()
+        finally:
+            gate.set()
+            if hold is not None:
+                hold.proceed.set()
+            for worker in workers:
+                if worker.ident is not None:
+                    join_ended(worker)
 
     assert confirm(retained.group) is True
     assert trail(log) == expected_trail
@@ -519,13 +521,15 @@ def test_a_real_lost_leader_is_never_confirmed_and_never_frees_its_place(
     model = KernelModel(loses_at="wait")
     install_kernel(monkeypatch, model)
     opened = open_door(own_runner, child_cleanup, leaders.describe())
+    exited = bounded(opened.child.exited())
     with pytest.raises(ChildIdentityLost):
-        own_runner.run(bounded(opened.child.exited()))
+        own_runner.run(exited)
     group = retain_lost_group(opened.child, slot_releases(log, opened.owned.pid))
 
     for _ in range(2):
+        confirmation = bounded(confirm_group_gone(group))
         with pytest.raises(ChildIdentityLost):
-            own_runner.run(bounded(confirm_group_gone(group)))
+            own_runner.run(confirmation)
 
     assert operations(log) == []
     assert model.violations == []

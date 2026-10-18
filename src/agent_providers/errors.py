@@ -185,7 +185,7 @@ class ContainmentLost(Exception):
     """The end of a run's process group after SIGKILL is not confirmed.
 
     Deliberately neither an ``UnavailableError`` nor a ``ProviderError``: a
-    route failure would be mapped to a retry, while this one is handed to the
+    either would be mapped to a route failure by the adapter instead of reaching the
     quarantine that keeps the run's place held.
     """
 

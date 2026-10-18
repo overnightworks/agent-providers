@@ -1,12 +1,12 @@
 """The service's one configuration: identity, listener, profiles, purposes and apps.
 
 The service accepts at most one subscription profile, for Claude, which needs its
-token file and the ``[cli]`` section naming the absolute Claude program and the exact version
-it must report and its private ``working_root``, checked at load. An app that lists tools
-names its one https MCP origin; an origin is never shared between apps and needs the signing
-key. At load, every such app's capability is measured against the 8,192-character limit with
-a reserved subject size and timestamp width, so an app whose tools do not fit stops startup
-instead of failing its users.
+token file and a ``[cli.claude]`` table naming the absolute program and the exact version
+it must report, beside the ``[cli]`` section's private ``working_root``, checked at load. An
+app that lists tools names its one https MCP origin; an origin is never shared between apps
+and needs the signing key. At load, every such app's capability is measured against the
+8,192-character limit with a reserved subject size and timestamp width, so an app whose tools
+do not fit stops startup instead of failing its users.
 
 A TOML file is read once at startup into frozen models that forbid unknown
 fields. A file the models refuse stops the service with an error naming the
@@ -16,6 +16,7 @@ and each profile's token file the TOML names are read and checked with it, in th
 
 from __future__ import annotations
 
+import re
 import tomllib
 from collections.abc import Iterator, Mapping
 from enum import StrEnum
@@ -49,7 +50,6 @@ from agent_service.capability import (
     preflight_claims,
     signed_capability,
 )
-from agent_service.claude_version import PinnedClaudeVersion
 from agent_service.signing import SigningKey, load_signing_key
 
 NonEmptyText = Annotated[str, Field(min_length=1, strict=True)]
@@ -128,8 +128,31 @@ class SigningConfig(_Section):
     )
 
 
-def _claude_program(path: object) -> Path:
-    return _absolute_path_to("claude program", path)
+VERSION_PATTERN: Final = re.compile(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)", re.ASCII)
+MALFORMED_PIN: Final = (
+    "must be three dot-separated integers without leading zeros, written as a string,"
+    " such as 2.1.302"
+)
+
+
+def _pin_in_grammar(value: object) -> str:
+    if not isinstance(value, str) or VERSION_PATTERN.fullmatch(value) is None:
+        raise ValueError(MALFORMED_PIN)
+    return value
+
+
+PinnedVersion = Annotated[str, BeforeValidator(_pin_in_grammar)]
+
+
+def _program(path: object) -> Path:
+    return _absolute_path_to("program", path)
+
+
+class ProgramPin(_Section):
+    """One provider's program and the exact version it must report."""
+
+    binary: Annotated[Path, BeforeValidator(_program)]
+    version: PinnedVersion
 
 
 def _private_working_root(value: object) -> PrivateWorkingRoot:
@@ -143,13 +166,17 @@ def _private_working_root(value: object) -> PrivateWorkingRoot:
 
 
 class CliConfig(_Section):
-    """The Claude program this installation runs, its pinned version and its private root."""
+    """The private root every program run lives in, and each provider's pinned program."""
 
-    claude_binary: Annotated[Path, BeforeValidator(_claude_program)]
-    claude_version: PinnedClaudeVersion
     working_root: Annotated[PrivateWorkingRoot, PlainValidator(_private_working_root)] = Field(
         exclude=True, repr=False
     )
+    claude: ProgramPin | None = None
+
+    def programs(self) -> Mapping[Provider, ProgramPin]:
+        """The pinned programs this installation sets, in ``Provider`` order."""
+        pinned = {Provider.CLAUDE: self.claude}
+        return {provider: pin for provider, pin in pinned.items() if pin is not None}
 
 
 class ServerConfig(_Section):
@@ -285,11 +312,12 @@ def _refuse_a_claude_profile_without_its_token_file(document: object) -> None:
             )
 
 
-def _refuse_a_claude_profile_without_the_cli_section(document: object) -> None:
-    if _value(document, "cli") is not None:
+def _refuse_a_claude_profile_without_its_program_table(document: object) -> None:
+    cli = _value(document, "cli")
+    if isinstance(cli, Mapping | CliConfig) and _value(cli, "claude") is not None:
         return
     if any(provider is Provider.CLAUDE for _name, _table, provider in _raw_profiles(document)):
-        raise ValueError("cli: required for a claude profile")
+        raise ValueError("cli.claude: required for a claude profile")
 
 
 def _refuse_an_origin_without_signing(document: object) -> None:
@@ -316,7 +344,7 @@ RULES_ON_THE_RAW_DOCUMENT: Final = (
     _refuse_a_second_profile_for_one_provider,
     _refuse_a_profile_for_a_provider_without_a_route,
     _refuse_a_claude_profile_without_its_token_file,
-    _refuse_a_claude_profile_without_the_cli_section,
+    _refuse_a_claude_profile_without_its_program_table,
     _refuse_an_origin_without_signing,
     _refuse_tools_without_an_origin,
 )

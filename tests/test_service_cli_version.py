@@ -1,4 +1,4 @@
-"""The service starts only when the Claude program reports exactly the version the config pins."""
+"""The service starts only when each pinned program reports exactly the version the config pins."""
 
 from __future__ import annotations
 
@@ -38,6 +38,7 @@ from test_service_config import (
     CLAUDE_VERSION_LINE,
     CLI_SECTION,
     NO_PROFILE,
+    ROOT_ONLY_CLI,
     VALID_CONFIG,
     _refused_on_one_line,
     _written,
@@ -48,8 +49,9 @@ import agent_providers.process as core_process
 from agent_providers.config import reset_config
 from agent_providers.procfs import GroupCensus
 from agent_providers.spawn import KillUntilGoneResult
-from agent_service.claude_version import parse_version_output
+from agent_service import cli_version
 from agent_service.cli import EXIT_BAD_CONFIG, main
+from agent_service.cli_version import claude_version_output
 
 PRINTS_THE_PIN = f"{PINNED_CLAUDE_VERSION} (Claude Code)\n"
 WORKING_ROOT_NAME = "working-root"
@@ -102,9 +104,12 @@ def _printing(directory: Path, stdout: str) -> Path:
 
 
 def _document_naming(program: Path, root: Path, base: str = VALID_CONFIG) -> str:
-    binary_line = f"claude_binary = {json.dumps(str(program))}"
+    binary_line = f"binary = {json.dumps(str(program))}"
     root_line = f"working_root = {json.dumps(str(root))}"
-    return base.replace(CLI_SECTION, cli_section(binary_line, CLAUDE_VERSION_LINE, root_line))
+    return base.replace(
+        CLI_SECTION,
+        cli_section(binary=binary_line, version=CLAUDE_VERSION_LINE, root=root_line),
+    )
 
 
 def _config_file_naming(tmp_path: Path, program: Path, base: str = VALID_CONFIG) -> Path:
@@ -121,7 +126,7 @@ def _refused_leaving_the_root_empty(
 
 def _no_version_line(program: Path, reason: str) -> str:
     return (
-        f"cli.claude_version: {program} did not print a version ({reason});"
+        f"cli.claude.version: {program} did not print a version ({reason});"
         f" the pinned version is {PINNED_CLAUDE_VERSION}"
     )
 
@@ -147,7 +152,7 @@ def test_a_program_reporting_the_pinned_version_starts_the_service_without_a_cor
     assert list(working_root.iterdir()) == []
 
 
-def test_a_cli_section_without_a_profile_serves_after_probing_the_program(
+def test_a_program_table_without_a_profile_serves_after_probing_the_program(
     tmp_path, served, probe_log
 ):
     program = _logged_program(tmp_path, probe_log)
@@ -158,12 +163,24 @@ def test_a_cli_section_without_a_profile_serves_after_probing_the_program(
     assert probe_log.read_text() == "--version\n"
 
 
-def test_an_installation_with_neither_profile_nor_cli_section_serves(tmp_path, served):
-    text = NO_PROFILE.replace(CLI_SECTION, "")
+@pytest.mark.parametrize(
+    "cli_text",
+    [
+        pytest.param("", id="no-cli-section"),
+        pytest.param(ROOT_ONLY_CLI, id="working-root-only"),
+    ],
+)
+def test_an_installation_with_neither_profile_nor_program_table_serves(
+    tmp_path, served, monkeypatch, cli_text
+):
+    probes = []
+    monkeypatch.setattr(cli_version, "run_catalog_cli", lambda *args, **where: probes.append(args))
+    text = NO_PROFILE.replace(CLI_SECTION, cli_text)
 
     assert main(["--config", str(_written(tmp_path, text))]) == 0
 
     assert len(served) == 1
+    assert probes == []
 
 
 def test_the_probe_runs_in_a_run_tree_below_the_working_root_with_no_token_and_no_login(
@@ -209,7 +226,7 @@ def test_a_program_reporting_another_version_refuses_the_start_naming_both(
     refusal = _refused_leaving_the_root_empty(tmp_path, capsys, program)
 
     assert refusal == (
-        f"cli.claude_version: {program} reports 2.1.303, not the pinned {PINNED_CLAUDE_VERSION}"
+        f"cli.claude.version: {program} reports 2.1.303, not the pinned {PINNED_CLAUDE_VERSION}"
     )
     assert served == []
 
@@ -372,7 +389,7 @@ def test_a_binary_path_holding_a_newline_is_refused_on_one_line_with_the_newline
     refusal = _refused_leaving_the_root_empty(tmp_path, capsys, program)
 
     assert refusal == (
-        f"cli.claude_version: {str(program).replace(chr(10), '\\n')} did not print a version"
+        f"cli.claude.version: {str(program).replace(chr(10), '\\n')} did not print a version"
         f" (probe could not start or its start deadline expired);"
         f" the pinned version is {PINNED_CLAUDE_VERSION}"
     )
@@ -423,8 +440,8 @@ def test_a_run_tree_that_cannot_be_made_refuses_the_start_as_unstarted(
         pytest.param("2.1.30٢ (Claude Code)\n", None, id="non-ascii-digit"),
     ],
 )
-def test_only_the_exact_version_line_is_parsed(stdout, version):
-    assert parse_version_output(stdout) == version
+def test_claude_reads_only_its_exact_version_line(stdout, version):
+    assert claude_version_output(stdout) == version
 
 
 def _the_unstarted_refusal(program: Path) -> str:
@@ -432,7 +449,7 @@ def _the_unstarted_refusal(program: Path) -> str:
 
 
 def _the_mismatch_refusal(program: Path) -> str:
-    return f"cli.claude_version: {program} reports 2.1.303, not the pinned {PINNED_CLAUDE_VERSION}"
+    return f"cli.claude.version: {program} reports 2.1.303, not the pinned {PINNED_CLAUDE_VERSION}"
 
 
 def test_a_run_tree_whose_rollback_fails_still_refuses_the_start_as_unstarted(

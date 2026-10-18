@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import pytest
 import uvicorn
 from service_support import logging_state_snapshot  # noqa: F401 - a fixture, requested by name
-from test_service_claude_version import _config_file_naming, _logged_program
+from test_service_cli_version import _config_file_naming, _logged_program
 from test_service_config import CLI_SECTION, NO_PROFILE, _written
 
 import agent_service.config as service_config

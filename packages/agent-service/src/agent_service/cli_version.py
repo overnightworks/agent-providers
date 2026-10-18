@@ -1,12 +1,10 @@
-"""The Claude version the installation pins, and the startup probe that holds the program to it."""
+"""The pinned programs' version readers, one per adapter, and the startup probe that uses them."""
 
 from __future__ import annotations
 
-import re
+from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Annotated, Final
-
-from pydantic import BeforeValidator
+from typing import Final
 
 from agent_providers.config import PrivateWorkingRoot
 from agent_providers.process import (
@@ -17,35 +15,29 @@ from agent_providers.process import (
 )
 from agent_providers.secret_file import shown_text
 from agent_providers.spawn import ChildProcess, closed_environment
+from agent_service.config import VERSION_PATTERN, CliConfig, ProgramPin, Provider
 
-VERSION_PATTERN: Final = re.compile(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)", re.ASCII)
-VERSION_OUTPUT_SUFFIX: Final = " (Claude Code)"
-MALFORMED_PIN: Final = (
-    "must be three dot-separated integers without leading zeros, written as a string,"
-    " such as 2.1.302"
-)
+CLAUDE_VERSION_SUFFIX: Final = " (Claude Code)"
+
+VersionReader = Callable[[str], str | None]
 
 
-class ClaudeVersionRefused(ValueError):
-    """The program does not report the pinned version; the message follows the config path."""
+class ProgramVersionRefused(ValueError):
+    """A program does not report its pinned version; the message follows the config path."""
 
 
-def _pin_in_grammar(value: object) -> str:
-    if not isinstance(value, str) or VERSION_PATTERN.fullmatch(value) is None:
-        raise ValueError(MALFORMED_PIN)
-    return value
-
-
-PinnedClaudeVersion = Annotated[str, BeforeValidator(_pin_in_grammar)]
-
-
-def parse_version_output(stdout: str) -> str | None:
+def claude_version_output(stdout: str) -> str | None:
     """The version ``claude --version`` printed, or ``None`` when the output is anything else."""
     text = stdout.removesuffix("\n")
-    if not text.endswith(VERSION_OUTPUT_SUFFIX):
+    if not text.endswith(CLAUDE_VERSION_SUFFIX):
         return None
-    version = text.removesuffix(VERSION_OUTPUT_SUFFIX)
+    version = text.removesuffix(CLAUDE_VERSION_SUFFIX)
     return version if VERSION_PATTERN.fullmatch(version) else None
+
+
+VERSION_READERS: Final[Mapping[Provider, VersionReader]] = {
+    Provider.CLAUDE: claude_version_output,
+}
 
 
 def _unusable_run(run: CliRun | None) -> str | None:
@@ -80,27 +72,35 @@ def _probe(binary: Path, working_root: PrivateWorkingRoot) -> CliRun | None:
         return None
 
 
-def _refusal(binary: Path, pinned: str, run: CliRun | None) -> str | None:
-    shown_binary = shown_text(str(binary))
+def _refusal(
+    provider: Provider, pin: ProgramPin, run: CliRun | None, read_version: VersionReader
+) -> str | None:
+    shown_binary = shown_text(str(pin.binary))
     reason = _unusable_run(run)
-    reported = parse_version_output(run.stdout) if run is not None and reason is None else None
+    reported = read_version(run.stdout) if run is not None and reason is None else None
     if reported is None:
         why = reason or _what_was_printed(run.stdout)
         return (
-            f"cli.claude_version: {shown_binary} did not print a version ({why});"
-            f" the pinned version is {pinned}"
+            f"cli.{provider}.version: {shown_binary} did not print a version ({why});"
+            f" the pinned version is {pin.version}"
         )
-    if reported != pinned:
-        return f"cli.claude_version: {shown_binary} reports {reported}, not the pinned {pinned}"
+    if reported != pin.version:
+        return (
+            f"cli.{provider}.version: {shown_binary} reports {reported},"
+            f" not the pinned {pin.version}"
+        )
     return None
 
 
-def require_pinned_version(binary: Path, pinned: str, working_root: PrivateWorkingRoot) -> None:
-    """Run ``binary --version`` in a run tree below ``working_root``; refuse unless ``pinned``.
+def require_pinned_versions(cli: CliConfig) -> None:
+    """Run each pinned ``binary --version`` in a run tree below the root; refuse the first miss.
 
-    The tree goes only once the probe's spawn failed or its group is confirmed gone; a tree
+    A tree goes only once its probe's spawn failed or its group is confirmed gone; a tree
     that cannot be removed is logged by the core and never changes the outcome.
     """
-    refusal = _refusal(binary, pinned, _probe(binary, working_root))
-    if refusal is not None:
-        raise ClaudeVersionRefused(refusal)
+    for provider, pin in cli.programs().items():
+        refusal = _refusal(
+            provider, pin, _probe(pin.binary, cli.working_root), VERSION_READERS[provider]
+        )
+        if refusal is not None:
+            raise ProgramVersionRefused(refusal)

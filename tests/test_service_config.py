@@ -50,17 +50,22 @@ SONGMAKER_ORIGIN_LINE = 'mcp_origin = "https://songmaker.internal"\n'
 SIGNING_KEY_LINE = f"key_file = {json.dumps(str(process_signing_key_file()))}"
 SIGNING_SECTION = f"[signing]\n{SIGNING_KEY_LINE}\n\n"
 TOKEN_FILE_LINE = f"token_file = {json.dumps(str(process_token_file()))}"
-CLAUDE_BINARY_LINE = f"claude_binary = {json.dumps(str(process_claude_cli()))}"
-CLAUDE_VERSION_LINE = f'claude_version = "{PINNED_CLAUDE_VERSION}"'
+CLAUDE_BINARY_LINE = f"binary = {json.dumps(str(process_claude_cli()))}"
+CLAUDE_VERSION_LINE = f'version = "{PINNED_CLAUDE_VERSION}"'
 ROOT_MARKER = "synthetic-private-root-marker"
 WORKING_ROOT_LINE = f"working_root = {json.dumps(str(process_working_root().path))}"
 
 
-def cli_section(*lines: str) -> str:
-    return "".join(["[cli]\n", *(f"{line}\n" for line in lines if line), "\n"])
+def cli_section(*, binary: str, version: str, root: str) -> str:
+    root_lines = f"{root}\n" if root else ""
+    program_lines = "".join(f"{line}\n" for line in (binary, version) if line)
+    program_table = f"[cli.claude]\n{program_lines}\n" if program_lines else ""
+    return f"[cli]\n{root_lines}\n{program_table}"
 
 
-CLI_SECTION = cli_section(CLAUDE_BINARY_LINE, CLAUDE_VERSION_LINE, WORKING_ROOT_LINE)
+CLI_SECTION = cli_section(
+    binary=CLAUDE_BINARY_LINE, version=CLAUDE_VERSION_LINE, root=WORKING_ROOT_LINE
+)
 TOOLS_LINE = 'tools = { read_song = "read_only" }'
 
 VALID_CONFIG = f"""
@@ -107,9 +112,10 @@ def _written(tmp_path: Path, text: str) -> Path:
 def test_loading_a_file_does_not_run_the_program_its_cli_section_names(tmp_path):
     probe_log = tmp_path / "probe-starts"
     program = fake_cli_executable(tmp_path, {("--version",): "any"}, calls_log=probe_log)
-    binary_line = f"claude_binary = {json.dumps(str(program))}"
+    binary_line = f"binary = {json.dumps(str(program))}"
     text = VALID_CONFIG.replace(
-        CLI_SECTION, cli_section(binary_line, CLAUDE_VERSION_LINE, WORKING_ROOT_LINE)
+        CLI_SECTION,
+        cli_section(binary=binary_line, version=CLAUDE_VERSION_LINE, root=WORKING_ROOT_LINE),
     )
 
     load_config(_written(tmp_path, text))
@@ -1104,11 +1110,11 @@ def test_a_document_with_several_defects_is_refused_on_one_line_naming_one_of_th
 
 
 MALFORMED_PIN_REFUSAL = (
-    "cli.claude_version: must be three dot-separated integers without leading zeros,"
+    "cli.claude.version: must be three dot-separated integers without leading zeros,"
     " written as a string, such as 2.1.302"
 )
 NOT_A_PROGRAM_PATH = (
-    "cli.claude_binary: {shown}must be an absolute path to the claude program; ~ is not expanded"
+    "cli.claude.binary: {shown}must be an absolute path to the program; ~ is not expanded"
 )
 
 
@@ -1116,28 +1122,31 @@ NOT_A_PROGRAM_PATH = (
     ("binary_line", "refusal"),
     [
         pytest.param(
-            'claude_binary = "claude"',
+            'binary = "claude"',
             NOT_A_PROGRAM_PATH.format(shown="claude "),
             id="bare-name",
         ),
         pytest.param(
-            'claude_binary = "./claude"',
+            'binary = "./claude"',
             NOT_A_PROGRAM_PATH.format(shown="./claude "),
             id="dot-relative",
         ),
         pytest.param(
-            'claude_binary = "~/claude"',
+            'binary = "~/claude"',
             NOT_A_PROGRAM_PATH.format(shown="~/claude "),
             id="tilde",
         ),
-        pytest.param("claude_binary = 7", NOT_A_PROGRAM_PATH.format(shown=""), id="number"),
-        pytest.param("", "cli.claude_binary: Field required", id="missing"),
+        pytest.param("binary = 7", NOT_A_PROGRAM_PATH.format(shown=""), id="number"),
+        pytest.param("", "cli.claude.binary: Field required", id="missing"),
     ],
 )
-def test_a_claude_program_that_is_not_an_absolute_path_is_refused_by_field(
+def test_a_program_binary_that_is_not_an_absolute_path_is_refused_by_field(
     tmp_path, capsys, binary_line, refusal
 ):
-    text = _with(CLI_SECTION, cli_section(binary_line, CLAUDE_VERSION_LINE, WORKING_ROOT_LINE))
+    text = _with(
+        CLI_SECTION,
+        cli_section(binary=binary_line, version=CLAUDE_VERSION_LINE, root=WORKING_ROOT_LINE),
+    )
 
     assert _refused_on_one_line(_written(tmp_path, text), capsys) == refusal
 
@@ -1145,27 +1154,33 @@ def test_a_claude_program_that_is_not_an_absolute_path_is_refused_by_field(
 @pytest.mark.parametrize(
     ("version_line", "refusal"),
     [
-        pytest.param("", "cli.claude_version: Field required", id="missing"),
-        pytest.param('claude_version = "2.1"', MALFORMED_PIN_REFUSAL, id="two-integers"),
-        pytest.param('claude_version = "2.1.302.1"', MALFORMED_PIN_REFUSAL, id="four-integers"),
-        pytest.param('claude_version = "v2.1.302"', MALFORMED_PIN_REFUSAL, id="v-prefix"),
-        pytest.param('claude_version = "2.01.302"', MALFORMED_PIN_REFUSAL, id="leading-zero"),
-        pytest.param('claude_version = "2.1.x"', MALFORMED_PIN_REFUSAL, id="not-a-number"),
-        pytest.param('claude_version = ""', MALFORMED_PIN_REFUSAL, id="empty"),
-        pytest.param("claude_version = 2", MALFORMED_PIN_REFUSAL, id="integer"),
+        pytest.param("", "cli.claude.version: Field required", id="missing"),
+        pytest.param('version = "2.1"', MALFORMED_PIN_REFUSAL, id="two-integers"),
+        pytest.param('version = "2.1.302.1"', MALFORMED_PIN_REFUSAL, id="four-integers"),
+        pytest.param('version = "v2.1.302"', MALFORMED_PIN_REFUSAL, id="v-prefix"),
+        pytest.param('version = "2.01.302"', MALFORMED_PIN_REFUSAL, id="leading-zero"),
+        pytest.param('version = "2.1.x"', MALFORMED_PIN_REFUSAL, id="not-a-number"),
+        pytest.param('version = ""', MALFORMED_PIN_REFUSAL, id="empty"),
+        pytest.param("version = 2", MALFORMED_PIN_REFUSAL, id="integer"),
     ],
 )
 def test_a_pinned_version_that_is_not_three_integers_is_refused_by_field(
     tmp_path, capsys, version_line, refusal
 ):
-    text = _with(CLI_SECTION, cli_section(CLAUDE_BINARY_LINE, version_line, WORKING_ROOT_LINE))
+    text = _with(
+        CLI_SECTION,
+        cli_section(binary=CLAUDE_BINARY_LINE, version=version_line, root=WORKING_ROOT_LINE),
+    )
 
     assert _refused_on_one_line(_written(tmp_path, text), capsys) == refusal
 
 
 def _cli_naming_the_working_root(root_line: str, program: Path) -> str:
-    binary_line = f"claude_binary = {json.dumps(str(program))}"
-    return _with(CLI_SECTION, cli_section(binary_line, CLAUDE_VERSION_LINE, root_line))
+    binary_line = f"binary = {json.dumps(str(program))}"
+    return _with(
+        CLI_SECTION,
+        cli_section(binary=binary_line, version=CLAUDE_VERSION_LINE, root=root_line),
+    )
 
 
 def _root_line(root: str) -> str:
@@ -1220,10 +1235,13 @@ def _the_probe_never_started(probe_log: Path) -> bool:
     return not probe_log.exists()
 
 
-def test_a_private_working_root_loads_into_the_cli_section(tmp_path):
+def test_a_cli_table_loads_its_working_root_and_each_program_table(tmp_path):
     config = load_config(_written(tmp_path, VALID_CONFIG))
 
     assert config.cli.working_root == process_working_root()
+    assert list(config.cli.programs()) == [Provider.CLAUDE]
+    assert config.cli.claude.binary == process_claude_cli()
+    assert config.cli.claude.version == PINNED_CLAUDE_VERSION
 
 
 def _config_naming_a_marked_root(tmp_path: Path, make_the_root: bool) -> Path:
@@ -1335,20 +1353,87 @@ def test_a_bad_working_root_and_a_bad_token_file_are_both_named_on_one_line(tmp_
     assert root not in refusal.replace(str(unreadable), "")
 
 
-def test_a_claude_profile_without_the_cli_section_is_refused(tmp_path, capsys):
-    refusal = _refused_on_one_line(_written(tmp_path, _with(CLI_SECTION, "")), capsys)
+PROGRAM_TABLE_REQUIRED = "cli.claude: required for a claude profile"
+ROOT_ONLY_CLI = cli_section(binary="", version="", root=WORKING_ROOT_LINE)
+FORMER_FLAT_KEYS = f"claude_{CLAUDE_BINARY_LINE}\nclaude_{CLAUDE_VERSION_LINE}\n"
+FORMER_FLAT_KEYS_REFUSED = (
+    "cli.claude_binary: Extra inputs are not permitted;"
+    " cli.claude_version: Extra inputs are not permitted"
+)
+UNCHANGED_V030_CLI = f"[cli]\n{FORMER_FLAT_KEYS}\n"
+WITH_ROOT_AND_FLAT_KEYS = f"[cli]\n{WORKING_ROOT_LINE}\n{FORMER_FLAT_KEYS}\n"
 
-    assert refusal == "cli: required for a claude profile"
 
-
-def test_a_claude_profile_without_cli_is_refused_before_its_token_file_is_opened(tmp_path, capsys):
+def _unreadable_token_file(tmp_path: Path, text: str) -> str:
     unreadable = tmp_path / "missing.token"
-    text = _with(CLI_SECTION, "").replace(
-        TOKEN_FILE_LINE, f"token_file = {json.dumps(str(unreadable))}"
+    return text.replace(TOKEN_FILE_LINE, f"token_file = {json.dumps(str(unreadable))}")
+
+
+@pytest.mark.parametrize(
+    "cli_text",
+    [
+        pytest.param("", id="no-cli-table"),
+        pytest.param(ROOT_ONLY_CLI, id="working-root-only"),
+        pytest.param(UNCHANGED_V030_CLI, id="former-flat-keys"),
+    ],
+)
+def test_a_claude_profile_without_its_program_table_is_refused_before_its_token_file_is_opened(
+    tmp_path, capsys, cli_text
+):
+    text = _unreadable_token_file(tmp_path, _with(CLI_SECTION, cli_text))
+
+    assert _refused_on_one_line(_written(tmp_path, text), capsys) == PROGRAM_TABLE_REQUIRED
+
+
+@pytest.mark.parametrize(
+    ("cli_text", "refusal"),
+    [
+        pytest.param(WITH_ROOT_AND_FLAT_KEYS, FORMER_FLAT_KEYS_REFUSED, id="beside-the-root"),
+        pytest.param(
+            UNCHANGED_V030_CLI,
+            f"cli.working_root: Field required; {FORMER_FLAT_KEYS_REFUSED}",
+            id="unchanged-v030",
+        ),
+        pytest.param(
+            f"[cli]\n{WORKING_ROOT_LINE}\n{FORMER_FLAT_KEYS}\n[cli.claude]\n"
+            f"{CLAUDE_BINARY_LINE}\n{CLAUDE_VERSION_LINE}\n\n",
+            FORMER_FLAT_KEYS_REFUSED,
+            id="beside-a-program-table",
+        ),
+    ],
+)
+def test_the_former_flat_program_keys_stop_the_start_naming_each_key(
+    tmp_path, capsys, cli_text, refusal
+):
+    text = NO_PROFILE.replace(CLI_SECTION, cli_text)
+
+    assert _refused_on_one_line(_written(tmp_path, text), capsys) == refusal
+
+
+@pytest.mark.parametrize("provider", ["codex", "grok"])
+def test_a_program_table_for_a_provider_without_a_version_reader_stops_the_start(
+    tmp_path, capsys, provider
+):
+    probe_log = tmp_path / "probe-starts"
+    program = fake_cli_executable(tmp_path, {("--version",): "any"}, calls_log=probe_log)
+    table = f'[cli.{provider}]\nbinary = {json.dumps(str(program))}\nversion = "1.0.60"\n\n'
+    text = NO_PROFILE.replace(CLI_SECTION, ROOT_ONLY_CLI + table)
+
+    refusal = _refused_on_one_line(_written(tmp_path, text), capsys)
+
+    assert refusal == f"cli.{provider}: Extra inputs are not permitted"
+    assert _the_probe_never_started(probe_log)
+
+
+def test_the_working_root_belongs_to_the_cli_table_not_to_a_program(tmp_path, capsys):
+    program_with_root = (
+        cli_section(binary=CLAUDE_BINARY_LINE, version=CLAUDE_VERSION_LINE, root="").rstrip("\n")
+        + f"\n{WORKING_ROOT_LINE}\n\n"
     )
+    text = NO_PROFILE.replace(CLI_SECTION, program_with_root)
 
     assert _refused_on_one_line(_written(tmp_path, text), capsys) == (
-        "cli: required for a claude profile"
+        "cli.working_root: Field required; cli.claude.working_root: Extra inputs are not permitted"
     )
 
 

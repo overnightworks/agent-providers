@@ -192,9 +192,8 @@ def _service_config_document(
             "group_claim": GROUP_CLAIM,
         },
         "cli": {
-            "claude_binary": str(process_claude_cli()),
-            "claude_version": PINNED_CLAUDE_VERSION,
             "working_root": str(process_working_root().path),
+            "claude": {"binary": str(process_claude_cli()), "version": PINNED_CLAUDE_VERSION},
         },
         "signing": {"key_file": str(process_signing_key_file())},
         "profiles": {CLI_PROFILE: {"provider": "claude", "token_file": str(process_token_file())}},

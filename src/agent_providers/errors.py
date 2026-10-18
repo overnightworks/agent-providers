@@ -184,7 +184,7 @@ class RetainedGroup:
 class ContainmentLost(Exception):
     """The end of a run's process group after SIGKILL is not confirmed.
 
-    Deliberately neither an ``UnavailableError`` nor a ``ProviderError``: a
+    Deliberately neither an ``UnavailableError`` nor a ``ProviderError``:
     either would be mapped to a route failure by the adapter instead of reaching the
     quarantine that keeps the run's place held.
     """

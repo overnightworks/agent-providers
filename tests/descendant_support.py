@@ -98,6 +98,12 @@ def process_identity(pid: int) -> tuple[str, str] | None:
     return fields[0], fields[19]
 
 
+def process_start_time(pid: int) -> str | None:
+    """The start time of ``pid``, or ``None`` when the kernel lists no such process."""
+    identity = process_identity(pid)
+    return None if identity is None else identity[1]
+
+
 class DescendantRow:
     """The handshake of a lingering descendant, done on the calling thread.
 

@@ -32,7 +32,7 @@ from unittest.mock import patch
 import provider_test_support
 import pytest
 from anchored_support import TEST_WAIT_SECONDS
-from descendant_support import process_identity
+from descendant_support import process_identity, process_start_time
 from provider_test_support import (
     A_RUNNER_FAILURE_CANARY,
     ANOTHER_RUNNER_FAILURE_CANARY,
@@ -762,13 +762,13 @@ def test_a_cli_that_leaves_a_child_behind_is_terminated_with_its_group() -> None
 def test_a_sigterm_ignoring_cli_and_child_are_reaped_after_sigkill() -> None:
     command = "trap '' TERM; { trap '' TERM; while :; do :; done; } & while :; do :; done"
     started: list[subprocess.Popen[bytes]] = []
-    original_identities: list[tuple[str, str] | None] = []
+    original_start_times: list[str | None] = []
     real_popen = subprocess.Popen
 
     def capture_process(*args, **kwargs):
         child = real_popen(*args, **kwargs)
         started.append(child)
-        original_identities.append(process_identity(child.pid))
+        original_start_times.append(process_start_time(child.pid))
         return child
 
     with (
@@ -779,7 +779,8 @@ def test_a_sigterm_ignoring_cli_and_child_are_reaped_after_sigkill() -> None:
     ):
         assert run_catalog_cli(shell_child("-c", command)).complete is False
 
-    assert process_identity(started[0].pid) != original_identities[0]
+    assert original_start_times[0] is not None
+    assert process_start_time(started[0].pid) != original_start_times[0]
     with pytest.raises(ProcessLookupError):
         os.killpg(started[0].pid, 0)
 
@@ -1096,13 +1097,13 @@ def test_bounded_runner_notifies_a_zombie_reap_only_after_background_confirmatio
 
 def test_bounded_runner_stops_a_cli_that_never_reads_its_full_stdin_pipe() -> None:
     started: list[subprocess.Popen[bytes]] = []
-    original_identities: list[tuple[str, str] | None] = []
+    original_start_times: list[str | None] = []
     real_popen = subprocess.Popen
 
     def capture_process(*args, **kwargs):
         child = real_popen(*args, **kwargs)
         started.append(child)
-        original_identities.append(process_identity(child.pid))
+        original_start_times.append(process_start_time(child.pid))
         return child
 
     with patch("agent_providers.spawn.subprocess.Popen", side_effect=capture_process):
@@ -1115,18 +1116,19 @@ def test_bounded_runner_stops_a_cli_that_never_reads_its_full_stdin_pipe() -> No
 
     assert outcome is not None
     assert outcome.complete is False
-    assert process_identity(started[0].pid) != original_identities[0]
+    assert original_start_times[0] is not None
+    assert process_start_time(started[0].pid) != original_start_times[0]
 
 
 def test_bounded_runner_stops_a_cli_that_never_writes_output() -> None:
     started: list[subprocess.Popen[bytes]] = []
-    original_identities: list[tuple[str, str] | None] = []
+    original_start_times: list[str | None] = []
     real_popen = subprocess.Popen
 
     def capture_process(*args, **kwargs):
         child = real_popen(*args, **kwargs)
         started.append(child)
-        original_identities.append(process_identity(child.pid))
+        original_start_times.append(process_start_time(child.pid))
         return child
 
     with patch("agent_providers.spawn.subprocess.Popen", side_effect=capture_process):
@@ -1139,7 +1141,8 @@ def test_bounded_runner_stops_a_cli_that_never_writes_output() -> None:
 
     assert outcome is not None
     assert outcome.complete is False
-    assert process_identity(started[0].pid) != original_identities[0]
+    assert original_start_times[0] is not None
+    assert process_start_time(started[0].pid) != original_start_times[0]
 
 
 _THE_RUNNER_DOOR_PID = FakeBlockingChild.pid

@@ -1981,7 +1981,8 @@ are not measured, and the exposure is bounded only by each run's wall deadline (
 and `total_cost_usd` is the CLI's notional estimate, never a cap.
 
 **The runs.** Init lists `tools` exactly `mcp__fake__step`, `mcp_servers` exactly `fake`
-`connected` and `model` `"claude-haiku-5-5"` in all five runs. Every run's layer 1
+`connected` and `model` `"claude-haiku-5-5"` in all five runs; `modelUsage` model keys (`usage_models`) are
+`claude-haiku-5-5` in E1 to E4, and E5 has no `result`. Every run's layer 1
 (evidence integrity) is `intact`, layer 2 (sequence compliance) `compliant`, no run
 stopped the series, every teardown was confirmed (`became_zombie` false), and every home,
 working directory, `cli.exit` and `cli.sock` was deleted.
@@ -1992,15 +1993,15 @@ working directory, `cli.exit` and `cli.sock` was deleted.
 | E2 | complete / completion | 6 (7) | 5 / 5 / 4 / 0 / 0 | 1 | `success`, false, `completed`, `end_turn`, 6 | 0 | 0.00112 | yes |
 | E3 | complete / completion | 2 (2) | 1 / 1 / 0 / 1 / 0 | 1 | `success`, false, `completed`, `end_turn`, 2 | 0 | 0.00068 | yes |
 | E4 | complete / completion | 2 (2) | 1 / 1 / 1 / 1 / 0 | 1 | `success`, false, `completed`, `end_turn`, 2 | 0 | 0.00068 | yes |
-| E5 | planned-stop / planned-stop | 2 (3) | 2 / 3 / 0 / 3 / 1 (n=2, new id, new connection, inside the window) | 0 | no `result` | `cli_exit` 143 | none | no |
+| E5 | planned-stop / planned-stop | 2 (3) | 2 / 3 / 0 / 3 / later-new-id 1 | 0 | no `result` | `cli_exit` 143 | none | no |
 
 E4 ran under its guard: E3's c6 was `fired` with `ms` 60,006, below 130,000. E2 and E5
 each had a `thinking` block in response 2 (not counted as text). E5's stop path:
 `aborted_by` `planned-sigterm`, precondition `n2-pending`, `signal_outcome` `sent`,
 `signal_ms` 10,982, `exit_seen_ms` = `window_end_ms` = `abort_ms` = 11,516 (observation
 times on the drive's clock), `abort_late_ms` 0, `window_complete` true, no `result` after
-the signal (`signal-result` nothing), no after-window observation. Run times from first
-event to `result`: E1 32.6 s, E2 9.1 s, E3 63.0 s, E4 132.7 s.
+the signal (`signal-result` nothing), no after-window observation. Run times from the drive's
+start to the `result`: E1 32.6 s, E2 9.1 s, E3 63.0 s, E4 132.7 s.
 
 **Cells.** `insufficient` appears only where stated.
 
@@ -2011,25 +2012,24 @@ event to `result`: E1 32.6 s, E2 9.1 s, E3 63.0 s, E4 132.7 s.
   named); ids are integers, the originals' ids are distinct (E5: provisional), the tool
   name is the bare `step`. `initialize` requested `2025-11-25` and was answered
   `2025-11-25`. Before `initialize` the CLI sends a `server/discover` request with
-  `MCP-Protocol-Version: 2026-07-28`, and after `notifications/initialized` a `GET` whose
-  `Accept` check fails; neither is a `tools/call`. For 11: the landed relay
+  `MCP-Protocol-Version: 2026-07-28`, and after `notifications/initialized` a `GET` (its
+  `Accept` as 0c c3 recorded; the fake's POST-style both-types check does not apply to it);
+  neither is a `tools/call`. For 11: the landed relay
   serves the pinned CLI's `tools/call`, and 11 c1 is built on the bare name. The relay
   was not run; its answers to `server/discover` and the `GET` are not part of this record.
-- **c2 Concurrency and connections** (E1): `serial-one-connection(10)`. The ten calls of
-  one response arrived one after another, each 3,015 to 3,055 ms after the previous
+- **c2 Concurrency and connections** (E1): `serial-one-connection(10)`. In E1's one
+  response the ten calls arrived one after another, each 3,015 to 3,055 ms after the previous
   arrival (hold 3,000 ms), most outstanding 1, one connection, the first arrival at
-  2,153 ms and the last answer at 32,592 ms (Hc2 predicted this). For 10b1: with the pinned
-  CLI at most one call of a run waits at a time, so 10b1's c1 and c5 stay protocol cells
-  against a fake CLI and no production path reaches the limit of 8; the head re-estimates
-  10b1 downward and may put line 22's example to the operator in its true form. Not
-  measured: tools with `readOnlyHint`.
+  2,153 ms and the last answer at 32,592 ms (Hc2 predicted this). For 10b1: in this
+  response the pinned CLI dispatched the ten calls one at a time on one connection; whether
+  that bounds the pending calls of a production run is not measured. Not measured: tools
+  with `readOnlyHint`.
 - **c3 Re-sends** (E2 n 1 to 4): `none` for all four, on a complete run. E3: `none`.
   E4: no failure to read. E5 n=1: `none` (no later n=1 occurrence; the stream is not
   complete, so only the direct class stands). For 10b1: no re-send after a JSON-RPC
   error, an `isError` result, a 500, a drop or the 60 s give-up, so the duplicate rule
-  guards only a misbehaving client. Separately observed in E5 (below, c5): during its
-  SIGTERM handling the CLI reconnected and sent n=2 again with a new id (1) on a new
-  connection.
+  guards only a misbehaving client. Separately observed in E5 (below, c5): `later-new-id 1`
+  for n=2, provisional.
 - **c4 Order of text and request** (E1): `text-first(133)`: the text event was received
   at 2,020 ms, the first request arrived at 2,153 ms (receipt lags the CLI's write, so the
   CLI wrote the text first). For 11: its fake CLI emits the text before the request.
@@ -2037,16 +2037,21 @@ event to `result`: E1 32.6 s, E2 9.1 s, E3 63.0 s, E4 132.7 s.
   534 ms after the signal, code 143 (`cli.exit` written). Close: `closed-in-window(10985)`
   for the held n=2 occurrence (3 ms after `signal_ms`; the n=1 occurrence was closed at
   the same instant). Sent in the window: `other(GET, initialize, notifications/initialized,
-  server/discover, tools/call)`, so no `notifications/cancelled` in the window, but a new
-  connection with the full handshake and a `tools/call` for n=2 (id 1, held, closed at
-  11,509 ms). After-window observations: none. Residuals: an exit between the last
-  readability check and the signal cannot be told from one the signal caused; what the CLI
-  wrote after the signal but the drive never consumed is unseen; times are observation
-  times. For 10b2: its fake CLI's stop reproduces the outcome in c5 and c7. No design
-  change follows: Q3 (a) sends SIGKILL after the grace either way. For 10b1: a pending
-  call whose CLI is signalled can be followed by a re-send of that call on a new
-  connection with an id lower than any earlier id of the run, so an id is not unique across
-  the run, and a forward must not repeat after the run is ending.
+  server/discover, tools/call)`, so no `notifications/cancelled` in the window. Directly
+  observed (record seq 15): a new connection (conn 3) opened in the window. Its handshake
+  had `server/discover`, `initialize`, `notifications/initialized` and `GET`, and no
+  `tools/list`; then came a `tools/call` with n=2 and id 1 (11,051 ms, held, closed at
+  11,509 ms), lower than the run's earlier `tools/call` ids 2 and 3. As a cell it is
+  `later-new-id(1)` for n=2, with no attribution to response 2's model call
+  (`insufficient(provisional-attribution)`, `later_new_id` 1, `same_id` 0); the ids
+  restarted on the new connection, and no id was seen twice. After-window observations:
+  none. Residuals: an exit between the last readability check and the signal cannot be told
+  from one the signal caused; a close made before the signal and observed after it counts
+  as pending (this run's close was observed 3 ms after `signal_ms`); an exit, close or
+  request observed after `window_end_ms` is not counted; what the CLI wrote after the
+  signal but the drive never consumed is unseen; times are observation times. For 10b2: its fake CLI's stop reproduces the outcome in c5 and c7. No design
+  change follows: Q3 (a) sends SIGKILL after the grace either way. For 10b1: the
+  observation is the `tools/call` with a lower id on a new connection within the window.
 - **c6 The CLI's own call timeout**: E3 (unset) `fired(60006, closed)`: the CLI handed
   the model a `local-timeout` `is_error` result (receipt 62,184 ms), 60,006 ms after the
   first arrival, and the server saw the connection closed at 62,179 ms with no
@@ -2056,7 +2061,7 @@ event to `result`: E1 32.6 s, E2 9.1 s, E3 63.0 s, E4 132.7 s.
   (`5000`, n=1): `insufficient (provisional-attribution)`, with the two sides apart: the
   stream's n=1 result is a `local-timeout` `is_error` result received at 7,292 ms, 5,004 ms
   after the first n=1 arrival; the server's n=1 occurrence ended `client-closed` at 10,985
-  ms (the SIGTERM), and a `notifications/cancelled` for its id arrived at 7,303 ms. Only an
+  ms, and a `notifications/cancelled` for its id arrived at 7,303 ms. Only an
   E3 `fired` below 130,000 ms authorizes E4, and it did. For 11, in every outcome: the run
   environment is `ClaudeRun`'s (`_RUN_SWITCHES`), which sets no tool timeout. The default
   gave up at 60 s and `MCP_TOOL_TIMEOUT=600000` survived this 130 s hold, so 11 adds
@@ -2079,11 +2084,13 @@ event to `result`: E1 32.6 s, E2 9.1 s, E3 63.0 s, E4 132.7 s.
   nothing to record.
 - **c8 Cancel**: E2 n 1 to 4 `neither`; E3 n=1 `closed-only` (a close at 62,179 ms, no
   cancel); E4 n=1 `neither` (answered); E5 n=1 `cancelled-with-id` (a
-  `notifications/cancelled` with a `reason`, `requestId` equal to the n=1 occurrence's id,
-  sent at 7,303 ms on a second connection, which then carried n=2). `cancelled-other-id`
+  `notifications/cancelled` with a `reason` and a `requestId` equal to the n=1 occurrence's
+  id arrived on conn 2 at 7,303 ms, 5,015 ms after n=1's arrival). Its pairing with the
+  stream's 5 s give-up is provisional and unclaimed; the stream's timeout and the server's
+  cancellation are kept separate. Conn 2 then carried n=2. `cancelled-other-id`
   0 in every run. For 10b1: a give-up is signalled to the relay in the two different ways
   seen here (the default 60 s path closed the connection; the 5 s path sent a cancel, and
-  closed the first connection only at the SIGTERM), so the relay must treat both a client
+  closed the first connection only at 10,985 ms), so the relay must treat both a client
   close and a `notifications/cancelled` as the end of a pending call, or state that a
   pending call is still forwarded after the CLI gave up. The two runs differ in
   `MCP_TOOL_TIMEOUT` and in whether a second call followed; the cause of the difference is

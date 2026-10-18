@@ -683,10 +683,13 @@ def test_a_refused_init_ends_the_run_when_it_is_read(
     seen: list[StreamEvent] = []
     refusals: list[RunSurfaceRefused] = []
 
+    async def collect() -> None:
+        async for event in astream_cli_run(PrivateWorkingRoot(private_root), run):
+            seen.append(event)
+
     async def scenario() -> None:
         with pytest.raises(RunSurfaceRefused) as refusal:
-            async for event in astream_cli_run(PrivateWorkingRoot(private_root), run):
-                seen.append(event)
+            await collect()
         refusals.append(refusal.value)
 
     drive_real_children(child_cleanup, monkeypatch, scenario())

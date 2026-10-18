@@ -661,7 +661,7 @@ with no MCP SDK dependency.
   CLI closed a call it gave up on (A1b-0e E3); bytes do not, because a pipelined request
   is the next one (L7), and the watch keeps reading after them so a later close is still
   seen. The watch cancels a pending answer in the very step it sees the end, and the
-  listener awaits the answer directly, so for a `tools/call` the barrier's give-up is
+  listener awaits the answer through an await chain that forwards `Task.cancel()` at once (`asyncio.gather`), so for a `tools/call` the barrier's give-up is
   recorded before any later acceptance (A1b-10b1b1, guarantee G). An answer that
   completed before the end is written, and the connection then ends. Retained unparsed
   bytes are bounded by `MAX_PIPELINED_BYTES` (one further request), counted over

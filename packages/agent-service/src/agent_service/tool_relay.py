@@ -593,10 +593,10 @@ class ToolCallBarrier:
 
     A call is given up by ``cancel(request_id)`` or by the cancellation of the task running
     ``call()``. Each is recorded, for a waiting or handed-out call, before it returns: ``call()``
-    awaits its verdict future directly, so ``Task.cancel()`` of any task whose await chain reaches
-    ``call()`` through an await chain that forwards ``Task.cancel()`` at once (a direct await or
-    ``asyncio.gather``; no ``asyncio.wait``, shield or ``wait_for``, no task not awaited so)
-    cancels it at once, and ``accept`` and ``next_event()`` decide from that
+    awaits its verdict future directly, so ``Task.cancel()`` of any task that reaches ``call()``
+    through an await chain forwarding ``Task.cancel()`` at once (a direct await or
+    ``asyncio.gather``; no ``asyncio.wait``, shield or ``wait_for``, and no task outside that
+    chain) cancels it at once, and ``accept`` and ``next_event()`` decide from that
     record. A given-up call leaves the pending set and its request is closed without a byte,
     whatever it would have answered: ``call()`` returns ``Unanswered`` after a cancel and raises
     ``CancelledError`` after a task cancellation. A waiting one is never handed out; a

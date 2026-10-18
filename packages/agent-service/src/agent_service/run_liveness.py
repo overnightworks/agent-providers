@@ -5,7 +5,8 @@ are produced and when a run is over (decision record 0001, H6). Three parties
 cooperate, each a task created with ``asyncio.create_task``:
 
 * the *pump* owns the runner's generator: it takes one step when the
-  supervisor asks, and it alone cancels and closes the generator;
+  supervisor asks, and it alone cancels and closes the generator, and it
+  collects the ``ContainmentLost`` groups the generator's steps and close met;
 * the *supervisor* waits for the runner and for the clock, writes every frame
   through the one ``FrameWriter``, and puts it into a one-slot queue;
 * the stream (``SupervisedRun.frames``) forwards the queued frames.
@@ -14,8 +15,10 @@ The supervisor never waits for the client without also watching the maximum
 duration, so a client that stops reading cannot keep a runner alive. A client
 which takes no frame for ``stall_timeout_s`` is dropped sooner: the runner is
 stopped once and the stream ends without a terminal. Every
-ending stops the runner first and queues the terminal only after the
-runner's close has finished. The shielded wait for that close mirrors the
+ending is decided at once but stops the runner first: the terminal is
+committed (encoded, accepted, recorded) and queued only after the runner's
+close has finished, and a containment loss the pump met makes it
+``failed: provider_error``. The shielded wait for that close mirrors the
 provider core's reap of a streaming process
 (``agent_providers.anchored_turn``) without importing it.
 """
@@ -47,6 +50,7 @@ from uuid import UUID
 import anyio
 
 from agent_client.wire import ClientLoss, FailureCode
+from agent_providers.errors import ContainmentLost, RetainedGroup
 from agent_providers.events import StreamEvent
 from agent_service.config import RunConfig
 
@@ -119,17 +123,26 @@ RunnerOutcome = RunnerYielded | RunnerExhausted | RunnerRaised
 class FrameWriter(Protocol):
     """The one writer of a run's frames and of its record; ``run_events`` implements it."""
 
-    ended: bool
+    @property
+    def ended(self) -> bool:
+        """Whether a terminal has been decided; it is committed by ``run_over``."""
+        ...
 
     def heartbeat(self) -> bytes: ...
 
-    def failed(self, code: FailureCode, message: str) -> bytes: ...
+    def decide_failure(self, code: FailureCode, message: str) -> None: ...
 
     def frame_of(self, outcome: RunnerOutcome) -> bytes | None:
-        """The frame of a runner outcome, or nothing for an event that says nothing."""
+        """The frame of a runner outcome sent at once, or nothing: it says none or ends the run."""
         ...
 
-    def run_over(self) -> None: ...
+    def run_over(self, losses: tuple[RetainedGroup, ...]) -> None:
+        """Commit the decided terminal, end the record, and release the lease."""
+        ...
+
+    def terminal_frame(self) -> bytes:
+        """The terminal ``run_over`` committed."""
+        ...
 
     def client_lost(self, loss: ClientLoss) -> None: ...
 
@@ -477,6 +490,28 @@ async def _stopped(
     return interrupted, failures
 
 
+def containment_losses(error: BaseException) -> tuple[RetainedGroup, ...]:
+    """Every distinct group of a ``ContainmentLost`` in ``error``, in the order found.
+
+    The walk covers the error, the members of each exception group, then its
+    cause and its context, and visits each exception once.
+    """
+    groups: list[RetainedGroup] = []
+    visited: set[int] = set()
+    unvisited = [error]
+    while unvisited:
+        current = unvisited.pop()
+        if id(current) in visited:
+            continue
+        visited.add(id(current))
+        if isinstance(current, ContainmentLost) and current.group not in groups:
+            groups.append(current.group)
+        members = current.exceptions if isinstance(current, BaseExceptionGroup) else ()
+        linked = (*members, current.__cause__, current.__context__)
+        unvisited.extend(reversed([link for link in linked if link is not None]))
+    return tuple(groups)
+
+
 async def _one_step(events: AsyncGenerator[StreamEvent, None]) -> RunnerOutcome:
     try:
         return RunnerYielded(await anext(events))
@@ -524,6 +559,7 @@ class SupervisedRun:
         self._cleanup: asyncio.Task[None] | None = None
         self._failures = failures
         self._drop_reported = False
+        self._losses: list[RetainedGroup] = []
 
     async def __aenter__(self) -> SupervisedRun:
         self._pump = asyncio.create_task(self._pump_runner())
@@ -555,13 +591,31 @@ class SupervisedRun:
             while not self._stopping:
                 await self._step_wanted.wait()
                 self._step_wanted.clear()
-                outcome = await _one_step(self._events)
-                if isinstance(outcome, RunnerRaised) and self._stopping:
-                    raise outcome.error
+                with self._collecting_losses():
+                    outcome = await _one_step(self._events)
+                if isinstance(outcome, RunnerRaised):
+                    self._collect_losses(outcome.error)
+                    if self._stopping:
+                        raise outcome.error
                 self._outcome = outcome
                 self._outcome_ready.set()
         finally:
-            await self._events.aclose()
+            with self._collecting_losses():
+                await self._events.aclose()
+
+    @contextmanager
+    def _collecting_losses(self) -> Iterator[None]:
+        """Collect the losses of whatever escapes the block, and let it escape unchanged."""
+        try:
+            yield
+        except BaseException as escaped:
+            self._collect_losses(escaped)
+            raise
+
+    def _collect_losses(self, error: BaseException) -> None:
+        self._losses.extend(
+            group for group in containment_losses(error) if group not in self._losses
+        )
 
     async def _supervise(self) -> None:
         try:
@@ -591,17 +645,16 @@ class SupervisedRun:
                     await self._drop()
                     return
                 case Action.IDLE:
-                    await self._end(self._idle_timeout())
+                    self._wire.decide_failure(FailureCode.IDLE_TIMEOUT, IDLE_TIMEOUT_MESSAGE)
+                    await self._end()
                     return
                 case Action.LIMIT:
-                    await self._end(self._limit_exceeded())
+                    await self._end_at_the_maximum()
                     return
 
-    def _idle_timeout(self) -> bytes:
-        return self._wire.failed(FailureCode.IDLE_TIMEOUT, IDLE_TIMEOUT_MESSAGE)
-
-    def _limit_exceeded(self) -> bytes:
-        return self._wire.failed(FailureCode.LIMIT_EXCEEDED, LIMIT_EXCEEDED_MESSAGE)
+    async def _end_at_the_maximum(self, pending: bytes | None = None) -> None:
+        self._wire.decide_failure(FailureCode.LIMIT_EXCEEDED, LIMIT_EXCEEDED_MESSAGE)
+        await self._end(pending)
 
     @property
     def _deadlines(self) -> Deadlines:
@@ -634,8 +687,7 @@ class SupervisedRun:
         self._outcome_ready.clear()
         frame = self._wire.frame_of(outcome)
         if self._wire.ended:
-            assert frame is not None
-            await self._end(frame)
+            await self._end()
             return False
         if frame is not None and not await self._deliver(frame):
             return False
@@ -644,7 +696,7 @@ class SupervisedRun:
                 await self._drop()
                 return False
             case Action.LIMIT:
-                await self._end(self._limit_exceeded())
+                await self._end_at_the_maximum()
                 return False
         self._request_step(self._clock())
         return True
@@ -676,16 +728,16 @@ class SupervisedRun:
                     await self._drop()
                     return False
                 case Action.LIMIT:
-                    await self._end(self._limit_exceeded(), pending=frame)
+                    await self._end_at_the_maximum(pending=frame)
                     return False
             await self._wait_for(self._slot.wait_vacant(), deadlines.next)
         self._queue(frame)
         return True
 
-    async def _end(self, terminal: bytes, pending: bytes | None = None) -> None:
-        """Stop the runner, then queue the frame already encoded before the terminal, then it."""
+    async def _end(self, pending: bytes | None = None) -> None:
+        """Stop the runner, then queue the frame already sent before the terminal, then it."""
         await self._stop()
-        for frame in (pending, terminal):
+        for frame in (pending, self._wire.terminal_frame()):
             if frame is not None and not await self._fill_when_vacant(frame):
                 return
 
@@ -752,7 +804,7 @@ class SupervisedRun:
         self._pump.cancel()
         await asyncio.wait({self._pump})
         self._log_runner_close()
-        self._failures.attempt(FailedPart.CLEANUP, self._wire.run_over)
+        self._failures.attempt(FailedPart.CLEANUP, lambda: self._wire.run_over(tuple(self._losses)))
 
     def _log_runner_close(self) -> None:
         """Log how the runner closed in a frame of its own, so no later failure keeps it alive."""

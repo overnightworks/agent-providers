@@ -11,6 +11,7 @@ one.
 from __future__ import annotations
 
 import asyncio
+from types import TracebackType
 
 import anyio
 import anyio.lowlevel
@@ -36,13 +37,31 @@ async def wait_outlasting_cancellation(task: asyncio.Task[object]) -> asyncio.Ca
     return interrupted
 
 
+class _Kept:
+    """Keep the cancellation raised in its block, for the caller to raise later."""
+
+    cancellation: asyncio.CancelledError | None = None
+
+    def __enter__(self) -> _Kept:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        exc_traceback: TracebackType | None,
+    ) -> bool:
+        if isinstance(exc, asyncio.CancelledError):
+            self.cancellation = exc
+            return True
+        return False
+
+
 async def level_cancellation() -> asyncio.CancelledError | None:
     """Deliver and return the AnyIO level cancellation pending on the calling task, if any."""
-    try:
+    with _Kept() as kept:
         await anyio.lowlevel.checkpoint_if_cancelled()
-    except asyncio.CancelledError as cancelled:
-        return cancelled
-    return None
+    return kept.cancellation
 
 
 async def outlast[T](task: asyncio.Task[T]) -> T:

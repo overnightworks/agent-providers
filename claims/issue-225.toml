@@ -1,8 +1,0 @@
-claim_id = "4081d392a17b41beabb6bb3c70c33207"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "925172c1425e9d6be747b61038cef79633315d9b"
-branch = "claude/issue-225-kill-and-census"
-scope = ["README.md", "src/agent_providers/spawn.py", "tests/test_anchored_door.py", "tests/test_anchored_group_signal.py"]
-opened_commit = "7721a43e103fa3c952314efd5480aa89c58a0539"
-whole_reason = "One public method on the spawn owner and its delegate, the loss classification in the same file, the group-signal test module that owns the builders its rows need, one door row, and the README spawn row. The bound and the loop are cut to 3p4u; splitting further would land the kill without its real-kernel proof."

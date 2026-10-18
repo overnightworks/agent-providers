@@ -1,0 +1,8 @@
+claim_id = "d9ced07c33e242eb8e5ccc2e39748e8f"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "cee2f09af71a9668127c33e281f743d9b4eae06f"
+branch = "claude/issue-253-run-directories"
+scope = ["CLAUDE.md", "README.md", "src/agent_providers/anchored_turn.py", "src/agent_providers/config.py", "src/agent_providers/process.py", "tests/test_async_claude_spawn_seam.py", "tests/test_last_holder_removal.py", "tests/test_run_directories.py"]
+opened_commit = "b51c4baf4aa83e68ea559417ced61264459768f8"
+whole_reason = "One owner of a run's directories: the tree and its one removal, which follows the slot so a retained group keeps its directories, never follows a link and refuses a snapshot-visible mount, are one deletion contract over 4b1a's primitives; the anchored_turn port, the docs and the spawn-seam guard are its reach. Split, the creator would land without its cleanup."

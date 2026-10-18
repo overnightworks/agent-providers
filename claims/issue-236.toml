@@ -1,0 +1,8 @@
+claim_id = "a9d386a275c24f79addd310681d849af"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "d325678ff9506f3d9dbcc7825c44d41fc6ea78bf"
+branch = "claude/issue-236-cancelled-call-ends"
+scope = ["README.md", "docs/decisions/0001-agent-service.md", "packages/agent-service/src/agent_service/mcp_wire.py", "packages/agent-service/src/agent_service/tool_relay.py", "tests/relay_support.py", "tests/test_service_tool_relay.py", "tests/test_service_tool_relay_barrier.py", "tests/test_service_tool_relay_protocol.py"]
+opened_commit = "003c82f9f8a022089c496095177200ed0b61fdbb"
+whole_reason = "One owner module's cancel path: the owner port's Unanswered, McpRelayOwner's cancel routing and wire model, and the barrier's whole give-up model (two entries recorded at once with guarantee G, three states, the given-up result, one counted retrieval per forward), with three relay test modules, the shared fakes, a deterministic A8c, two README rows and two ADR bullets. A1b-10b1b2 only adds the listener's close as a cause of entry (b)."

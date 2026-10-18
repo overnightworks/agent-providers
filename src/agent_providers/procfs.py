@@ -7,16 +7,21 @@ nothing and has no clock; it imports the standard library only.
 The checks detect a visible misconfiguration. They do not establish a complete
 view: a mount over ``/proc`` or over one of its numeric directories is a
 precondition of the supported host and nothing here looks for it.
+
+``holds_mount_point`` decides, beside the group scan, whether a mount table
+names a mount point at or below a directory. It reads one snapshot: what the
+caller does about a mount made later is the caller's boundary.
 """
 
 from __future__ import annotations
 
 import os
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Protocol
+from typing import Final, Protocol
 
 PROC_ROOT = Path("/proc")
 PROC_FILESYSTEM_TYPE = "proc"
@@ -32,6 +37,7 @@ STAT_THREADS_INDEX = 17
 EXITED_STATES = frozenset({"Z", "X"})
 VANISHED_ENTRY_ERRORS = (FileNotFoundError, ProcessLookupError)
 KERNEL_INTEGER_MAX_DIGITS = 20
+MOUNTINFO_OCTAL_ESCAPE: Final = re.compile(r"\\([0-7]{3})")
 _INTEGER = re.compile(rf"-?\d{{1,{KERNEL_INTEGER_MAX_DIGITS}}}")
 
 
@@ -169,10 +175,28 @@ def _mount_verdict(view: ProcView) -> GroupCensus | None:
     return None
 
 
+def holds_mount_point(mountinfo: str, directory: str) -> bool:
+    for fields in _mountinfo_fields(mountinfo):
+        if MOUNTINFO_SEPARATOR not in fields or len(fields) <= MOUNTINFO_MOUNT_POINT_INDEX:
+            continue
+        mount_point = _unescape_mountinfo(fields[MOUNTINFO_MOUNT_POINT_INDEX])
+        if mount_point == directory or mount_point.startswith(directory + "/"):
+            return True
+    return False
+
+
+def _mountinfo_fields(mountinfo: str) -> Iterator[list[str]]:
+    for record in mountinfo.split("\n"):
+        yield record.split(" ")
+
+
+def _unescape_mountinfo(field: str) -> str:
+    return MOUNTINFO_OCTAL_ESCAPE.sub(lambda escape: chr(int(escape[1], 8)), field)
+
+
 def _super_options_of_proc_mount(mountinfo: str, device: str) -> list[str] | None:
     options = None
-    for line in mountinfo.splitlines():
-        fields = line.split()
+    for fields in _mountinfo_fields(mountinfo):
         if MOUNTINFO_SEPARATOR not in fields:
             continue
         separator = fields.index(MOUNTINFO_SEPARATOR)

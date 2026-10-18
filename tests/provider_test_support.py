@@ -24,6 +24,7 @@ import os
 import shlex
 import signal
 import stat
+import sys
 import tempfile
 import threading
 import time
@@ -367,6 +368,94 @@ class ClaudeCliStreamReader:
         if self._stalls:
             await asyncio.get_running_loop().create_future()
         return b""
+
+
+PROC_DEVICE = "0:25"
+PROC_MOUNT_POINT = "/proc"
+
+
+def mountinfo_line(
+    *,
+    device: str = PROC_DEVICE,
+    mount_point: str = PROC_MOUNT_POINT,
+    optional_fields: str = "shared:13",
+    filesystem_type: str = "proc",
+    super_options: str = "rw",
+) -> str:
+    return (
+        f"28 32 {device} / {mount_point} rw,nosuid {optional_fields} - "
+        f"{filesystem_type} proc {super_options}"
+    )
+
+
+class ThreadedOperation:
+    """Runs an operation on a thread, stopping it at its k-th line event inside the given code.
+
+    A pause that expires lets the operation run on without the coordinator's
+    permission, so ``finish()`` fails the row that relied on it.
+    """
+
+    _BOUND_SECONDS = 5
+    _POLL_SECONDS = 0.001
+
+    def __init__(self, operation, *, pause_in: frozenset = frozenset(), at_line: int = 0) -> None:
+        self._operation = operation
+        self._pause_in = pause_in
+        self._pause_at_line = at_line
+        self._seen_lines = 0
+        self._stopped_or_ended = threading.Event()
+        self._resume = threading.Event()
+        self.paused = False
+        self.pause_expired = False
+        self.outcome = None
+        self.refusal: RuntimeError | None = None
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self, or_when: threading.Event | None = None) -> None:
+        self._thread.start()
+        deadline = time.monotonic() + self._BOUND_SECONDS
+        while not self._stopped_or_ended.wait(self._POLL_SECONDS):
+            if or_when is not None and or_when.is_set():
+                return
+            assert time.monotonic() < deadline, "the operation hung"
+
+    def finish(self) -> None:
+        self._resume.set()
+        if self._thread.ident is not None:
+            self._thread.join(self._BOUND_SECONDS)
+            assert not self._thread.is_alive()
+        assert not self.pause_expired, "the pause expired before the row resumed it"
+
+    def _wait_for_resume(self) -> bool:
+        return self._resume.wait(self._BOUND_SECONDS)
+
+    def _run(self) -> None:
+        tracer_found_at_entry = sys.gettrace()
+        sys.settrace(self._on_call)
+        try:
+            self.outcome = self._operation()
+        except RuntimeError as refusal:
+            self.refusal = refusal
+        finally:
+            sys.settrace(tracer_found_at_entry)
+            self._stopped_or_ended.set()
+
+    def _on_call(self, frame, event, argument):
+        return self._on_line if frame.f_code in self._pause_in else None
+
+    def _on_line(self, frame, event, argument):
+        if event == "line":
+            self._seen_lines += 1
+            if self._seen_lines == self._pause_at_line:
+                self.paused = True
+                self._stopped_or_ended.set()
+                if not self._wait_for_resume():
+                    self.pause_expired = True
+        return self._on_line
+
+
+def code_of(*functions) -> frozenset:
+    return frozenset(function.__code__ for function in functions)
 
 
 @dataclass(frozen=True)

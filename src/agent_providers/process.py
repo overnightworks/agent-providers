@@ -1471,6 +1471,59 @@ class PrivateHomeReservation:
         self.release()
 
 
+class LastHolderRemoval:
+    """One removal, made once by the last of a closure and its reservations.
+
+    The closure, the outstanding reservations and the claim share one lock; the
+    removal runs after it is released. The claim is never revoked, so a removal
+    that raised is not retried, and nothing here finalizes, sweeps at exit or
+    retries: an unclosed instance never removes.
+    """
+
+    def __init__(self, remove: Callable[[], None]) -> None:
+        self._remove = remove
+        self._lock = threading.Lock()
+        self._closed = False
+        self._reservations: set[HolderReservation] = set()
+        self._removal_claimed = False
+
+    def reserve(self) -> HolderReservation:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("reservations are closed")
+            reservation = HolderReservation(self)
+            self._reservations.add(reservation)
+            return reservation
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
+            claimed = self._claim_when_last()
+        if claimed:
+            self._remove()
+
+    def _release(self, reservation: HolderReservation) -> None:
+        with self._lock:
+            self._reservations.discard(reservation)
+            claimed = self._claim_when_last()
+        if claimed:
+            self._remove()
+
+    def _claim_when_last(self) -> bool:
+        if self._closed and not self._reservations and not self._removal_claimed:
+            self._removal_claimed = True
+            return True
+        return False
+
+
+class HolderReservation:
+    def __init__(self, removal: LastHolderRemoval) -> None:
+        self._removal = removal
+
+    def release(self) -> None:
+        self._removal._release(self)
+
+
 def _discard_failed_home(created: str | None, registry_key: object) -> None:
     if created is not None and _remove_private_tree(Path(created)):
         finalizer = _live_home_finalizers.pop(registry_key, None)
@@ -1719,7 +1772,7 @@ def _install_credential(
             return
     try:
         destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        _write_new_credential_file(destination, payload, mode)
+        _write_new_private_file(destination, payload, mode)
     except OSError:
         raise_without_chain(
             CliEnvironmentUnavailableError(
@@ -1729,10 +1782,10 @@ def _install_credential(
         )
 
 
-def _write_new_credential_file(destination: Path, payload: bytes, mode: int) -> None:
+def _write_new_private_file(destination: Path, payload: bytes, mode: int) -> None:
     descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
     try:
-        _write_credential(descriptor, payload)
+        _write_whole(descriptor, payload)
         os.fchmod(descriptor, mode)
     finally:
         os.close(descriptor)
@@ -1892,12 +1945,12 @@ def _read_within_bound(descriptor: int) -> bytes | None:
         chunks.append(chunk)
 
 
-def _write_credential(descriptor: int, payload: bytes) -> None:
+def _write_whole(descriptor: int, payload: bytes) -> None:
     view = memoryview(payload)
     while view:
         written = os.write(descriptor, view)
         if written < 1:
-            raise OSError("credential copy made no progress")
+            raise OSError("private file write made no progress")
         view = view[written:]
 
 

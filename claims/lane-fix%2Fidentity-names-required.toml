@@ -1,8 +1,0 @@
-claim_id = "d01ab5971a674d60995f06b808bcf527"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "8e8944c1f4a06ed84797b93b3fdbdabd4f9f6619"
-branch = "fix/identity-names-required"
-scope = ["README.md", "docs/decisions/0001-agent-service.md", "packages/agent-service/src/agent_service/config.py", "tests/keycloak/realm.json", "tests/service_support.py", "tests/test_keycloak_token_shapes.py", "tests/test_service_config.py", "tests/test_service_entrance.py", "tests/test_service_keycloak.py", "tests/test_service_routing.py"]
-opened_commit = "b162e02dc7e4fe3c884a5af635dacd35363a9c2c"
-whole_reason = "One config section's host-named fields lose their defaults, the tests and test realm stop naming the deployment's group, and the README and ADR say the fields are required."

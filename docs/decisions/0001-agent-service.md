@@ -1181,6 +1181,667 @@ the parallel-run limit stands once, in H7's Decision.
     - *Default:* entfällt; als Quarantäne entschieden.
     - *Beleg:* A1b-3, A1b-3f, A1b-8.
 
+### A1b measured: grok 1.0.60
+
+Measured on 18.10.2026 on the installed `grok-1.0.60-linux-x86_64` (191,294,880
+bytes, sha256 prefix `10e6af64b247`; the hash was the same after the last run,
+so the self-updater never touched the binary). Operator ruling 18.10.2026: G0a
+uses no login. No cell read, copied, hashed or printed an auth file or a token,
+and none ran `login`, `logout` or `update` without `--check`. No model turn was
+possible, so no quota was used. Cells that need a login are listed under
+"Deferred to G0b / G0c" below.
+
+#### A1b-G0a the Grok CLI without a login
+
+**Harness (every cell).** Each run is the CLI under `bwrap` with
+`--die-with-parent --new-session`, the network unshared (loopback only, except
+E1), an environment of exactly `PATH`, `HOME`, `GROK_HOME` and `TMPDIR`
+(`HOME=/probe/home`, `GROK_HOME=/probe/home/.grok`, both on a fresh empty
+directory in scratch), a fresh empty working directory `/probe/work` that holds
+only `prompt.txt` (`hello`), `/usr` and the needed `/etc` files bound
+read-only, and the binary bound read-only as `/opt/grok/grok`. Wall deadline
+30 s, then a process-group kill; after every run `/proc` is scanned for
+processes carrying `GROK_HOME=/probe/home/.grok`. Every run held
+`/tmp/probe-stack.lock`. `write_record` is the one writer of evidence: it drops
+the run's random bearer string and every 12-character window of it. BASE is
+`--prompt-file /probe/work/prompt.txt --output-format streaming-json --deny "*"
+--max-turns 1 --no-subagents --disable-web-search`. The scripts follow
+verbatim (`<scratch>` stands for the scratch directory). The only secret-shaped
+value is the throwaway MCP server's bearer, which the driver passes through the
+child's environment, and which is also never in a configuration file: the
+config names `${PROBE_BEARER}` and `bearer_token_env_var`.
+
+**Summary for the consumers.**
+
+| Cell | Result |
+|---|---|
+| V1 | Version line parses with one regex; `[channel]` suffix is absent in an empty home. |
+| V2 | Every BASE flag and `--no-leader` reach the login refusal; the control exits 2. |
+| N1 | No login: one `{"type":"error","message":...}` line, exit 1, 0.33 s, no leader. |
+| T1 | All six switches accepted by name; `--sandbox` cannot be driven inside this harness. |
+| S1 | `--system-prompt-override` and `--rules` accepted; replace or append is deferred. |
+| L1 | `--max-turns 1` accepted; `0` refused at parse (`1..=4294967295`). |
+| A1 | The stream stops at the refusal; the ACP `initialize` result carries `availableCommands` and `modelState` with no login. |
+| M1 | `mcp doctor` reaches a local HTTP server without a login and sends the bearer from the environment. |
+| M2 | MCP tools are named `server__tool`; `MCPTool(...)` and `mcp__` rules; no MCP-only deny switch. |
+| F1 | A first run writes `$GROK_HOME` (docs, logs, sessions, config); `HOME` unset falls back to the passwd home. |
+| B1 | No process survives a refusal; `agent leader` creates a socket and lock under the home and lives until killed. |
+| E1 | No hostname is looked up or connected to without a login; only `update --check` resolves `x.ai`. |
+
+**V1 version and pin.** In the empty home, `grok --version` and `grok version`
+print `grok 1.0.60 (01a8e1c591c0)` (exit 0, 0.04 s); `grok version --json` prints
+`{"currentVersion":"1.0.60 (01a8e1c591c0)","channel":"unknown"}` and `grok
+inspect` prints `Version: 1.0.60 [unknown]`. The one line the issue expected,
+`grok 1.0.60 (01a8e1c591c0) [stable]`, appears only where an install records
+its channel; the suffix is therefore optional. One regex that holds for both:
+`^grok (\d+\.\d+\.\d+) \(([0-9a-f]{12})\)(?: \[(\w+)\])?$`. The first check of
+the installed version at the start of the probe ran `grok --version` once with
+the operator's ordinary environment (the line with `[stable]`) and no other
+command did.
+
+**V2 flags.** All `--help` outputs exit 0. Each token run alone beside
+`--prompt-file` and `--output-format streaming-json`:
+
+| Flag | Result |
+|---|---|
+| `--prompt-file`, `--output-format streaming-json`, `--deny "*"`, `--max-turns 1`, `--no-subagents`, `--disable-web-search` | accepted: each reaches the login refusal (exit 1) |
+| `--no-leader` at the top level | accepted (exit 1 at the refusal) although `grok --help` does not list it; it is listed under `grok agent --help` |
+| `agent stdio --no-leader` | refused: `unexpected argument '--no-leader'`; the flag belongs before the subcommand (`agent --no-leader stdio` exits 0) |
+| `--invented-flag` (control) | exit 2, `error: unexpected argument '--invented-flag' found` |
+
+A usage error exits 2 and the login refusal exits 1, so the two are told apart
+by exit code. The self-updater has no flag: the bundled configuration reference
+names the key `[cli] auto_update = false` and the environment variable
+`GROK_DISABLE_AUTOUPDATER`. Without a login neither made a difference in E1
+(the updater never ran). `grok leader kill` stops every leader of the user, so
+this probe never ran it.
+
+**N1 start-up with no login.** BASE and `--output-format json` end the same way. Stdout gets exactly one line, whose key
+names are `type` and `message`:
+
+```text
+{"type":"error","message":"Not signed in. To authenticate without a browser, run:\n  grok login --device-code\n\nAlternatively, set the XAI_API_KEY environment variable or run `grok login` on a machine with a browser."}
+```
+
+stderr carries the same text after `Error: `; exit 1; wall 0.31 to 0.33 s; no
+process was left. `-p hello --output-format plain` prints nothing on stdout
+and the text twice on stderr (once bare, once with `Error: `), exit 1.
+`grok agent stdio` with stdin closed exits 0 after 2.3 s and prints nothing.
+`grok agent headless` (the WebSocket relay form) printed only `Grok Build (pager)
+- v1.0.60 (01a8e1c591c0)` on stderr and ran into the 30 s deadline; it was
+killed with its group and left no survivor. An adapter that detects a missing
+login can match the `type: "error"` event, the exit code 1 and the phrase `Not
+signed in`.
+
+**T1 tool switches.** Accepted by name (each reached the refusal): `--deny "*"`,
+`--tools ""`, `--disallowed-tools bash,edit`, `--permission-mode dontAsk`
+(values: default, acceptEdits, auto, dontAsk, bypassPermissions, plan),
+`--no-subagents`, `--disable-web-search`. `--sandbox <PROFILE>` (env
+`GROK_SANDBOX`) is a profile name the CLI resolves before the login check: the
+name `default` exits 1 in 0.05 s with `Custom sandbox profile 'default' not
+found. Define it in ~/.grok/sandbox.toml or .grok/sandbox.toml`, and `--sandbox
+workspace` exits 1 with `bwrap: Failed to mount tmpfs`, because the CLI starts
+its own `bwrap` and that cannot run inside this harness. Whether tools are
+really off is a model-turn fact: deferred.
+
+**S1 system text.** Both flags are in `grok --help`, and each is accepted
+(refusal exit 1): `--system-prompt-override <PROMPT>` with help text "Override
+the agent's system prompt (compat alias: --system-prompt)" and `--rules
+<RULES>` with "Extra rules to append to the system prompt". `grok inspect` in
+the empty home lists no project instructions, no skills, no rules, no MCP
+servers and three built-in agents (`general-purpose`, `explore`, `plan`). Whether
+the override replaces the text is deferred.
+
+**L1 turn limit.** `--max-turns 1` is accepted. `--max-turns 0` exits 2
+(`invalid value '0' for '--max-turns <N>': 0 is not in 1..=4294967295`),
+`x` exits 2 (`invalid digit found in string`), `-1` exits 2 (taken as an
+unexpected argument). The value is therefore at least 1 and the library cannot
+express "no turns". Whether it ends a run is deferred.
+
+**A1 announcement.** The BASE stream stops at the refusal before any
+announcement, so the start-up event is not reachable that way. The ACP form is:
+`grok agent --no-leader stdio` speaks JSON-RPC lines. A client `initialize`
+(`protocolVersion` 1) is answered with no login, with `result` keys
+`_meta`, `agentCapabilities` (`_meta`, `auth`, `loadSession`, `mcpCapabilities`,
+`promptCapabilities`, `sessionCapabilities`), `authMethods` (one entry, id
+`grok.com`) and `protocolVersion`. `result._meta` carries `availableCommands`
+(entries of `name`, `description`, `input`), `modelState`, `mcpServers`,
+`defaultAuthMethodId`, `agentVersion` and `currentWorkingDirectory` among 18 keys. It is followed by a
+notification `_x.ai/mcp/servers_updated`. `session/new` answers with a series of
+`_x.ai/session/setup` notifications (`method`, `phase`, `sessionId`) and then an error,
+code -32000, `Authentication required`. Tools and the plan are therefore not
+announced without a login; commands are. Total 15 s wall for the exchange; no
+survivor.
+
+**M1 MCP client.** The configuration lives in `$GROK_HOME/config.toml`
+(table `[mcp_servers.<name>]`: `url`, `headers`, `bearer_token_env_var`,
+`bearer_token_file`, `enabled`, `command`, `args`, `env`, `cwd`) or, with
+`grok mcp add --scope project`, in `./.grok/config.toml` of the working
+directory (it is listed as `(project)` and does not create a file in the
+home). `GROK_CONFIG=<file>` did not add the servers of that file to `mcp list`,
+so a per-run configuration is the project file in the run's own working
+directory. `mcp add` takes the bearer only as `-H "NAME: VALUE"` on argv, so
+the probe wrote a placeholder-free config by hand: a header
+`Authorization = "Bearer ${PROBE_BEARER}"` and a second server with
+`bearer_token_env_var = "PROBE_BEARER"`; `mcp list` printed both, `mcp add` of a
+third server printed `File modified: ~/.grok/config.toml`, and `disable` /
+`enable` flipped `(disabled)`. `mcp doctor` connects without a login: per
+server `server started`, `handshake OK (protocol 2025-11-25)`, `1 tools
+discovered`, `Found 3 healthy, 0 failing`. The local server saw, per
+connection, in order: `POST` `server/discover` (header `Mcp-Method`,
+`Mcp-Protocol-Version: 2026-07-28`), `POST` `initialize` (`protocolVersion`
+`2025-11-25`, `clientInfo` keys `name`, `version`), `POST`
+`notifications/initialized` (header `Mcp-Session-Id` from the reply and
+`Mcp-Protocol-Version: 2025-11-25`), `GET` (the server stream; the fake
+server answers 405), `POST` `tools/list`, and at the end `DELETE` of the
+session. Every request had `Accept: text/event-stream, application/json`
+and `POST` bodies `Content-Type: application/json`. The request headers present
+were `accept`, `authorization`, `content-length`, `content-type`, `host`,
+`mcp-method`, `mcp-protocol-version`, `mcp-session-id`, `user-agent`. Both the
+`headers` form and the `bearer_token_env_var` form delivered the exact bearer
+(compared in memory: true for every request of those two servers). The server
+added with only `-H "X-Probe: 1"` sent no `Authorization`; after its unauthenticated
+`GET` the client also asked six `/.well-known/` OAuth discovery paths. A client
+that gets a 405 on the `GET` is not stopped by it. The handshake before a
+model turn (a turn's request order) is deferred.
+
+**M2 MCP switches.** `grok mcp enable|disable <NAME>` have no options beyond
+`--debug`. Rules are the global `--allow <RULE>` and `--deny <RULE>` (aliases
+`--allowedTools`, `--disallowedTools`) and `--permission-mode`; the bundled
+permissions guide gives the MCP syntax: `MCPTool(server__tool)` with glob
+(`MCPTool(linear__*)`), the Claude spelling `mcp__server` /
+`mcp__server__tool` is rewritten onto it, tool names carry no `mcp__`
+prefix, and a bare `*` rule matches every tool. No switch exists that names
+only MCP tools besides these rules. That `--deny "*"` blocks an MCP tool call is a
+model-turn fact: deferred.
+
+**F1 files.** `--version` writes nothing but the empty `tmp`. The first run
+that starts the agent (BASE, `du`, `inspect`) creates under `$GROK_HOME`:
+`README.md` (113 KB) and `docs/user-guide/` (27 Markdown files, 808 KB in
+total, rewritten from the binary), `logs/unified.jsonl` (about 11 KB for a refused run, one
+JSON object per line with the keys `ts`, `lvl`, `msg`, `pid`, `src`, `ctx`,
+`ver`), `config.toml` (52 B, one table `[marketplace]`), `agent_id` (36 B),
+`.metadata_version` (6 B), `sessions/session_search.sqlite` (36 KB),
+`installed-plugins/registry.lock`, `.config-init.lock`, `managed_config.lock`
+and empty `sessions/` and `installed-plugins/` directories. `du` reports
+`~/.grok` as 812 KB. Nothing is written outside the home and `TMPDIR`. With
+`HOME` and `GROK_HOME` both unset and no passwd entry in the sandbox, `inspect`
+exits 0 and creates no `.grok`; with the passwd entry present it creates
+`<passwd-home>/.grok`: the CLI falls back to the passwd profile like 1.0.4
+(`process.py:1318`), so a run must always set `GROK_HOME`.
+
+**B1 survivors.** A refused run (BASE, with and without `--no-leader`, with
+`--leader-socket`) starts no leader: no socket, no lock, no process after the
+exit. `grok agent leader --leader-socket <scratch>/leader-g0a.sock` created
+`leader-g0a.sock` and `leader-g0a.lock` (7 B) in the throwaway home and ran
+until the 30 s deadline killed it; the scan found no survivor. The leader
+socket therefore follows `--leader-socket` and defaults to
+`$GROK_HOME/leader.sock`, under the throwaway home. Without a login no leader
+is started, so the question whether a turn leaves one is deferred; the group
+reap needs a Grok rule only if that cell finds a survivor.
+
+**E1 egress.** Under `strace -f -qq -s 200 -e trace=connect,sendto` with the
+network shared, BASE with the updater default, BASE with
+`GROK_DISABLE_AUTOUPDATER=1`, `agent stdio` and `--version` made no DNS query
+and no network `connect`; the only `connect` was to
+`/var/run/dbus/system_bus_socket` (ENOENT). `grok update --check` (the binary
+bound read-only) resolved `x.ai` (A and AAAA, twice) and connected to port 443,
+and printed `A new version of Grok Build is available: 1.0.60 -> 1.0.62
+[stable]`. No update-check or telemetry host appears on the no-login path.
+
+**Fresh and repeated.** Every cell ran on a fresh throwaway home. `--version` and
+BASE ran a second time on new homes with the same exit codes and lines (0 and
+`grok 1.0.60 (01a8e1c591c0)`; 1 and the same error line). The ACP exchange
+ran twice with the same shapes.
+
+**What the consumers may now rely on.** G1 (login a profile holds): the
+refusal is `type: "error"`, exit 1, `Not signed in`; `GROK_HOME` must be set;
+`authMethods` names `grok.com`. G2 (run spec): the BASE flags exist on 1.0.60
+and `--no-leader` is accepted at the top level; `--max-turns` is at least 1; the
+sandbox flag needs a named profile. G3 (event mapping): only the error event
+and the ACP `initialize` / `session/new` shapes are known; no turn events.
+G5 (relay attachment): MCP config is a toml table in the home or the working
+directory, with bearer by environment variable, and `doctor` reaches an HTTP
+server without a login. Adapter-port review of 4c: the version regex above and
+the optional channel suffix.
+
+**Deferred to A1b-G0b / G0c (need a login and quota).** N2 stream of a
+completed turn, T-live, S-live, L-live, M-live (tool-call name form, parallel
+calls, whether `--deny "*"` blocks MCP tools), F-live, E-live, L3, R1, R2, the
+nested `--sandbox` profile, a leader left by a real turn, and the headless
+WebSocket form.
+
+**Scripts, verbatim.**
+
+`g0a.py`:
+
+```python
+"""G0a harness: runs the grok CLI under bwrap with an empty throwaway home."""
+import json, os, pathlib, secrets, shutil, signal, subprocess, sys, time
+
+SCRATCH = pathlib.Path("<scratch>")
+EVIDENCE = SCRATCH / "ev"
+GROK = pathlib.Path(shutil.which("grok")).resolve()
+BEARER = secrets.token_urlsafe(24)
+DEADLINE_S = 30
+BASE = ["--prompt-file", "/probe/work/prompt.txt", "--output-format", "streaming-json",
+        "--deny", "*", "--max-turns", "1", "--no-subagents", "--disable-web-search"]
+
+
+def write_record(name, line):
+    for start in range(len(BEARER) - 11):
+        line = line.replace(BEARER[start:start + 12], "<bearer>")
+    line = line.replace(str(SCRATCH), "<scratch>").replace(str(pathlib.Path.home()), "<home>")
+    with open(EVIDENCE / f"{name}.txt", "a") as out:
+        out.write(line.rstrip("\n") + "\n")
+
+
+def fresh_dirs(tag):
+    home, work = SCRATCH / f"home-{tag}", SCRATCH / f"work-{tag}"
+    for d in (home, work):
+        shutil.rmtree(d, ignore_errors=True)
+        d.mkdir()
+    (home / "tmp").mkdir()
+    (work / "prompt.txt").write_text("hello")
+    return home, work
+
+
+def survivors(home):
+    found = []
+    needle = b"GROK_HOME=/probe/home/.grok"
+    for p in pathlib.Path("/proc").iterdir():
+        if not p.name.isdigit():
+            continue
+        try:
+            env = (p / "environ").read_bytes()
+            cwd = os.readlink(p / "cwd")
+            comm = (p / "comm").read_text().strip()
+        except OSError:
+            continue
+        if needle in env and str(home) not in cwd and int(p.name) != os.getpid():
+            found.append((int(p.name), comm))
+    return found
+
+
+def child_env(extra_env):
+    return {"PATH": "/usr/bin:/bin", "HOME": "/probe/home", "GROK_HOME": "/probe/home/.grok",
+            "TMPDIR": "/probe/home/tmp", **extra_env}
+
+
+def sandbox_argv(home, work, argv, share_net, binary_args=True):
+    cmd = ["bwrap", "--die-with-parent", "--new-session",
+           "--unshare-user", "--unshare-ipc", "--unshare-uts"]
+    if not share_net:
+        cmd.append("--unshare-net")
+    cmd += ["--ro-bind", "/usr", "/usr", "--symlink", "usr/bin", "/bin",
+            "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib64", "/lib64",
+            "--ro-bind", "/etc/ssl", "/etc/ssl", "--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf",
+            "--ro-bind", "/etc/hosts", "/etc/hosts", "--ro-bind", "/etc/nsswitch.conf", "/etc/nsswitch.conf",
+            "--ro-bind", "/etc/ca-certificates", "/etc/ca-certificates",
+            "--proc", "/proc", "--dev", "/dev",
+            "--bind", str(home), "/probe/home", "--bind", str(work), "/probe/work",
+            "--ro-bind", str(GROK), "/opt/grok/grok", "--chdir", "/probe/work"]
+    return cmd + ["/opt/grok/grok"] + argv if binary_args else cmd + argv
+
+
+def run(tag, argv, share_net=False, extra_env=None, home=None, work=None, strace=False, raw=False, unset=(), passwd=False):
+    home, work = (home, work) if home else fresh_dirs(tag)
+    cmd = sandbox_argv(home, work, argv, share_net, binary_args=not raw)
+    if passwd:
+        cmd[1:1] = ["--ro-bind", "/etc/passwd", "/etc/passwd"]
+    trace = SCRATCH / f"strace-{tag}.log"
+    if strace:
+        cmd = ["strace", "-f", "-qq", "-s", "200", "-e", "trace=connect,sendto", "-o", str(trace)] + cmd
+    started = time.monotonic()
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, env={k: v for k, v in child_env(extra_env or {}).items() if k not in unset},
+                            start_new_session=True, close_fds=True, text=True, errors="replace")
+    timed_out = False
+    try:
+        out, err = proc.communicate(timeout=DEADLINE_S)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        os.killpg(proc.pid, signal.SIGKILL)
+        out, err = proc.communicate()
+    wall = time.monotonic() - started
+    alive = survivors(home)
+    for pid, _ in alive:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+    return dict(exit=proc.returncode, out=out, err=err, wall=round(wall, 2), timed_out=timed_out,
+                survivors=alive, home=home, work=work, trace=trace if strace else None)
+
+
+def listing(root):
+    rows = []
+    for p in sorted(pathlib.Path(root).rglob("*")):
+        rel = p.relative_to(root)
+        kind = "dir" if p.is_dir() else ("sock" if p.is_socket() else "file")
+        size = p.stat().st_size if kind == "file" else 0
+        rows.append(f"{kind:4} {size:8} {rel}")
+    return rows
+
+
+def report(cell, label, result):
+    write_record(cell, f"## {label}: exit={result['exit']} wall={result['wall']}s timeout={result['timed_out']} survivors={result['survivors']}")
+    for stream in ("out", "err"):
+        for line in result[stream].splitlines()[:40]:
+            write_record(cell, f"  {stream}| {line[:1600]}")
+```
+
+`cells1.py`:
+
+```python
+import sys; sys.path.insert(0,".")
+import g0a, re, json
+from g0a import run, report, write_record as w, BASE
+P="/probe/work/prompt.txt"
+MIN=["--prompt-file",P,"--output-format","streaming-json"]
+
+def v2():
+    c="V2"
+    for h in (["--help"],["agent","--help"],["agent","headless","--help"],["agent","stdio","--help"],["mcp","--help"],["mcp","add","--help"],["mcp","enable","--help"],["mcp","disable","--help"],["mcp","doctor","--help"],["inspect","--help"],["du","--help"],["update","--help"]):
+        r=run("v2",h); w(c,f"## grok {' '.join(h)} exit={r['exit']} lines={len(r['out'].splitlines())}")
+        (g0a.EVIDENCE/("help-"+"-".join(h).replace("--","")+".txt")).write_text(r["out"].replace(str(g0a.SCRATCH),"<scratch>"))
+    tokens=[["--prompt-file",P],["--output-format","streaming-json"],["--deny","*"],["--max-turns","1"],["--no-subagents"],["--disable-web-search"],["--no-leader"],["--invented-flag"]]
+    for t in tokens:
+        argv = MIN+t if t[0] not in ("--prompt-file","--output-format") else (MIN if t[0]=="--prompt-file" else ["--prompt-file",P]+t)
+        r=run("v2",argv); report(c,"top-level "+" ".join(t),r)
+    for t in (["--no-leader"],["--invented-flag"]):
+        r=run("v2",["agent","stdio"]+t); report(c,"agent stdio "+" ".join(t),r)
+
+def t1():
+    c="T1"
+    for t in (["--deny","*"],["--tools",""],["--disallowed-tools","bash,edit"],["--permission-mode","dontAsk"],["--no-subagents"],["--disable-web-search"],["--sandbox","default"],["--invented-flag"]):
+        r=run("t1",MIN+t); report(c,"M + "+" ".join(t),r)
+
+def s1():
+    c="S1"
+    for t in (["--system-prompt-override","probe"],["--rules","probe"]):
+        r=run("s1",BASE+t); report(c,"BASE + "+t[0],r)
+    r=run("s1",["inspect"]); report(c,"inspect",r)
+
+def l1():
+    c="L1"
+    for v in ("1","0","-1","x"):
+        r=run("l1",MIN+["--max-turns",v]); report(c,"--max-turns "+v,r)
+
+def n1():
+    c="N1"
+    r=run("n1",BASE); report(c,"BASE (top-level)",r)
+    r=run("n1",["-p","hello","--output-format","plain"]); report(c,"-p hello plain",r)
+    r=run("n1",["--prompt-file",P,"--output-format","json"]); report(c,"json",r)
+    r=run("n1",["agent","stdio"]); report(c,"agent stdio, stdin closed",r)
+
+def f1():
+    c="F1"
+    for tag,argv in (("version",["--version"]),("n1",BASE),("du",["du"]),("inspect",["inspect"])):
+        r=run("f1",argv); report(c,"after "+tag,r)
+        for row in g0a.listing(r["home"]): w(c,"   "+row)
+
+def b1():
+    c="B1"
+    sock="/probe/home/.grok/leader-g0a.sock"
+    for label,argv in (("BASE",BASE),("BASE --leader-socket",BASE+["--leader-socket",sock]),("agent stdio --no-leader",["agent","stdio","--no-leader"]),("agent leader --leader-socket",["agent","leader","--leader-socket",sock])):
+        r=run("b1",argv); report(c,label,r)
+        for row in g0a.listing(r["home"]): w(c,"   "+row)
+
+if __name__=="__main__":
+    import sys
+    for name in sys.argv[1:]: globals()[name]()
+```
+
+`cells2.py`:
+
+```python
+import sys; sys.path.insert(0, ".")
+import g0a
+from g0a import run, report, write_record as w, BASE
+def extra():
+    for label, argv in (("agent --no-leader stdio, stdin closed", ["agent", "--no-leader", "stdio"]),
+                        ("agent --no-leader --leader-socket stdio", ["agent", "--no-leader", "--leader-socket", "/probe/home/.grok/leader-g0a.sock", "stdio"]),
+                        ("BASE --no-leader", BASE + ["--no-leader"]),
+                        ("sandbox workspace", BASE + ["--sandbox", "workspace"]),
+                        ("agent headless, stdin closed", ["agent", "headless"])):
+        r = run("x", argv); report("B1x", label, r)
+def repeat():
+    for label, argv in (("repeat --version", ["--version"]), ("repeat BASE", BASE)):
+        r = run("rep", argv); report("REP", label, r)
+if __name__ == "__main__":
+    for n in sys.argv[1:]: globals()[n]()
+```
+
+`fake_mcp.py`:
+
+```python
+"""Throwaway MCP-over-HTTP server run inside the sandbox; the bearer comes from the environment only."""
+import json, os, sys, threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+BEARER = os.environ["PROBE_BEARER"]
+SEEN = []
+
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *a):
+        pass
+
+    def _record(self, body):
+        auth = self.headers.get("Authorization", "")
+        rpc = json.loads(body) if body else {}
+        SEEN.append({"http": self.command, "path": self.path,
+                     "headers": sorted(k.lower() for k in self.headers.keys()),
+                     "bearer_matches": auth == "Bearer " + BEARER,
+                     "accept": self.headers.get("Accept"), "content_type": self.headers.get("Content-Type"),
+                     "rpc_method": rpc.get("method"), "has_id": "id" in rpc,
+                     "protocol_asked": (rpc.get("params") or {}).get("protocolVersion"),
+                     "client_info_keys": sorted(((rpc.get("params") or {}).get("clientInfo") or {}).keys()),
+                     "mcp_protocol_header": self.headers.get("Mcp-Protocol-Version"),
+                     "session_header": bool(self.headers.get("Mcp-Session-Id"))})
+        return rpc
+
+    def _send(self, code, payload=None):
+        data = json.dumps(payload).encode() if payload is not None else b""
+        self.send_response(code)
+        if payload is not None:
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Mcp-Session-Id", "probe-session")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_POST(self):
+        rpc = self._record(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+        method = rpc.get("method")
+        if "id" not in rpc:
+            return self._send(202)
+        results = {"initialize": {"protocolVersion": (rpc.get("params") or {}).get("protocolVersion", "2025-03-26"),
+                                  "capabilities": {"tools": {}}, "serverInfo": {"name": "probe", "version": "0"}},
+                   "tools/list": {"tools": [{"name": "echo", "description": "probe",
+                                             "inputSchema": {"type": "object", "properties": {}}}]},
+                   "ping": {}}
+        self._send(200, {"jsonrpc": "2.0", "id": rpc["id"], "result": results.get(method, {})})
+
+    def do_GET(self):
+        self._record(b"")
+        self._send(405)
+
+    def do_DELETE(self):
+        self._record(b"")
+        self._send(200)
+
+
+def start():
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server.server_address[1]
+```
+
+`m1_inner.py`:
+
+```python
+"""Runs inside bwrap with its own loopback: starts the fake server, then drives grok mcp commands."""
+import json, os, subprocess, sys, pathlib
+sys.path.insert(0, "/probe/work")
+import fake_mcp
+port = fake_mcp.start()
+url = f"http://127.0.0.1:{port}/mcp"
+home = pathlib.Path("/probe/home/.grok"); home.mkdir(exist_ok=True)
+(home / "config.toml").write_text(
+    f'[mcp_servers.viaheaders]\nurl = "{url}"\nheaders = {{ "Authorization" = "Bearer ${{PROBE_BEARER}}" }}\n\n'
+    f'[mcp_servers.viaenv]\nurl = "{url}"\nbearer_token_env_var = "PROBE_BEARER"\n')
+def grok(*argv, timeout=30):
+    p = subprocess.run(["/opt/grok/grok", *argv], capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+    return {"argv": list(argv), "exit": p.returncode, "out": p.stdout[-1500:], "err": p.stderr[-800:]}
+steps = [grok("mcp", "list"), grok("mcp", "doctor"),
+         grok("mcp", "add", "added", url, "--transport", "http", "-H", "X-Probe: 1"), grok("mcp", "list"),
+         grok("mcp", "disable", "added"), grok("mcp", "list"), grok("mcp", "enable", "added"), grok("mcp", "doctor")]
+print(json.dumps({"steps": steps, "seen": fake_mcp.SEEN, "config": (home / "config.toml").read_text().replace("\n", "\\n")[:1500]}))
+```
+
+`m1.py`:
+
+```python
+import sys; sys.path.insert(0, ".")
+import json, shutil, g0a
+from g0a import run, write_record as w
+home, work = g0a.fresh_dirs("m1")
+for f in ("fake_mcp.py", "m1_inner.py"):
+    shutil.copy(g0a.SCRATCH / f, work / f)
+r = run("m1", ["/usr/bin/python3", "/probe/work/m1_inner.py"], extra_env={"PROBE_BEARER": g0a.BEARER}, home=home, work=work, raw=True)
+w("M1", f"## inner exit={r['exit']} wall={r['wall']} survivors={r['survivors']}")
+w("M1", "stderr| " + r["err"][-600:])
+data = json.loads(r["out"]) if r["out"].strip().startswith("{") else {"raw": r["out"][-800:]}
+for step in data.get("steps", []):
+    w("M1", f"## grok {' '.join(step['argv'])} exit={step['exit']}")
+    for line in step["out"].splitlines(): w("M1", "  out| " + line[:200])
+    for line in step["err"].splitlines(): w("M1", "  err| " + line[:200])
+for s in data.get("seen", []): w("M1", "seen| " + json.dumps(s, sort_keys=True))
+w("M1", "config| " + data.get("config", ""))
+w("M1", "tree|"); [w("M1", "   " + row) for row in g0a.listing(home)]
+```
+
+`m1b.py`:
+
+```python
+import sys; sys.path.insert(0, ".")
+import g0a
+from g0a import run, report
+script = ("cd /probe/work; /opt/grok/grok mcp add --scope project --transport http pj http://127.0.0.1:9/mcp; echo add-exit=$?;"
+          " find .grok -type f | sed 's#^#proj-file #'; /opt/grok/grok mcp list; echo list-exit=$?;"
+          " printf '[mcp_servers.alt]\\nurl = \"http://127.0.0.1:9/mcp\"\\n' > /probe/work/alt.toml;"
+          " GROK_CONFIG=/probe/work/alt.toml /opt/grok/grok mcp list; echo grokconfig-exit=$?;"
+          " ls /probe/home/.grok | grep -c config.toml")
+r = run("m1b", ["/usr/bin/sh", "-c", script], raw=True)
+report("M1b", "project scope and GROK_CONFIG", r)
+```
+
+`e1.py`:
+
+```python
+import sys; sys.path.insert(0, ".")
+import re, g0a
+from g0a import run, report, write_record as w, BASE
+def hosts(trace):
+    seen = []
+    for line in open(trace, errors="replace"):
+        m = re.search(r'connect\(\d+, \{sa_family=AF_INET6?, sin6?_port=htons\((\d+)\)', line)
+        if m and m.group(1) != "53": seen.append("connect port " + m.group(1))
+        if 'htons(53)' in line and ("connect" in line or "sendto" in line):
+            q = re.search(r'sendto\(\d+, "(.*?)", \d+', line)
+            if q: seen.append("dns " + re.sub(r"\\\d+|\\x[0-9a-f]{2}", ".", q.group(1))[:80])
+    return seen
+cases = [("updater default", BASE, {}), ("updater off GROK_DISABLE_AUTOUPDATER=1", BASE, {"GROK_DISABLE_AUTOUPDATER": "1"}),
+         ("agent stdio", ["agent", "stdio"], {}), ("--version", ["--version"], {}), ("update --check (installer path, binary bound read-only)", ["update", "--check"], {})]
+for n, (label, argv, env) in enumerate(cases):
+    r = run(f"e1{n}", argv, share_net=True, extra_env=env, strace=True)
+    report("E1", label, r)
+    for h in hosts(r["trace"]): w("E1", "   " + h)
+
+import glob
+for t in sorted(glob.glob(str(g0a.SCRATCH / "strace-e1*.log"))):
+    w("E1", "raw " + t.rsplit("/", 1)[1] + " lines=" + str(sum(1 for _ in open(t))))
+    for line in list(open(t, errors="replace"))[:25]:
+        w("E1", "   raw| " + re.sub(r"inet6?_addr\(\"[0-9a-f:.]+\"\)", "ADDR", line.strip())[:220])
+```
+
+`f2.py`:
+
+```python
+import sys; sys.path.insert(0, ".")
+import g0a
+from g0a import run, report
+script = "/opt/grok/grok inspect >/dev/null 2>&1; echo inspect-exit=$?; echo HOME=${HOME-unset}; find / -xdev -maxdepth 5 -name '.grok' -not -path '/proc/*' 2>/dev/null | sed 's#^#found #'; ls -d /root /home/* 2>&1 | sed 's#^#ls #'"
+for label, passwd in (("HOME and GROK_HOME unset, no passwd entry", False), ("HOME and GROK_HOME unset, passwd entry bound", True)):
+    r = run("f2", ["/usr/bin/sh", "-c", script], unset=("HOME", "GROK_HOME"), raw=True, passwd=passwd)
+    report("F1b", label, r)
+```
+
+`acp_inner.py`:
+
+```python
+"""Inside the sandbox: speaks ACP to `grok agent --no-leader stdio` with no login; prints the key shape of each reply."""
+import json, subprocess, sys, threading, time, queue
+p = subprocess.Popen(["/opt/grok/grok", "agent", "--no-leader", "stdio"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                     stderr=subprocess.PIPE, text=True)
+lines = queue.Queue()
+for stream, tag in ((p.stdout, "out"), (p.stderr, "err")):
+    threading.Thread(target=lambda s=stream, t=tag: [lines.put((t, l.rstrip())) for l in s], daemon=True).start()
+
+def shape(value, depth=0):
+    if isinstance(value, dict):
+        return {k: shape(v, depth + 1) if depth < 2 else type(v).__name__ for k, v in value.items()}
+    if isinstance(value, list):
+        return [shape(value[0], depth + 1)] if value else []
+    return type(value).__name__
+
+def send(msg):
+    p.stdin.write(json.dumps(msg) + "\n"); p.stdin.flush()
+
+def drain(label, seconds):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        try:
+            tag, line = lines.get(timeout=0.2)
+        except queue.Empty:
+            continue
+        try:
+            doc = json.loads(line)
+            body = {"method": doc.get("method"), "id": doc.get("id"), "keys": sorted(doc),
+                    "result": {k: (sorted(v) if isinstance(v, dict) else shape(v)) for k, v in (doc.get("result") or {}).items()},"meta_keys": sorted((doc.get("result") or {}).get("_meta") or {}),"auth_methods": [m.get("id") for m in (doc.get("result") or {}).get("authMethods", [])],"cap_keys": sorted((doc.get("result") or {}).get("agentCapabilities") or {}), "error": {"code": (doc.get("error") or {}).get("code"),
+                                                                 "message": (doc.get("error") or {}).get("message", "")[:160]} if doc.get("error") else None,
+                    "params": shape(doc.get("params"))}
+            print(label, tag, json.dumps(body, sort_keys=True), flush=True)
+        except ValueError:
+            print(label, tag, "non-json:", line[:160], flush=True)
+
+send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": 1, "clientCapabilities": {}}})
+drain("initialize", 5)
+send({"jsonrpc": "2.0", "id": 2, "method": "session/new", "params": {"cwd": "/probe/work", "mcpServers": []}})
+drain("session/new", 8)
+p.stdin.close()
+try:
+    p.wait(timeout=10)
+except subprocess.TimeoutExpired:
+    p.kill()
+print("exit", p.returncode)
+```
+
+`a1.py`:
+
+```python
+import sys, shutil; sys.path.insert(0, ".")
+import g0a
+home, work = g0a.fresh_dirs("a1")
+shutil.copy(g0a.SCRATCH / "acp_inner.py", work / "acp_inner.py")
+r = g0a.run("a1", ["/usr/bin/python3", "/probe/work/acp_inner.py"], home=home, work=work, raw=True)
+g0a.report("A1", "ACP initialize and session/new over agent stdio", r)
+```
+
+
 ### A1b measured: claude 2.1.302
 
 Measured on 17.10.2026 on `$HOME/.local/share/claude/versions/2.1.302`

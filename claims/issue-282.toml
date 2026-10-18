@@ -1,8 +1,0 @@
-claim_id = "87e42f3603944881b656e2eb82a2d2a9"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "9cc920b36cc49e7888f2d1ccd5d9e92b45d09cc0"
-branch = "claude/issue-282-3b2-callers-hold-until-confirmed"
-scope = ["README.md", "src/agent_providers/claude/provider.py", "src/agent_providers/process.py", "src/agent_providers/spawn.py", "tests/provider_test_support.py", "tests/test_anchored_door.py", "tests/test_blocking_anchored_child.py", "tests/test_catalog_home_retention.py", "tests/test_claude_provider.py", "tests/test_codex_cli_adapter.py", "tests/test_grok_cli_adapter.py", "tests/test_process.py"]
-opened_commit = "ce8afbc1b9076620fcb703472b8a3fced7d4afa8"
-whole_reason = "One contract, that a bounded run's caller holds its place until the runner's confirmation, applied to its callers (the catalog homes' fix, the Claude probe's release ownership and the Claude and Grok proofs on the shared fake door), plus two #288 review follow-ups in the same runner and door code: the door closes every descriptor, and the held-group line cannot skip the report."

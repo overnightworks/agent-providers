@@ -43,6 +43,8 @@ from service_support import (
     StrayCancelledRunner,
     TokenMint,
     alice_admitted_run,
+    client_leaves_mid_run,
+    client_takes_nothing_until_dropped,
     driven,
     failure_lines,
     get_run,
@@ -55,10 +57,11 @@ from service_support import (
     served,
     service_config,
     stray_cancellation,
+    supervision_fails,
+    tool_call,
 )
 from starlette.requests import ClientDisconnect
 
-from agent_client.run_stream import ViolationKind
 from agent_client.wire import (
     ClientLoss,
     FailureCode,
@@ -100,10 +103,6 @@ EXHAUSTED = None
 RECORDING_FAILURE_CANARY = "RECORDING_FAILURE_CANARY"
 ALL_THE_WAY_TO_THE_MAXIMUM = 600
 STALL_PAST_THE_MAXIMUM = RunConfig(stall_timeout_s=590, idle_timeout_s=595)
-
-
-def _call(tool_use_id: str, name: str = "read_song") -> ToolCallEvent:
-    return ToolCallEvent(tool_use_id=tool_use_id, name=name, input={})
 
 
 def _release(runner: GatedRunner, script: tuple[StreamEvent | Exception | None, ...]) -> None:
@@ -174,9 +173,9 @@ def _assert_recorded(
             RunConfig(max_tool_calls=1),
             True,
             (
-                _call("c1"),
+                tool_call("c1"),
                 ToolResultEvent(tool_use_id="c1", content="ok"),
-                _call("c2"),
+                tool_call("c2"),
             ),
             5,
             RunState.FAILED,
@@ -274,7 +273,7 @@ async def test_a_run_ended_by_the_idle_timeout_reads_running_until_its_runner_is
     runner.hold_close()
     async with driven(runner) as drive:
         await drive.run_to(125)
-        _assert_recorded(drive.status(), RunState.RUNNING, events=9, at=0)
+        _assert_recorded(drive.status(), RunState.RUNNING, events=8, at=0)
 
         drive.clock.advance_to(130)
         runner.release_close()
@@ -352,7 +351,7 @@ async def test_a_client_leaving_after_a_tool_call_ends_the_run_by_the_effect_of_
 ):
     async with driven(read=False) as drive:
         drive.took(await anext(drive.frames))
-        drive.runner.release(_call("c", tool))
+        drive.runner.release(tool_call("c", tool))
         drive.took(await anext(drive.frames))
         await drive.frames.aclose()
 
@@ -360,15 +359,6 @@ async def test_a_client_leaving_after_a_tool_call_ends_the_run_by_the_effect_of_
             drive.status(), state, code=code, events=2, at=0, lost=ClientLoss.DISCONNECTED
         )
         assert drive.types == ["run_started", "tool_call"]
-
-
-async def _client_leaves_mid_run(drive: Drive) -> None:
-    drive.took(await anext(drive.frames))
-
-
-async def _client_takes_nothing_until_dropped(drive: Drive) -> None:
-    drive.took(await anext(drive.frames))
-    await drive.run_to(45)
 
 
 async def _answer_arrives_behind_a_client_that_is_then_dropped(drive: Drive) -> None:
@@ -384,19 +374,12 @@ async def _client_leaves_after_the_answer_was_queued(drive: Drive) -> None:
     await drive.clock.parked()
 
 
-async def _supervision_fails(drive: Drive) -> None:
-    drive.took(await anext(drive.frames))
-    with pytest.raises(RuntimeError, match="the clock broke"):
-        await anext(drive.frames)
-    assert drive.end_of_stream() == [ViolationKind.TRUNCATED]
-
-
 @pytest.mark.parametrize(
     ("clock", "scenario", "state", "events", "lost", "ended_at"),
     [
         pytest.param(
             StepClock,
-            _client_leaves_mid_run,
+            client_leaves_mid_run,
             RunState.CANCELLED,
             1,
             ClientLoss.DISCONNECTED,
@@ -405,7 +388,7 @@ async def _supervision_fails(drive: Drive) -> None:
         ),
         pytest.param(
             StepClock,
-            _client_takes_nothing_until_dropped,
+            client_takes_nothing_until_dropped,
             RunState.CANCELLED,
             2,
             ClientLoss.DROPPED,
@@ -432,7 +415,7 @@ async def _supervision_fails(drive: Drive) -> None:
         ),
         pytest.param(
             BrokenClock,
-            _supervision_fails,
+            supervision_fails,
             RunState.CANCELLED,
             1,
             ClientLoss.DROPPED,
@@ -758,7 +741,7 @@ async def test_a_response_that_ends_waits_for_the_held_close_of_its_run_before_i
 
 
 @in_loop
-async def test_a_run_whose_terminal_was_accepted_is_recorded_when_the_held_close_is_released():
+async def test_a_run_whose_terminal_was_decided_is_recorded_when_the_held_close_is_released():
     runner = GatedRunner()
     runner.hold_close()
     async with driven(runner, read=False) as drive:
@@ -770,7 +753,7 @@ async def test_a_run_whose_terminal_was_accepted_is_recorded_when_the_held_close
         await drive.clock.parked()
 
         _assert_recorded(
-            drive.status(), RunState.RUNNING, events=2, at=0, lost=ClientLoss.DISCONNECTED
+            drive.status(), RunState.RUNNING, events=1, at=0, lost=ClientLoss.DISCONNECTED
         )
 
         drive.clock.advance_to(8)
@@ -1690,7 +1673,7 @@ async def _answered_and_read(drive: Drive) -> None:
 
 
 async def _dropped_and_read(drive: Drive) -> None:
-    await _client_takes_nothing_until_dropped(drive)
+    await client_takes_nothing_until_dropped(drive)
     await drive.drain()
 
 

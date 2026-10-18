@@ -14,6 +14,11 @@ limit_exceeded``. Each accepted event is also recorded
 closed. When frames go out, and when a silent or overlong run is
 ended, ``run_liveness`` decides.
 
+A run's terminal is decided when its ending happens but encoded, charged,
+accepted and recorded only once, by ``run_over`` after the runner's close; a
+containment loss the runner's pump met turns that terminal, or the fallback of
+a cut stream, into ``failed: provider_error``.
+
 A tool call's input is deep-copied into its wire event, so the event never
 shares a list or dict with the runner that built it, and its effect comes from
 the app's tool list, where an unlisted tool counts as side-effecting.
@@ -26,6 +31,7 @@ import copy
 import logging
 from collections.abc import AsyncGenerator, Iterator
 from contextlib import aclosing, contextmanager
+from dataclasses import dataclass
 from typing import Final
 
 from pydantic import ValidationError
@@ -36,6 +42,7 @@ from agent_client.sse import EventTooLarge, encode_event
 from agent_client.wire import (
     PROTOCOL_VERSION,
     AssistantText,
+    Cancelled,
     ClientLoss,
     Failed,
     FailureCode,
@@ -43,10 +50,10 @@ from agent_client.wire import (
     RunEvent,
     RunStarted,
     Succeeded,
-    TerminalEvent,
     ToolCall,
     ToolResult,
 )
+from agent_providers.errors import RetainedGroup
 from agent_providers.events import (
     AssistantTextEvent,
     FinalEvent,
@@ -90,6 +97,21 @@ class _OverBudget(Exception):
     """A provider event past the run's budget; the message is the service's own."""
 
 
+@dataclass(frozen=True)
+class _DecidedFailure:
+    code: FailureCode
+    message: str
+
+
+def _failure_of(refusal: _Unsendable | _OverBudget) -> _DecidedFailure:
+    code = (
+        FailureCode.LIMIT_EXCEEDED
+        if isinstance(refusal, _OverBudget)
+        else FailureCode.PROVIDER_ERROR
+    )
+    return _DecidedFailure(code, str(refusal))
+
+
 async def run_frames(
     admitted: AdmittedRun,
     runner: Runner | None,
@@ -104,14 +126,14 @@ async def run_frames(
     started = wire.started()
     started_at = clock()
     if runner is None:
-        failed = wire.failed(FailureCode.PROVIDER_UNAVAILABLE, NO_RUNNER_MESSAGE)
+        wire.decide_failure(FailureCode.PROVIDER_UNAVAILABLE, NO_RUNNER_MESSAGE)
         with failures.leaving():
-            failures.attempt(FailedPart.CLEANUP, wire.run_over)
+            failures.attempt(FailedPart.CLEANUP, lambda: wire.run_over(()))
             if failures.met_any:
                 return
             with _client_lost_when_closed(wire, failures):
                 yield started
-                yield failed
+                yield wire.terminal_frame()
         return
     events = runner.run(admitted)
     async with (
@@ -157,7 +179,12 @@ class _WireRun:
         self._seq = 0
         self._tool_calls = 0
         self._bytes = 0
-        self.ended = False
+        self._decided: FinalEvent | _DecidedFailure | None = None
+        self._terminal_frame: bytes | None = None
+
+    @property
+    def ended(self) -> bool:
+        return self._decided is not None
 
     def started(self) -> bytes:
         return self._sent(
@@ -169,14 +196,45 @@ class _WireRun:
             )
         )
 
-    def run_over(self) -> None:
+    def run_over(self, losses: tuple[RetainedGroup, ...]) -> None:
+        """Commit the decided terminal, then end the record; a loss makes either provider_error."""
         try:
-            self._recorder_of_started_run().over(
-                None if self.ended else self._stream.cancellation_terminal()
-            )
+            recorder = self._recorder_of_started_run()
+            if self.ended:
+                self._terminal_frame = self._committed_terminal(lost=bool(losses))
+                recorder.over()
+            else:
+                recorder.over(self._fallback_ending(lost=bool(losses)))
         finally:
             if self._lease is not None:
                 self._lease.release()
+
+    def terminal_frame(self) -> bytes:
+        assert self._terminal_frame is not None
+        return self._terminal_frame
+
+    def _committed_terminal(self, *, lost: bool) -> bytes:
+        decided = (
+            _DecidedFailure(FailureCode.PROVIDER_ERROR, RUNNER_FAILED_MESSAGE)
+            if lost
+            else self._decided
+        )
+        if isinstance(decided, _DecidedFailure):
+            return self._sent(self._failed_event(decided))
+        assert decided is not None
+        try:
+            succeeded = self._wire_event(decided)
+            assert succeeded is not None
+            return self._sent(succeeded)
+        except (_Unsendable, _OverBudget) as refusal:
+            return self._sent(self._failed_event(_failure_of(refusal)))
+
+    def _fallback_ending(self, *, lost: bool) -> Failed | Cancelled:
+        if lost:
+            return self._failed_event(
+                _DecidedFailure(FailureCode.PROVIDER_ERROR, RUNNER_FAILED_MESSAGE)
+            )
+        return self._stream.cancellation_terminal()
 
     def client_lost(self, loss: ClientLoss) -> None:
         self._recorder_of_started_run().lost(loss)
@@ -184,32 +242,39 @@ class _WireRun:
     def heartbeat(self) -> bytes:
         return self._sent(Heartbeat(v=PROTOCOL_VERSION, run_id=self._run_id, seq=self._seq))
 
-    def failed(self, code: FailureCode, message: str) -> bytes:
-        return self._sent(
-            Failed(
-                v=PROTOCOL_VERSION, run_id=self._run_id, seq=self._seq, code=code, message=message
-            )
+    def decide_failure(self, code: FailureCode, message: str) -> None:
+        self._decided = _DecidedFailure(code, message)
+
+    def _failed_event(self, failure: _DecidedFailure) -> Failed:
+        return Failed(
+            v=PROTOCOL_VERSION,
+            run_id=self._run_id,
+            seq=self._seq,
+            code=failure.code,
+            message=failure.message,
         )
 
     def frame_of(self, outcome: RunnerOutcome) -> bytes | None:
-        """The frame of the runner's outcome, the run's failure, or nothing for an empty text."""
+        """The frame of an outcome sent at once; nothing for an empty text or a decided ending."""
         match outcome:
             case RunnerExhausted():
-                return self.failed(FailureCode.PROVIDER_ERROR, NO_ANSWER_MESSAGE)
+                self.decide_failure(FailureCode.PROVIDER_ERROR, NO_ANSWER_MESSAGE)
             case RunnerRaised(error=error):
                 log_failure(log, f"The runner of run {self._run_id} failed", error)
-                return self.failed(FailureCode.PROVIDER_ERROR, RUNNER_FAILED_MESSAGE)
+                self.decide_failure(FailureCode.PROVIDER_ERROR, RUNNER_FAILED_MESSAGE)
+            case RunnerYielded(event=FinalEvent() as final):
+                self._decided = final
             case RunnerYielded(event=core_event):
                 return self._frame_of_event(core_event)
+        return None
 
     def _frame_of_event(self, core_event: StreamEvent) -> bytes | None:
         try:
             event = self._wire_event(core_event)
             return None if event is None else self._sent(event)
-        except _Unsendable as unsendable:
-            return self.failed(FailureCode.PROVIDER_ERROR, str(unsendable))
-        except _OverBudget as over_budget:
-            return self.failed(FailureCode.LIMIT_EXCEEDED, str(over_budget))
+        except (_Unsendable, _OverBudget) as refusal:
+            self._decided = _failure_of(refusal)
+            return None
 
     def _wire_event(self, core_event: StreamEvent) -> RunEvent | None:
         try:
@@ -254,7 +319,6 @@ class _WireRun:
         if violation is not None:
             raise _Unsendable(f"The provider broke the run's stream rules: {violation.kind}.")
         self._seq += 1
-        self.ended = isinstance(event, TerminalEvent)
         self._record(event)
         return frame
 

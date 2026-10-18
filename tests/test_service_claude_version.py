@@ -217,15 +217,17 @@ def test_a_program_reporting_another_version_refuses_the_start_naming_both(
 @pytest.mark.parametrize(
     ("stdout", "reason"),
     [
-        pytest.param("hello\n", "printed 6 bytes", id="another-text"),
-        pytest.param("2.1.302\n", "printed 8 bytes", id="without-the-product-suffix"),
+        pytest.param("hello\n", "printed 6 characters", id="another-text"),
+        pytest.param("2.1.302\n", "printed 8 characters", id="without-the-product-suffix"),
         pytest.param(
-            f"{PRINTS_THE_PIN}banner\n", f"printed {len(PRINTS_THE_PIN) + 7} bytes", id="two-lines"
+            f"{PRINTS_THE_PIN}banner\n",
+            f"printed {len(PRINTS_THE_PIN) + 7} characters",
+            id="two-lines",
         ),
         pytest.param("", "printed nothing", id="empty"),
-        pytest.param("   \n", "printed 4 bytes", id="only-spaces"),
-        pytest.param("\nhello\n", "printed 7 bytes", id="blank-first-line"),
-        pytest.param("x" * 100 + "\n", "printed 101 bytes", id="long-line"),
+        pytest.param("   \n", "printed 4 characters", id="only-spaces"),
+        pytest.param("\nhello\n", "printed 7 characters", id="blank-first-line"),
+        pytest.param("x" * 100 + "\n", "printed 101 characters", id="long-line"),
     ],
 )
 def test_output_that_is_not_the_version_line_refuses_the_start_naming_only_how_much_was_printed(
@@ -291,16 +293,17 @@ def test_a_program_printing_where_it_runs_refuses_the_start_without_the_working_
     configured, physical = root_layout(tmp_path)
     physical.mkdir()
     physical.chmod(0o700)
-    program = _script(tmp_path, program_body)
+    printed_copy = tmp_path / "printed-copy"
+    program = _script(tmp_path, f'{program_body} | tee "{printed_copy}"')
 
     refusal = _refused_on_one_line(
         _written(tmp_path, _document_naming(program, configured)), capsys
     )
+    printed_characters = len(printed_copy.read_bytes().decode(errors="replace"))
 
     assert PRIVATE_MARKER not in refusal
     assert "phys" not in refusal
-    assert " did not print a version (printed " in refusal
-    assert refusal.endswith(f" bytes); the pinned version is {PINNED_CLAUDE_VERSION}")
+    assert refusal == _no_version_line(program, f"printed {printed_characters} characters")
     assert list(physical.iterdir()) == []
     assert served == []
 

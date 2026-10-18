@@ -62,7 +62,7 @@ def _unusable_run(run: CliRun | None) -> str | None:
 def _what_was_printed(stdout: str) -> str:
     if not stdout:
         return "printed nothing"
-    return f"printed {len(stdout.encode(errors='replace'))} bytes"
+    return f"printed {len(stdout)} characters"
 
 
 def _probe(binary: Path, working_root: PrivateWorkingRoot) -> CliRun | None:

@@ -1192,7 +1192,9 @@ def test_a_saturated_pool_refuses_a_turn_with_no_chained_cause_or_context(
 ) -> None:
     set_claude_process_limit(monkeypatch, 1)
     monkeypatch.setattr(
-        provider, "verify_cli_tool_surface", AsyncMock(return_value=Path("/usr/bin/claude")),
+        provider,
+        "verify_cli_tool_surface",
+        AsyncMock(return_value=Path("/usr/bin/claude")),
     )
     monkeypatch.setattr(provider, "_write_mcp_config", lambda _spec, _user_id: "unused")
     monkeypatch.setattr(provider, "_unlink_quiet", lambda _path: None)

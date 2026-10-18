@@ -1,8 +1,0 @@
-claim_id = "dc46ca737c2345c1bc4f774529adf673"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "470dad66239a7653c460d11fb7cc410aa12524b6"
-branch = "claude/issue-297-l1-teardown-delivers-cancel"
-scope = ["README.md", "docs/decisions/0001-agent-service.md", "packages/agent-service/src/agent_service/run_liveness.py", "packages/agent-service/src/agent_service/run_tools.py", "src/agent_providers/anchored_turn.py", "src/agent_providers/outlasting.py", "tests/test_outlasting.py", "tests/test_service_containment_ending.py", "tests/test_service_quarantine.py", "tests/test_service_run_recording.py"]
-opened_commit = "c144307b2f354d557985af458eb9d8fbd5515295"
-whole_reason = "The level delivery and the one owner of the waiter's cancellation are one decision: the leaving's fix needs the shared wait, the shared helper has its first proof in the leaving, and the core reap and the close move onto it with their unchanged tests as proof, so no part lands alone."

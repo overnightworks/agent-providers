@@ -1,8 +1,0 @@
-claim_id = "1f56fa6870ba48958633b3309e792317"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "ed820c9b31300fd56bec75e2b3ed6d1870b782d3"
-branch = "claude/issue-270-run-directory-primitives"
-scope = ["README.md", "src/agent_providers/config.py", "src/agent_providers/process.py", "src/agent_providers/procfs.py", "tests/provider_test_support.py", "tests/test_config.py", "tests/test_last_holder_removal.py", "tests/test_process.py", "tests/test_procfs.py"]
-opened_commit = "98125d34791d2fa1b9ac74c6e941c91ffe57ab99"
-whole_reason = "The four primitives the run-directory lifecycle composes, each with its own proof; none but the renamed writer, whose credential caller already exists, has a caller before 4b1b (plan review 1, finding 4), and splitting them would add a landing per primitive without exposing anything a host can use."

@@ -28,6 +28,7 @@ from agent_providers import process
 from agent_providers.anchored_turn import (
     CliProcessPool,
     CliProcessPoolSaturated,
+    ReapBounds,
     anchored_turn_child,
 )
 from agent_providers.config import (
@@ -42,12 +43,12 @@ from agent_providers.constants import (
     CLAUDE_CLI_MAX_CONCURRENT_PROCESSES,
     CLAUDE_CLI_MODEL_LIST_MARKER,
     CLAUDE_CLI_NO_TOOL_SURFACE_TIMEOUT_SECONDS,
-    CLAUDE_CLI_SIGTERM_GRACE_SECONDS,
     CLAUDE_CLI_TOOL_SURFACE_FAILURE_CACHE_SECONDS,
     CLAUDE_CLI_TOOL_SURFACE_TIMEOUT_SECONDS,
     CLAUDE_CLI_ZOMBIE_FAILURE_CACHE_SECONDS,
-    CLAUDE_CLI_ZOMBIE_REAP_TIMEOUT_SECONDS,
+    CLI_GROUP_CONFIRMATION_SECONDS,
     CLI_OUTPUT_READ_LIMIT_BYTES,
+    CLI_TERMINATION_GRACE_SECONDS,
     DEADLINE_EXCEEDED_REASON,
     PROBE_TIMEOUT_SECONDS,
 )
@@ -84,7 +85,12 @@ from agent_providers.transcript import flatten_messages, stdin_prompt
 log = logging.getLogger(__name__)
 
 CLAUDE_CLI_PROCESS_POOL: Final = CliProcessPool(
-    limit=CLAUDE_CLI_MAX_CONCURRENT_PROCESSES, name="Claude CLI"
+    limit=CLAUDE_CLI_MAX_CONCURRENT_PROCESSES,
+    name="Claude CLI",
+    reap=ReapBounds(
+        sigterm_grace_seconds=CLI_TERMINATION_GRACE_SECONDS,
+        confirmation_seconds=CLI_GROUP_CONFIRMATION_SECONDS,
+    ),
 )
 
 _sync_clients: dict[str, object] = {}
@@ -1044,7 +1050,7 @@ _ToolSurfaceKey = tuple[BinaryBuild, frozenset[str]]
 
 # Extra margin a follower waits beyond the leader's own worst case before
 # giving up on its own — generous, since this only ever fires if the
-# leader's own bound (probe deadline + SIGTERM grace + zombie-reap budget)
+# leader's own bound (probe deadline + SIGTERM grace + group-confirmation bound)
 # somehow failed to hold; it is a defense-in-depth backstop, not the
 # expected path.
 _FOLLOWER_WAIT_MARGIN_SECONDS: Final = 2
@@ -1470,8 +1476,8 @@ def _follower_wait_budget_seconds(probe_timeout_seconds: float) -> float:
 
 def _cleanup_margin_seconds() -> float:
     return (
-        CLAUDE_CLI_SIGTERM_GRACE_SECONDS
-        + CLAUDE_CLI_ZOMBIE_REAP_TIMEOUT_SECONDS
+        CLI_TERMINATION_GRACE_SECONDS
+        + CLI_GROUP_CONFIRMATION_SECONDS
         + _FOLLOWER_WAIT_MARGIN_SECONDS
     )
 

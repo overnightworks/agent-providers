@@ -86,8 +86,8 @@ def watcher_names() -> set[str]:
     return {t.name for t in threading.enumerate() if t.name.startswith(WATCHER_THREAD_PREFIX)}
 
 
-def join_watcher(watcher: threading.Thread) -> None:
-    watcher.join(TEST_WAIT_SECONDS)
+def join_watcher(watcher: threading.Thread, bound: float = TEST_WAIT_SECONDS) -> None:
+    watcher.join(bound)
     assert not watcher.is_alive(), "the watcher did not end within the bound"
 
 

@@ -795,7 +795,7 @@ class KillUntilGoneResult:
     """The last count of :meth:`AnchoredChild.kill_until_gone` and whether it ended in time.
 
     Only :attr:`confirmed` means that the group is gone, in time: an ``EMPTY`` count
-    that ended no later than the bound. Any other result keeps the group to be retained.
+    that ended no later than the bound. Any other result means the group must be retained.
     """
 
     census: procfs.GroupCensus

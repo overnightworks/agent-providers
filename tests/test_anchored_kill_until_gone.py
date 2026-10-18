@@ -1,7 +1,11 @@
 """The anchored child repeats its kill and count until the group is gone, within a bound.
 
 Pinned on a virtual clock for the schedule, the result, the errors and the cancellation, and
-once on the real loop clock with a descendant that outlives the first count.
+twice on the real loop clock: with a scripted first LIVE count and the descendant's death
+checked at the return, and with every count LIVE, which bounds the attempts and must return.
+
+Residual: a ``wait_until`` that waits ten times longer than asked still passes, because a lower
+bound on the attempts of a real run would flake under load.
 """
 
 from __future__ import annotations
@@ -10,6 +14,7 @@ import asyncio
 import math
 import signal
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -80,6 +85,7 @@ class VirtualCensusClock:
 @dataclass(frozen=True)
 class Count:
     instant: float | None
+    monotonic: float
     thread: str
 
 
@@ -93,6 +99,7 @@ class Rig:
     census_calls: CensusRecorder
     model: GroupSignalModel
     log: EventLog = field(default_factory=EventLog)
+    loop_thread: str | None = None
     counts: list[Count] = field(default_factory=list)
     on_count: Callable[[int], None] | None = None
     on_kill: Callable[[int], None] | None = None
@@ -100,7 +107,9 @@ class Rig:
     def count_hook(self) -> None:
         self.counts.append(
             Count(
-                None if self.clock is None else self.clock.instant, threading.current_thread().name
+                None if self.clock is None else self.clock.instant,
+                time.monotonic(),
+                threading.current_thread().name,
             )
         )
         if self.on_count is not None:
@@ -118,7 +127,7 @@ class Rig:
         return self.runner.run(bounded(scenario))
 
     @property
-    def count_instants(self) -> list[float]:
+    def count_instants(self) -> list[float | None]:
         return [count.instant for count in self.counts]
 
     async def finish(self) -> None:
@@ -174,6 +183,7 @@ def virtual_rig(open_rig: Callable[..., Rig], clock: VirtualCensusClock) -> Rig:
 
 def kill_until_gone_then_finish(rig: Rig, within: float):
     async def scenario():
+        rig.loop_thread = threading.current_thread().name
         result = await rig.child.kill_until_gone(within=within)
         await rig.finish()
         return result
@@ -192,8 +202,7 @@ def test_the_schedule_spaces_attempts_from_each_counts_end_and_stops_before_the_
     assert clock.waits == pytest.approx([ORIGIN + 0.04 + INTERVAL])
     assert (result.census, result.ended_in_time, result.confirmed) == (LIVE, True, False)
     assert virtual_rig.log.kinds == ["kill", "count"] * 2
-    loop_thread = threading.main_thread().name
-    assert {count.thread for count in virtual_rig.counts}.isdisjoint({loop_thread})
+    assert {count.thread for count in virtual_rig.counts}.isdisjoint({virtual_rig.loop_thread})
 
 
 def test_the_first_empty_count_in_time_confirms_and_ends_the_call(
@@ -473,4 +482,22 @@ def test_the_real_clock_confirms_with_a_lingering_descendant_dead_at_the_return(
 
     assert len(rig.census_calls) >= 2
     assert rig.log.kinds == ["kill", "count"] * len(rig.census_calls)
+    assert rig.counts[1].monotonic - rig.counts[0].monotonic >= INTERVAL
     assert rig.model.violations == []
+
+
+def test_the_real_clock_spaces_live_attempts_and_returns_unconfirmed_at_the_bound(
+    open_rig: Callable[..., Rig],
+) -> None:
+    rig = open_rig()
+    rig.census_calls.answer = LIVE
+
+    async def scenario():
+        result = await rig.child.kill_until_gone(within=3 * INTERVAL)
+        await rig.finish()
+        return result
+
+    result = rig.run(scenario())
+
+    assert (result.census, result.ended_in_time, result.confirmed) == (LIVE, True, False)
+    assert len(rig.census_calls) <= 1 + 3

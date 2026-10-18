@@ -27,6 +27,7 @@ from service_support import (
     ScriptedRunner,
     decoded_events,
     get_run,
+    quarantine_on,
     reaches_text,
     run_body,
     run_headers,
@@ -83,7 +84,15 @@ def _streamed(runner: Runner | None, records: RunRecords | None = None) -> bytes
 
     async def collected() -> bytes:
         store = records or RunRecords()
-        frames = run_frames(admitted, runner, SONGMAKER, RunConfig(), LoopClock(), store)
+        frames = run_frames(
+            admitted,
+            runner,
+            SONGMAKER,
+            RunConfig(),
+            LoopClock(),
+            store,
+            quarantine=quarantine_on(),
+        )
         return b"".join([frame async for frame in frames])
 
     return asyncio.run(collected())
@@ -272,7 +281,8 @@ def test_a_refused_tool_call_reaches_neither_the_frames_nor_the_service_log(monk
     terminal = _terminal(raw)
     assert isinstance(terminal, Failed)
     assert (terminal.code, terminal.message) == (
-        FailureCode.PROVIDER_ERROR, "The provider failed during the run.",
+        FailureCode.PROVIDER_ERROR,
+        "The provider failed during the run.",
     )
     assert A_CANARY.encode() not in raw
     service_records = [record for record in caplog.records if record.name == run_events.__name__]

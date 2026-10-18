@@ -18,7 +18,8 @@ stopped once and the stream ends without a terminal. Every
 ending is decided at once but stops the runner first: the terminal is
 committed (encoded, accepted, recorded) and queued only after the runner's
 close has finished, and a containment loss the pump met makes it
-``failed: provider_error``. The shielded wait for that close mirrors the
+``failed: provider_error``, and its place passes to the quarantine before
+the record ends. The shielded wait for that close mirrors the
 provider core's reap of a streaming process
 (``agent_providers.anchored_turn``) without importing it.
 """
@@ -134,6 +135,10 @@ class FrameWriter(Protocol):
 
     def frame_of(self, outcome: RunnerOutcome) -> bytes | None:
         """The frame of a runner outcome sent at once, or nothing: it says none or ends the run."""
+        ...
+
+    def hand_over(self, losses: tuple[RetainedGroup, ...]) -> None:
+        """Pass the run's place to the quarantine when ``losses`` is not empty."""
         ...
 
     def run_over(self, losses: tuple[RetainedGroup, ...]) -> None:
@@ -512,6 +517,11 @@ def containment_losses(error: BaseException) -> tuple[RetainedGroup, ...]:
     return tuple(groups)
 
 
+def reported_by_the_quarantine(error: BaseException) -> bool:
+    """Whether the quarantine's line reports ``error``, so no ``log_failure`` line may."""
+    return isinstance(error, ContainmentLost)
+
+
 async def _one_step(events: AsyncGenerator[StreamEvent, None]) -> RunnerOutcome:
     try:
         return RunnerYielded(await anext(events))
@@ -803,13 +813,15 @@ class SupervisedRun:
         self._stopping = True
         self._pump.cancel()
         await asyncio.wait({self._pump})
+        losses = tuple(self._losses)
+        self._failures.attempt(FailedPart.CLEANUP, lambda: self._wire.hand_over(losses))
         self._log_runner_close()
-        self._failures.attempt(FailedPart.CLEANUP, lambda: self._wire.run_over(tuple(self._losses)))
+        self._failures.attempt(FailedPart.CLEANUP, lambda: self._wire.run_over(losses))
 
     def _log_runner_close(self) -> None:
         """Log how the runner closed in a frame of its own, so no later failure keeps it alive."""
         closing_failure = _failure_of(self._pump)
-        if closing_failure is None:
+        if closing_failure is None or reported_by_the_quarantine(closing_failure):
             return
         log_failure(log, f"Closing the runner of run {self._run_id} failed", closing_failure)
         if isinstance(closing_failure, asyncio.CancelledError):

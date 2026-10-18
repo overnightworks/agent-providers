@@ -54,12 +54,16 @@ import agent_service.signing as signing
 from agent_client.run_stream import StreamViolation, ViolationKind
 from agent_client.sse import RunStreamDecoder
 from agent_client.wire import RejectionCode, RunEvent, RunRejection, RunRequest, RunStatus
+from agent_providers.errors import RetainedGroup
 from agent_providers.events import AssistantTextEvent, StreamEvent, ToolCallEvent
+from agent_service.admission import AdmissionSlot
 from agent_service.app import create_app
 from agent_service.config import RunConfig, ServiceConfig
 from agent_service.identity import Principal
+from agent_service.quarantine import GroupConfirmation, Quarantine
 from agent_service.routing import Cli
 from agent_service.run_events import run_frames
+from agent_service.run_liveness import LoopClock, RunClock
 from agent_service.run_records import RunRecords
 from agent_service.runners import AdmittedRun, Runners
 
@@ -330,6 +334,14 @@ class StepClock:
         assert isinstance(loop, SteppedLoop), "run the scenario in a SteppedLoop"
         await loop.settled()
         return min((deadline for deadline, _ in self._waiters), default=None)
+
+    async def step_to_next_deadline(self) -> float:
+        """Advance to the deadline the waiters hold next and let them run; that deadline."""
+        deadline = await self.parked()
+        assert deadline is not None, "nothing waits on this clock"
+        self.advance_to(deadline)
+        await self.parked()
+        return deadline
 
 
 WALL_CLOCK_START: Final = datetime(2026, 10, 16, 12, 0, 0, tzinfo=UTC)
@@ -760,6 +772,40 @@ class StrayCancelledRunner(GatedRunner):
             await self._closed()
 
 
+class _SplitFailure(AsyncGenerator[StreamEvent, None]):
+    """A runner's generator whose step and close fail independently of each other."""
+
+    def __init__(self, runner: SplitFailureRunner) -> None:
+        self._runner = runner
+
+    async def asend(self, value: None) -> StreamEvent:
+        self._runner.log.append("step raised")
+        raise self._runner.step_error
+
+    async def athrow(self, *args, **kwargs) -> StreamEvent:
+        raise NotImplementedError
+
+    async def aclose(self) -> None:
+        await self._runner._closed()
+
+
+class SplitFailureRunner(GatedRunner):
+    """A runner whose first step raises ``step_error`` at once, then closes raising ``close_error``.
+
+    ``GatedRunner``'s generator reaches the pump with its step's exception only
+    after its close ended, so it cannot order two failures. Here the step fails
+    first, the close then waits on ``hold_close`` and raises its own error.
+    """
+
+    def __init__(self, step_error: BaseException, close_error: BaseException) -> None:
+        super().__init__()
+        self.step_error = step_error
+        self.close_error = close_error
+
+    def run(self, admitted: AdmittedRun) -> AsyncGenerator[StreamEvent, None]:
+        return _SplitFailure(self)
+
+
 SONGMAKER = service_config().apps["songmaker"]
 ALICE = Principal(TEST_ISSUER, "user-alice")
 
@@ -780,17 +826,57 @@ QUIET = AssistantTextEvent(text="")
 
 FAILURE_LINE = re.compile(r"(?P<event>.+?): (?P<kind>\w+) at (?P<positions>.+)")
 POSITION = re.compile(r"[\w.]+\.py:\d+:[\w<>]+")
+QUARANTINE_LOGGER: Final = "agent_service.quarantine"
+QUARANTINE_LINE = re.compile(
+    r"Not confirmed gone after SIGKILL: process (?P<noun>groups?) (?P<pgids>\d+(?:, \d+)*)"
+    r" of run (?P<run_id>[0-9a-f-]{36}); the run's place stays taken until then"
+)
+
+
+class QuarantineLineFails(logging.Filter):
+    """A handler filter that raises on the quarantine's ERROR line, as a failing handler does."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name == QUARANTINE_LOGGER and record.levelno >= logging.ERROR:
+            raise OSError("the log handler broke")
+        return True
+
+
+class RunnerCloseLineFails(logging.Filter):
+    """A handler filter that raises on the line of a failed runner close."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.getMessage().startswith("Closing the runner of run"):
+            raise OSError("the log handler broke")
+        return True
+
+
+def quarantine_lines(caplog: pytest.LogCaptureFixture) -> list[tuple[uuid.UUID, list[int]]]:
+    """Each quarantine ERROR line as its run id and process-group ids, nothing else attached."""
+    lines = []
+    for record in caplog.records:
+        if record.name != QUARANTINE_LOGGER or record.levelno < logging.ERROR:
+            continue
+        assert (record.exc_info, record.stack_info) == (None, None)
+        line = QUARANTINE_LINE.fullmatch(record.getMessage())
+        assert line is not None, record.getMessage()
+        pgids = [int(pgid) for pgid in line["pgids"].split(", ")]
+        assert line["noun"] == ("group" if len(pgids) == 1 else "groups"), record.getMessage()
+        lines.append((uuid.UUID(line["run_id"]), pgids))
+    return lines
 
 
 def failure_lines(caplog: pytest.LogCaptureFixture) -> list[tuple[str, str, str]]:
     """Each ERROR line as its event, its class and the function that raised.
 
     Every line must be the event, the class and well-formed stack positions
-    alone, with nothing attached to the record.
+    alone, with nothing attached to the record. The quarantine's own line is
+    checked by ``quarantine_lines`` and left out.
     """
+    quarantine_lines(caplog)
     lines = []
     for record in caplog.records:
-        if record.levelno < logging.ERROR:
+        if record.levelno < logging.ERROR or record.name == QUARANTINE_LOGGER:
             continue
         assert record.exc_info is None
         line = FAILURE_LINE.fullmatch(record.getMessage())
@@ -862,7 +948,8 @@ class ClientSocket:
 
     ``send`` blocks on the second body chunk until ``released`` is set, as
     uvicorn's drain does, or raises ``second_chunk_raises`` there;
-    ``blocks_the_first_chunk`` blocks the first one forever. With
+    ``blocks_the_first_chunk`` blocks the first one forever. ``user_token`` replaces
+    the default user, who is on the CLI route. With
     ``suspends_the_start`` the start message never completes. ``receive`` answers
     the request first and ``http.disconnect`` once the client ``leave``s.
     """
@@ -876,8 +963,9 @@ class ClientSocket:
         second_chunk_raises: Exception | None = None,
         suspends_the_start: bool = False,
         leaves_at_once: bool = False,
+        user_token: str | None = None,
     ) -> None:
-        self.scope = _run_scope(spec_version)
+        self.scope = _run_scope(spec_version, user_token)
         self.messages: list[dict[str, Any]] = []
         self.released = asyncio.Event()
         self.answering = asyncio.Event()
@@ -933,9 +1021,9 @@ def shared_mint() -> TokenMint:
     return TokenMint()
 
 
-def _run_scope(spec_version: str) -> dict[str, Any]:
+def _run_scope(spec_version: str, user_token: str | None = None) -> dict[str, Any]:
     mint = shared_mint()
-    headers = run_headers(mint.workload(), mint.user())
+    headers = run_headers(mint.workload(), user_token or mint.user())
     return {
         "type": "http",
         "asgi": {"version": "3.0", "spec_version": spec_version},
@@ -963,6 +1051,10 @@ async def respond_through_the_app(
 
     ``runners`` replace the drive's runner, as ``Runners()`` serves a run without one.
 
+    The app builds its own quarantine on ``drive.clock`` with its own
+    ``ScriptedConfirmation``, so a custom ``confirm`` and ``drive.quarantine_clock``
+    do not reach it.
+
     The token checks leave the loop for a worker thread, so this returns only
     once the app has begun to answer: from then on the run waits on the clock alone.
     """
@@ -972,6 +1064,7 @@ async def respond_through_the_app(
         runners=runners or Runners(cli=drive.runner),
         records=drive.records,
         fetch_key_set=shared_mint().fetch_key_set,
+        confirm_group_gone=ScriptedConfirmation(clock=drive.clock),
     )
     response = asyncio.create_task(app(client.scope, client.receive, client.send))
     answering = asyncio.create_task(client.answering.wait())
@@ -979,6 +1072,38 @@ async def respond_through_the_app(
     answering.cancel()
     await asyncio.gather(answering, return_exceptions=True)
     return response
+
+
+class ScriptedConfirmation:
+    """A ``GroupConfirmation`` that answers each group from its script, then ``True`` for good.
+
+    A scripted exception is raised instead of answered. Every call is recorded
+    with the clock's time when it was asked.
+    """
+
+    def __init__(
+        self,
+        scripts: Mapping[RetainedGroup, Sequence[bool | Exception]] | None = None,
+        clock: Callable[[], float] = lambda: 0.0,
+    ) -> None:
+        self._scripts = {group: list(script) for group, script in (scripts or {}).items()}
+        self._clock = clock
+        self.calls: list[tuple[float, RetainedGroup]] = []
+
+    async def __call__(self, group: RetainedGroup) -> bool:
+        self.calls.append((self._clock(), group))
+        script = self._scripts.get(group)
+        answer = script.pop(0) if script else True
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+
+def quarantine_on(
+    clock: RunClock | None = None, confirm: GroupConfirmation | None = None
+) -> Quarantine:
+    """A quarantine on the loop's clock, confirming every group at once unless told otherwise."""
+    return Quarantine(clock or LoopClock(), confirm or ScriptedConfirmation())
 
 
 class Drive:
@@ -992,14 +1117,28 @@ class Drive:
         *,
         read: bool = True,
         records: RunRecords | None = None,
+        places: int = 1,
+        confirm: GroupConfirmation | None = None,
     ) -> None:
         self.runner = runner
         self.runs = runs
         self.clock = clock
+        self.quarantine_clock = StepClock()
         self.records = records or RunRecords(lambda: instant(clock.now))
         self.run_id = uuid.uuid4()
+        self.slot = AdmissionSlot(places)
+        self.lease = self.slot.try_take()
+        self.confirmation = confirm or ScriptedConfirmation(clock=self.quarantine_clock)
+        self.quarantine = quarantine_on(self.quarantine_clock, self.confirmation)
         self.frames = run_frames(
-            alice_admitted_run(self.run_id), runner, SONGMAKER, runs, clock, self.records
+            alice_admitted_run(self.run_id),
+            runner,
+            SONGMAKER,
+            runs,
+            clock,
+            self.records,
+            self.lease,
+            quarantine=self.quarantine,
         )
         self.events: list[tuple[float, RunEvent]] = []
         self.frame_sizes: list[int] = []
@@ -1086,8 +1225,20 @@ class Drive:
         self.assert_nothing_left()
 
     def assert_nothing_left(self) -> None:
-        assert asyncio.all_tasks() == {asyncio.current_task()}
+        assert asyncio.all_tasks() == {asyncio.current_task(), *self.quarantine_retries()}
         assert self.runner.closes == 1
+
+    def quarantine_retries(self) -> set[asyncio.Task[object]]:
+        """This run's quarantine task, if its place was handed over and not yet freed."""
+        name = f"quarantine:{self.run_id}"
+        return {task for task in asyncio.all_tasks() if task.get_name() == name}
+
+    def slot_is_full(self) -> bool:
+        """Whether no place is free; a probe that finds one gives it back."""
+        probe = self.slot.try_take()
+        if probe is not None:
+            probe.release()
+        return probe is None
 
 
 @asynccontextmanager
@@ -1098,6 +1249,8 @@ async def driven(
     *,
     read: bool = True,
     records: RunRecords | None = None,
+    places: int = 1,
+    confirm: GroupConfirmation | None = None,
 ) -> AsyncIterator[Drive]:
     drive = Drive(
         runner or GatedRunner(),
@@ -1105,12 +1258,20 @@ async def driven(
         clock or StepClock(),
         read=read,
         records=records,
+        places=places,
+        confirm=confirm,
     )
     try:
         yield drive
     finally:
-        drive.runner.release_close()
-        if drive.reader is not None:
-            drive.reader.cancel()
-        await asyncio.gather(*([drive.reader] if drive.reader else []), return_exceptions=True)
-        await drive.frames.aclose()
+        try:
+            drive.runner.release_close()
+            if drive.reader is not None:
+                drive.reader.cancel()
+            await asyncio.gather(*([drive.reader] if drive.reader else []), return_exceptions=True)
+            await drive.frames.aclose()
+        finally:
+            retries = drive.quarantine_retries()
+            for retry in retries:
+                retry.cancel()
+            await asyncio.gather(*retries, return_exceptions=True)

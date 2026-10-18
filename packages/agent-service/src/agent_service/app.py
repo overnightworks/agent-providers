@@ -44,6 +44,7 @@ from webauth.jwt_verification import KeySetFetch, MonotonicClock
 
 from agent_client.capability import MAX_CAPABILITY_CHARACTERS
 from agent_client.wire import PROTOCOL_VERSION, RejectionCode, RunRejection, RunRequest
+from agent_providers import lost_groups
 from agent_service.admission import AdmissionSlot, Lease
 from agent_service.capability import (
     Capability,
@@ -53,6 +54,7 @@ from agent_service.capability import (
 )
 from agent_service.config import ServiceConfig
 from agent_service.identity import Caller, CallerCheck, build_verifier
+from agent_service.quarantine import GroupConfirmation, Quarantine
 from agent_service.routing import Cli, NotEnabled, ServedRoute, route
 from agent_service.run_events import run_frames
 from agent_service.run_liveness import LoopClock
@@ -102,18 +104,21 @@ def create_app(
     fetch_key_set: KeySetFetch = fetch_key_set_over_https,
     monotonic_clock: MonotonicClock = time.monotonic,
     wall_clock: Callable[[], datetime] = utc_now,
+    confirm_group_gone: GroupConfirmation = lost_groups.confirm_group_gone,
 ) -> FastAPI:
     """The service's ASGI app.
 
     ``wall_clock`` (aware UTC) stamps each capability's issue and expiry and the
     default run-record store. An injected ``records`` keeps its own clock, so the
     two can differ; ``wall_clock`` never reaches the token verifier, which reads
-    webauth's own.
+    webauth's own. ``confirm_group_gone`` is how the one quarantine asks whether a
+    lost process group is gone.
     """
     callers = CallerCheck(build_verifier(config.identity, fetch_key_set, monotonic_clock), config)
     installed_runners = runners or Runners()
     installed_records = records or RunRecords(wall_clock)
     subscription_slot = AdmissionSlot(config.runs.max_parallel_cli_runs)
+    quarantine = Quarantine(LoopClock(), confirm_group_gone)
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
     @app.post("/runs")
@@ -130,6 +135,7 @@ def create_app(
             installed_runners,
             installed_records,
             subscription_slot,
+            quarantine,
             wall_clock,
             caller,
             run_request,
@@ -165,7 +171,8 @@ class _RunResponse(StreamingResponse):
 
     It also releases the run's lease on exit, after the frames are closed. That
     frees the place only for a run that never began, because the lease is
-    released once the run is over, however long the connection hangs on.
+    released once the run is over, however long the connection hangs on, and
+    a lease the quarantine took over is not this one.
     """
 
     def __init__(self, frames: AsyncGenerator[bytes, None], lease: Lease | None) -> None:
@@ -187,6 +194,7 @@ def _admitted(
     runners: Runners,
     records: RunRecords,
     subscription_slot: AdmissionSlot,
+    quarantine: Quarantine,
     wall_clock: Callable[[], datetime],
     caller: Caller,
     run_request: RunRequest,
@@ -210,7 +218,7 @@ def _admitted(
             return rejection(RejectionCode.BUSY)
     try:
         response = _admitted_response(
-            config, runners, records, lease, wall_clock, caller, run_request, served
+            config, runners, records, lease, quarantine, wall_clock, caller, run_request, served
         )
     except BaseException:
         _release(lease)
@@ -231,6 +239,7 @@ def _admitted_response(
     runners: Runners,
     records: RunRecords,
     lease: Lease | None,
+    quarantine: Quarantine,
     wall_clock: Callable[[], datetime],
     caller: Caller,
     run_request: RunRequest,
@@ -265,6 +274,7 @@ def _admitted_response(
             LoopClock(),
             records,
             lease,
+            quarantine=quarantine,
         ),
         lease,
     )

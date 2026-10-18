@@ -1547,7 +1547,9 @@ class _EarliestFailure:
         if self.failure is None:
             self.failure = failure
         else:
-            self.failure.add_note(f"a descriptor close also failed ({type(failure).__name__})")
+            BaseException.add_note(
+                self.failure, f"a descriptor close also failed ({type(failure).__name__})"
+            )
         return True
 
 

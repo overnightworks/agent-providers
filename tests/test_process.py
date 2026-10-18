@@ -2055,6 +2055,15 @@ class _UntestableError(Exception):
 
 
 
+class _NoteDroppingError(Exception):
+    def add_note(self, note: str) -> None:
+        return None
+
+
+class _NoteRaisingError(Exception):
+    def add_note(self, note: str) -> None:
+        raise RuntimeError("add_note overridden to raise")
+
 
 @pytest.mark.parametrize(
     ("traversal_failure", "failing_closes", "later_classes"),
@@ -2064,6 +2073,8 @@ class _UntestableError(Exception):
         (None, {4: KeyboardInterrupt, 5: OSError}, ["OSError"]),
         (None, {4: _FalseValuedError, 5: _UntestableError}, ["_UntestableError"]),
         (None, {4: _UntestableError, 5: _FalseValuedError}, ["_FalseValuedError"]),
+        (None, {4: _NoteDroppingError, 5: OSError}, ["OSError"]),
+        (None, {4: _NoteRaisingError, 5: OSError}, ["OSError"]),
     ],
     ids=[
         "traversal_then_cleanup_close",
@@ -2071,6 +2082,8 @@ class _UntestableError(Exception):
         "popped_frame_close_then_ancestor_close",
         "false_valued_then_untestable",
         "untestable_then_false_valued",
+        "earliest_overrides_add_note_to_drop_it",
+        "earliest_overrides_add_note_to_raise",
     ],
 )
 def test_the_earliest_failure_propagates_and_every_descriptor_is_still_closed(
@@ -2107,7 +2120,15 @@ def test_the_earliest_failure_propagates_and_every_descriptor_is_still_closed(
     descriptors_before = _descriptor_count()
 
     with pytest.raises(
-        (RuntimeError, KeyboardInterrupt, OSError, _FalseValuedError, _UntestableError),
+        (
+            RuntimeError,
+            KeyboardInterrupt,
+            OSError,
+            _FalseValuedError,
+            _UntestableError,
+            _NoteDroppingError,
+            _NoteRaisingError,
+        ),
     ) as raised:
         process._make_tree_removable(tmp_path)
 

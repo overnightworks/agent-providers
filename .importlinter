@@ -38,3 +38,16 @@ layers =
     agent_service
     agent_providers
     agent_client
+
+[importlinter:contract:neutral-run-modules-name-no-provider]
+name = the neutral run modules import no provider package
+type = forbidden
+source_modules =
+    agent_providers.cli_run
+    agent_providers.anchored_turn
+    agent_providers.lost_groups
+    agent_providers.transcript
+forbidden_modules =
+    agent_providers.claude
+    agent_providers.codex
+    agent_providers.grok

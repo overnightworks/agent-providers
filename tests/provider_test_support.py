@@ -50,11 +50,12 @@ from typing import Any, Final, Protocol
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from anchored_support import TEST_WAIT_SECONDS
+from anchored_kernel import join_watcher, recorded_watcher_starts
+from anchored_support import TEST_WAIT_SECONDS, ChildCleanup
 
 from agent_client.tools import ToolDeclaration
 from agent_providers import anchored_turn, lost_groups, process, spawn
-from agent_providers.anchored_turn import ReapBounds
+from agent_providers.anchored_turn import CliProcessPool, ReapBounds
 from agent_providers.catalog import ProviderRoute
 from agent_providers.claude import provider as claude_provider
 from agent_providers.config import (
@@ -331,11 +332,19 @@ class ClaudeCliStreamReader:
     """The stand-in for the ``asyncio.StreamReader`` of a Claude child pipe."""
 
     def __init__(
-        self, lines: Sequence[bytes], *, limit: int | None = None, stalls: bool = False,
+        self,
+        lines: Sequence[bytes],
+        *,
+        limit: int | None = None,
+        stalls: bool = False,
+        failure: Exception | None = None,
+        failed: asyncio.Event | None = None,
     ) -> None:
         self._lines = list(lines)
         self._limit = limit
         self._stalls = stalls
+        self._failure = failure
+        self._failed = failed
 
     async def readline(self) -> bytes:
         if not self._lines:
@@ -346,6 +355,10 @@ class ClaudeCliStreamReader:
         return line
 
     async def read(self, size: int = -1) -> bytes:
+        if self._failure is not None:
+            if self._failed is not None:
+                self._failed.set()
+            raise self._failure
         if not self._lines:
             return await self._end_of_stream()
         payload = b"".join(self._lines)
@@ -1453,6 +1466,9 @@ class ScriptedClaudeChild(ScriptedAnchoredChild):
         stderr: bytes = b"",
         stdout_limit: int | None = None,
         stdout_stalls: bool = False,
+        stderr_stalls: bool = False,
+        stderr_failure: Exception | None = None,
+        stdin_failure: Exception | None = None,
     ) -> None:
         self.log: list[Recorded] = []
         super().__init__(
@@ -1478,9 +1494,15 @@ class ScriptedClaudeChild(ScriptedAnchoredChild):
         self.stdout = ClaudeCliStreamReader(
             stream_lines, limit=stdout_limit, stalls=stdout_stalls,
         )
-        self.stderr = ClaudeCliStreamReader([stderr] if stderr else [])
+        self.stderr_failed = asyncio.Event()
+        self.stderr = ClaudeCliStreamReader(
+            [stderr] if stderr else [],
+            stalls=stderr_stalls,
+            failure=stderr_failure,
+            failed=self.stderr_failed,
+        )
         self.stdin = MagicMock(spec_set=CLAUDE_CLI_STDIN_SURFACE)
-        self.stdin.drain = AsyncMock()
+        self.stdin.drain = AsyncMock(side_effect=stdin_failure)
 
     def commit_exit(self, returncode: int) -> None:
         self.returncode = returncode
@@ -1774,10 +1796,52 @@ def install_claude_cli_children(
     return spawns
 
 
-def held_claude_slots() -> int:
-    pool = claude_provider.CLAUDE_CLI_PROCESS_POOL
+def held_slots(pool: CliProcessPool) -> int:
     with pool._lock:
         return len(pool._reservations)
+
+
+def held_claude_slots() -> int:
+    return held_slots(claude_provider.CLAUDE_CLI_PROCESS_POOL)
+
+
+REAL_REAP_BOUNDS = ReapBounds(
+    sigterm_grace_seconds=TEST_WAIT_SECONDS, confirmation_seconds=TEST_WAIT_SECONDS,
+)
+TREE_PATTERN = "agent-run-*"
+
+
+def a_private_root(parent: Path, name: str = "root") -> Path:
+    root = parent / name
+    root.mkdir()
+    root.chmod(0o700)
+    return root
+
+
+def drive_real_children[T](
+    child_cleanup: ChildCleanup, monkeypatch: pytest.MonkeyPatch, scenario: Coroutine[Any, Any, T],
+) -> T:
+    """Run a scenario whose real children ``child_cleanup`` owns and whose watchers are joined."""
+    children_before = len(child_cleanup.listed())
+    with recorded_watcher_starts(monkeypatch) as watchers:
+        try:
+            return child_cleanup.capture(lambda: run_bounded(scenario)).value  # type: ignore[return-value]
+        finally:
+            for owned in child_cleanup.listed()[children_before:]:
+                join_watcher(watchers.thread(owned.pid))
+
+
+def the_only_tree(root: Path) -> Path:
+    (tree,) = root.glob(TREE_PATTERN)
+    return tree
+
+
+def removal_errors(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.get_records("call")
+        if record.name == process.log.name and record.levelno == logging.ERROR
+    ]
 
 
 def set_claude_process_limit(monkeypatch: pytest.MonkeyPatch, limit: int) -> None:

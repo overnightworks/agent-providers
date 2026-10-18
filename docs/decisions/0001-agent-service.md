@@ -1264,6 +1264,10 @@ the parallel-run limit stands once, in H7's Decision.
     - *Default:* entfällt; als Quarantäne entschieden.
     - *Beleg:* A1b-3, A1b-3f, A1b-8.
 
+### A1b-4c run port (head, 18.10.2026)
+
+Every provider's subscription run goes through one neutral entry (README, `agent_providers.cli_run`); an adapter states only its pool, line limit, run files, child, stdin and line decoder, and the decoder decides the ending. Checked against A1b-0a, C0a and G0a (stdin line, stdin prompt, prompt file; JSON lines everywhere; Codex's `error` lines not terminal). The version (P1, HQ4), the turn bound (HQ6), the surface verdict (5i, HQ5) and the login form (HQ2, HQ3) stay outside the port.
+
 ### A1b measured: grok 1.0.60
 
 Measured on 18.10.2026 on the installed `grok-1.0.60-linux-x86_64` (191,294,880

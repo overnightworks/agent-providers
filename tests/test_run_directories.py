@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import errno
 import gc
-import logging
 import os
 import shutil
 import sys
@@ -20,31 +19,36 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from anchored_kernel import join_watcher, recorded_watcher_starts
 from anchored_leaders import spawn_warnings
-from anchored_support import GONE, TEST_WAIT_SECONDS, ChildCleanup
+from anchored_support import GONE, ChildCleanup
 from provider_test_support import (
     DESTINATION_FAULTS,
+    REAL_REAP_BOUNDS,
+    TREE_PATTERN,
     ScriptedClaudeChild,
     a_child_that_outlives_sigkill,
     a_credential_destination_that_fails,
+    a_private_root,
     confirm_the_retained_group_gone,
+    drive_real_children,
     fail_mkdtemp,
     fail_the_directory_named,
     held_claude_slots,
+    held_slots,
     install_claude_cli_children,
     killpg_forbidden,
     mountinfo_line,
     reap_without_waiting,
     recorded_census_workers,
+    removal_errors,
     run_bounded,
+    the_only_tree,
     tree_snapshot,
 )
 
 from agent_providers import lost_groups, process, procfs
 from agent_providers.anchored_turn import (
     CliProcessPool,
-    ReapBounds,
     anchored_turn_child,
 )
 from agent_providers.claude.provider import CLAUDE_CLI_PROCESS_POOL
@@ -66,10 +70,6 @@ from agent_providers.process import (
 from agent_providers.procfs import GroupCensus
 from agent_providers.spawn import ChildProcess, ChildProcessSpecificationError, closed_environment
 
-REAL_REAP_BOUNDS = ReapBounds(
-    sigterm_grace_seconds=TEST_WAIT_SECONDS, confirmation_seconds=TEST_WAIT_SECONDS,
-)
-TREE_PATTERN = "agent-run-*"
 PROMPT = "multi-line\nnon-ASCII text: grüße, 日本語\n".encode()
 FILES = {"prompt": PROMPT, "empty": b""}
 NAME_REFUSED = "A run file needs a single path component as its name"
@@ -108,24 +108,9 @@ HOME_AFTER_THE_LEADER = [
 WORK_AFTER_THE_LEADER = ["result"]
 
 
-def a_private_root(parent: Path, name: str = "root") -> Path:
-    root = parent / name
-    root.mkdir()
-    root.chmod(0o700)
-    return root
-
-
 @pytest.fixture
 def private_root(tmp_path: Path) -> Path:
     return a_private_root(tmp_path)
-
-
-def removal_errors(caplog: pytest.LogCaptureFixture) -> list[str]:
-    return [
-        record.getMessage()
-        for record in caplog.get_records("call")
-        if record.name == process.log.name and record.levelno == logging.ERROR
-    ]
 
 
 def descriptors_open() -> int:
@@ -194,11 +179,6 @@ def rmtree_counted(
     with monkeypatch.context() as patched:
         patched.setattr(process.shutil, "rmtree", counted)
         yield seen
-
-
-def the_only_tree(root: Path) -> Path:
-    (tree,) = root.glob(TREE_PATTERN)
-    return tree
 
 
 def remove_the_leftover(tree: Path) -> None:
@@ -356,11 +336,6 @@ class ReapObservation:
     work_entries: list[str]
 
 
-def held_slots(pool: CliProcessPool) -> int:
-    with pool._lock:
-        return len(pool._reservations)
-
-
 @dataclass
 class RealRuns:
     """Drives real leaders through the real door in a module-local pool."""
@@ -421,13 +396,7 @@ class RealRuns:
         )
 
     def drive(self, scenario: Coroutine[Any, Any, None]) -> None:
-        children_before = len(self.child_cleanup.listed())
-        with recorded_watcher_starts(self.monkeypatch) as watchers:
-            try:
-                self.child_cleanup.capture(lambda: run_bounded(scenario))
-            finally:
-                for owned in self.child_cleanup.listed()[children_before:]:
-                    join_watcher(watchers.thread(owned.pid))
+        drive_real_children(self.child_cleanup, self.monkeypatch, scenario)
 
 
 @pytest.fixture
@@ -572,7 +541,8 @@ def test_a_removal_never_follows_the_tree_replaced_by_a_link_and_logs_once(
         )
     finally:
         link.unlink()
-        assert process._remove_private_tree(renamed)
+        process._remove_private_tree(renamed)
+    assert list(real_runs.root.iterdir()) == []
 
 
 def mount_table_naming(root: Path, locate: Callable[[Path], Path]) -> Callable[[], str]:

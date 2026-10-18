@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final, Literal
 
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 
 from agent_client.wire import TurnMessage
 from agent_providers import process
@@ -56,6 +56,7 @@ from agent_providers.errors import (
     ProviderUnavailableError,
     SafeRouteReasonCode,
     normalize_route_failure,
+    raise_without_chain,
     refuse_empty_model,
 )
 from agent_providers.events import (
@@ -384,10 +385,12 @@ async def _consume_stream(
                 parsed = _safe_json_loads(raw_line)
                 if parsed is None:
                     continue
-                for event in _parse_stream_event(parsed, text_chunks, correlation_id):
+                for event in _parse_stream_event(parsed, correlation_id):
                     if isinstance(event, FinalEvent):
                         final_text = event.text
                         continue
+                    if isinstance(event, AssistantTextEvent):
+                        text_chunks.append(event.text)
                     yield event
         except asyncio.TimeoutError:
             raise UnavailableError(
@@ -447,9 +450,13 @@ def _safe_json_loads(raw_line: bytes) -> dict | None:
     if not line:
         return None
     try:
-        parsed = json.loads(line)
-    except json.JSONDecodeError:
-        log.warning("Claude stream: skipping malformed JSON line (%d bytes)", len(line))
+        parsed = json.loads(line.decode("utf-8"))
+    except (ValueError, RecursionError) as error:
+        log.warning(
+            "Claude stream: skipping malformed JSON line (%s, %d bytes)",
+            type(error).__name__,
+            len(line),
+        )
         return None
     if not isinstance(parsed, dict):
         log.warning("Claude stream: skipping non-object event")
@@ -457,14 +464,19 @@ def _safe_json_loads(raw_line: bytes) -> dict | None:
     return parsed
 
 
-def _parse_stream_event(
-    payload: dict,
-    text_chunks: list[str],
-    correlation_id: str | None,
-) -> list[StreamEvent]:
+def _parse_stream_event(payload: dict, correlation_id: str | None) -> list[StreamEvent]:
+    try:
+        return _dispatch_stream_event(payload, correlation_id)
+    except (AttributeError, TypeError, ValidationError) as error:
+        refusal = type(error).__name__
+    log.warning("Claude stream: refusing a malformed event (%s)", refusal)
+    raise_without_chain(UnavailableError(CLAUDE_CLI_UNAVAILABLE_DETAIL))
+
+
+def _dispatch_stream_event(payload: dict, correlation_id: str | None) -> list[StreamEvent]:
     kind = payload.get("type")
     if kind == "assistant":
-        return _parse_assistant_events(payload, text_chunks, correlation_id)
+        return _parse_assistant_events(payload, correlation_id)
     if kind == "user":
         return _parse_user_events(payload, correlation_id)
     if kind == "result":
@@ -474,7 +486,7 @@ def _parse_stream_event(
 
 def _raise_for_error_result(payload: dict) -> None:
     if payload.get("is_error"):
-        raise UnavailableError(CLAUDE_CLI_UNAVAILABLE_DETAIL)
+        raise_without_chain(UnavailableError(CLAUDE_CLI_UNAVAILABLE_DETAIL))
 
 
 def _parse_result_events(payload: dict, correlation_id: str | None) -> list[StreamEvent]:
@@ -489,15 +501,11 @@ def _raise_for_api_error_message(payload: dict) -> None:
     if not payload.get("is_api_error_message"):
         return
     if payload.get("error") == _CLI_AUTHENTICATION_FAILED:
-        raise CliLoginRefusedError(CLAUDE_CLI_LOGIN_REFUSED_DETAIL)
-    raise UnavailableError(CLAUDE_CLI_UNAVAILABLE_DETAIL)
+        raise_without_chain(CliLoginRefusedError(CLAUDE_CLI_LOGIN_REFUSED_DETAIL))
+    raise_without_chain(UnavailableError(CLAUDE_CLI_UNAVAILABLE_DETAIL))
 
 
-def _parse_assistant_events(
-    payload: dict,
-    text_chunks: list[str],
-    correlation_id: str | None,
-) -> list[StreamEvent]:
+def _parse_assistant_events(payload: dict, correlation_id: str | None) -> list[StreamEvent]:
     message = payload.get("message") or {}
     _raise_for_api_error_message(payload)
     events: list[StreamEvent] = []
@@ -505,7 +513,6 @@ def _parse_assistant_events(
         btype = block.get("type")
         if btype == "text":
             text = block.get("text") or ""
-            text_chunks.append(text)
             events.append(AssistantTextEvent(text=text, correlation_id=correlation_id))
         elif btype == "tool_use":
             events.append(ToolCallEvent(
@@ -1748,15 +1755,17 @@ def _parse_announced_surface(
         or payload.get("type") != _CLI_INIT_EVENT_TYPE
         or payload.get("subtype") != _CLI_INIT_EVENT_SUBTYPE
     ):
-        raise UnavailableError(
+        raise_without_chain(UnavailableError(
             "Claude CLI did not open with the expected session init event",
-        )
+        ))
     tools = payload.get("tools")
     if not isinstance(tools, list) or not all(isinstance(t, str) for t in tools):
-        raise UnavailableError("Claude CLI announced an unreadable tool list")
+        raise_without_chain(UnavailableError("Claude CLI announced an unreadable tool list"))
     commands = payload.get("slash_commands")
     if not isinstance(commands, list) or not all(isinstance(c, str) for c in commands):
-        raise UnavailableError("Claude CLI announced an unreadable slash-command list")
+        raise_without_chain(
+            UnavailableError("Claude CLI announced an unreadable slash-command list"),
+        )
     return _AnnouncedSurface(
         tools=tuple(tools),
         slash_commands=tuple(commands),

@@ -340,7 +340,6 @@ def test_a_refused_login_fails_with_the_closed_cause_and_no_cli_text(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     decoder = ClaudeStreamDecoder()
-    steps: list[Any] = []
     refused = line(
         {
             "type": "assistant",
@@ -351,11 +350,10 @@ def test_a_refused_login_fails_with_the_closed_cause_and_no_cli_text(
     )
 
     with pytest.raises(CliLoginRefusedError) as refusal:
-        steps.extend(decoder.events_of(refused))
+        decoder.events_of(refused)
 
-    assert (str(refusal.value), steps, CLI_MARKER in caplog.text) == (
+    assert (str(refusal.value), CLI_MARKER in caplog.text) == (
         CLAUDE_CLI_LOGIN_REFUSED_DETAIL,
-        [],
         False,
     )
 

@@ -402,8 +402,10 @@ def test_an_over_long_line_ends_the_run_without_its_bytes(
     script = f"printf %s {MARKER}; head -c {2 * LINE_LIMIT_BYTES} /dev/zero | tr '\\0' x; echo\n"
     adapter = LineScriptAdapter(pool, script=script, line_limit_bytes=LINE_LIMIT_BYTES)
 
+    run = collect(root, adapter, [])
+
     with pytest.raises(CliStreamLineTooLong) as refusal:
-        drive(collect(root, adapter, []))
+        drive(run)
 
     assert (
         MARKER in str(refusal.value),
@@ -426,9 +428,10 @@ def test_a_decoder_refusal_propagates_after_the_reap(
         refusal=refusal,
     )
     seen: list[StreamEvent] = []
+    run = collect(root, adapter, seen)
 
     with pytest.raises(ScriptRefused) as raised:
-        drive(collect(root, adapter, seen))
+        drive(run)
 
     assert (raised.value is refusal, seen, list(private_root.iterdir())) == (
         True,

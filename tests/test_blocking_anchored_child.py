@@ -182,7 +182,7 @@ def test_the_door_carries_the_streams_and_holds_the_exited_leader_until_its_rele
     assert held_state is not None
     assert held_state[0] == "Z"
     child.release()
-    assert [child.stdin.closed, child.stdout.closed, child.stderr.closed] == [True] * 3
+    assert all(stream.closed for stream in (child.stdin, child.stdout, child.stderr))
     assert child_cleanup.state(owned) == GONE
     child.release()
 

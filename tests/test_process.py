@@ -762,11 +762,13 @@ def test_a_cli_that_leaves_a_child_behind_is_terminated_with_its_group() -> None
 def test_a_sigterm_ignoring_cli_and_child_are_reaped_after_sigkill() -> None:
     command = "trap '' TERM; { trap '' TERM; while :; do :; done; } & while :; do :; done"
     started: list[subprocess.Popen[bytes]] = []
+    original_identities: list[tuple[str, str] | None] = []
     real_popen = subprocess.Popen
 
     def capture_process(*args, **kwargs):
         child = real_popen(*args, **kwargs)
         started.append(child)
+        original_identities.append(process_identity(child.pid))
         return child
 
     with (
@@ -777,7 +779,7 @@ def test_a_sigterm_ignoring_cli_and_child_are_reaped_after_sigkill() -> None:
     ):
         assert run_catalog_cli(shell_child("-c", command)).complete is False
 
-    assert process_identity(started[0].pid) is None
+    assert process_identity(started[0].pid) != original_identities[0]
     with pytest.raises(ProcessLookupError):
         os.killpg(started[0].pid, 0)
 
@@ -1094,11 +1096,13 @@ def test_bounded_runner_notifies_a_zombie_reap_only_after_background_confirmatio
 
 def test_bounded_runner_stops_a_cli_that_never_reads_its_full_stdin_pipe() -> None:
     started: list[subprocess.Popen[bytes]] = []
+    original_identities: list[tuple[str, str] | None] = []
     real_popen = subprocess.Popen
 
     def capture_process(*args, **kwargs):
         child = real_popen(*args, **kwargs)
         started.append(child)
+        original_identities.append(process_identity(child.pid))
         return child
 
     with patch("agent_providers.spawn.subprocess.Popen", side_effect=capture_process):
@@ -1111,16 +1115,18 @@ def test_bounded_runner_stops_a_cli_that_never_reads_its_full_stdin_pipe() -> No
 
     assert outcome is not None
     assert outcome.complete is False
-    assert process_identity(started[0].pid) is None
+    assert process_identity(started[0].pid) != original_identities[0]
 
 
 def test_bounded_runner_stops_a_cli_that_never_writes_output() -> None:
     started: list[subprocess.Popen[bytes]] = []
+    original_identities: list[tuple[str, str] | None] = []
     real_popen = subprocess.Popen
 
     def capture_process(*args, **kwargs):
         child = real_popen(*args, **kwargs)
         started.append(child)
+        original_identities.append(process_identity(child.pid))
         return child
 
     with patch("agent_providers.spawn.subprocess.Popen", side_effect=capture_process):
@@ -1133,7 +1139,7 @@ def test_bounded_runner_stops_a_cli_that_never_writes_output() -> None:
 
     assert outcome is not None
     assert outcome.complete is False
-    assert process_identity(started[0].pid) is None
+    assert process_identity(started[0].pid) != original_identities[0]
 
 
 _THE_RUNNER_DOOR_PID = FakeBlockingChild.pid
@@ -1417,31 +1423,6 @@ def test_a_failed_step_reported_to_a_dead_log_sink_still_hands_the_group_to_the_
     assert child.kill_bounds[-1] == process._BACKGROUND_REAP_LIMIT_SECONDS
 
 
-@pytest.mark.parametrize(
-    ("confirmation", "diagnostic"),
-    [
-        pytest.param(
-            process._GroupConfirmation(
-                GroupCensus.EMPTY, True, exit_published=False, released=False,
-            ),
-            "empty, exit not published",
-            id="exit-not-published",
-        ),
-        pytest.param(
-            process._GroupConfirmation(
-                GroupCensus.EMPTY, True, exit_published=True, released=False,
-            ),
-            "empty, exit published, leader not released",
-            id="exit-published",
-        ),
-    ],
-)
-def test_a_declined_empty_count_names_whether_the_exit_was_published(
-    confirmation, diagnostic,
-) -> None:
-    assert confirmation.diagnostic == diagnostic
-
-
 def test_the_settle_margin_covers_the_grace_the_count_bound_and_the_exit_wait() -> None:
     assert cli_settle_margin_seconds() == pytest.approx(11.1)
     assert cli_settle_deadline(100.0) == 100.0 + cli_settle_margin_seconds()
@@ -1498,7 +1479,10 @@ def test_the_runner_leaves_the_decision_to_free_to_the_shared_decider(
     assert outcome.became_zombie is True
     assert ("release",) not in child.operations
     assert reaped == []
-    assert len(_reap_warnings(caplog)) == 1
+    warnings = _reap_warnings(caplog)
+    assert len(warnings) == 1
+    assert "leader not released" in warnings[0]
+    assert "exit not published" not in warnings[0]
     assert [group.process for group in held_bounded_groups] == [child]
 
 

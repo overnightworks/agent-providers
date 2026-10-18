@@ -12,7 +12,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-from provider_test_support import CALLER_CONTEXTS, override_provider_runtime
+from provider_test_support import (
+    CALLER_CONTEXTS,
+    override_grok_runtime,
+    override_provider_runtime,
+    override_turn_runtime,
+)
 from pydantic import ValidationError
 
 from agent_providers.catalog import (
@@ -32,6 +37,8 @@ from agent_providers.config import (
     configure,
     current_claude_runtime,
     current_config,
+    current_grok_runtime,
+    current_grok_turn_runtime,
     current_turn_config,
     reset_config,
 )
@@ -39,10 +46,8 @@ from agent_providers.config import (
 
 def _catalog_only_runtime(tmp_path: Path) -> ProviderRuntimeConfig:
     return ProviderRuntimeConfig(
-        grok_cli_binary="/bin/sh",
         codex_cli_binary="/bin/sh",
         cli_binary_search_path=(Path("/usr/bin"),),
-        grok_cli_auth_file=tmp_path / "grok.json",
         codex_cli_auth_file=tmp_path / "codex.json",
         cli_working_directory_root=tmp_path,
     )
@@ -52,6 +57,7 @@ def test_a_catalog_host_configures_without_inventing_a_turn_fact(tmp_path: Path)
     """A host that only asks what a provider offers has no chat model to name."""
     catalog_only = _catalog_only_runtime(tmp_path)
     override_provider_runtime(**catalog_only.model_dump())
+    override_grok_runtime(binary="/bin/sh", token_file=tmp_path / "grok.json")
 
     assert current_config().turns is None
     snapshot = probe_provider_route("grok", ProviderRoute.CLI)
@@ -371,3 +377,54 @@ def test_a_host_with_a_removed_flat_claude_field_is_refused_naming_the_field(
 
     with pytest.raises(ValidationError, match=removed_flat_field):
         ProviderRuntimeConfig(**facts)
+
+
+def test_a_grok_call_without_a_grok_block_names_the_provider(tmp_path: Path) -> None:
+    override_provider_runtime(**_catalog_only_runtime(tmp_path).model_dump())
+
+    with pytest.raises(ProviderNotConfiguredError) as refused:
+        current_grok_runtime()
+
+    assert (refused.value.provider, refused.value.block) == ("grok", "grok")
+    assert "grok" in str(refused.value)
+
+
+def test_a_grok_turn_without_a_grok_turn_block_names_the_provider() -> None:
+    override_turn_runtime(grok=None)
+
+    with pytest.raises(ProviderNotConfiguredError) as refused:
+        current_grok_turn_runtime()
+
+    assert (refused.value.provider, refused.value.block) == ("grok", "turns.grok")
+
+
+@pytest.mark.parametrize(
+    "removed_flat_field",
+    [
+        pytest.param("grok_cli_binary", id="binary"),
+        pytest.param("grok_cli_auth_file", id="auth-file"),
+    ],
+)
+def test_a_host_with_a_removed_flat_grok_field_is_refused_naming_the_field(
+    removed_flat_field: str, tmp_path: Path,
+) -> None:
+    facts = {**_catalog_only_runtime(tmp_path).model_dump(), removed_flat_field: "/bin/sh"}
+
+    with pytest.raises(ValidationError, match=removed_flat_field):
+        ProviderRuntimeConfig(**facts)
+
+
+@pytest.mark.parametrize(
+    "removed_flat_field",
+    [
+        pytest.param("cli_prompt_file_prefix", id="prompt-file-prefix"),
+        pytest.param("cli_prompt_file_placeholder", id="prompt-file-placeholder"),
+    ],
+)
+def test_a_host_with_a_removed_flat_prompt_file_field_is_refused_naming_the_field(
+    removed_flat_field: str,
+) -> None:
+    facts = {**current_turn_config().model_dump(), removed_flat_field: "notes-"}
+
+    with pytest.raises(ValidationError, match=removed_flat_field):
+        TurnRuntimeConfig(**facts)

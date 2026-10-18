@@ -29,6 +29,7 @@ from provider_test_support import (
     fake_cli_executable,
     override_claude_runtime,
     override_cli_binary,
+    override_login_source,
     override_provider_runtime,
 )
 from pydantic import SecretStr
@@ -427,7 +428,7 @@ def test_an_api_key_makes_a_provider_ready_without_its_cli_block(
     provider: str, key_setting: str, environment_key: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(catalog, "_anthropic_sdk_available", lambda: True)
-    override_provider_runtime(claude=None, **{key_setting: SecretStr("a-key")})
+    override_provider_runtime(claude=None, grok=None, **{key_setting: SecretStr("a-key")})
 
     configuration = provider_configuration(provider, frozenset())
 
@@ -436,11 +437,14 @@ def test_an_api_key_makes_a_provider_ready_without_its_cli_block(
     assert configuration.environment_key == environment_key
 
 
-def test_a_claude_host_without_its_block_is_refused_not_reported_as_logged_out() -> None:
-    override_provider_runtime(claude=None)
+@pytest.mark.parametrize("provider", ["claude", "grok"])
+def test_a_host_without_a_providers_block_is_refused_not_reported_as_logged_out(
+    provider: str,
+) -> None:
+    override_provider_runtime(**{provider: None})
 
-    with pytest.raises(ProviderNotConfiguredError, match="claude"):
-        provider_configuration("claude", frozenset())
+    with pytest.raises(ProviderNotConfiguredError, match=provider):
+        provider_configuration(provider, frozenset())
 
 
 SIGNED_IN_CLI_ANSWERS = {
@@ -773,8 +777,6 @@ class _Outcome(enum.Enum):
 @dataclasses.dataclass(frozen=True)
 class _CliSetupInstall:
     provider: str
-    auth_file_setting: str
-    binary_setting: str
     api_key_setting: str
     method: ProviderSetupMethod
     environment_key: str
@@ -784,7 +786,7 @@ class _CliSetupInstall:
 CLI_SETUP_INSTALLS = [
     pytest.param(
         _CliSetupInstall(
-            "grok", "grok_cli_auth_file", "grok_cli_binary", "xai_api_key",
+            "grok", "xai_api_key",
             ProviderSetupMethod.GROK_CLI, "XAI_API_KEY",
             {
                 _Credential.VALID: b'{"realm": {"key": "synthetic-grok-key"}}',
@@ -797,7 +799,7 @@ CLI_SETUP_INSTALLS = [
     ),
     pytest.param(
         _CliSetupInstall(
-            "codex", "codex_cli_auth_file", "codex_cli_binary", "openai_api_key",
+            "codex", "openai_api_key",
             ProviderSetupMethod.CODEX_CLI, "OPENAI_API_KEY",
             {
                 _Credential.VALID: a_codex_login(),
@@ -826,12 +828,10 @@ def _a_cli_install(
         (tmp_path / "fake-cli").write_text("#!/bin/sh\n")
     override_provider_runtime(
         cli_binary_search_path=(tmp_path,),
-        **{
-            install.auth_file_setting: auth_file,
-            install.binary_setting: "absent-cli" if binary is _Binary.MISSING else "fake-cli",
-            install.api_key_setting: SecretStr("a-key") if api_key else None,
-        },
+        **{install.api_key_setting: SecretStr("a-key") if api_key else None},
     )
+    override_login_source(install.provider, auth_file)
+    override_cli_binary(install.provider, "absent-cli" if binary is _Binary.MISSING else "fake-cli")
     return calls_log
 
 

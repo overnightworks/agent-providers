@@ -56,6 +56,7 @@ from provider_test_support import (
     fail_to_start_the_runner_thread,
     order_the_thread_start_claims,
     override_cli_binary,
+    override_grok_runtime,
     override_login_source,
     override_provider_runtime,
     pool_callbacks,
@@ -2479,7 +2480,7 @@ def test_a_destination_directory_that_cannot_be_made_is_a_copy_environment_fault
 def test_an_unreadable_grok_token_mirror_is_a_login_fault_chained_from_the_read_error(
     tmp_path: Path,
 ) -> None:
-    override_provider_runtime(grok_cli_auth_file=tmp_path)
+    override_grok_runtime(token_file=tmp_path)
 
     with pytest.raises(CliLoginUnusableError) as raised:
         process.grok_cli_token_is_present()
@@ -4006,8 +4007,7 @@ def test_credential_probe_names_malformed_mounted_credentials(
         if checker == "grok"
         else process.codex_cli_login_is_usable
     )
-    field = "grok_cli_auth_file" if checker == "grok" else "codex_cli_auth_file"
-    override_provider_runtime(**{field: credential_file})
+    override_login_source(checker, credential_file)
 
     with pytest.raises(CliLoginUnusableError, match=detail):
         function()
@@ -4016,7 +4016,7 @@ def test_credential_probe_names_malformed_mounted_credentials(
 def test_a_grok_credential_that_is_not_valid_utf8_is_unusable_without_a_chain(tmp_path) -> None:
     credential_file = tmp_path / "grok.json"
     credential_file.write_bytes(b'{"realm": {"key": "\xff\xfe"}}')
-    override_provider_runtime(grok_cli_auth_file=credential_file)
+    override_grok_runtime(token_file=credential_file)
 
     with pytest.raises(CliLoginUnusableError, match=GROK_CLI_CREDENTIALS_INVALID_DETAIL) as refusal:
         process.grok_cli_token_is_present()
@@ -4030,7 +4030,7 @@ def test_a_grok_credential_is_read_as_utf8_whatever_the_locale_default_is(
 ) -> None:
     credential_file = tmp_path / "grok.json"
     credential_file.write_bytes(b'{"realm": {"key": "caf\xe9"}}')
-    override_provider_runtime(grok_cli_auth_file=credential_file)
+    override_grok_runtime(token_file=credential_file)
     read_text = Path.read_text
 
     def read_with_a_latin1_default(self: Path, encoding: str | None = None, **options):
@@ -4053,7 +4053,7 @@ def test_a_malformed_grok_credential_refusal_holds_no_text_of_the_document(
     canary = "grok-credential-canary-5d2e"
     credential_file = tmp_path / "grok.json"
     credential_file.write_text(_a_credential_document_holding(canary))
-    override_provider_runtime(grok_cli_auth_file=credential_file)
+    override_grok_runtime(token_file=credential_file)
 
     def refusal() -> CliLoginUnusableError:
         with pytest.raises(CliLoginUnusableError) as raised:
@@ -4142,7 +4142,7 @@ def test_an_unusable_codex_login_makes_the_probe_answer_logged_out(
 def test_the_grok_probe_hands_its_child_the_login_byte_for_byte(tmp_path, monkeypatch) -> None:
     auth_file = tmp_path / "grok-auth.json"
     auth_file.write_bytes(b'{"realm": {"key": "grok-synthetic-key"}}')
-    override_provider_runtime(grok_cli_auth_file=auth_file)
+    override_grok_runtime(token_file=auth_file)
     monkeypatch.setattr(process, "resolve_cli_binary", lambda _binary: Path("/usr/bin/grok"))
     copies: list[bytes] = []
 

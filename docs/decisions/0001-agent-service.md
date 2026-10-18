@@ -157,8 +157,9 @@ body rules be fixed before the build.
   signature, issuer, audience, expiry and role checks still apply.
 - **The policy.** The service reads one TOML file into frozen models that
   forbid unknown fields; a refused file stops startup naming the field.
-  `[identity]` names issuer, key-set URL (https), audience, subscription group,
-  group claim and the clock leeway `leeway_seconds` (0 to 300, default 0);
+  `[identity]` requires issuer, key-set URL (https), audience, subscription
+  group and group claim, none with a default, and takes the clock leeway
+  `leeway_seconds` (0 to 300), the only field that defaults, to 0;
   `[runs]` the run's pace and limits: `heartbeat_interval_s` (an integer, 1 to
   300, default 15), `stall_timeout_s` (default 30), `idle_timeout_s`
   (default 120) and `max_duration_s` (default 600), which must satisfy

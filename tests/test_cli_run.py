@@ -51,7 +51,7 @@ from agent_providers.cli_run import (
     StepEvent,
     SurfaceVerdict,
     astream_cli_run,
-    judge_announcement,
+    examine_announcement,
     verdict_of,
 )
 from agent_providers.config import PrivateWorkingRoot, reset_config
@@ -712,7 +712,7 @@ def test_a_refused_announcement_raises_its_verdict_alone_and_logs_its_name(
         raise UnicodeDecodeError("utf-8", MARKER.encode(), 0, 1, "invalid start byte")
     except UnicodeDecodeError:
         try:
-            judge_announcement(
+            examine_announcement(
                 a_surface(RelayState.CONNECTED, tool_beside_relay=True), relay_attached=True
             )
         except RunSurfaceRefused as refused:
@@ -741,6 +741,6 @@ def test_an_accepted_announcement_returns_without_a_log(
 ) -> None:
     caplog.set_level(logging.DEBUG)
 
-    judge_announcement(a_surface(RelayState.CONNECTED), relay_attached=True)
+    examine_announcement(a_surface(RelayState.CONNECTED), relay_attached=True)
 
     assert caplog.records == []

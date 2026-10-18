@@ -38,7 +38,7 @@ from agent_providers.cli_run import (
     StepEvent,
     SurfaceVerdict,
     drain_without_keeping,
-    judge_announcement,
+    examine_announcement,
     refuse_announcement,
 )
 from agent_providers.config import (
@@ -741,7 +741,7 @@ class ClaudeStreamDecoder:
         if payload is None:
             return []
         if _is_init_event(payload):
-            judge_announcement(
+            examine_announcement(
                 _run_surface_of(payload, relay_attached=self._relay_attached),
                 relay_attached=self._relay_attached,
             )

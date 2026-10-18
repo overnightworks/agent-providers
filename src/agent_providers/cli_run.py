@@ -6,7 +6,7 @@ through the adapter's decoder and drains stderr unkept. The group is confirmed
 gone and the tree's removal attempted before the ending is yielded; a group that
 cannot be confirmed raises ``ContainmentLost`` instead of an answer. A decoder
 judges what its CLI announced at the start as a :class:`RunSurface` through
-:func:`judge_announcement`, and a refused announcement ends the run with
+:func:`examine_announcement`, and a refused announcement ends the run with
 ``RunSurfaceRefused``. Nothing here names a provider or reads installed
 configuration.
 """
@@ -98,7 +98,7 @@ def refuse_announcement(verdict: SurfaceVerdict) -> NoReturn:
     raise_without_chain(RunSurfaceRefused(verdict))
 
 
-def judge_announcement(surface: RunSurface, *, relay_attached: bool) -> None:
+def examine_announcement(surface: RunSurface, *, relay_attached: bool) -> None:
     verdict = verdict_of(surface, relay_attached=relay_attached)
     if verdict is not SurfaceVerdict.ACCEPTED:
         refuse_announcement(verdict)

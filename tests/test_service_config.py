@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import errno
 import json
+import math
 import os
 import stat
 import tomllib
@@ -195,6 +196,9 @@ REFUSED_RUN_SETTINGS = (
     "max_duration_s = 0",
     "max_duration_s = -1",
     "max_duration_s = 100",
+    "max_duration_s = 2147484",
+    "max_duration_s = 2147483.5",
+    "max_duration_s = 2147483.0005",
     "max_tool_calls = 0",
     "max_tool_calls = true",
     "max_tool_calls = 30.0",
@@ -211,6 +215,13 @@ REFUSED_RUN_SETTINGS = (
 
 def _with_runs(setting: str) -> str:
     return VALID_CONFIG + f"\n[runs]\n{setting}\n"
+
+
+def _field_named_for(setting: str) -> str:
+    field = setting.split(" = ")[0]
+    if field == "max_parallel_cli_runs" or setting.startswith("max_duration_s = 21474"):
+        return f"runs.{field}"
+    return "runs"
 
 
 def _with_key_set_url(url: str) -> str:
@@ -299,9 +310,7 @@ def _with_key_set_url(url: str) -> str:
         *[
             pytest.param(
                 _with_runs(setting),
-                "runs.max_parallel_cli_runs"
-                if setting.startswith("max_parallel_cli_runs")
-                else "runs",
+                _field_named_for(setting),
                 id=f"runs-{setting.replace(' ', '')}",
             )
             for setting in REFUSED_RUN_SETTINGS
@@ -315,12 +324,23 @@ def test_a_refused_file_stops_startup_naming_the_field(tmp_path, capsys, text, n
     assert named_field in capsys.readouterr().err
 
 
-def test_run_limits_given_as_integers_or_floats_load(tmp_path):
-    text = _with_runs("heartbeat_interval_s = 20\nidle_timeout_s = 90\nmax_duration_s = 300.5")
+@pytest.mark.parametrize(
+    "max_duration_s",
+    [300.5, 2147483, math.nextafter(2147483.0, -math.inf)],
+    ids=["a-fraction", "the-bound", "just-below-the-bound"],
+)
+def test_run_limits_given_as_integers_or_floats_load(tmp_path, max_duration_s):
+    text = _with_runs(
+        f"heartbeat_interval_s = 20\nidle_timeout_s = 90\nmax_duration_s = {max_duration_s}"
+    )
 
     runs = load_config(_written(tmp_path, text)).runs
 
-    assert (runs.heartbeat_interval_s, runs.idle_timeout_s, runs.max_duration_s) == (20, 90, 300.5)
+    assert (runs.heartbeat_interval_s, runs.idle_timeout_s, runs.max_duration_s) == (
+        20,
+        90,
+        max_duration_s,
+    )
 
 
 @pytest.mark.parametrize("stall_timeout_s", [16, 120])

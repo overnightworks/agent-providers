@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from descendant_support import Handshake
 from mcp_app_fake import (
     CERTIFICATE_HOST,
     McpAppFake,
@@ -51,7 +52,7 @@ STRAY_TOOL_LINES = (
 
 _CLAUDE_SOURCE = """\
 #!{python}
-import http.client, json, os, sys, time, urllib.error, urllib.parse, urllib.request
+import http.client, json, os, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
 
 PLAN = json.loads({plan!r})
 if sys.argv[1:] == ["--version"]:
@@ -75,6 +76,19 @@ for name in os.listdir(home):
     with open(home + "/" + name, "rb") as source, open(capture + "/files/" + name, "wb") as copy:
         copy.write(source.read())
 relay = json.load(open(home + "/relay-mcp.json"))["mcpServers"]["relay"]
+if PLAN["descendant"]:
+    program, identity, ack, ready = PLAN["descendant"]
+    try:
+        os.close(os.open(program + ".started", os.O_CREAT | os.O_EXCL))
+    except FileExistsError:
+        pass
+    else:
+        subprocess.Popen(
+            [sys.executable, "-I", program, identity, ack, ready, "0"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        with open(ready, "rb") as published:
+            published.read(1)
 
 
 def rpc(method, params=None, request_id=None, version=None):
@@ -157,6 +171,11 @@ emit({{"type": "result", "subtype": "success", "is_error": False, "result": "don
 """
 
 
+def _paths_of(handshake: Handshake) -> list[str]:
+    paths = (handshake.program, handshake.identity, handshake.ack, handshake.ready)
+    return [str(path) for path in paths]
+
+
 @dataclass(frozen=True)
 class ClaudeCall:
     name: str
@@ -176,12 +195,17 @@ def a_relay_calling_claude(
     give_up_when_present: Path | None = None,
     timeout_seconds: float = 20.0,
     marked_by_system_prompt: bool = False,
+    descendant: Handshake | None = None,
 ) -> Path:
     """The pinned program's stand-in for a relay run; it captures into ``directory/capture``.
 
     With ``marked_by_system_prompt`` one executable serves parallel runs: the run's system text
     is its marker, naming its capture directory ``capture/<marker>`` and travelling in every
     call's arguments as ``marker``.
+
+    With ``descendant`` the first run's program starts a SIGTERM-ignoring child of its own
+    process group that stays in the group (``descendant_support``'s program), and waits for its
+    ready signal; the test's ``DescendantRow`` completes the handshake.
     """
     plan = {
         "version_line": f"{version} (Claude Code)",
@@ -195,6 +219,7 @@ def a_relay_calling_claude(
         "give_up_when_present": None if give_up_when_present is None else str(give_up_when_present),
         "timeout": timeout_seconds,
         "marked_by_system_prompt": marked_by_system_prompt,
+        "descendant": None if descendant is None else _paths_of(descendant),
     }
     binary = directory / "claude"
     binary.write_text(_CLAUDE_SOURCE.format(python=sys.executable, plan=json.dumps(plan)))

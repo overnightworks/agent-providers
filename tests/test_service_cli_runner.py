@@ -1,8 +1,7 @@
 """The service's CLI runner answers a tool-free run through the real core and ends it correctly.
 
 HTTP rows serve the real app on a loopback socket and run a fake Claude program as a real
-child; no installed core configuration exists in any of them. Production keeps tool apps on
-``provider_unavailable`` behind ``cli_offers_tools``; the tool path has its own module
+child; no installed core configuration exists in any of them. The tool path has its own module
 (``test_service_cli_runner_tools``). A tool-free run opens no connection to an app, so these
 rows give the runner no TLS context.
 """
@@ -301,13 +300,14 @@ def test_a_capability_never_reaches_the_tool_free_cli(
     assert [name for name, text in carriers.items() if any(token in text for token in signed)] == []
 
 
-def test_an_app_with_tools_ends_no_provider_yet_without_a_child(
+def test_without_a_cli_section_a_tool_app_is_provider_unavailable(
     tmp_path: Path, child_cleanup: ChildCleanup, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     capture = tmp_path / "capture"
     config = a_config(tmp_path, a_fake_claude(tmp_path, capture=capture), songmaker={})
+    without_cli = config.model_copy(update={"cli": None})
 
-    events = drive_over_http(child_cleanup, monkeypatch, config, post_a_run)
+    events = drive_over_http(child_cleanup, monkeypatch, without_cli, post_a_run)
 
     terminal = events[-1]
     assert isinstance(terminal, Failed)
@@ -913,24 +913,15 @@ def test_an_unconfirmed_group_after_a_clean_end_never_succeeds(
     drive_scripted(monkeypatch, child, scenario(), loop_factory=SteppedLoop)
 
 
-@pytest.mark.parametrize(
-    ("songmaker", "ending"),
-    [
-        pytest.param(PLAIN_APP, ("succeeded", "done"), id="plain"),
-        pytest.param({}, ("failed", NO_RUNNER_MESSAGE), id="tools"),
-    ],
-)
-def test_the_service_entry_installs_the_tool_free_cli_runner(
+def test_the_service_entry_installs_the_cli_runner(
     tmp_path: Path,
     child_cleanup: ChildCleanup,
     monkeypatch: pytest.MonkeyPatch,
     logging_state_restored: None,
     authority: TestAuthority,
-    songmaker: dict[str, object],
-    ending: tuple[str, str],
 ) -> None:
     binary = a_fake_claude(tmp_path, version_line=VERSION_LINE)
-    config = trusting(a_config(tmp_path, binary, songmaker=songmaker), authority)
+    config = trusting(a_config(tmp_path, binary, songmaker=PLAIN_APP), authority)
     served_apps: list[FastAPI] = []
     create_app_for_the_test = app_module.create_app
     monkeypatch.setattr(uvicorn, "run", lambda app, **_where: served_apps.append(app))
@@ -950,7 +941,7 @@ def test_the_service_entry_installs_the_tool_free_cli_runner(
 
     events = own_real_children(child_cleanup, monkeypatch, start_and_post)
 
-    assert shown(events)[-1] == ending
+    assert shown(events)[-1] == ("succeeded", "done")
 
 
 @pytest.mark.parametrize("provider", list(Provider))

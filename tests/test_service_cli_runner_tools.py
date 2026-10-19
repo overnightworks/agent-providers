@@ -2,21 +2,21 @@
 
 Every row serves the real app on a loopback socket, runs a fake Claude as a real child that
 speaks to the run's relay, and answers its calls from a TLS fake app signed by a test CA. The
-rows inject ``Runners(cli_offers_tools=True)`` because production keeps tool apps on
-``provider_unavailable`` until A1b-11b; the entry row goes through ``cli.main`` instead.
+rows build ``Runners(cli=CliRunner(...))`` as production does; the entry rows go through
+``cli.main`` instead.
 """
 
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import gc
 import json
+import math
 import socket
 import threading
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -32,6 +32,7 @@ from cli_tools_support import (
     a_relay_calling_claude,
     a_tool_app,
 )
+from descendant_support import DescendantRow
 from mcp_app_fake import (
     HeldRequest,
     HeldRequests,
@@ -51,10 +52,12 @@ from provider_test_support import (
 )
 from service_support import (
     PINNED_CLAUDE_VERSION,
+    assert_rejected,
     decoded_events,
     failure_lines,
     fake_app_authority,  # noqa: F401 - a fixture, requested by name
     logging_state_snapshot,  # noqa: F401 - a fixture, requested by name
+    post_run,
     run_body,
     served,
 )
@@ -80,6 +83,7 @@ from agent_client.wire import (
     ClientLoss,
     Failed,
     FailureCode,
+    RejectionCode,
     RunEvent,
     RunState,
     RunStatus,
@@ -87,6 +91,7 @@ from agent_client.wire import (
     ToolCall,
     ToolResult,
 )
+from agent_providers import spawn
 from agent_service.cli import main
 from agent_service.cli_runner import CliRunner, mcp_tls_context
 from agent_service.config import ServiceConfig
@@ -182,8 +187,7 @@ def a_tool_run(
         runners = Runners(
             cli=CliRunner(
                 config, tls_context=mcp_tls_context(authority.ca_file), clock=LoopClock()
-            ),
-            cli_offers_tools=True,
+            )
         )
 
         def play(base_url: str) -> tuple[list[RunEvent], RunStatus]:
@@ -412,8 +416,7 @@ def test_an_app_without_granted_tools_gets_the_tool_free_run(
         runners = Runners(
             cli=CliRunner(
                 config, tls_context=mcp_tls_context(authority.ca_file), clock=LoopClock()
-            ),
-            cli_offers_tools=True,
+            )
         )
 
         events = drive_over_http(child_cleanup, monkeypatch, config, post_a_run, runners)
@@ -538,11 +541,16 @@ def test_every_ending_closes_the_runs_tools_once(
 
     monkeypatch.setattr(RunTools, "close", counted)
 
-    run = a_tool_run(tmp_path, authority, child_cleanup, monkeypatch, **options)
+    a_tool_run(
+        tmp_path,
+        authority,
+        child_cleanup,
+        monkeypatch,
+        before_stop=nothing_left_running([ChildCapture(tmp_path / "capture")]),
+        **options,
+    )
 
-    with pytest.raises(ConnectionRefusedError):
-        socket.create_connection(("127.0.0.1", run.capture.relay_port), timeout=SETTLE_SECONDS)
-    assert (closes, pending_tool_tasks()) == ([ending], [])
+    assert closes == [ending]
 
 
 @pytest.fixture(name="final_held")
@@ -589,8 +597,16 @@ def test_a_capability_in_the_tool_list_fails_the_run(
     assert run.app.capability not in everything_seen + run.capture.everything_it_was_given
 
 
+@pytest.mark.parametrize(
+    ("max_duration_s", "tool_timeout_ms"),
+    [
+        pytest.param(300.0005, 300001, id="a-fraction-rounds-up"),
+        pytest.param(2147483.0, 2147483000, id="the-bound"),
+        pytest.param(math.nextafter(2147483.0, -math.inf), 2147483000, id="just-below-the-bound"),
+    ],
+)
 def test_the_child_of_a_tool_run_gets_the_configured_tool_timeout(
-    tmp_path, authority, child_cleanup, monkeypatch
+    tmp_path, authority, child_cleanup, monkeypatch, max_duration_s, tool_timeout_ms
 ):
     run = a_tool_run(
         tmp_path,
@@ -598,10 +614,11 @@ def test_the_child_of_a_tool_run_gets_the_configured_tool_timeout(
         child_cleanup,
         monkeypatch,
         calls=[SAVE_NOTE],
-        runs={"max_duration_s": 300.0005},
+        runs={"max_duration_s": max_duration_s},
     )
 
-    assert run.capture.text_of("environment").splitlines().count("MCP_TOOL_TIMEOUT=300001") == 1
+    environment = run.capture.text_of("environment").splitlines()
+    assert environment.count(f"MCP_TOOL_TIMEOUT={tool_timeout_ms}") == 1
 
 
 def saved(request: RecordedRequest):
@@ -723,6 +740,7 @@ def test_a_held_final_with_a_stuck_app_ends_by_supervision(
         scenario=settling_before_the_app_is_released(
             release, lambda base_url: scenario(base_url, final_held)
         ),
+        before_stop=nothing_left_running([ChildCapture(tmp_path / "capture")]),
         **{"calls": [SAVE_NOTE], **options},
     )
 
@@ -731,9 +749,7 @@ def test_a_held_final_with_a_stuck_app_ends_by_supervision(
     assert run.status.client_lost == client_lost
     assert final_held.is_set()
     assert not any(isinstance(event, Succeeded) for event in run.events)
-    assert (len(run.app.calls), pending_tool_tasks()) == (1, [])
-    with pytest.raises(ConnectionRefusedError):
-        socket.create_connection(("127.0.0.1", run.capture.relay_port), timeout=SETTLE_SECONDS)
+    assert len(run.app.calls) == 1
 
 
 def relay_refuses(port: int) -> bool:
@@ -867,11 +883,8 @@ def answered_with_its_marker(request: RecordedRequest):
 
 def post_a_run_marked(base_url: str, marker: str) -> list[RunEvent]:
     turn = {"system": marker, "messages": [{"role": "user", "text": "a"}]}
-    response = httpx.post(
-        f"{base_url}/runs",
-        headers={"Content-Type": "application/json", **headers()},
-        content=json.dumps(run_body(turn=turn)),
-        timeout=HELD_RUN_CLIENT_TIMEOUT_SECONDS,
+    response = post_run(
+        base_url, headers(), run_body(turn=turn), timeout=HELD_RUN_CLIENT_TIMEOUT_SECONDS
     )
     return decoded_events(response.content)
 
@@ -936,6 +949,198 @@ def test_five_parallel_tool_runs_stay_apart(tmp_path, authority, child_cleanup, 
     assert all_children_gone(child_cleanup) == [True] * 5
 
 
+def through_the_service_entry[Result](
+    tmp_path: Path,
+    config: ServiceConfig,
+    child_cleanup: ChildCleanup,
+    monkeypatch: pytest.MonkeyPatch,
+    scenario: Callable[[str], Result],
+) -> Result:
+    """Start ``cli.main`` on ``config``, serve the app it builds and play ``scenario`` on it."""
+    served_apps = []
+    create_app_for_the_test = app_module.create_app
+
+    def create_app_with_the_test_key_set(built: ServiceConfig, **keywords: Any):
+        return create_app_for_the_test(built, fetch_key_set=MINT.fetch_key_set, **keywords)
+
+    monkeypatch.setattr(uvicorn, "run", lambda built, **_where: served_apps.append(built))
+    monkeypatch.setattr(config_module, "load_config", lambda _path: config)
+    monkeypatch.setattr(app_module, "create_app", create_app_with_the_test_key_set)
+
+    def start_and_play() -> Result:
+        assert main(["--config", str(tmp_path / "agent-service.toml")]) == 0
+        with served(served_apps[0]) as base_url:
+            return scenario(base_url)
+
+    return own_real_children(child_cleanup, monkeypatch, start_and_play)
+
+
+@contextmanager
+def owning_the_descendant(row: DescendantRow) -> Iterator[None]:
+    """Complete the descendant's handshake beside the scenario, which cannot start without it."""
+    with ThreadPoolExecutor(1) as handshaking:
+        owned = handshaking.submit(row.own_the_descendant)
+        try:
+            yield
+        finally:
+            owned.result()
+
+
+def in_the_descendants_company(
+    row: DescendantRow, scenario: Callable[[str], list[RunEvent]]
+) -> Callable[[str], list[RunEvent]]:
+    def play(base_url: str) -> list[RunEvent]:
+        with owning_the_descendant(row):
+            return scenario(base_url)
+
+    return play
+
+
+@pytest.mark.parametrize(
+    ("options", "ending"),
+    [
+        pytest.param({"scenario": post_a_run}, SUCCEEDED, id="success"),
+        pytest.param(
+            {"scenario": leave_after_the_first_tool_call, "linger_seconds": 60.0},
+            (RunState.CANCELLED, None),
+            id="client-leaves",
+        ),
+    ],
+)
+def test_a_descendant_of_a_tool_run_is_dead_when_the_run_ends(
+    tmp_path, authority, child_cleanup, monkeypatch, handshake, options, ending
+):
+    scenario = options.pop("scenario")
+    descendant_dead_at_the_end: list[bool] = []
+
+    with DescendantRow(handshake, child_cleanup) as row:
+        checking_the_end = nothing_left_running([ChildCapture(tmp_path / "capture")])
+
+        def check_the_end(config: ServiceConfig) -> None:
+            descendant_dead_at_the_end.append(row.descendant_is_dead())
+            checking_the_end(config)
+
+        run = a_tool_run(
+            tmp_path,
+            authority,
+            child_cleanup,
+            monkeypatch,
+            calls=[READ_NOTE],
+            descendant=handshake,
+            scenario=in_the_descendants_company(row, scenario),
+            before_stop=check_the_end,
+            **options,
+        )
+
+    assert (ended_as(run), descendant_dead_at_the_end) == (ending, [True])
+
+
+class FirstReapGate:
+    """A gate in front of the first run's real group reap; waiting for it fails on a timeout."""
+
+    def __init__(self) -> None:
+        self.reached = threading.Event()
+        self.released = threading.Event()
+        self.reaps = 0
+
+    def wait_until_reached(self) -> None:
+        assert self.reached.wait(STUCK_APP_BOUND_SECONDS), "the first run was never reaped"
+
+
+@pytest.fixture(name="first_reap")
+def a_gate_in_front_of_the_first_real_reap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[FirstReapGate]:
+    gate = FirstReapGate()
+    reap = spawn.AnchoredChild.kill_until_gone
+
+    async def gated(child: spawn.AnchoredChild, *, within: float) -> spawn.KillUntilGoneResult:
+        gate.reaps += 1
+        if gate.reaps == 1:
+            gate.reached.set()
+            assert await asyncio.to_thread(gate.released.wait, STUCK_APP_BOUND_SECONDS)
+        return await reap(child, within=within)
+
+    monkeypatch.setattr(spawn.AnchoredChild, "kill_until_gone", gated)
+    try:
+        yield gate
+    finally:
+        gate.released.set()
+
+
+@dataclass(frozen=True)
+class RunsAcrossAStop:
+    placed_while_reaping: tuple[RunState, bool]
+    second_run: httpx.Response
+    first_status: RunStatus
+    third_status: RunStatus
+    descendant_dead_after: bool
+
+
+def test_a_real_group_keeps_its_place_through_the_service_until_the_reap_ends(
+    tmp_path, authority, child_cleanup, monkeypatch, logging_state_restored, handshake, first_reap
+):
+    held = HeldRequests(bound_seconds=STUCK_APP_BOUND_SECONDS)
+    binary = a_relay_calling_claude(
+        tmp_path,
+        version=PINNED_CLAUDE_VERSION,
+        calls=[READ_NOTE],
+        linger_seconds=60.0,
+        descendant=handshake,
+    )
+    overrides = {"tools/call": held.responder(saved)}
+    with (
+        a_tool_app(authority, list(TOOLS), overrides=overrides) as app,
+        DescendantRow(handshake, child_cleanup) as row,
+    ):
+        songmaker = {"tools": TOOLS, "mcp_origin": app.origin}
+        runs = {"max_parallel_cli_runs": 1}
+        config = trusting(a_config(tmp_path, binary, runs=runs, songmaker=songmaker), authority)
+        forwards: list[HeldRequest] = []
+
+        def leave_during_the_first_forward(base_url: str) -> list[RunEvent]:
+            return leave_when(base_url, "tool_call", lambda: forwards.extend(held.wait_for(1)))
+
+        def across_the_stop(base_url: str) -> RunsAcrossAStop:
+            with owning_the_descendant(row):
+                try:
+                    first = leave_during_the_first_forward(base_url)
+                    first_reap.wait_until_reached()
+                    while_reaping = (
+                        status_of(base_url, first).state,
+                        row.descendant_is_dead(),
+                    )
+                    second = post_run(base_url, headers(), run_body())
+                finally:
+                    first_reap.released.set()
+                [forward] = forwards
+                forward.wait_for_peer_left()
+                settled = settled_status(base_url, first)
+                dead_after = row.descendant_is_dead()
+                nothing_left_running([ChildCapture(tmp_path / "capture")])(config)
+                try:
+                    third = leave_during_the_first_forward(base_url)
+                    third_status = settled_status(base_url, third)
+                finally:
+                    held.release_all()
+            return RunsAcrossAStop(while_reaping, second, settled, third_status, dead_after)
+
+        across = through_the_service_entry(
+            tmp_path, config, child_cleanup, monkeypatch, across_the_stop
+        )
+
+    assert across.placed_while_reaping == (RunState.RUNNING, False)
+    assert_rejected(across.second_run, RejectionCode.BUSY, 429)
+    assert (ending_of(across.first_status), across.first_status.client_lost) == (
+        (RunState.CANCELLED, None),
+        ClientLoss.DISCONNECTED,
+    )
+    assert (across.descendant_dead_after, ending_of(across.third_status)) == (
+        True,
+        (RunState.CANCELLED, None),
+    )
+
+
 def test_the_mcp_trust_context_ignores_the_environment(
     tmp_path, authority, other_authority, monkeypatch
 ):
@@ -952,8 +1157,20 @@ def test_the_mcp_trust_context_ignores_the_environment(
 
 
 @pytest.mark.parametrize(
-    "signed_by_the_configured_ca",
-    [pytest.param(True, id="the-configured-ca"), pytest.param(False, id="another-ca")],
+    ("signed_by_the_configured_ca", "wire", "calls_at_the_app"),
+    [
+        pytest.param(
+            True,
+            [
+                ("tool_call", "save_note", "call-1", "side_effecting"),
+                ("tool_result", "call-1", "save_note", False),
+                ("succeeded", "done"),
+            ],
+            1,
+            id="the-configured-ca",
+        ),
+        pytest.param(False, [("failed", FailureCode.PROVIDER_ERROR)], 0, id="another-ca"),
+    ],
 )
 def test_a_run_trusts_exactly_the_configured_bundle(
     tmp_path,
@@ -963,29 +1180,22 @@ def test_a_run_trusts_exactly_the_configured_bundle(
     monkeypatch,
     logging_state_restored,
     signed_by_the_configured_ca,
+    wire,
+    calls_at_the_app,
 ):
     binary = a_relay_calling_claude(tmp_path, version=PINNED_CLAUDE_VERSION, calls=[SAVE_NOTE])
     serving_authority = authority if signed_by_the_configured_ca else other_authority
     with a_tool_app(serving_authority, list(TOOLS)) as app:
         songmaker = {"tools": TOOLS, "mcp_origin": app.origin}
         config = trusting(a_config(tmp_path, binary, songmaker=songmaker), authority)
-        served_apps = []
-        create_app_for_the_test = app_module.create_app
 
-        def create_app_with_tools_on(built: ServiceConfig, **keywords: Any):
-            keywords["runners"] = dataclasses.replace(keywords["runners"], cli_offers_tools=True)
-            return create_app_for_the_test(built, fetch_key_set=MINT.fetch_key_set, **keywords)
+        def post_and_settle(base_url: str) -> list[RunEvent]:
+            events = post_a_run(base_url)
+            settled_status(base_url, events)
+            return events
 
-        monkeypatch.setattr(uvicorn, "run", lambda built, **_where: served_apps.append(built))
-        monkeypatch.setattr(config_module, "load_config", lambda _path: config)
-        monkeypatch.setattr(app_module, "create_app", create_app_with_tools_on)
+        events = through_the_service_entry(
+            tmp_path, config, child_cleanup, monkeypatch, post_and_settle
+        )
 
-        def start_and_post() -> RunStatus:
-            assert main(["--config", str(tmp_path / "agent-service.toml")]) == 0
-            with served(served_apps[0]) as base_url:
-                events = post_a_run(base_url)
-                return settled_status(base_url, events)
-
-        status = own_real_children(child_cleanup, monkeypatch, start_and_post)
-
-    assert ending_of(status) == (SUCCEEDED if signed_by_the_configured_ca else PROVIDER_ERROR)
+    assert (wire_shape(events), len(app.calls)) == (wire, calls_at_the_app)

@@ -47,6 +47,7 @@ from relay_support import (
     post,
     post_message,
     relay_tasks,
+    within_the_bound,
     yield_until,
 )
 from service_support import (
@@ -160,12 +161,15 @@ class Stall:
         self.original_ran = False
         self.cancelling = 0
         self._claimed = False
+        self._released = False
         original = getattr(owner, name)
 
         async def stalled(*args: Any, **kwargs: Any) -> Any:
             if self._claimed:
                 return await original(*args, **kwargs)
             self._claimed = True
+            if self._released:
+                return await original(*args, **kwargs)
             gate = asyncio.Event()
             self._gate = weakref.ref(gate)
             self._strong_gate = None if weakly else gate
@@ -181,6 +185,7 @@ class Stall:
         monkeypatch.setattr(owner, name, stalled)
 
     def release(self) -> None:
+        self._released = True
         gate = self._gate() if self._gate is not None else None
         if gate is not None:
             gate.set()
@@ -389,7 +394,7 @@ async def forwarded_from_the_cli(scene: Scene, tools: RunTools) -> tuple[RawClie
     port = port_of(door_of(tools))
     first, idle = await RawClient.connect(port), await RawClient.connect(port)
     await first.send(cli_call(tools, 1))
-    event = await tools.calls.next_event()
+    event = await within_the_bound(tools.calls.next_event())
     tools.calls.accept(event)
     await yield_until(lambda: scene.app_calls() != [])
     return first, idle
@@ -421,7 +426,7 @@ async def put_a_forwarded_call_on_the_barrier(scene: Scene, barrier: ToolCallBar
     asyncio.get_running_loop().create_task(
         barrier.call(1, CallToolParams(name="edit_song", arguments={}))
     )
-    barrier.accept(await barrier.next_event())
+    barrier.accept(await within_the_bound(barrier.next_event()))
     await yield_until(lambda: scene.app_calls() != [])
 
 
@@ -451,6 +456,18 @@ async def stalled_tools(scene: Scene, plan: Stalls) -> RunTools:
     scene.stall(ToolCallBarrier, "settle")
     await put_a_forwarded_call_on_the_barrier(scene, barrier)
     return RunTools(RUN_ID, scene.clock, relay, barrier, upstream)
+
+
+class Target:
+    async def call(self) -> str:
+        return "ran"
+
+
+def test_a_stall_released_before_its_first_call_lets_that_call_through(monkeypatch):
+    stall = Stall(monkeypatch, Target, "call")
+    stall.release()
+
+    assert asyncio.run(Target().call()) == "ran"
 
 
 @pytest.mark.parametrize("app_holds", [held_before_the_head, held_after_the_head])
@@ -600,7 +617,7 @@ def test_a_callers_cancellation_never_cuts_the_close_short_and_is_delivered_afte
             closing_in_scope() if cancellation is Cancellation.LEVEL else tools.close(reap),
             name="test:closer",
         )
-        await in_the_reap.wait()
+        await within_the_bound(in_the_reap.wait())
         if cancellation is Cancellation.LEVEL:
             scope.cancel()
         else:
@@ -693,7 +710,7 @@ def test_open_builds_the_tool_set_after_discovery(authority, monkeypatch, caplog
         listed = await reply_of(client)
         assert [tool["name"] for tool in listed["result"]["tools"]] == ["edit_song"]
         await client.send(cli_call(tools, 2))
-        assert (await tools.calls.next_event()).name == "edit_song"
+        assert (await within_the_bound(tools.calls.next_event())).name == "edit_song"
         closer = start_close(tools, injected_reap())
         assert await ending_of(closer) is None
         await scene.assert_nothing_left()

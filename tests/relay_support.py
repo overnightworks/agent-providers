@@ -545,6 +545,11 @@ async def yield_until(condition: Callable[[], bool]) -> None:
             await asyncio.sleep(0)
 
 
+async def within_the_bound[T](awaitable: Awaitable[T]) -> T:
+    async with asyncio.timeout(WAIT_SECONDS):
+        return await awaitable
+
+
 async def close_bounded(relay: Relay) -> None:
     async with asyncio.timeout(WAIT_SECONDS):
         await relay.close()

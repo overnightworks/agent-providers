@@ -21,6 +21,8 @@ import anyio
 import pytest
 from provider_test_support import Recorded, ScriptedAnchoredChild, operations
 from service_support import (
+    CUT_BY_ITS_SCOPE,
+    ClockBreaksOnce,
     Drive,
     GatedRunner,
     QuarantineLineFails,
@@ -30,6 +32,7 @@ from service_support import (
     StepClock,
     client_leaves_mid_run,
     client_takes_nothing_until_dropped,
+    closed_inside,
     driven,
     failure_lines,
     in_loop,
@@ -585,27 +588,19 @@ async def test_a_scope_cut_closer_over_a_failing_hand_over_is_cancelled_after_th
     runner = GatedRunner()
     runner.close_error = _lost()
     runner.hold_close()
-    reached_after_the_close: list[bool] = []
     async with driven(runner, read=False) as drive:
         drive.took(await anext(drive.frames))
         await drive.clock.parked()
         scope = anyio.CancelScope()
-
-        async def close_inside_the_scope() -> None:
-            with scope:
-                await drive.frames.aclose()
-                reached_after_the_close.append(True)
-
-        closing = asyncio.create_task(close_inside_the_scope())
+        closing = asyncio.create_task(closed_inside(scope, drive.frames.aclose()))
         await drive.clock.parked()
         scope.cancel()
         await drive.clock.parked()
         assert not closing.done()
 
         runner.release_close()
-        await closing
 
-        assert (scope.cancelled_caught, reached_after_the_close) == (True, [])
+        assert await closing is CUT_BY_ITS_SCOPE
         assert drive.slot_is_full()
         await drive.quarantine_clock.step_to_next_deadline()
         assert not drive.slot_is_full()

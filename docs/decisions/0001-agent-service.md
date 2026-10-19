@@ -1080,17 +1080,23 @@ Rules:
    generator that is never advanced creates no record and never calls
    `runner.run`.
 8. A run is over when its runner is closed, and the store hears it at once.
-   The cleanup task (`_reap`) calls the writer's `run_over(losses)`, which
-   commits the decided terminal first, as soon as the
-   runner's close has finished or failed, exactly once, whoever waits and
+   The cleanup task (`_reap`) attempts, in this order, the quarantine's
+   hand-over, the log line of the runner's close, the writer's
+   `commit_terminal(losses)` (the decided terminal, as soon as the runner's
+   close has finished or failed) and `run_over(losses)` (the record's end and
+   the lease's release), exactly once, whoever waits and
    however often a waiter is cancelled, and before any wait for frame
    delivery. `_supervise`'s finalizer guarantees that the slot closes; it is
    not the completion notification. `_stop` raises what the decider decides
    once the runner is stopped, so a recording defect cuts the stream the way a
    supervision failure does. No step of a run's ending raises its failure past
    the decider: the supervision (its clock, its drive and the drop report it
-   makes) and the cleanup (the disconnect report, the quarantine's hand-over
-   and the record's end) record each failure in the run's one collection
+   makes) and the cleanup (the disconnect report, the quarantine's hand-over,
+   the terminal's commit and the record's end; the log line of the runner's
+   close is a reporting-only step: its failure is logged once by class and
+   positions and never raised, so the decided terminal still reaches a
+   connected client, unless another real cleanup failure independently
+   prevents delivery) record each failure in the run's one collection
    (`run_liveness.RunFailures`), in the order the failures happened. One pure decider (`run_liveness._exit_of`)
    reads that collection, any cancellation and the body's outcome: a
    cancellation always wins: one caught during teardown, one that arrived in
@@ -1113,8 +1119,10 @@ Rules:
    runner, the run is recorded complete before its first frame is handed out.
 9. The ending is the committed terminal, or `failed: provider_error` when the
    pump met a loss; `cancellation_terminal()` is used only when no terminal was
-   decided and no loss was met. `run_over()` passes no fallback when a terminal
-   was decided. The fallback's state and code are all that is read: it is never
+   decided and no loss was met. `run_over()` passes no fallback when the decided
+   terminal was committed; when its commit failed, the fallback is `failed:
+   provider_error`, and the record ends `failed` although no terminal frame
+   was sent. The fallback's state and code are all that is read: it is never
    sent, accepted or counted, and the record holds no provider text.
 10. Loss causes are latched when detected, and the first one wins. A drop calls
     `client_lost(dropped)` before it awaits the stop; a supervision failure

@@ -38,6 +38,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final, NoReturn
 
+import anyio
 import httpx
 import jwt
 import pytest
@@ -937,6 +938,34 @@ class BrokenClock(StepClock):
             await super().wait_until(deadline)
             return
         raise self._breaks_with()
+
+
+class ClockBreaksOnce:
+    """A store clock that raises on the first call after ``arm()``, then works again."""
+
+    def __init__(self) -> None:
+        self._armed = False
+
+    def arm(self) -> None:
+        self._armed = True
+
+    def __call__(self) -> datetime:
+        if self._armed:
+            self._armed = False
+            raise RuntimeError("the store clock broke once")
+        return instant(0)
+
+
+CUT_BY_ITS_SCOPE: Final = object()
+
+
+async def closed_inside(scope: anyio.CancelScope, closing: Coroutine[Any, Any, object]) -> object:
+    """Close inside ``scope``; the marker when the scope cut the closing short."""
+    finished = False
+    with scope:
+        await closing
+        finished = True
+    return CUT_BY_ITS_SCOPE if scope.cancelled_caught and not finished else None
 
 
 def tool_call(tool_use_id: str, name: str = "read_song") -> ToolCallEvent:

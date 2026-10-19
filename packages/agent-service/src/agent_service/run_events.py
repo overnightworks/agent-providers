@@ -15,10 +15,12 @@ closed. When frames go out, and when a silent or overlong run is
 ended, ``run_liveness`` decides.
 
 A run's terminal is decided when its ending happens but encoded, charged,
-accepted and recorded only once, by ``run_over`` after the runner's close; a
-containment loss the runner's pump met turns that terminal, or the fallback of
-a cut stream, into ``failed: provider_error``, and passes the run's place to the
-quarantine (``agent_service.quarantine``) before the record ends.
+accepted and recorded only once, by ``commit_terminal`` after the runner's close,
+and the record ends in ``run_over``; a containment loss the runner's pump met
+turns that terminal, or the fallback of a cut stream, into ``failed:
+provider_error``, and passes the run's place to the quarantine
+(``agent_service.quarantine``) before the record ends. A terminal whose commit
+failed ends the record ``failed: provider_error`` all the same.
 
 A tool call's input is deep-copied into its wire event, so the event never
 shares a list or dict with the runner that built it, and its effect comes from
@@ -115,6 +117,7 @@ def _failure_of(refusal: _Unsendable | _OverBudget) -> _DecidedFailure:
 
 
 _CONTAINMENT_LOST: Final = _DecidedFailure(FailureCode.PROVIDER_ERROR, RUNNER_FAILED_MESSAGE)
+_COMMIT_FAILED: Final = _DecidedFailure(FailureCode.PROVIDER_ERROR, RUNNER_FAILED_MESSAGE)
 
 
 async def run_frames(
@@ -135,6 +138,7 @@ async def run_frames(
     if runner is None:
         wire.decide_failure(FailureCode.PROVIDER_UNAVAILABLE, NO_RUNNER_MESSAGE)
         with failures.leaving():
+            failures.attempt(FailedPart.CLEANUP, lambda: wire.commit_terminal(()))
             failures.attempt(FailedPart.CLEANUP, lambda: wire.run_over(()))
             if failures.met_any:
                 return
@@ -210,18 +214,23 @@ class _WireRun:
         if losses:
             self._quarantine.hold(self._run_id, self._lease, losses)
 
+    def commit_terminal(self, losses: tuple[RetainedGroup, ...]) -> None:
+        """Commit the decided terminal; a loss turns it into ``failed: provider_error``."""
+        if self._decided is not None:
+            self._terminal_frame = self._committed_terminal(
+                _CONTAINMENT_LOST if losses else self._decided
+            )
+
     def run_over(self, losses: tuple[RetainedGroup, ...]) -> None:
-        """Commit the decided terminal, then end the record; a loss makes either provider_error."""
+        """End the record and release the lease; only a committed terminal needs no fallback."""
         try:
             recorder = self._recorder_of_started_run()
-            ending = _CONTAINMENT_LOST if losses else self._decided
-            if ending is None:
-                recorder.over(self._stream.cancellation_terminal())
-            elif not self.ended:
-                recorder.over(self._failed_event(_CONTAINMENT_LOST))
-            else:
-                self._terminal_frame = self._committed_terminal(ending)
+            if self._terminal_frame is not None:
                 recorder.over()
+            elif self.ended or losses:
+                recorder.over(self._failed_event(_COMMIT_FAILED))
+            else:
+                recorder.over(self._stream.cancellation_terminal())
         finally:
             if self._lease is not None:
                 self._lease.release()

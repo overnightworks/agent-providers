@@ -31,12 +31,14 @@ import anyio
 import pytest
 from service_support import (
     ALICE,
+    CUT_BY_ITS_SCOPE,
     MOST_BUSY_TURNS_BEFORE_THE_RUN_NEVER_SETTLES,
     QUIET,
     SONGMAKER,
     STRAY_CANCELLATION_CANARY,
     BrokenClock,
     ClientSocket,
+    ClockBreaksOnce,
     Drive,
     GatedRunner,
     ScriptedRunner,
@@ -44,6 +46,7 @@ from service_support import (
     StrayCancelledRunner,
     TokenMint,
     alice_admitted_run,
+    closed_inside,
     client_leaves_mid_run,
     client_takes_nothing_until_dropped,
     driven,
@@ -778,26 +781,18 @@ async def test_a_run_whose_terminal_was_decided_is_recorded_when_the_held_close_
 async def test_a_closer_cut_by_its_scope_waits_for_the_held_close_and_then_is_cancelled():
     runner = GatedRunner()
     runner.hold_close()
-    reached_after_the_close: list[bool] = []
     async with driven(runner, read=False) as drive:
         drive.took(await anext(drive.frames))
         scope = anyio.CancelScope()
-
-        async def close_inside_the_scope() -> None:
-            with scope:
-                await drive.frames.aclose()
-                reached_after_the_close.append(True)
-
-        closing = asyncio.create_task(close_inside_the_scope())
+        closing = asyncio.create_task(closed_inside(scope, drive.frames.aclose()))
         await drive.clock.parked()
         scope.cancel()
         await drive.clock.parked()
         assert not closing.done()
 
         runner.release_close()
-        await closing
 
-        assert (scope.cancelled_caught, reached_after_the_close) == (True, [])
+        assert await closing is CUT_BY_ITS_SCOPE
         assert drive.status().state is RunState.CANCELLED
         drive.assert_nothing_left()
 
@@ -1050,7 +1045,7 @@ async def _end_a_run(
         if not ending.cancellation.is_level:
             return asyncio.create_task(closing)
         scope = anyio.CancelScope()
-        closer = asyncio.create_task(_closed_inside(scope, closing))
+        closer = asyncio.create_task(closed_inside(scope, closing))
         scopes[closer] = scope
         return closer
 
@@ -1138,19 +1133,7 @@ def _propagated(closer: asyncio.Task[object], *, delivered: bool, by_level: bool
     failure = closer.exception()
     if failure:
         return type(failure).__name__
-    return "cancelled" if closer.result() is _CUT_BY_ITS_SCOPE else "returned"
-
-
-_CUT_BY_ITS_SCOPE: Final = object()
-
-
-async def _closed_inside(scope: anyio.CancelScope, closing: Coroutine[Any, Any, object]) -> object:
-    """Close inside ``scope``; the marker when the scope cut the closing short."""
-    finished = False
-    with scope:
-        await closing
-        finished = True
-    return _CUT_BY_ITS_SCOPE if scope.cancelled_caught and not finished else None
+    return "cancelled" if closer.result() is CUT_BY_ITS_SCOPE else "returned"
 
 
 @asynccontextmanager

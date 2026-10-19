@@ -1,0 +1,8 @@
+claim_id = "c041dcf3ffa14385a39d3d26657bafc0"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "4e330fe56c01867bfe4980e98defeda5bdeeda8c"
+branch = "claude/issue-306-8c-run-tree-release-owners"
+scope = ["README.md", "src/agent_providers/anchored_turn.py", "src/agent_providers/claude/provider.py", "src/agent_providers/codex/protocol.py", "src/agent_providers/config.py", "src/agent_providers/process.py", "tests/test_claude_provider.py", "tests/test_config.py", "tests/test_process.py", "tests/test_service_cli_version.py", "tests/test_service_config.py"]
+opened_commit = "1c94b22e6bcd10a92dbd7092011ca2d053d14b04"
+whole_reason = "The row's two core owner fixes, one root rule and one release owner, land as one hour-sized slice; each source file carries a few lines and the test files are their proof, so splitting them would pay a second claim, review and gate for the same small core diff."

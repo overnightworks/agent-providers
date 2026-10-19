@@ -285,6 +285,7 @@ def test_a_barrier_step_pending_at_the_close_leaves_no_unretrieved_failure(
         await asyncio.gather(asking, return_exceptions=True)
 
         barrier.stop()
+        await asyncio.sleep(0)
         await events.close()
         del asking
         gc.collect()

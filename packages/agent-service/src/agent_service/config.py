@@ -8,7 +8,7 @@ and needs the signing key. At load, every such app's capability is measured agai
 8,192-character limit with a reserved subject size and timestamp width, so an app whose tools
 do not fit stops startup instead of failing its users. The ``[mcp]`` section names the one
 CA bundle (``ca_file``, an absolute path) the service trusts for those origins; it is required
-as soon as any app declares an origin.
+as soon as any app declares an origin, and otherwise optional and unused.
 
 A TOML file is read once at startup into frozen models that forbid unknown
 fields. A file the models refuse stops the service with an error naming the
@@ -188,7 +188,7 @@ def _ca_bundle(path: object) -> Path:
 class McpConfig(_Section):
     """The one CA bundle that signs the certificates of the apps' MCP origins."""
 
-    ca_file: Annotated[Path, BeforeValidator(_ca_bundle)]
+    ca_file: Annotated[Path, BeforeValidator(_ca_bundle)] | None = None
 
 
 class ServerConfig(_Section):
@@ -458,6 +458,12 @@ class ServiceConfig(_Section):
         if app.mcp_origin is None or self.signing is None:
             return None
         return CapabilityScope(app.mcp_origin, app.granted_tools(), self.signing.key)
+
+    def mcp_trust_bundle(self) -> Path | None:
+        """The CA bundle for the apps' MCP origins; ``None`` while no app declares an origin."""
+        if self.mcp is None or not any(app.mcp_origin for app in self.apps.values()):
+            return None
+        return self.mcp.ca_file
 
     def app_of_workload_client(self, client_id: str) -> str | None:
         return self._apps_by_workload_client.get(client_id)

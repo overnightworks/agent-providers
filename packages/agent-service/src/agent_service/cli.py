@@ -5,8 +5,8 @@ Claude program and anything it starts could read the service's memory), a config
 service refuses, or a pinned program that does not report its version ends the process
 with exit status 2 and one line naming the reason; nothing is served. Otherwise it serves the
 app with the CLI runner installed when a ``[cli]`` section is set. The runner trusts exactly the
-CA bundle ``[mcp] ca_file`` names for the apps' MCP origins; a bundle that cannot be loaded
-ends the process the same way.
+CA bundle ``[mcp] ca_file`` names for the apps' MCP origins, loaded only when an app declares
+one; a bundle that cannot be loaded ends the process the same way.
 """
 
 from __future__ import annotations
@@ -70,7 +70,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         return EXIT_BAD_CONFIG
     try:
-        tls_context = None if config.mcp is None else mcp_tls_context(config.mcp.ca_file)
+        trust_bundle = config.mcp_trust_bundle()
+        tls_context = None if trust_bundle is None else mcp_tls_context(trust_bundle)
     except OSError as error:
         print(
             "agent-service: refusing to start: mcp.ca_file: cannot be loaded:"

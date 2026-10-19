@@ -88,6 +88,8 @@ def rpc(method, params=None, request_id=None, version=None):
             status, raw = response.status, response.read()
     except urllib.error.HTTPError as error:
         status, raw = error.code, error.read()
+    except (urllib.error.URLError, ConnectionError, OSError):
+        return None
     with open(capture + "/replies", "a") as handle:
         reply = {{"method": method, "status": status, "body": raw.decode()}}
         handle.write(json.dumps(reply) + "\\n")

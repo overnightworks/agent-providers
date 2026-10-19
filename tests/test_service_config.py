@@ -596,11 +596,23 @@ def test_an_app_origin_without_mcp_ca_file_is_refused_at_startup(tmp_path, capsy
     assert _refused_on_one_line(config_file, capsys) == ORIGIN_WITHOUT_CA_FILE_REFUSAL
 
 
-@pytest.mark.parametrize("mcp_section", ["", MCP_SECTION], ids=["no-table", "table"])
+@pytest.mark.parametrize(
+    "mcp_section", ["", "[mcp]\n\n", MCP_SECTION], ids=["no-table", "empty-table", "table"]
+)
 def test_no_origin_needs_no_mcp_ca_file(tmp_path, mcp_section):
     text = NO_ORIGIN.replace(MCP_SECTION, mcp_section)
 
     assert load_config(_written(tmp_path, text)).apps["songmaker"].mcp_origin is None
+
+
+def test_a_missing_mcp_ca_file_does_not_stop_startup_while_no_app_declares_an_origin(
+    tmp_path, served_apps
+):
+    absent = tmp_path / "absent-ca.pem"
+    text = NO_ORIGIN.replace(MCP_SECTION, f"[mcp]\nca_file = {json.dumps(str(absent))}\n\n")
+
+    assert main(["--config", str(_written(tmp_path, text))]) == 0
+    assert len(served_apps) == 1
 
 
 def test_a_relative_mcp_ca_file_is_refused_by_the_configuration(tmp_path, capsys):

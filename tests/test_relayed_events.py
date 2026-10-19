@@ -39,6 +39,7 @@ from agent_service.relayed_events import RelayedEvents
 from agent_service.run_liveness import LoopClock
 from agent_service.run_tools import RunTools
 from agent_service.tool_relay import (
+    CapabilityReflected,
     McpRelayOwner,
     Relay,
     ToolCallBarrier,
@@ -59,12 +60,13 @@ class UpstreamBroke(Exception):
 class RecordingApp:
     """An ``AppTools`` fake that answers at once and records the names it was called with."""
 
-    def __init__(self) -> None:
+    def __init__(self, answer: str | None = None) -> None:
         self.called: list[str] = []
+        self._answer = answer
 
     async def call_tool(self, name: str, arguments: Mapping[str, Any]) -> ToolOutcome:
         self.called.append(name)
-        return ToolOutcome(f"ran {name}", is_error=False)
+        return ToolOutcome(self._answer or f"ran {name}", is_error=False)
 
 
 class ScriptedCore:
@@ -175,8 +177,8 @@ def test_a_ready_relay_event_goes_before_a_ready_core_event_and_none_is_lost() -
 
         assert shown(yielded) == [
             ("tool_call", "call-1"),
-            ("assistant_text", "hi"),
             ("tool_result", "call-1"),
+            ("assistant_text", "hi"),
         ]
         barrier.stop()
         await events.close()
@@ -242,6 +244,30 @@ def test_a_ready_final_waits_for_every_queued_barrier_event() -> None:
     drive(scenario())
 
 
+def test_a_final_ready_as_the_one_result_is_queued_waits_for_that_result() -> None:
+    async def scenario() -> None:
+        app, core = RecordingApp(), ScriptedCore()
+        barrier = a_barrier(app)
+        Arrivals(barrier).arrive(1)
+        events = RelayedEvents(core.stream(), barrier)
+        yielded = await taken(events, 1)
+
+        next_event = asyncio.ensure_future(anext(events))
+        core.feed(FINAL)
+        yielded.append(await asyncio.wait_for(next_event, WAIT_SECONDS))
+        yielded.extend(await taken(events, 1))
+
+        assert shown(yielded) == [
+            ("tool_call", "call-1"),
+            ("tool_result", "call-1"),
+            ("final", "done"),
+        ]
+        barrier.stop()
+        await events.close()
+
+    drive(scenario())
+
+
 def test_the_clis_own_tool_lines_are_dropped_from_the_merged_stream() -> None:
     async def scenario() -> None:
         core = ScriptedCore()
@@ -298,10 +324,10 @@ def test_a_barrier_step_pending_at_the_close_leaves_no_unretrieved_failure(
 
 @asynccontextmanager
 async def real_tools(
-    barrier_class: type[ToolCallBarrier] = ToolCallBarrier,
+    barrier_class: type[ToolCallBarrier] = ToolCallBarrier, app: RecordingApp | None = None
 ) -> AsyncIterator[RunTools]:
     capability = capability_carrying(CANARY, tools=("edit_note",))
-    barrier = barrier_class(RUN_ID, RecordingApp(), capability)
+    barrier = barrier_class(RUN_ID, app or RecordingApp(), capability)
     offered = [ToolDefinition.model_validate({"name": "edit_note", "inputSchema": {}})]
     relay = await Relay.start(RUN_ID, McpRelayOwner(capability, offered, barrier), LoopClock())
     yield RunTools(RUN_ID, LoopClock(), relay, barrier, AsyncExitStack())
@@ -401,16 +427,30 @@ def test_a_cancellation_during_a_held_cleanup_waits_for_it(
     drive(scenario())
 
 
+async def provoke_unoffered(tools: RunTools, events: AsyncGenerator[StreamEvent, None]) -> None:
+    tools.calls.unoffered()
+
+
+async def provoke_reflected(tools: RunTools, events: AsyncGenerator[StreamEvent, None]) -> None:
+    Arrivals(tools.calls).arrive(1)
+    await asyncio.wait_for(anext(events), WAIT_SECONDS)
+
+
+@pytest.mark.parametrize(
+    ("failure", "provoke"),
+    [(UnofferedToolCalled, provoke_unoffered), (CapabilityReflected, provoke_reflected)],
+    ids=["unoffered", "reflected"],
+)
 def test_a_barrier_failure_reaches_the_service_unchanged(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, failure, provoke
 ) -> None:
     async def scenario() -> None:
         core = ScriptedCore()
-        async with real_tools() as tools:
+        async with real_tools(app=RecordingApp(answer=CANARY)) as tools:
             events, _port = a_runner_behind(monkeypatch, core, tools)
-            tools.calls.unoffered()
+            await provoke(tools, events)
 
-            with pytest.raises(UnofferedToolCalled):
-                await anext(events)
+            with pytest.raises(failure):
+                await asyncio.wait_for(anext(events), WAIT_SECONDS)
 
     drive(scenario())

@@ -55,6 +55,7 @@ class RelayedEvents:
         self._accept_the_yielded_event()
         while True:
             await self._wait_for_a_step()
+            await self._let_the_barrier_hand_out_its_queue()
             if (relayed := self._finished_relay_event()) is not None:
                 return relayed
             if (core_event := self._finished_core_event()) is not None:
@@ -108,6 +109,17 @@ class RelayedEvents:
             self._relay_step = asyncio.create_task(self._calls.next_event())
         steps = {step for step in (self._core_step, self._relay_step) if step is not None}
         await asyncio.wait(steps, return_when=asyncio.FIRST_COMPLETED)
+
+    async def _let_the_barrier_hand_out_its_queue(self) -> None:
+        """``next_event`` returns in its first step when the barrier holds a queued event.
+
+        A core event that overtakes a reader which has not had that step yet would be yielded
+        ahead of an event the barrier already queued, and a final would end the run over it.
+        """
+        core_ready = self._core_step is not None and self._core_step.done()
+        reader_pending = self._relay_step is not None and not self._relay_step.done()
+        if core_ready and reader_pending:
+            await asyncio.sleep(0)
 
     async def _next_core_event(self) -> StreamEvent | _CoreEnded:
         return await anext(self._core, _CORE_ENDED)

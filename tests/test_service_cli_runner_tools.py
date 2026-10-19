@@ -8,10 +8,11 @@ rows inject ``Runners(cli_offers_tools=True)`` because production keeps tool app
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import gc
 import json
-import time
+import socket
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -46,6 +47,7 @@ from provider_test_support import (
 )
 from service_support import (
     PINNED_CLAUDE_VERSION,
+    failure_lines,
     fake_app_authority,  # noqa: F401 - a fixture, requested by name
     logging_state_snapshot,  # noqa: F401 - a fixture, requested by name
     served,
@@ -55,6 +57,7 @@ from test_service_cli_runner import (
     PLAIN_APP,
     a_config,
     drive_over_http,
+    eventually,
     headers,
     post_a_run,
     private_root_of,
@@ -79,6 +82,7 @@ from agent_client.wire import (
 from agent_service.cli import main
 from agent_service.cli_runner import CliRunner, mcp_tls_context
 from agent_service.config import ServiceConfig
+from agent_service.run_events import RUNNER_FAILED_MESSAGE
 from agent_service.run_liveness import LoopClock
 from agent_service.run_tools import RunTools
 from agent_service.runners import Runners
@@ -122,11 +126,8 @@ def wire_shape(events: Sequence[RunEvent]) -> list[tuple[Any, ...]]:
 
 
 def settled_status(base_url: str, events: Sequence[RunEvent]) -> RunStatus:
-    deadline = time.monotonic() + SETTLE_SECONDS
-    while (status := status_of(base_url, list(events))).state is RunState.RUNNING:
-        assert time.monotonic() < deadline, "the run never ended"
-        time.sleep(0.02)
-    return status
+    eventually(lambda: status_of(base_url, list(events)).state is not RunState.RUNNING)
+    return status_of(base_url, list(events))
 
 
 def a_tool_run(
@@ -376,7 +377,10 @@ def test_a_capability_reflected_in_an_upstream_result_fails_the_run(
 
     everything_seen = json.dumps([event.model_dump(mode="json") for event in run.events])
     everything_seen += run.status.model_dump_json() + caplog.text
+    failed = [event for event in run.events if isinstance(event, Failed)]
     assert (ended_as(run), run.capture.replies) == (PROVIDER_ERROR, [])
+    assert [event.message for event in failed] == [RUNNER_FAILED_MESSAGE]
+    assert "CapabilityReflected" in [kind for _event, kind, _function in failure_lines(caplog)]
     assert run.app.capability not in everything_seen
     assert not [shape for shape in wire_shape(run.events) if shape[0] == "tool_result"]
 
@@ -470,8 +474,6 @@ def leave_after_the_first_tool_call(base_url: str) -> list[RunEvent]:
 
 def pending_tool_tasks() -> list[str]:
     gc.collect()
-    import asyncio
-
     return sorted(
         task.get_name()
         for task in (obj for obj in gc.get_objects() if isinstance(obj, asyncio.Task))
@@ -513,8 +515,6 @@ def test_every_ending_closes_the_runs_tools_once(
     monkeypatch.setattr(RunTools, "close", counted)
 
     run = a_tool_run(tmp_path, authority, child_cleanup, monkeypatch, **options)
-
-    import socket
 
     with pytest.raises(ConnectionRefusedError):
         socket.create_connection(("127.0.0.1", run.capture.relay_port), timeout=SETTLE_SECONDS)

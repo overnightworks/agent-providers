@@ -1,8 +1,0 @@
-claim_id = "8f542515129b409e9aad4caf3595d54a"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "fca3ff9aa100af969d80ea6982476279d6d0ff93"
-branch = "claude/issue-305-8a-neutral-cli-runner"
-scope = ["README.md", "docs/decisions/0001-agent-service.md", "packages/agent-service/pyproject.toml", "packages/agent-service/src/agent_service/app.py", "packages/agent-service/src/agent_service/cli.py", "packages/agent-service/src/agent_service/cli_runner.py", "packages/agent-service/src/agent_service/runners.py", "tests/provider_test_support.py", "tests/service_support.py", "tests/test_claude_run.py", "tests/test_cli_run.py", "tests/test_service_cli_runner.py", "tests/test_service_config.py", "tests/test_service_entrance.py", "uv.lock"]
-opened_commit = "1ea283fb6912dfe0297a1a9f6816d8168070e324"
-whole_reason = "One contract, the runner installed and proven end to end: its four service files carry one behaviour, and its test files are that behaviour's proof plus the two moved builders it reuses instead of copying."

@@ -268,7 +268,7 @@ def _admitted_response(
     return _RunResponse(
         run_frames(
             admitted,
-            runners.for_route(served),
+            runners.for_route(served, app_config),
             app_config,
             config.runs,
             LoopClock(),

@@ -181,6 +181,7 @@ def _service_config_document(
     issuer: str,
     runs: Mapping[str, object] | None,
     songmaker: Mapping[str, object] | None,
+    claude_binary: Path | None = None,
 ) -> dict[str, Any]:
     return {
         **({} if runs is None else {"runs": runs}),
@@ -193,7 +194,10 @@ def _service_config_document(
         },
         "cli": {
             "working_root": str(process_working_root().path),
-            "claude": {"binary": str(process_claude_cli()), "version": PINNED_CLAUDE_VERSION},
+            "claude": {
+                "binary": str(claude_binary or process_claude_cli()),
+                "version": PINNED_CLAUDE_VERSION,
+            },
         },
         "signing": {"key_file": str(process_signing_key_file())},
         "profiles": {CLI_PROFILE: {"provider": "claude", "token_file": str(process_token_file())}},
@@ -219,8 +223,11 @@ def service_config(
     runs: Mapping[str, object] | None = None,
     *,
     songmaker: Mapping[str, object] | None = None,
+    claude_binary: Path | None = None,
 ) -> ServiceConfig:
-    return ServiceConfig.model_validate(_service_config_document(issuer, runs, songmaker))
+    return ServiceConfig.model_validate(
+        _service_config_document(issuer, runs, songmaker, claude_binary)
+    )
 
 
 def plain_service_config() -> ServiceConfig:
@@ -1054,10 +1061,12 @@ async def respond_through_the_app(
     client: ClientSocket,
     monkeypatch: pytest.MonkeyPatch,
     runners: Runners | None = None,
+    config: ServiceConfig | None = None,
 ) -> asyncio.Task[None]:
     """Post a run to the real app on the drive's runner, clock and store; its response task.
 
     ``runners`` replace the drive's runner, as ``Runners()`` serves a run without one.
+    ``config`` replaces the default one, which lists the songmaker's tools.
 
     The app builds its own quarantine on ``drive.clock`` with its own
     ``ScriptedConfirmation``, so a custom ``confirm`` and ``drive.quarantine_clock``
@@ -1068,7 +1077,7 @@ async def respond_through_the_app(
     """
     monkeypatch.setattr("agent_service.app.LoopClock", lambda: drive.clock)
     app = create_app(
-        service_config(runs=drive.runs.model_dump()),
+        config or service_config(runs=drive.runs.model_dump()),
         runners=runners or Runners(cli=drive.runner),
         records=drive.records,
         fetch_key_set=shared_mint().fetch_key_set,

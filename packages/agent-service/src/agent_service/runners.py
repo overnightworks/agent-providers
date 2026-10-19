@@ -2,9 +2,10 @@
 
 A runner turns one admitted run into the provider core's in-process turn
 events (``agent_providers.events``); the service maps those onto the wire.
-Each route has at most one runner. The CLI runner (slice A1b) and the API
-runner (A2b) are not built yet, so production installs none and a run on a
-route without a runner fails as ``provider_unavailable``.
+Each route has at most one runner. Production installs the tool-free CLI
+runner (A1b-8), which serves no app that lists tools until A1b-11; the API
+runner (A2b) is not built yet. A run on a route or for an app without a runner
+fails as ``provider_unavailable``.
 
 An admitted run of an app with an MCP origin carries its capability
 (``agent_service.capability``), minted at admission; a runner that sends it
@@ -27,6 +28,7 @@ from uuid import UUID
 from agent_client.wire import RunRequest
 from agent_providers.events import StreamEvent
 from agent_service.capability import Capability
+from agent_service.config import AppConfig
 from agent_service.identity import Principal
 from agent_service.routing import Api, Cli, ServedRoute
 
@@ -49,10 +51,13 @@ class Runner(Protocol):
 class Runners:
     cli: Runner | None = None
     api: Runner | None = None
+    cli_offers_tools: bool = True
 
-    def for_route(self, served: ServedRoute) -> Runner | None:
+    def for_route(self, served: ServedRoute, app: AppConfig) -> Runner | None:
         match served:
             case Cli():
+                if app.tools and not self.cli_offers_tools:
+                    return None
                 return self.cli
             case Api():
                 return self.api

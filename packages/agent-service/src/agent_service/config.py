@@ -6,7 +6,9 @@ it must report, beside the ``[cli]`` section's private ``working_root``, checked
 app that lists tools names its one https MCP origin; an origin is never shared between apps
 and needs the signing key. At load, every such app's capability is measured against the
 8,192-character limit with a reserved subject size and timestamp width, so an app whose tools
-do not fit stops startup instead of failing its users.
+do not fit stops startup instead of failing its users. The ``[mcp]`` section names the one
+CA bundle (``ca_file``, an absolute path) the service trusts for those origins; it is required
+as soon as any app declares an origin, and otherwise optional and unused.
 
 A TOML file is read once at startup into frozen models that forbid unknown
 fields. A file the models refuse stops the service with an error naming the
@@ -179,6 +181,16 @@ class CliConfig(_Section):
         return {provider: pin for provider, pin in pinned.items() if pin is not None}
 
 
+def _ca_bundle(path: object) -> Path:
+    return _absolute_path_to("CA bundle", path)
+
+
+class McpConfig(_Section):
+    """The one CA bundle that signs the certificates of the apps' MCP origins."""
+
+    ca_file: Annotated[Path, BeforeValidator(_ca_bundle)] | None = None
+
+
 class ServerConfig(_Section):
     host: NonEmptyText = "127.0.0.1"
     port: int = Field(default=8080, ge=1, le=65535)
@@ -340,6 +352,21 @@ def _refuse_tools_without_an_origin(document: object) -> None:
             )
 
 
+def _declares_an_origin(app: object) -> bool:
+    return _value(app, "mcp_origin") is not None
+
+
+def _refuse_an_origin_without_a_ca_bundle(document: object) -> None:
+    mcp = _value(document, "mcp")
+    if isinstance(mcp, Mapping | McpConfig) and _value(mcp, "ca_file") is not None:
+        return
+    for app_name, app in _named_tables(document, "apps", AppConfig):
+        if _declares_an_origin(app):
+            raise ValueError(
+                f"mcp.ca_file: required because apps.{shown_text(app_name)} declares an mcp_origin"
+            )
+
+
 RULES_ON_THE_RAW_DOCUMENT: Final = (
     _refuse_a_second_profile_for_one_provider,
     _refuse_a_profile_for_a_provider_without_a_route,
@@ -347,6 +374,7 @@ RULES_ON_THE_RAW_DOCUMENT: Final = (
     _refuse_a_claude_profile_without_its_program_table,
     _refuse_an_origin_without_signing,
     _refuse_tools_without_an_origin,
+    _refuse_an_origin_without_a_ca_bundle,
 )
 
 
@@ -355,6 +383,7 @@ class ServiceConfig(_Section):
     server: ServerConfig = ServerConfig()
     runs: RunConfig = RunConfig()
     cli: CliConfig | None = None
+    mcp: McpConfig | None = None
     signing: SigningConfig | None = None
     profiles: dict[NonEmptyText, ProfileConfig] = Field(default_factory=dict)
     purposes: dict[NonEmptyText, PurposeConfig]
@@ -433,6 +462,12 @@ class ServiceConfig(_Section):
         if app.mcp_origin is None or self.signing is None:
             return None
         return CapabilityScope(app.mcp_origin, app.granted_tools(), self.signing.key)
+
+    def mcp_trust_bundle(self) -> Path | None:
+        """The CA bundle for the apps' MCP origins; ``None`` while no app declares an origin."""
+        if self.mcp is None or not any(map(_declares_an_origin, self.apps.values())):
+            return None
+        return self.mcp.ca_file
 
     def app_of_workload_client(self, client_id: str) -> str | None:
         return self._apps_by_workload_client.get(client_id)

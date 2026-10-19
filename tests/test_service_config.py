@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 import uvicorn
+from mcp_app_fake import TestAuthority
 from provider_test_support import fake_cli_executable
 from pydantic import ValidationError
 from service_support import (
@@ -49,6 +50,8 @@ from agent_service.config import (
 SONGMAKER_ORIGIN_LINE = 'mcp_origin = "https://songmaker.internal"\n'
 SIGNING_KEY_LINE = f"key_file = {json.dumps(str(process_signing_key_file()))}"
 SIGNING_SECTION = f"[signing]\n{SIGNING_KEY_LINE}\n\n"
+MCP_CA_FILE = TestAuthority(process_signing_key_file().parent).ca_file
+MCP_SECTION = f"[mcp]\nca_file = {json.dumps(str(MCP_CA_FILE))}\n\n"
 TOKEN_FILE_LINE = f"token_file = {json.dumps(str(process_token_file()))}"
 CLAUDE_BINARY_LINE = f"binary = {json.dumps(str(process_claude_cli()))}"
 CLAUDE_VERSION_LINE = f'version = "{PINNED_CLAUDE_VERSION}"'
@@ -80,7 +83,7 @@ group_claim = "member-groups"
 host = "127.0.0.1"
 port = 8099
 
-{CLI_SECTION}{SIGNING_SECTION}[profiles.claude-main]
+{CLI_SECTION}{SIGNING_SECTION}{MCP_SECTION}[profiles.claude-main]
 provider = "claude"
 {TOKEN_FILE_LINE}
 
@@ -578,6 +581,52 @@ def test_an_origin_without_a_signing_section_stops_startup_naming_the_field(tmp_
     config_file = _written(tmp_path, ORIGIN_WITHOUT_SIGNING)
 
     assert _refused_on_one_line(config_file, capsys) == ORIGIN_WITHOUT_SIGNING_REFUSAL
+
+
+NO_ORIGIN = VALID_CONFIG.replace(TOOLS_LINE + "\n", "").replace(SONGMAKER_ORIGIN_LINE, "")
+ORIGIN_WITHOUT_CA_FILE_REFUSAL = (
+    "mcp.ca_file: required because apps.songmaker declares an mcp_origin"
+)
+
+
+@pytest.mark.parametrize("mcp_section", ["", "[mcp]\n\n"], ids=["no-table", "empty-table"])
+def test_an_app_origin_without_mcp_ca_file_is_refused_at_startup(tmp_path, capsys, mcp_section):
+    config_file = _written(tmp_path, VALID_CONFIG.replace(MCP_SECTION, mcp_section))
+
+    assert _refused_on_one_line(config_file, capsys) == ORIGIN_WITHOUT_CA_FILE_REFUSAL
+
+
+@pytest.mark.parametrize(
+    "mcp_section", ["", "[mcp]\n\n", MCP_SECTION], ids=["no-table", "empty-table", "table"]
+)
+def test_no_origin_needs_no_mcp_ca_file(tmp_path, mcp_section):
+    text = NO_ORIGIN.replace(MCP_SECTION, mcp_section)
+
+    assert load_config(_written(tmp_path, text)).apps["songmaker"].mcp_origin is None
+
+
+def test_a_missing_mcp_ca_file_does_not_stop_startup_while_no_app_declares_an_origin(
+    tmp_path, served_apps
+):
+    absent = tmp_path / "absent-ca.pem"
+    text = NO_ORIGIN.replace(MCP_SECTION, f"[mcp]\nca_file = {json.dumps(str(absent))}\n\n")
+
+    assert main(["--config", str(_written(tmp_path, text))]) == 0
+    assert len(served_apps) == 1
+
+
+def test_a_relative_mcp_ca_file_is_refused_by_the_configuration(tmp_path, capsys):
+    text = VALID_CONFIG.replace(MCP_SECTION, '[mcp]\nca_file = "ca.pem"\n\n')
+
+    assert _refused_on_one_line(_written(tmp_path, text), capsys).startswith("mcp.ca_file: ")
+
+
+def test_a_missing_mcp_ca_file_stops_startup_naming_the_key(tmp_path, capsys):
+    absent = tmp_path / "absent-ca.pem"
+    text = VALID_CONFIG.replace(MCP_SECTION, f"[mcp]\nca_file = {json.dumps(str(absent))}\n\n")
+
+    assert main(["--config", str(_written(tmp_path, text))]) == EXIT_BAD_CONFIG
+    assert "mcp.ca_file: cannot be loaded" in capsys.readouterr().err
 
 
 def test_an_app_whose_capability_is_exactly_8192_characters_at_the_preflight_loads(tmp_path):

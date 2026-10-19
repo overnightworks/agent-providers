@@ -201,6 +201,7 @@ def _service_config_document(
                 "version": PINNED_CLAUDE_VERSION,
             },
         },
+        "mcp": {"ca_file": "/etc/agent-service/mcp-ca.pem"},
         "signing": {"key_file": str(process_signing_key_file())},
         "profiles": {CLI_PROFILE: {"provider": "claude", "token_file": str(process_token_file())}},
         "purposes": {

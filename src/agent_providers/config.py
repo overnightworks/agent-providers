@@ -149,11 +149,11 @@ class ProviderRuntimeConfig(BaseModel):
     turn paths create every child's private working directory and every
     temporary file those paths write, so a deployment states that root once instead of inheriting
     whatever ``TMPDIR`` happens to be. It holds every credential copy, so
-    :func:`configure` refuses a root that is not private: an absolute path to an
-    existing directory, not a symlink, owned by the process's effective user,
-    with mode exactly 0700. The host keeps that owner, mode and path
-    resolution, and the process's effective identity, for the process
-    lifetime. The check proves privacy only on a filesystem with POSIX
+    :func:`configure` refuses a root that is not private: an absolute path
+    written without a ``..`` component to an existing directory, not a symlink,
+    owned by the process's effective user, with mode exactly 0700. The host
+    keeps that owner, mode and path resolution, and the process's effective
+    identity, for the process lifetime. The check proves privacy only on a filesystem with POSIX
     ownership and modes, and claims no protection against a hostile
     replacement after startup.
 
@@ -228,6 +228,7 @@ class WorkingRootViolation(StrEnum):
     FOREIGN_OWNER = "foreign_owner"
     WRONG_MODE = "wrong_mode"
     UNINSPECTABLE = "uninspectable"
+    PARENT_COMPONENT = "parent_component"
 
 
 class WorkingRootNotPrivateError(RuntimeError):
@@ -286,6 +287,8 @@ _configuration_lock = threading.Lock()
 def _inspect_working_root(root: Path) -> None:
     if not root.is_absolute():
         raise_without_chain(WorkingRootNotPrivateError(WorkingRootViolation.RELATIVE))
+    if ".." in root.parts:
+        raise_without_chain(WorkingRootNotPrivateError(WorkingRootViolation.PARENT_COMPONENT))
     try:
         status = os.lstat(root)
     except (FileNotFoundError, NotADirectoryError):
@@ -311,13 +314,14 @@ def configure(config: ProviderRuntimeConfig) -> None:
     and letting the later caller win would silently discard the earlier value.
 
     Every call first inspects ``cli_working_directory_root`` and raises
-    :class:`WorkingRootNotPrivateError` unless it is an absolute path to an
-    existing directory, not a symlink, owned by the effective user, with mode
-    exactly 0700. A refusal installs nothing and leaves an earlier installation
-    in place. The host keeps the root's owner, mode and path resolution, and the
-    process's effective identity, for the process lifetime; the check proves
-    privacy only on a filesystem with POSIX ownership and modes and guards
-    against no hostile replacement after startup.
+    :class:`WorkingRootNotPrivateError` unless it is an absolute path written
+    without a ``..`` component to an existing directory, not a symlink, owned
+    by the effective user, with mode exactly 0700. A refusal installs nothing
+    and leaves an earlier installation in place. The host keeps the root's
+    owner, mode and path resolution, and the process's effective identity, for
+    the process lifetime; the check proves privacy only on a filesystem with
+    POSIX ownership and modes and guards against no hostile replacement after
+    startup.
     """
     global _configured
     _inspect_working_root(config.cli_working_directory_root)

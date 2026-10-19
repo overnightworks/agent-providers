@@ -169,8 +169,53 @@ def _with_a_component_longer_than_the_filesystem_allows(
     return base / THE_ROOT_NAME.ljust(300, "x")
 
 
+def _after_a_symlinked_component(base: Path, _monkeypatch: pytest.MonkeyPatch) -> Path:
+    deep = _a_private_directory(_a_private_directory(base / "real") / "deep")
+    _a_private_directory(base / "real" / "root")
+    (base / "link").symlink_to(deep)
+    return base / "link" / ".." / "root"
+
+
+def _through_a_real_directory(base: Path, _monkeypatch: pytest.MonkeyPatch) -> Path:
+    _a_private_directory(base / "sub")
+    _a_private_directory(base / "root")
+    return base / "sub" / ".." / "root"
+
+
+def _before_a_missing_target(base: Path, _monkeypatch: pytest.MonkeyPatch) -> Path:
+    _a_private_directory(base / "sub")
+    return base / "sub" / ".." / "absent"
+
+
+def _ending_in_a_parent(base: Path, _monkeypatch: pytest.MonkeyPatch) -> Path:
+    return _a_private_directory(base / "root") / ".."
+
+
+def _relative_with_a_parent(_base: Path, _monkeypatch: pytest.MonkeyPatch) -> Path:
+    return Path("..") / THE_ROOT_NAME
+
+
 _REFUSED_ROOTS = (
     pytest.param(WorkingRootViolation.RELATIVE, _relative, id="relative"),
+    pytest.param(
+        WorkingRootViolation.RELATIVE, _relative_with_a_parent, id="relative-with-a-parent",
+    ),
+    pytest.param(
+        WorkingRootViolation.PARENT_COMPONENT,
+        _after_a_symlinked_component,
+        id="parent-after-a-symlinked-component",
+    ),
+    pytest.param(
+        WorkingRootViolation.PARENT_COMPONENT,
+        _through_a_real_directory,
+        id="parent-through-a-real-directory",
+    ),
+    pytest.param(
+        WorkingRootViolation.PARENT_COMPONENT,
+        _before_a_missing_target,
+        id="parent-before-a-missing-target",
+    ),
+    pytest.param(WorkingRootViolation.PARENT_COMPONENT, _ending_in_a_parent, id="trailing-parent"),
     pytest.param(WorkingRootViolation.MISSING, _absent, id="absent"),
     pytest.param(WorkingRootViolation.MISSING, _a_regular_file, id="regular-file"),
     pytest.param(WorkingRootViolation.MISSING, _below_a_regular_file, id="below-a-regular-file"),
@@ -268,7 +313,18 @@ def _every_refusal(test: Callable[..., None]) -> Callable[..., None]:
 def test_the_violations_are_the_closed_set_the_contract_names() -> None:
     assert {member.value for member in WorkingRootViolation} == {
         "relative", "missing", "symlink", "foreign_owner", "wrong_mode", "uninspectable",
+        "parent_component",
     }
+
+
+@pytest.mark.parametrize("name", ["..root", "a..b", "root."])
+def test_a_root_whose_names_only_contain_dots_is_accepted(tmp_path: Path, name: str) -> None:
+    root = _a_private_directory(tmp_path / name)
+    config = _runtime_with_root(tmp_path, root)
+
+    _install_over_nothing(config)
+
+    assert (current_config(), PrivateWorkingRoot(root).path) == (config, root)
 
 
 def test_a_private_root_is_installed(tmp_path: Path) -> None:

@@ -112,7 +112,12 @@ def release_turn_reservations(
     home_reservation: PrivateHomeReservation,
     release_slot: Callable[[], None],
 ) -> None:
-    """Release a turn's home token and its pool slot, the slot even when the token raises."""
+    """Release a turn's home token and its pool slot, the slot even when the token raises.
+
+    Not ``process.released_when_the_runner_ends``: the Codex slot is bound to
+    the spawned pid, so a spawn failure and a reap release it differently, and
+    the image path releases here before any runner exists.
+    """
     try:
         home_reservation.release()
     finally:

@@ -478,6 +478,7 @@ def test_a_stall_released_before_its_first_call_lets_that_call_through(monkeypat
     assert asyncio.run(first_call()) == "ran"
 
 
+@pytest.mark.parametrize("app_holds", [held_before_the_head, held_after_the_head])
 def test_the_close_stops_before_the_reap_and_needs_neither_clock_time_nor_the_peer(
     authority, monkeypatch, caplog, app_holds
 ):

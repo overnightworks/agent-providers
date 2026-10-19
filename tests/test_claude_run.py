@@ -303,18 +303,17 @@ def test_an_empty_history_is_refused() -> None:
         a_run(history=())
 
 
+POSITIONAL_FIELDS = (Path("/opt/claude/claude"), SecretStr(CANARY_TOKEN), SYSTEM_TEXT, 30, HISTORY)
+
+
 def test_a_run_requires_its_relay_by_keyword_omitted() -> None:
     with pytest.raises(TypeError):
-        ClaudeRun(  # type: ignore[call-arg]
-            Path("/opt/claude/claude"), SecretStr(CANARY_TOKEN), SYSTEM_TEXT, 30, HISTORY
-        )
+        ClaudeRun(*POSITIONAL_FIELDS)  # type: ignore[call-arg]
 
 
 def test_a_run_requires_its_relay_by_keyword_not_by_position() -> None:
     with pytest.raises(TypeError):
-        ClaudeRun(  # type: ignore[misc]
-            Path("/opt/claude/claude"), SecretStr(CANARY_TOKEN), SYSTEM_TEXT, 30, HISTORY, None
-        )
+        ClaudeRun(*POSITIONAL_FIELDS, None)  # type: ignore[misc]
 
 
 def line(payload: dict[str, Any]) -> bytes:

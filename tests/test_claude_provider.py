@@ -3796,11 +3796,10 @@ def test_a_tool_surface_probe_refused_by_a_full_pool_leaves_no_home_behind(monke
     held = provider.CLAUDE_CLI_PROCESS_POOL.reserve()
     assert held is not None
 
+    deadline = time.monotonic() + 1
     try:
         with pytest.raises(provider._ClaudeCliProcessPoolSaturated):
-            provider._probe_cli_surface_sync(
-                Path("/usr/bin/claude"), mcp=None, deadline=time.monotonic() + 1,
-            )
+            provider._probe_cli_surface_sync(Path("/usr/bin/claude"), mcp=None, deadline=deadline)
         [home] = homes
         assert (held_claude_slots(), home.path.exists()) == (1, False)
     finally:

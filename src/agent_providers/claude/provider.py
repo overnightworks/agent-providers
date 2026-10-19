@@ -519,14 +519,12 @@ def _parse_assistant_events(payload: dict, correlation_id: str | None) -> list[S
             text = block.get("text") or ""
             events.append(AssistantTextEvent(text=text, correlation_id=correlation_id))
         elif btype == "tool_use":
-            events.append(
-                ToolCallEvent(
-                    tool_use_id=block.get("id") or "",
-                    name=block.get("name") or "",
-                    input=block.get("input") or {},
-                    correlation_id=correlation_id,
-                )
-            )
+            events.append(ToolCallEvent(
+                tool_use_id=block.get("id") or "",
+                name=block.get("name") or "",
+                input=block.get("input") or {},
+                correlation_id=correlation_id,
+            ))
     return events
 
 
@@ -543,14 +541,12 @@ def _parse_user_events(payload: dict, correlation_id: str | None) -> list[Stream
                 content_str = content
             else:
                 content_str = ""
-            events.append(
-                ToolResultEvent(
-                    tool_use_id=block.get("tool_use_id") or "",
-                    content=content_str,
-                    is_error=bool(block.get("is_error", False)),
-                    correlation_id=correlation_id,
-                )
-            )
+            events.append(ToolResultEvent(
+                tool_use_id=block.get("tool_use_id") or "",
+                content=content_str,
+                is_error=bool(block.get("is_error", False)),
+                correlation_id=correlation_id,
+            ))
     return events
 
 
@@ -608,8 +604,7 @@ def cli_model_catalog() -> ClaudeCliModelCatalog:
             CLAUDE_CLI_MODEL_CATALOG_ERROR,
         )
     return ClaudeCliModelCatalog(
-        _model_aliases_in(run.stdout),
-        _current_model_label_in(run.stdout),
+        _model_aliases_in(run.stdout), _current_model_label_in(run.stdout),
     )
 
 
@@ -632,7 +627,8 @@ def _model_aliases_in(stdout: str) -> tuple[str, ...]:
 
 def _current_model_label_in(stdout: str) -> str | None:
     marked_lines = [
-        line for line in stdout.splitlines() if line.startswith(CLAUDE_CLI_CURRENT_MODEL_MARKER)
+        line for line in stdout.splitlines()
+        if line.startswith(CLAUDE_CLI_CURRENT_MODEL_MARKER)
     ]
     if len(marked_lines) != 1:
         return None
@@ -1641,9 +1637,7 @@ def _cached_tool_surface_verdict(key: _ToolSurfaceKey) -> _ToolSurfaceMismatch |
 def _record_tool_surface_failure(key: _ToolSurfaceKey, error: UnavailableError) -> None:
     with _tool_surface_lock:
         _tool_surface_failures[key] = _ToolSurfaceFailure(
-            time.monotonic(),
-            type(error),
-            str(error),
+            time.monotonic(), type(error), str(error),
         )
 
 
@@ -1674,7 +1668,8 @@ def _evaluate_tool_surface(
 
     if surface.mcp_connected is False and not unexpected_tools and not slash_commands:
         raise UnavailableError(
-            "Claude CLI could not connect the host's MCP server — cannot verify its tool surface",
+            "Claude CLI could not connect the host's MCP server — "
+            "cannot verify its tool surface",
         )
 
     mismatch = _ToolSurfaceMismatch(
@@ -1871,11 +1866,9 @@ def _parse_announced_surface(
 ) -> _AnnouncedSurface:
     payload = _safe_json_loads(raw_line)
     if payload is None or not _is_init_event(payload):
-        raise_without_chain(
-            UnavailableError(
-                "Claude CLI did not open with the expected session init event",
-            )
-        )
+        raise_without_chain(UnavailableError(
+            "Claude CLI did not open with the expected session init event",
+        ))
     tools = _announced_tools(payload)
     if tools is None:
         raise_without_chain(UnavailableError("Claude CLI announced an unreadable tool list"))

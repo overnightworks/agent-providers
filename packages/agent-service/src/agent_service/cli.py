@@ -4,13 +4,16 @@ A platform other than Linux, a root process, a process that cannot be made non-d
 Claude program and anything it starts could read the service's memory), a configuration the
 service refuses, or a pinned program that does not report its version ends the process
 with exit status 2 and one line naming the reason; nothing is served. Otherwise it serves the
-app with the tool-free CLI runner installed when a ``[cli]`` section is set.
+app with the CLI runner installed when a ``[cli]`` section is set. The runner trusts exactly the
+CA bundle ``[mcp] ca_file`` names for the apps' MCP origins; a bundle that cannot be loaded
+ends the process the same way.
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import ssl
 import sys
 from pathlib import Path
 from typing import Final
@@ -48,9 +51,10 @@ def main(argv: list[str] | None = None) -> int:
 
     from agent_providers.secret_file import shown_text
     from agent_service.app import create_app
-    from agent_service.cli_runner import installed_runners
+    from agent_service.cli_runner import installed_runners, mcp_tls_context
     from agent_service.cli_version import ProgramVersionRefused, require_pinned_versions
     from agent_service.config import ConfigError, load_config
+    from agent_service.run_liveness import LoopClock
 
     try:
         config = load_config(arguments.config)
@@ -66,7 +70,16 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return EXIT_BAD_CONFIG
-    runners = installed_runners(config)
+    try:
+        tls_context = None if config.mcp is None else mcp_tls_context(config.mcp.ca_file)
+    except (OSError, ssl.SSLError) as error:
+        print(
+            "agent-service: refusing to start: mcp.ca_file: cannot be loaded:"
+            f" {shown_text(str(error))}",
+            file=sys.stderr,
+        )
+        return EXIT_BAD_CONFIG
+    runners = installed_runners(config, tls_context, LoopClock())
     close_transport_loggers()
     uvicorn.run(
         create_app(config, runners=runners),

@@ -1,7 +1,10 @@
 """The service's CLI runner answers a tool-free run through the real core and ends it correctly.
 
 HTTP rows serve the real app on a loopback socket and run a fake Claude program as a real
-child; no installed core configuration exists in any of them.
+child; no installed core configuration exists in any of them. Production keeps tool apps on
+``provider_unavailable`` behind ``cli_offers_tools``; the tool path has its own module
+(``test_service_cli_runner_tools``). A tool-free run opens no connection to an app, so these
+rows give the runner no TLS context.
 """
 
 from __future__ import annotations
@@ -26,6 +29,7 @@ import pytest
 import uvicorn
 from anchored_support import GONE, TEST_WAIT_SECONDS, ChildCleanup
 from fastapi import FastAPI
+from mcp_app_fake import TestAuthority
 from provider_test_support import (
     INIT_LINE,
     SUCCESS_LINE,
@@ -63,6 +67,7 @@ from service_support import (
     decoded_events,
     driven,
     failure_lines,
+    fake_app_authority,  # noqa: F401 - a fixture, requested by name
     get_run,
     instant,
     logging_state_snapshot,  # noqa: F401 - a fixture, requested by name
@@ -96,7 +101,7 @@ from agent_service.admission import AdmissionSlot
 from agent_service.app import create_app
 from agent_service.cli import main
 from agent_service.cli_runner import RUN_ADAPTERS, CliRunner, installed_runners
-from agent_service.config import Provider, ServiceConfig
+from agent_service.config import McpConfig, Provider, ServiceConfig
 from agent_service.quarantine import Quarantine
 from agent_service.run_events import (
     INVALID_EVENT_MESSAGE,
@@ -104,7 +109,9 @@ from agent_service.run_events import (
     RUNNER_FAILED_MESSAGE,
     run_frames,
 )
+from agent_service.run_liveness import LoopClock
 from agent_service.run_records import RunRecords
+from agent_service.runners import Runners
 
 MINT = TokenMint()
 CANARY = "cli-text-" + uuid.uuid4().hex
@@ -142,6 +149,14 @@ def a_config(
     )
 
 
+def trusting(config: ServiceConfig, authority: TestAuthority) -> ServiceConfig:
+    return config.model_copy(update={"mcp": McpConfig(ca_file=str(authority.ca_file))})
+
+
+def tool_free_runners(config: ServiceConfig) -> Runners:
+    return installed_runners(config, None, LoopClock())
+
+
 def private_root_of(config: ServiceConfig) -> Path:
     assert config.cli is not None
     return config.cli.working_root.path
@@ -157,7 +172,7 @@ def drive_over_http[T](
 
     The fake program's children are owned by ``child_cleanup`` and their watchers joined.
     """
-    app = create_app(config, runners=installed_runners(config), fetch_key_set=MINT.fetch_key_set)
+    app = create_app(config, runners=tool_free_runners(config), fetch_key_set=MINT.fetch_key_set)
 
     def serve() -> T:
         with served(app) as base_url:
@@ -705,7 +720,7 @@ def test_every_stop_reaps_the_cli_once_before_the_record_ends(
     async def scenario() -> None:
         client = ClientSocket(blocks_the_second_chunk=blocks_the_client)
         async with driven(read=False) as drive:
-            app = the_app_on(drive, monkeypatch, installed_runners(config), config)
+            app = the_app_on(drive, monkeypatch, tool_free_runners(config), config)
             response = await respond_through(app, client)
             await (
                 client.blocked.wait() if blocks_the_client else client.received(b"assistant_text")
@@ -740,7 +755,7 @@ def test_a_stop_at_a_yielded_event_closes_the_core_at_once(
     async def scenario() -> None:
         client = ClientSocket(blocks_the_second_chunk=True)
         async with driven(read=False) as drive:
-            app = the_app_on(drive, monkeypatch, installed_runners(config), config)
+            app = the_app_on(drive, monkeypatch, tool_free_runners(config), config)
             response = await respond_through(app, client)
             await client.blocked.wait()
             await asyncio.get_running_loop().settled()
@@ -763,7 +778,8 @@ def test_a_closed_runner_has_reaped_the_cli_before_its_close_returns(
     config = a_config(tmp_path, a_parked_claude(tmp_path, for_the_client_socket=True))
 
     async def scenario() -> tuple[AssistantTextEvent, int, list[Path], list[bool]]:
-        events = CliRunner(config).run(alice_admitted_run(uuid.uuid4()))
+        runner = CliRunner(config, tls_context=None, clock=StepClock())
+        events = runner.run(alice_admitted_run(uuid.uuid4()))
         first = await anext(events)
         await events.aclose()
         return (
@@ -833,7 +849,7 @@ def a_scripted_run(tmp_path: Path) -> ScriptedRun:
     run_id = uuid.uuid4()
     frames = run_frames(
         alice_admitted_run(run_id),
-        CliRunner(config),
+        CliRunner(config, tls_context=None, clock=clock),
         SONGMAKER,
         config.runs,
         clock,
@@ -904,11 +920,12 @@ def test_the_service_entry_installs_the_tool_free_cli_runner(
     child_cleanup: ChildCleanup,
     monkeypatch: pytest.MonkeyPatch,
     logging_state_restored: None,
+    authority: TestAuthority,
     songmaker: dict[str, object],
     ending: tuple[str, str],
 ) -> None:
     binary = a_fake_claude(tmp_path, version_line=VERSION_LINE)
-    config = a_config(tmp_path, binary, songmaker=songmaker)
+    config = trusting(a_config(tmp_path, binary, songmaker=songmaker), authority)
     served_apps: list[FastAPI] = []
     create_app_for_the_test = app_module.create_app
     monkeypatch.setattr(uvicorn, "run", lambda app, **_where: served_apps.append(app))

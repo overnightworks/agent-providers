@@ -315,7 +315,7 @@ POSITIONAL_FIELDS = (Path("/opt/claude/claude"), SecretStr(CANARY_TOKEN), SYSTEM
 )
 def test_a_run_requires_its_relay_by_keyword(arguments: tuple[Any, ...], refusal: str) -> None:
     with pytest.raises(TypeError, match=refusal):
-        ClaudeRun(*arguments)  # type: ignore[misc]
+        ClaudeRun(*arguments)
 
 
 def line(payload: dict[str, Any]) -> bytes:

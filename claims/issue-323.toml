@@ -1,8 +1,0 @@
-claim_id = "bb9936ee615b4c919bf07aaf81cca3be"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "a131836b5ae7ced5286d71e6532fbbcb8f589a2e"
-branch = "claude/issue-323-11b2-tools-in-production"
-scope = ["README.md", "docs/decisions/0001-agent-service.md", "packages/agent-service/src/agent_service/app.py", "packages/agent-service/src/agent_service/cli_runner.py", "packages/agent-service/src/agent_service/config.py", "packages/agent-service/src/agent_service/runners.py", "tests/cli_tools_support.py", "tests/service_support.py", "tests/test_service_cli_runner.py", "tests/test_service_cli_runner_tools.py", "tests/test_service_config.py"]
-opened_commit = "f3c63e8ab2c9172af83038db180d3064c7e2a692"
-whole_reason = "One contract, that the production service serves tool apps: the flag's deletion and the containment cells prove the same close, so they land together."

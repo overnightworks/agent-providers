@@ -156,12 +156,12 @@ async def drain_without_keeping(stream: asyncio.StreamReader) -> int:
         total += len(chunk)
 
 
-async def _settle(drain: asyncio.Task[int]) -> None:
+async def settle_drain(drain: asyncio.Task[int]) -> None:
     drain.cancel()
     await asyncio.gather(drain, return_exceptions=True)
 
 
-async def _next_line(stdout: asyncio.StreamReader) -> bytes:
+async def read_line(stdout: asyncio.StreamReader) -> bytes:
     try:
         return await stdout.readline()
     except ValueError:
@@ -188,10 +188,10 @@ async def astream_cli_run(
                     proc.stdin.write(start.stdin)
                     await proc.stdin.drain()
                 proc.stdin.close()
-                while line := await _next_line(proc.stdout):
+                while line := await read_line(proc.stdout):
                     for event in start.decoder.events_of(line):
                         yield event
                 returncode = await proc.exited()
             finally:
-                await _settle(drain)
+                await settle_drain(drain)
     yield start.decoder.ending(returncode)

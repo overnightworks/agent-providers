@@ -33,6 +33,7 @@ from agent_providers.anchored_turn import (
 )
 from agent_providers.cli_run import (
     CliRunStart,
+    CliStreamLineTooLong,
     RelayAccess,
     RelayState,
     RunSurface,
@@ -40,8 +41,10 @@ from agent_providers.cli_run import (
     SurfaceVerdict,
     drain_without_keeping,
     examine_announcement,
+    read_line,
     refuse_announcement,
     relay_authorization,
+    settle_drain,
 )
 from agent_providers.config import (
     McpServerSpec,
@@ -392,44 +395,23 @@ async def _consume_stream(
     timeout_seconds: int,
     correlation_id: str | None = None,
 ) -> AsyncIterator[StreamEvent]:
-    text_chunks: list[str] = []
-    final_text: str | None = None
-    stderr_task = asyncio.create_task(drain_without_keeping(proc.stderr))
+    decoder = _ClaudeLineDecoder(correlation_id)
+    drain = asyncio.create_task(drain_without_keeping(proc.stderr))
     try:
         try:
             async for raw_line in _iter_lines(proc.stdout, timeout_seconds):
-                parsed = _safe_json_loads(raw_line)
-                if parsed is None:
-                    continue
-                for event in _parse_stream_event(parsed, correlation_id):
-                    if isinstance(event, FinalEvent):
-                        final_text = event.text
-                        continue
-                    if isinstance(event, AssistantTextEvent):
-                        text_chunks.append(event.text)
+                for event in decoder.events_of(raw_line):
                     yield event
         except asyncio.TimeoutError:
             raise UnavailableError(
                 f"Claude CLI timed out after {timeout_seconds}s",
             )
-        await proc.exited()
-        stderr_size = await stderr_task
-        if proc.returncode != 0:
-            log.warning(
-                "Claude MCP stream failed (rc=%d, stderr_bytes=%d)",
-                proc.returncode,
-                stderr_size,
-            )
-            raise UnavailableError(
-                CLAUDE_CLI_UNAVAILABLE_DETAIL,
-            )
-
-        assembled = final_text if final_text is not None else "".join(text_chunks)
-        yield FinalEvent(text=assembled.strip(), correlation_id=correlation_id)
+        except CliStreamLineTooLong:
+            raise_without_chain(UnavailableError(CLAUDE_CLI_UNAVAILABLE_DETAIL))
+        returncode = await proc.exited()
     finally:
-        if not stderr_task.done():
-            stderr_task.cancel()
-            await asyncio.gather(stderr_task, return_exceptions=True)
+        await settle_drain(drain)
+    yield decoder.ending(returncode)
 
 
 async def _iter_lines(
@@ -443,7 +425,7 @@ async def _iter_lines(
         remaining = deadline - asyncio.get_event_loop().time()
         if remaining <= 0:
             raise asyncio.TimeoutError()
-        line = await asyncio.wait_for(stdout.readline(), timeout=remaining)
+        line = await asyncio.wait_for(read_line(stdout), timeout=remaining)
         if not line:
             return
         yield line
@@ -728,32 +710,25 @@ def _run_surface_of(payload: dict, *, relay_attached: bool) -> RunSurface:
     )
 
 
-class ClaudeStreamDecoder:
+class _ClaudeLineDecoder:
     """Claude's stream-json lines as events, and the ending from the result line.
 
-    The first object must be ``system/init``, and every init line is judged.
+    It judges no announcement; `ClaudeStreamDecoder` adds that judgement.
     """
 
-    def __init__(self, *, relay_attached: bool) -> None:
-        self._relay_attached = relay_attached
-        self._announced = False
+    def __init__(self, correlation_id: str | None = None) -> None:
+        self._correlation_id = correlation_id
         self._result: str | None = None
 
     def events_of(self, line: bytes) -> list[StepEvent]:
         payload = _safe_json_loads(line)
         if payload is None:
             return []
-        if _is_init_event(payload):
-            examine_announcement(
-                _run_surface_of(payload, relay_attached=self._relay_attached),
-                relay_attached=self._relay_attached,
-            )
-            self._announced = True
-            return []
-        if not self._announced:
-            refuse_announcement(SurfaceVerdict.NOT_ANNOUNCED)
+        return self._events_of_payload(payload)
+
+    def _events_of_payload(self, payload: dict) -> list[StepEvent]:
         steps: list[StepEvent] = []
-        for event in _parse_stream_event(payload, None):
+        for event in _parse_stream_event(payload, self._correlation_id):
             if isinstance(event, FinalEvent):
                 self._result = event.text
             elif isinstance(event, (AssistantTextEvent, ToolCallEvent, ToolResultEvent)):
@@ -766,7 +741,31 @@ class ClaudeStreamDecoder:
                 "Claude run failed (rc=%d, result=%s)", returncode, self._result is not None
             )
             raise UnavailableError(CLAUDE_CLI_UNAVAILABLE_DETAIL)
-        return FinalEvent(text=self._result.strip())
+        return FinalEvent(text=self._result.strip(), correlation_id=self._correlation_id)
+
+
+class ClaudeStreamDecoder(_ClaudeLineDecoder):
+    """The line decoder that also judges the run's announcement.
+
+    The first object must be ``system/init``, and every init line is judged.
+    """
+
+    def __init__(self, *, relay_attached: bool) -> None:
+        super().__init__()
+        self._relay_attached = relay_attached
+        self._announced = False
+
+    def _events_of_payload(self, payload: dict) -> list[StepEvent]:
+        if _is_init_event(payload):
+            examine_announcement(
+                _run_surface_of(payload, relay_attached=self._relay_attached),
+                relay_attached=self._relay_attached,
+            )
+            self._announced = True
+            return []
+        if not self._announced:
+            refuse_announcement(SurfaceVerdict.NOT_ANNOUNCED)
+        return super()._events_of_payload(payload)
 
 
 @dataclass(frozen=True)

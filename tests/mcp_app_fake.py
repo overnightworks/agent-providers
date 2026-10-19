@@ -172,6 +172,10 @@ class HeldRequest:
     def released(self) -> bool:
         return self._released.is_set()
 
+    @property
+    def ended(self) -> bool:
+        return self._ended.is_set()
+
     def release(self) -> None:
         self._released.set()
 
@@ -187,6 +191,7 @@ class HeldRequest:
 
     def keep_until_released(self, connection: ssl.SSLSocket, app_closing: threading.Event) -> bool:
         """Hold the connection; true when the test released it and the answer is to be sent."""
+        handler_timeout = connection.gettimeout()
         connection.settimeout(POLL_SECONDS)
         deadline = time.monotonic() + self._bound_seconds
         try:
@@ -201,6 +206,7 @@ class HeldRequest:
             self._failure = failure
             return False
         finally:
+            connection.settimeout(handler_timeout)
             self._ended.set()
 
     @staticmethod
@@ -248,7 +254,7 @@ class HeldRequests:
                 held.release()
 
     def _unreleased(self) -> list[HeldRequest]:
-        return [held for held in self._held if not held.released]
+        return [held for held in self._held if not (held.released or held.ended)]
 
 
 class Fate(StrEnum):

@@ -62,6 +62,7 @@ def closes_the_socket(client: ssl.SSLSocket) -> None:
 
 
 def resets_the_connection(client: ssl.SSLSocket) -> None:
+    """The kernel may report the reset as an end of stream; both mark the peer left."""
     client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
     client.close()
 

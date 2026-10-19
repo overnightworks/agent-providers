@@ -33,6 +33,7 @@ from cli_tools_support import (
     a_tool_app,
 )
 from mcp_app_fake import (
+    HeldRequest,
     HeldRequests,
     RecordedRequest,
     Responder,
@@ -153,12 +154,15 @@ def a_tool_run(
     serving_authority: TestAuthority | None = None,
     app_stays_up: bool = True,
     scenario: Callable[[str], list[RunEvent]] = post_a_run,
+    before_stop: Callable[[ServiceConfig], None] = lambda _config: None,
     **claude_options: Any,
 ) -> ToolRun:
     """One run of the real runner with its tools on, against a TLS fake app, over HTTP.
 
     The runner trusts ``authority``; the app is signed by ``serving_authority`` (default the
     same). ``app_stays_up=False`` stops the app before the run, so its origin refuses.
+    ``before_stop`` runs once the run has settled and the service still serves, because stopping
+    the service cancels what a faulty close would have left behind.
     """
     binary = a_relay_calling_claude(
         tmp_path, version=PINNED_CLAUDE_VERSION, calls=calls, **claude_options
@@ -184,7 +188,9 @@ def a_tool_run(
 
         def play(base_url: str) -> tuple[list[RunEvent], RunStatus]:
             events = scenario(base_url)
-            return events, settled_status(base_url, events)
+            status = settled_status(base_url, events)
+            before_stop(config)
+            return events, status
 
         events, status = drive_over_http(child_cleanup, monkeypatch, config, play, runners)
     return ToolRun(events, status, app, ChildCapture(tmp_path / "capture"), config)
@@ -730,17 +736,40 @@ def test_a_held_final_with_a_stuck_app_ends_by_supervision(
         socket.create_connection(("127.0.0.1", run.capture.relay_port), timeout=SETTLE_SECONDS)
 
 
+def relay_refuses(port: int) -> bool:
+    try:
+        socket.create_connection(("127.0.0.1", port), timeout=SETTLE_SECONDS).close()
+    except ConnectionRefusedError:
+        return True
+    return False
+
+
+def nothing_left_running(
+    captures: Sequence[ChildCapture], *, private_root_left_empty: bool = False
+) -> Callable[[ServiceConfig], None]:
+    def check(config: ServiceConfig) -> None:
+        eventually(lambda: (held_claude_slots(), pending_tool_tasks()) == (0, []))
+        for capture in captures:
+            eventually(lambda: relay_refuses(capture.relay_port))
+        if private_root_left_empty:
+            eventually(lambda: list(private_root_of(config).iterdir()) == [])
+
+    return check
+
+
 def leaving_beside_the_held_request(
     held: HeldRequests, event_type: str, also_ready: Callable[[], None] = lambda: None
 ) -> Callable[[str], list[RunEvent]]:
     def play(base_url: str) -> list[RunEvent]:
+        holding: list[HeldRequest] = []
+
         def ready() -> None:
-            held.wait_for(1)
+            holding.extend(held.wait_for(1))
             also_ready()
 
         try:
             events = leave_when(base_url, event_type, ready)
-            [request] = held.wait_for(1)
+            [request] = holding
             request.wait_for_peer_left()
             return events
         finally:
@@ -756,7 +785,7 @@ def assert_the_departure_left_nothing_running(run: ToolRun, caplog) -> None:
         None,
     )
     assert not any(isinstance(event, (ToolResult, Succeeded)) for event in run.events)
-    assert (held_claude_slots(), pending_tool_tasks(), failure_lines(caplog)) == (0, [], [])
+    assert failure_lines(caplog) == []
 
 
 def test_a_client_leaving_during_a_forward_cancels_it_upstream(
@@ -772,12 +801,11 @@ def test_a_client_leaving_during_a_forward_cancels_it_upstream(
         calls=[READ_NOTE],
         overrides={"tools/call": held.responder(saved)},
         scenario=leaving_beside_the_held_request(held, "tool_call"),
+        before_stop=nothing_left_running([ChildCapture(tmp_path / "capture")]),
     )
 
     assert_the_departure_left_nothing_running(run, caplog)
     assert (len(run.app.calls), run.capture.replies) == (1, [])
-    with pytest.raises(ConnectionRefusedError):
-        socket.create_connection(("127.0.0.1", run.capture.relay_port), timeout=SETTLE_SECONDS)
 
 
 def test_a_client_leaving_beside_a_held_final_cancels_the_forward(
@@ -796,12 +824,11 @@ def test_a_client_leaving_beside_a_held_final_cancels_the_forward(
         scenario=leaving_beside_the_held_request(
             held, "tool_call", lambda: eventually(final_held.is_set)
         ),
+        before_stop=nothing_left_running([ChildCapture(tmp_path / "capture")]),
     )
 
     assert_the_departure_left_nothing_running(run, caplog)
     assert (final_held.is_set(), len(run.app.calls), run.capture.replies) == (True, 1, [])
-    with pytest.raises(ConnectionRefusedError):
-        socket.create_connection(("127.0.0.1", run.capture.relay_port), timeout=SETTLE_SECONDS)
 
 
 def test_a_client_leaving_during_the_open_starts_no_child(
@@ -820,11 +847,11 @@ def test_a_client_leaving_during_the_open_starts_no_child(
         calls=[SAVE_NOTE],
         overrides={"initialize": held.responder(initialized)},
         scenario=leaving_beside_the_held_request(held, "run_started"),
+        before_stop=nothing_left_running([], private_root_left_empty=True),
     )
 
     assert_the_departure_left_nothing_running(run, caplog)
     assert (run.capture.started, run.app.calls) == (False, [])
-    assert list(private_root_of(run.config).iterdir()) == []
 
 
 PARALLEL_MARKERS = [f"run-{number}" for number in range(5)]
@@ -871,6 +898,7 @@ def five_runs_held_inside_their_calls_at_once(
 def test_five_parallel_tool_runs_stay_apart(tmp_path, authority, child_cleanup, monkeypatch):
     held = HeldRequests(bound_seconds=STUCK_APP_BOUND_SECONDS)
     outcomes: dict[str, tuple[list[RunEvent], RunStatus]] = {}
+    captures = {marker: ChildCapture(tmp_path / "capture" / marker) for marker in PARALLEL_MARKERS}
 
     run = a_tool_run(
         tmp_path,
@@ -881,9 +909,9 @@ def test_five_parallel_tool_runs_stay_apart(tmp_path, authority, child_cleanup, 
         marked_by_system_prompt=True,
         overrides={"tools/call": held.responder(answered_with_its_marker)},
         scenario=five_runs_held_inside_their_calls_at_once(held, outcomes),
+        before_stop=nothing_left_running(list(captures.values())),
     )
 
-    captures = {marker: ChildCapture(tmp_path / "capture" / marker) for marker in PARALLEL_MARKERS}
     assert {marker: wire_shape(events) for marker, (events, _status) in outcomes.items()} == {
         marker: [
             ("tool_call", "save_note", "call-1", "side_effecting"),
@@ -899,11 +927,7 @@ def test_five_parallel_tool_runs_stay_apart(tmp_path, authority, child_cleanup, 
     } == {marker: [True] for marker in captures}
     assert len({capture.relay_secret for capture in captures.values()}) == 5
     assert len({call.headers["authorization"] for call in run.app.calls}) == 5
-    assert (held_claude_slots(), pending_tool_tasks()) == (0, [])
     assert all_children_gone(child_cleanup) == [True] * 5
-    for capture in captures.values():
-        with pytest.raises(ConnectionRefusedError):
-            socket.create_connection(("127.0.0.1", capture.relay_port), timeout=SETTLE_SECONDS)
 
 
 def test_the_mcp_trust_context_ignores_the_environment(

@@ -9,41 +9,60 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import signal
 import threading
 import time
 import uuid
-from collections.abc import Callable, Coroutine, Iterator
+from collections.abc import AsyncGenerator, Callable, Coroutine, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
+import uvicorn
 from anchored_support import GONE, TEST_WAIT_SECONDS, ChildCleanup
+from fastapi import FastAPI
 from provider_test_support import (
     INIT_LINE,
     SUCCESS_LINE,
     SYSTEM_TEXT,
     TEXT_LINE,
+    ScriptedClaudeChild,
+    a_child_that_outlives_sigkill,
+    a_claude_cli_child,
     a_claude_stdin_line,
     a_fake_claude,
     a_private_root,
     an_init,
     drive_real_children,
+    drive_scripted,
     held_claude_slots,
     line,
     own_real_children,
+    the_only_tree,
 )
+from pydantic import ValidationError
 from service_support import (
+    ALICE,
+    CLI_PROFILE,
     PINNED_CLAUDE_VERSION,
     PROCESS_TOKEN,
+    SONGMAKER,
+    TEST_ISSUER,
     ClientSocket,
     Drive,
+    StepClock,
     SteppedLoop,
     TokenMint,
+    _service_config_document,
+    alice_admitted_run,
     decoded_events,
     driven,
     failure_lines,
     get_run,
+    instant,
+    logging_state_snapshot,  # noqa: F401 - a fixture, requested by name
     post_run,
     record_signed_tokens,
     respond_through_the_app,
@@ -53,6 +72,9 @@ from service_support import (
     service_config,
 )
 
+import agent_service.app as app_module
+import agent_service.config as config_module
+from agent_client.sse import RunStreamDecoder
 from agent_client.wire import (
     ClientLoss,
     Failed,
@@ -61,12 +83,23 @@ from agent_client.wire import (
     RunState,
     RunStatus,
 )
-from agent_providers import spawn
+from agent_providers import lost_groups, spawn
 from agent_providers.config import PrivateWorkingRoot, reset_config
+from agent_providers.procfs import GroupCensus
+from agent_providers.spawn import KillUntilGoneResult
+from agent_service.admission import AdmissionSlot
 from agent_service.app import create_app
-from agent_service.cli_runner import installed_runners
-from agent_service.config import ServiceConfig
-from agent_service.run_events import INVALID_EVENT_MESSAGE, NO_RUNNER_MESSAGE, RUNNER_FAILED_MESSAGE
+from agent_service.cli import main
+from agent_service.cli_runner import RUN_ADAPTERS, CliRunner, installed_runners
+from agent_service.config import Provider, ServiceConfig
+from agent_service.quarantine import Quarantine
+from agent_service.run_events import (
+    INVALID_EVENT_MESSAGE,
+    NO_RUNNER_MESSAGE,
+    RUNNER_FAILED_MESSAGE,
+    run_frames,
+)
+from agent_service.run_records import RunRecords
 
 MINT = TokenMint()
 CANARY = "cli-text-" + uuid.uuid4().hex
@@ -646,3 +679,168 @@ def test_a_stop_at_a_yielded_event_closes_the_core_at_once(
             ) == ((RunState.CANCELLED, ClientLoss.DISCONNECTED), [True], [], 0)
 
     in_stepped_loop(child_cleanup, monkeypatch, scenario())
+
+
+@dataclass
+class ScriptedRun:
+    """A run of the real runner over a scripted child, read frame by frame from the stream."""
+
+    frames: AsyncGenerator[bytes, None]
+    slot: AdmissionSlot
+    records: RunRecords
+    clock: StepClock
+    run_id: uuid.UUID
+    root: Path
+
+    def place_is_held(self) -> bool:
+        probe = self.slot.try_take()
+        if probe is not None:
+            probe.release()
+        return probe is None
+
+    def status(self) -> RunStatus:
+        status = self.records.read(self.run_id, "songmaker", ALICE)
+        assert status is not None
+        return status
+
+    def held_state(self) -> tuple[bool, int, bool]:
+        return self.place_is_held(), held_claude_slots(), the_only_tree(self.root).is_dir()
+
+    async def frees_its_place_once_the_group_is_confirmed(self, child: ScriptedClaudeChild) -> None:
+        retry = next(
+            task for task in asyncio.all_tasks() if task.get_name().startswith("quarantine:")
+        )
+        self.clock.advance_to(await self.clock.parked() or 0)
+        async with asyncio.timeout(TEST_WAIT_SECONDS):
+            while (deadline := await self.clock.parked()) is None:
+                await asyncio.sleep(0.01)
+        assert self.held_state() == (True, 1, True)
+        child.publish_exit(-signal.SIGKILL)
+        self.clock.advance_to(deadline)
+        await asyncio.wait_for(retry, TEST_WAIT_SECONDS)
+        assert (self.place_is_held(), held_claude_slots(), list(self.root.iterdir())) == (
+            False,
+            0,
+            [],
+        )
+
+
+def a_scripted_run(tmp_path: Path) -> ScriptedRun:
+    config = a_config(tmp_path, a_fake_claude(tmp_path))
+    clock = StepClock()
+    slot = AdmissionSlot(1)
+    records = RunRecords(lambda: instant(clock.now))
+    run_id = uuid.uuid4()
+    frames = run_frames(
+        alice_admitted_run(run_id),
+        CliRunner(config),
+        SONGMAKER,
+        config.runs,
+        clock,
+        records,
+        slot.try_take(),
+        quarantine=Quarantine(clock, lost_groups.confirm_group_gone),
+    )
+    return ScriptedRun(frames, slot, records, clock, run_id, private_root_of(config))
+
+
+def test_a_group_that_outlives_the_stop_keeps_the_runs_place_until_confirmed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    child = a_child_that_outlives_sigkill(
+        censuses=(GroupCensus.LIVE, GroupCensus.EMPTY),
+        stderr_stalls=True,
+        stream_lines=[INIT_LINE, TEXT_LINE],
+    )
+    run = a_scripted_run(tmp_path)
+
+    async def scenario() -> None:
+        await anext(run.frames)
+        await anext(run.frames)
+        async with asyncio.timeout(TEST_WAIT_SECONDS / 4):
+            await run.frames.aclose()
+        status = run.status()
+        assert (status.state, status.failure_code) == (RunState.FAILED, FailureCode.PROVIDER_ERROR)
+        assert run.held_state() == (True, 1, True)
+        await run.frees_its_place_once_the_group_is_confirmed(child)
+
+    drive_scripted(monkeypatch, child, scenario(), loop_factory=SteppedLoop)
+
+
+def test_an_unconfirmed_group_after_a_clean_end_never_succeeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    child = a_claude_cli_child(
+        stream_lines=[INIT_LINE, TEXT_LINE, SUCCESS_LINE],
+        returncode=0,
+        gone=(KillUntilGoneResult(GroupCensus.LIVE, ended_in_time=True),),
+        censuses=(GroupCensus.LIVE, GroupCensus.EMPTY),
+        stderr_stalls=True,
+    )
+    run = a_scripted_run(tmp_path)
+
+    async def scenario() -> None:
+        decoder = RunStreamDecoder()
+        async with asyncio.timeout(TEST_WAIT_SECONDS / 4):
+            async for frame in run.frames:
+                decoder.feed(frame)
+        status = run.status()
+        assert (status.state, status.failure_code) == (RunState.FAILED, FailureCode.PROVIDER_ERROR)
+        assert run.held_state() == (True, 1, True)
+        await run.frees_its_place_once_the_group_is_confirmed(child)
+
+    drive_scripted(monkeypatch, child, scenario(), loop_factory=SteppedLoop)
+
+
+@pytest.mark.parametrize(
+    ("songmaker", "ending"),
+    [
+        pytest.param(PLAIN_APP, ("succeeded", "done"), id="plain"),
+        pytest.param({}, ("failed", NO_RUNNER_MESSAGE), id="tools"),
+    ],
+)
+def test_the_service_entry_installs_the_tool_free_cli_runner(
+    tmp_path: Path,
+    child_cleanup: ChildCleanup,
+    monkeypatch: pytest.MonkeyPatch,
+    logging_state_restored: None,
+    songmaker: dict[str, object],
+    ending: tuple[str, str],
+) -> None:
+    binary = a_fake_claude(tmp_path, version_line=VERSION_LINE)
+    config = a_config(tmp_path, binary, songmaker=songmaker)
+    served_apps: list[FastAPI] = []
+    create_app_for_the_test = app_module.create_app
+    monkeypatch.setattr(uvicorn, "run", lambda app, **_where: served_apps.append(app))
+    monkeypatch.setattr(config_module, "load_config", lambda _path: config)
+    monkeypatch.setattr(
+        app_module,
+        "create_app",
+        lambda built, **keywords: create_app_for_the_test(
+            built, fetch_key_set=MINT.fetch_key_set, **keywords
+        ),
+    )
+
+    def start_and_post() -> list[RunEvent]:
+        assert main(["--config", str(tmp_path / "agent-service.toml")]) == 0
+        with served(served_apps[0]) as base_url:
+            return post_a_run(base_url)
+
+    events = own_real_children(child_cleanup, monkeypatch, start_and_post)
+
+    assert shown(events)[-1] == ending
+
+
+@pytest.mark.parametrize("provider", list(Provider))
+def test_a_profile_loads_only_for_a_provider_with_a_run_adapter(provider: Provider) -> None:
+    document = _service_config_document(TEST_ISSUER, None, None)
+    document["profiles"][CLI_PROFILE]["provider"] = provider.value
+
+    try:
+        ServiceConfig.model_validate(document)
+    except ValidationError:
+        loads = False
+    else:
+        loads = True
+
+    assert loads == (provider in RUN_ADAPTERS)

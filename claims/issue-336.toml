@@ -1,0 +1,7 @@
+claim_id = "b876628e22324e79b091c28b7b560aed"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "a79d2ff1bab65c63a515e70c2dc504a4963929e4"
+branch = "claude/issue-336-12a-claude-first-real-run"
+scope = ["docs/decisions/0001-agent-service.md"]
+opened_commit = "2842979c6c597292b674729528402e75d8388ce0"

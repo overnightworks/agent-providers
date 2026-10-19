@@ -38,7 +38,6 @@ from anchored_support import (
     GONE,
     IMPORT_ROOT_PRELUDE,
     RUNNING,
-    TEST_WAIT_SECONDS,
     ChildCleanup,
     Exited,
     ProcessState,
@@ -46,6 +45,7 @@ from anchored_support import (
     pidfd_open,
     wait_for_exits,
 )
+from bounds import TEST_WAIT_SECONDS
 from provider_test_support import call_within_deadline
 
 from agent_providers import procfs, spawn

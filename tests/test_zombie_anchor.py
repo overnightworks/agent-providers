@@ -18,7 +18,6 @@ from anchored_support import (
     P_PIDFD,
     RUNNING,
     SIGKILLED,
-    TEST_WAIT_SECONDS,
     UNREPORTED,
     ChildErrorKind,
     Exited,
@@ -33,6 +32,7 @@ from anchored_support import (
     state,
     zombie_anchor_session,
 )
+from bounds import TEST_WAIT_SECONDS
 
 from agent_providers.spawn import closed_environment
 

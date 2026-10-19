@@ -9,14 +9,15 @@ import subprocess
 import sys
 import threading
 import warnings
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
 import pytest
 from anchored_kernel import RecordingKernel, join_watcher, watcher_thread
-from anchored_support import TEST_WAIT_SECONDS, ChildCleanup, OwnedChild
+from anchored_support import ChildCleanup, OwnedChild
+from bounds import TEST_WAIT_SECONDS, within_the_bound
 from test_zombie_anchor import EXIT_WITH_LINE
 
 from agent_providers import spawn
@@ -243,11 +244,6 @@ class Opened:
     owned: OwnedChild
 
 
-async def bounded[Result](awaitable: Awaitable[Result]) -> Result:
-    async with asyncio.timeout(TEST_WAIT_SECONDS):
-        return await awaitable
-
-
 def asyncio_errors(caplog: pytest.LogCaptureFixture, phases: Phases = ("call",)) -> list[str]:
     return [
         record.getMessage()
@@ -271,7 +267,9 @@ def open_door(
     limit: int | None = None,
 ) -> Opened:
     captured = child_cleanup.capture(
-        lambda: runner.run(bounded(spawn.open_anchored_pipes(child, stream_buffer_limit=limit)))
+        lambda: runner.run(
+            within_the_bound(spawn.open_anchored_pipes(child, stream_buffer_limit=limit))
+        )
     )
     (owned,) = captured.children
     return Opened(captured.value, owned)

@@ -22,7 +22,8 @@ from anchored_kernel import (
     watcher_names,
 )
 from anchored_leaders import SPAWN_LOGGER, ExitProbe, Leaders, spawn_warnings
-from anchored_support import SIGKILLED, TEST_WAIT_SECONDS, ChildCleanup, Exited
+from anchored_support import SIGKILLED, ChildCleanup, Exited
+from bounds import TEST_WAIT_SECONDS
 
 from agent_providers import spawn
 from agent_providers.spawn import AnchorState

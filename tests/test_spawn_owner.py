@@ -42,7 +42,8 @@ from pathlib import Path
 
 import pytest
 from anchored_kernel import join_watcher, watcher_thread
-from anchored_support import TEST_WAIT_SECONDS, ChildCleanup
+from anchored_support import ChildCleanup
+from bounds import TEST_WAIT_SECONDS
 
 from agent_providers import spawn
 from agent_providers.spawn import (

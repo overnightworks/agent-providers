@@ -23,7 +23,6 @@ from anchored_support import (
     GONE,
     RUNNING,
     SIGKILLED,
-    TEST_WAIT_SECONDS,
     ChildCleanup,
     ChildErrorKind,
     CleanupFailed,
@@ -36,6 +35,7 @@ from anchored_support import (
     popen_bare,
     state,
 )
+from bounds import TEST_WAIT_SECONDS
 from test_zombie_anchor import EXIT_WITH_LINE
 
 from agent_providers.spawn import ChildProcess, closed_environment

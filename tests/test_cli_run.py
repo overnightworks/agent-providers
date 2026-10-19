@@ -19,7 +19,8 @@ from typing import Any
 
 import pytest
 from anchored_leaders import spawn_warnings
-from anchored_support import GONE, TEST_WAIT_SECONDS, ChildCleanup
+from anchored_support import GONE, ChildCleanup
+from bounds import TEST_WAIT_SECONDS
 from descendant_support import DescendantRow, Handshake, lingering_descendant
 from provider_test_support import (
     REAL_REAP_BOUNDS,

@@ -52,7 +52,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from anchored_kernel import join_watcher, recorded_watcher_starts
-from anchored_support import TEST_WAIT_SECONDS, ChildCleanup
+from anchored_support import ChildCleanup
+from bounds import TEST_WAIT_SECONDS
 
 from agent_client.tools import ToolDeclaration
 from agent_providers import anchored_turn, lost_groups, process, spawn

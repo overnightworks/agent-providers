@@ -26,7 +26,8 @@ from urllib.parse import urlsplit
 
 import httpx
 import pytest
-from anchored_support import TEST_WAIT_SECONDS, ChildCleanup
+from anchored_support import ChildCleanup
+from bounds import TEST_WAIT_SECONDS
 from capability_support import canary_token, capability_carrying
 from cli_tools_support import (
     ChildCapture,

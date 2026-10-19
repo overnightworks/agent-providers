@@ -22,14 +22,9 @@ from http import HTTPStatus
 from typing import Any
 
 import pytest
+from bounds import TEST_WAIT_SECONDS
 from capability_support import canary_token, capability_carrying
-from mcp_app_fake import (
-    CERTIFICATE_HOST,
-    WAIT_SECONDS,
-    McpAppFake,
-    ScriptedApp,
-    serving,
-)
+from mcp_app_fake import CERTIFICATE_HOST, McpAppFake, ScriptedApp, serving
 from relay_support import (
     RUN_ID,
     Delivery,
@@ -208,7 +203,7 @@ class BarrierRunner:
                     return
         finally:
             self._barrier.stop()
-            async with asyncio.timeout(WAIT_SECONDS):
+            async with asyncio.timeout(TEST_WAIT_SECONDS):
                 await self._barrier.settle()
 
 
@@ -306,7 +301,7 @@ def drive_barrier(
             owner = McpRelayOwner(capability, offered(OFFERED), entries)
             relay = await Relay.start(RUN_ID, owner, LoopClock())
             try:
-                async with asyncio.timeout(WAIT_SECONDS * 3):
+                async with asyncio.timeout(TEST_WAIT_SECONDS * 3):
                     await scenario(Rig(relay, barrier, entries, app))
             finally:
                 try:
@@ -316,7 +311,7 @@ def drive_barrier(
                         if isinstance(app, GatedApp):
                             app.release()
                         release_held_wakeups()
-                        async with asyncio.timeout(WAIT_SECONDS):
+                        async with asyncio.timeout(TEST_WAIT_SECONDS):
                             await barrier.settle()
                 finally:
                     await close_bounded(relay)
@@ -355,7 +350,7 @@ async def waiting_next_event(
         return await barrier.next_event()
 
     task = asyncio.create_task(ask())
-    async with asyncio.timeout(WAIT_SECONDS):
+    async with asyncio.timeout(TEST_WAIT_SECONDS):
         await asking.wait()
     return task
 
@@ -454,7 +449,7 @@ def streamed(runner: BarrierRunner, runs: RunConfig | None = None) -> asyncio.Ta
 
 
 async def settled_bytes(task: asyncio.Task[bytes]) -> bytes:
-    async with asyncio.timeout(WAIT_SECONDS):
+    async with asyncio.timeout(TEST_WAIT_SECONDS):
         return await task
 
 
@@ -737,7 +732,7 @@ def test_a_give_up_before_the_call_returns_leaves_its_request_unanswered(
 
         race.interfere(rig.barrier, call)
         rig.fake.release()
-        async with asyncio.timeout(WAIT_SECONDS):
+        async with asyncio.timeout(TEST_WAIT_SECONDS):
             ending = await ending_of(call)
             settled = await settling
 
@@ -870,7 +865,7 @@ def test_a_reflection_reported_by_the_owner_fails_the_next_event() -> None:
         rig.barrier.reflected()
 
         with pytest.raises(CapabilityReflected):
-            await asyncio.wait_for(waiting, WAIT_SECONDS)
+            await asyncio.wait_for(waiting, TEST_WAIT_SECONDS)
         assert rig.barrier.has_ready_event()
 
     drive_barrier(scenario)
@@ -1032,7 +1027,7 @@ def test_a_call_cancelled_before_its_accept_streams_an_error_result_and_never_ru
         runner = BarrierRunner(rig.barrier, accept_gate=gate, final_after=2)
         stream = streamed(runner, RunConfig(max_tool_calls=2))
         first = await rig.pending(1, "edit_song", {"n": 1})
-        async with asyncio.timeout(WAIT_SECONDS):
+        async with asyncio.timeout(TEST_WAIT_SECONDS):
             await runner.at_gate.wait()
 
         second_connection = await rig.cancel(1)
@@ -1259,7 +1254,7 @@ async def stopped_while_a_cancellation_is_requested(rig: Rig) -> None:
 
     rig.barrier.stop()
 
-    async with asyncio.timeout(WAIT_SECONDS):
+    async with asyncio.timeout(TEST_WAIT_SECONDS):
         assert (await second).error.code == REFUSAL["code"]
     await asyncio.gather(first, return_exceptions=True)
 
@@ -1368,7 +1363,7 @@ def test_a_forwards_outcome_is_retrieved_exactly_once_and_settle_waits_for_it(
         if ending.cancelled_on_completion:
             upstream_task(1).add_done_callback(lambda _: cancel_owner_answers())
         app.release()
-        async with asyncio.timeout(WAIT_SECONDS):
+        async with asyncio.timeout(TEST_WAIT_SECONDS):
             settled = await settling
 
         assert settled.logged_classes == list(ending.logged_classes)
@@ -1413,7 +1408,7 @@ def test_a_cancelled_wait_for_the_next_event_loses_and_doubles_no_call(
         rig.app.release()
         await rig.barrier.settle()
         await rig.accept_result("call-1")
-        async with asyncio.timeout(WAIT_SECONDS):
+        async with asyncio.timeout(TEST_WAIT_SECONDS):
             assert (await arrival).id == 1
         assert rig.app.calls == [("edit_song", {"text": "a"})]
 
@@ -1562,7 +1557,7 @@ def test_a_call_accepted_after_the_relays_close_cancelled_its_connection_task_is
         await yield_until(lambda: task_named(CONNECTION_OF_CALL_1).cancelling() > 0)
         await assert_given_up_before_the_connection_task_resumed(rig, event)
         holding_loop().release_wakeups()
-        async with asyncio.timeout(WAIT_SECONDS):
+        async with asyncio.timeout(TEST_WAIT_SECONDS):
             await closing
         assert writes.to(client) == b""
 
@@ -1828,7 +1823,7 @@ async def stopped_while_the_forward_runs(
     settling = settling_with_evidence(rig, caplog, retrievals)
     await yield_until(lambda: writes.to(client) != b"")
     rig.fake.release()
-    async with asyncio.timeout(WAIT_SECONDS):
+    async with asyncio.timeout(TEST_WAIT_SECONDS):
         settled = await settling
     assert (settled.logged_classes, settled.retrievals) == (["UpstreamBroke"], 1)
     return client
@@ -1989,7 +1984,7 @@ async def given_up_by_the_relays_close(
     await yield_until(lambda: task_named(CONNECTION_OF_CALL_1).cancelling() > 0)
 
     async def close_ends_without_a_byte() -> None:
-        async with asyncio.timeout(WAIT_SECONDS):
+        async with asyncio.timeout(TEST_WAIT_SECONDS):
             await closing
         assert writes.to(client) == b""
 

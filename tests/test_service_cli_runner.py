@@ -28,7 +28,8 @@ from urllib.parse import urlsplit
 
 import pytest
 import uvicorn
-from anchored_support import GONE, TEST_WAIT_SECONDS, ChildCleanup
+from anchored_support import GONE, ChildCleanup
+from bounds import TEST_WAIT_SECONDS
 from fastapi import FastAPI
 from mcp_app_fake import TestAuthority
 from provider_test_support import (

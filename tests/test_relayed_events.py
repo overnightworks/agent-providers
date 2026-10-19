@@ -19,8 +19,8 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import pytest
+from bounds import TEST_WAIT_SECONDS
 from capability_support import canary_token, capability_carrying
-from mcp_app_fake import WAIT_SECONDS
 from relay_support import RUN_ID, yield_until
 from service_support import alice_admitted_run, failure_lines, service_config
 
@@ -159,7 +159,7 @@ class Arrivals:
 
 
 async def taken(events: RelayedEvents, count: int) -> list[StreamEvent]:
-    return [await asyncio.wait_for(anext(events), WAIT_SECONDS) for _ in range(count)]
+    return [await asyncio.wait_for(anext(events), TEST_WAIT_SECONDS) for _ in range(count)]
 
 
 def shown(events: list[StreamEvent]) -> list[tuple[str, str]]:
@@ -200,7 +200,7 @@ async def loop_passes(count: int) -> None:
 
 
 def drive(scenario: Awaitable[None]) -> None:
-    asyncio.run(asyncio.wait_for(scenario, WAIT_SECONDS * 3))
+    asyncio.run(asyncio.wait_for(scenario, TEST_WAIT_SECONDS * 3))
 
 
 def test_a_ready_relay_event_goes_before_a_ready_core_event_and_none_is_lost() -> None:
@@ -292,7 +292,7 @@ def test_a_final_ready_as_the_one_result_is_queued_waits_for_that_result() -> No
 
         next_event = asyncio.ensure_future(anext(events))
         core.feed(FINAL)
-        yielded.append(await asyncio.wait_for(next_event, WAIT_SECONDS))
+        yielded.append(await asyncio.wait_for(next_event, TEST_WAIT_SECONDS))
         yielded.extend(await taken(events, 1))
 
         assert shown(yielded) == [
@@ -435,7 +435,7 @@ def test_a_final_waits_for_the_result_of_a_forward_still_running() -> None:
 
         assert not next_event.done()
         app.release()
-        yielded = [await asyncio.wait_for(next_event, WAIT_SECONDS), *await taken(events, 1)]
+        yielded = [await asyncio.wait_for(next_event, TEST_WAIT_SECONDS), *await taken(events, 1)]
 
         assert shown(yielded) == [("tool_result", "call-1"), ("final", "done")]
         barrier.stop()
@@ -462,7 +462,7 @@ def test_a_held_final_waits_on_the_barrier_and_does_not_spin() -> None:
 
         assert (held.done(), calls.questions) == (False, questions_after_a_few_passes)
         app.release()
-        await asyncio.wait_for(held, WAIT_SECONDS)
+        await asyncio.wait_for(held, TEST_WAIT_SECONDS)
         barrier.stop()
         await events.close()
 
@@ -509,7 +509,7 @@ def test_a_held_final_is_released_by_the_close_and_by_a_barrier_failure(ending: 
         else:
             barrier.reflected()
             with pytest.raises(CapabilityReflected):
-                await asyncio.wait_for(held, WAIT_SECONDS)
+                await asyncio.wait_for(held, TEST_WAIT_SECONDS)
             await events.close()
 
         barrier.abort_forwards()
@@ -661,7 +661,7 @@ def test_a_cancellation_during_a_held_cleanup_waits_for_it(
             core.feed(TEXT)
             await anext(events)
             closing = asyncio.ensure_future(events.aclose())
-            await asyncio.wait_for(core.holding.wait(), WAIT_SECONDS)
+            await asyncio.wait_for(core.holding.wait(), TEST_WAIT_SECONDS)
 
             closing.cancel()
             await yield_until(lambda: closing.cancelling() > 0)
@@ -684,7 +684,7 @@ async def provoke_unoffered(tools: RunTools, events: AsyncGenerator[StreamEvent,
 
 async def provoke_reflected(tools: RunTools, events: AsyncGenerator[StreamEvent, None]) -> None:
     Arrivals(tools.calls).arrive(1)
-    await asyncio.wait_for(anext(events), WAIT_SECONDS)
+    await asyncio.wait_for(anext(events), TEST_WAIT_SECONDS)
 
 
 @pytest.mark.parametrize(
@@ -704,6 +704,6 @@ def test_a_barrier_failure_reaches_the_service_unchanged(
             next_event = asyncio.ensure_future(anext(events))
 
             with pytest.raises(failure):
-                await asyncio.wait_for(next_event, WAIT_SECONDS)
+                await asyncio.wait_for(next_event, TEST_WAIT_SECONDS)
 
     drive(scenario())

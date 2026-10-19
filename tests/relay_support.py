@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 
 import h11
 import pytest
-from mcp_app_fake import WAIT_SECONDS
+from bounds import TEST_WAIT_SECONDS, within_the_bound
 from service_support import StepClock, SteppedLoop
 
 from agent_client.wire import JsonObject
@@ -93,7 +93,7 @@ class ScriptedOwner:
         return [request.body for request in self.requests]
 
     async def wait_entered(self) -> None:
-        async with asyncio.timeout(WAIT_SECONDS):
+        async with asyncio.timeout(TEST_WAIT_SECONDS):
             await self.entered.wait()
 
 
@@ -135,7 +135,7 @@ class ScriptedCalls:
         self.reflected_count += 1
 
     async def wait_entered(self) -> None:
-        async with asyncio.timeout(WAIT_SECONDS):
+        async with asyncio.timeout(TEST_WAIT_SECONDS):
             await self.entered.wait()
 
 
@@ -314,7 +314,7 @@ async def _gathered(
     if not 0 < minimum <= size <= RECEIVE_CHUNK_BYTES:
         raise ValueError(f"cannot aggregate {minimum} bytes into a read of {size}")
     gathered = b""
-    async with asyncio.timeout(WAIT_SECONDS):
+    async with asyncio.timeout(TEST_WAIT_SECONDS):
         while len(gathered) < minimum:
             chunk = await read(reader, minimum - len(gathered))
             if not chunk:
@@ -332,7 +332,7 @@ class RawClient:
 
     @classmethod
     async def connect(cls, port: int, host: str = LOOPBACK_HOST) -> "RawClient":
-        async with asyncio.timeout(WAIT_SECONDS):
+        async with asyncio.timeout(TEST_WAIT_SECONDS):
             reader, writer = await asyncio.open_connection(host, port)
         return cls(reader, writer)
 
@@ -363,7 +363,7 @@ class RawClient:
 
     async def send(self, raw: bytes) -> None:
         self._writer.write(raw)
-        async with asyncio.timeout(WAIT_SECONDS):
+        async with asyncio.timeout(TEST_WAIT_SECONDS):
             await self._writer.drain()
 
     async def answer(self) -> Answer:
@@ -390,7 +390,7 @@ class RawClient:
 
     async def _read_response_bytes(self) -> bytes:
         try:
-            async with asyncio.timeout(WAIT_SECONDS):
+            async with asyncio.timeout(TEST_WAIT_SECONDS):
                 chunk = await self._reader.read(_READ_BYTES)
         except ConnectionResetError:
             chunk = b""
@@ -411,7 +411,7 @@ class RawClient:
 
     async def at_eof(self) -> bool:
         try:
-            async with asyncio.timeout(WAIT_SECONDS):
+            async with asyncio.timeout(TEST_WAIT_SECONDS):
                 while await self._reader.read(_READ_BYTES):
                     pass
         except ConnectionResetError:
@@ -432,7 +432,7 @@ class RawClient:
 
 def blocking_connect(port: int) -> socket.socket:
     """Connect in the kernel without yielding to the event loop."""
-    return socket.create_connection((LOOPBACK_HOST, port), timeout=WAIT_SECONDS)
+    return socket.create_connection((LOOPBACK_HOST, port), timeout=TEST_WAIT_SECONDS)
 
 
 def post(relay: Relay, body: bytes = b"") -> bytes:
@@ -540,14 +540,9 @@ def connection_numbers(task_names: list[str]) -> list[int]:
 
 
 async def yield_until(condition: Callable[[], bool]) -> None:
-    async with asyncio.timeout(WAIT_SECONDS):
+    async with asyncio.timeout(TEST_WAIT_SECONDS):
         while not condition():
             await asyncio.sleep(0)
-
-
-async def within_the_bound[T](awaitable: Awaitable[T]) -> T:
-    async with asyncio.timeout(WAIT_SECONDS):
-        return await awaitable
 
 
 async def close_bounded(relay: Relay) -> None:
@@ -651,7 +646,7 @@ def drive(
         scripted = owner or ScriptedOwner()
         relay = await Relay.start(run_id, scripted, clock or LoopClock())
         try:
-            async with asyncio.timeout(WAIT_SECONDS * 3):
+            async with asyncio.timeout(TEST_WAIT_SECONDS * 3):
                 await scenario(relay)
         finally:
             for gate in (scripted, calls):
@@ -682,6 +677,6 @@ def drive_stepped(
 
 async def parked_at(clock: StepClock, instant: float | None) -> None:
     """Wait until the relay's next clock wait is ``instant``, letting real socket I/O land."""
-    async with asyncio.timeout(WAIT_SECONDS):
+    async with asyncio.timeout(TEST_WAIT_SECONDS):
         while await clock.parked() != instant:
             await asyncio.sleep(0)

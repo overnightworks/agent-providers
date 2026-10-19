@@ -1213,6 +1213,11 @@ def _a_root_open_to_the_group(tmp_path: Path) -> str:
     return str(_private_directory(tmp_path / "open-root", 0o750))
 
 
+def _a_private_root_written_with_a_parent_component(tmp_path: Path) -> str:
+    _private_directory(tmp_path / "x")
+    return str(_private_directory(tmp_path / "root").parent / "x" / ".." / "root")
+
+
 NOT_PRIVATE_ROOTS = (
     pytest.param(lambda _tmp: "run/x", "relative", id="relative"),
     pytest.param(lambda _tmp: "~/x", "relative", id="tilde"),
@@ -1221,6 +1226,9 @@ NOT_PRIVATE_ROOTS = (
     pytest.param(_a_regular_file_as_root, "missing", id="regular-file"),
     pytest.param(_a_link_to_a_private_directory, "symlink", id="symlink"),
     pytest.param(_a_root_open_to_the_group, "wrong_mode", id="mode-0750"),
+    pytest.param(
+        _a_private_root_written_with_a_parent_component, "parent_component", id="parent-component",
+    ),
 )
 
 

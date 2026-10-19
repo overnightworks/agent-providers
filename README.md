@@ -274,8 +274,12 @@ guess. These errors and `ProviderRuntimeNotConfiguredError` share the base
 reporting `ROUTE_FAILED`, so a host sees which part of its wiring is missing.
 
 `configure()` refuses a `cli_working_directory_root` that is not private: it
-must be an absolute path to an existing directory, not a symlink, owned by the
-process's effective user, with mode exactly 0700. It raises
+must be an absolute path, written without a `..` component, to an existing
+directory, not a symlink, owned by the process's effective user, with mode
+exactly 0700. A `..` is refused even where it would resolve harmlessly, because
+the temporary-file functions return the path with `..` collapsed textually, and
+after a symlinked component that is not the directory the kernel wrote to. Write
+the root as its resolved path. It raises
 `WorkingRootNotPrivateError`, whose `violation` is a member of the closed
 `WorkingRootViolation` and whose text never holds the path. Every call
 inspects, so an identical re-install does too, and a refusal installs nothing.
@@ -340,6 +344,8 @@ the error names the field.
 | `dispatch.stream_turn` and `dispatch.call_provider_once` raised `ProviderUnavailableError` with `ROUTE_FAILED` when a provider block, `turns`, or the configuration itself was missing | both raise `ProviderNotConfiguredError(provider, block)`, `TurnRuntimeNotConfiguredError` or `ProviderRuntimeNotConfiguredError` unchanged, all `config.HostWiringError`s; a host that caught `ProviderUnavailableError` for a wiring fault catches `HostWiringError` too |
 | `dispatch.image_capability` for the Codex CLI route always answered with the Codex fields set | it raises `ProviderNotConfiguredError("codex", block)` when `codex` or `turns.codex` is missing |
 | `process.run_cli_bounded` read the Grok prompt-file prefix itself | the caller passes `prompt_file_prefix` together with `prompt_file_bytes` and `prompt_file_arg_index`; the Grok transport passes `turns.grok.prompt_file_prefix` |
+| `configure()` and `PrivateWorkingRoot(path)` accepted a root written with a `..` component | both raise `WorkingRootNotPrivateError` with `WorkingRootViolation.PARENT_COMPONENT` (`"parent_component"`); write the root as its resolved path |
+| `process.HomeReservation` | `process.Reservation`, the one-method protocol a runner's end releases; a pool slot (`anchored_turn.CliProcessReservation`) is one too; no alias remains |
 | `process.PrivateCredentialHomeReservation` | `process.PrivateHomeReservation`, the reservation of the base `PrivateHome`; no alias remains |
 | `spawn.open_pipes(child, stderr=)` returned a `subprocess.Popen` (`spawn.PipedProcess`) | `spawn.open_blocking_anchored_pipes(child, stderr=)` returns a `BlockingAnchoredChild`, with no `wait`, `poll` or `communicate`: wait with `wait_for_exit(timeout)`, signal the group with `signal_group(sig)` or `kill_until_gone(within=)`, and reap only with `release()` once the exit is published; never reap its pid yourself (no known host calls it) |
 | `process.cli_settle_deadline(deadline)` was the deadline plus 2.1 s | plus 11.1 s, `process.cli_settle_margin_seconds()`; `CLI_PROBE_CALLER_TIMEOUT_SECONDS` grows by 9 s |
@@ -352,7 +358,7 @@ The agent service's `[cli]` section (exit 2 naming the field until migrated):
 |---|---|
 | `[cli] claude_binary` | `[cli.claude] binary` |
 | `[cli] claude_version` | `[cli.claude] version` |
-| (absent) | `[cli] working_root`, required, a private directory (mode 0700, owned by the service user, not a link) |
+| (absent) | `[cli] working_root`, required, a private directory (mode 0700, owned by the service user, not a link, written without `..`) |
 
 ## Migrating to 0.3.0
 

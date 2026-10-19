@@ -78,6 +78,7 @@ from agent_providers.claude.provider import (
     CliUnavailableError,
     UnavailableError,
     _acall_cli,
+    _AttachedMcpServer,
     _call_api,
     _call_cli,
     _cli_arguments,
@@ -2642,6 +2643,31 @@ def test_an_init_line_that_is_not_utf8_json_is_refused_with_the_closed_init_erro
     assert (refused.value.__cause__, refused.value.__context__) == (None, None)
     assert [_INIT_MARKER in text for text in carried] == [False] * len(carried)
     assert _INIT_MARKER not in caplog.text
+
+
+def test_a_probe_reads_a_malformed_server_entry_as_not_connected() -> None:
+    spec = McpServerSpec(
+        name="notes",
+        command="/usr/bin/python3",
+        args=(),
+        environment={},
+        user_id_environment_variable="PROBE_USER_ID",
+        config_file_prefix="probe-",
+        tool_names=frozenset({"get_note"}),
+    )
+    init = json.dumps(
+        {
+            "type": "system",
+            "subtype": "init",
+            "tools": [],
+            "slash_commands": [],
+            "mcp_servers": [1, {"name": "notes", "status": "connected"}],
+        }
+    ).encode()
+
+    surface = _parse_announced_surface(init, mcp=_AttachedMcpServer(spec, "/tmp/unused.json"))
+
+    assert surface.mcp_connected is False
 
 
 def test_tool_surface_failure_cache_expires_so_a_repair_takes_effect(

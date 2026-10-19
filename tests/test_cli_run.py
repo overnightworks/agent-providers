@@ -45,8 +45,14 @@ from agent_providers.claude.provider import CLAUDE_CLI_PROCESS_POOL
 from agent_providers.cli_run import (
     CliRunStart,
     CliStreamLineTooLong,
+    RelayState,
+    RunSurface,
+    RunSurfaceRefused,
     StepEvent,
+    SurfaceVerdict,
     astream_cli_run,
+    examine_announcement,
+    verdict_of,
 )
 from agent_providers.config import PrivateWorkingRoot, reset_config
 from agent_providers.errors import ContainmentLost
@@ -640,3 +646,101 @@ def test_a_stdin_write_failure_propagates_after_the_reap(
     drive_scripted(monkeypatch, child, scenario())
 
     assert (held_claude_slots(), list(private_root.iterdir())) == (0, [])
+
+
+def a_surface(relay: RelayState = RelayState.ABSENT, **causes: bool) -> RunSurface:
+    flags = {
+        "foreign_credential": False,
+        "tool_beside_relay": False,
+        "server_beside_relay": False,
+        **causes,
+    }
+    return RunSurface(relay=relay, **flags)
+
+
+@pytest.mark.parametrize(
+    ("relay", "relay_attached", "verdict"),
+    [
+        (RelayState.CONNECTED, True, SurfaceVerdict.ACCEPTED),
+        (RelayState.ABSENT, True, SurfaceVerdict.RELAY_NOT_CONNECTED),
+        (RelayState.NOT_CONNECTED, True, SurfaceVerdict.RELAY_NOT_CONNECTED),
+        (RelayState.ABSENT, False, SurfaceVerdict.ACCEPTED),
+        (RelayState.CONNECTED, False, SurfaceVerdict.SERVER_BESIDE_RELAY),
+        (RelayState.NOT_CONNECTED, False, SurfaceVerdict.SERVER_BESIDE_RELAY),
+    ],
+)
+def test_the_relay_verdict_follows_whether_a_relay_is_attached(
+    relay: RelayState, relay_attached: bool, verdict: SurfaceVerdict
+) -> None:
+    assert verdict_of(a_surface(relay), relay_attached=relay_attached) == verdict
+
+
+@pytest.mark.parametrize(
+    ("causes", "relay", "verdict"),
+    [
+        (
+            {"foreign_credential": True, "tool_beside_relay": True},
+            RelayState.CONNECTED,
+            SurfaceVerdict.FOREIGN_CREDENTIAL,
+        ),
+        (
+            {"tool_beside_relay": True, "server_beside_relay": True},
+            RelayState.CONNECTED,
+            SurfaceVerdict.TOOL_BESIDE_RELAY,
+        ),
+        (
+            {"server_beside_relay": True},
+            RelayState.NOT_CONNECTED,
+            SurfaceVerdict.SERVER_BESIDE_RELAY,
+        ),
+    ],
+    ids=["credential-over-tool", "tool-over-server", "server-over-relay"],
+)
+def test_each_verdict_outranks_the_next_in_precedence(
+    causes: dict[str, bool], relay: RelayState, verdict: SurfaceVerdict
+) -> None:
+    assert verdict_of(a_surface(relay, **causes), relay_attached=True) == verdict
+
+
+def test_a_refused_announcement_raises_its_verdict_alone_and_logs_its_name(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    refusal: RunSurfaceRefused | None = None
+
+    try:
+        raise UnicodeDecodeError("utf-8", MARKER.encode(), 0, 1, "invalid start byte")
+    except UnicodeDecodeError:
+        try:
+            examine_announcement(
+                a_surface(RelayState.CONNECTED, tool_beside_relay=True), relay_attached=True
+            )
+        except RunSurfaceRefused as refused:
+            refusal = refused
+
+    assert refusal is not None
+    assert (
+        refusal.verdict,
+        str(refusal),
+        refusal.__cause__,
+        refusal.__context__,
+        MARKER in caplog.text,
+        [record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING],
+    ) == (
+        SurfaceVerdict.TOOL_BESIDE_RELAY,
+        "The CLI's start announcement was refused: a tool the run's relay does not serve.",
+        None,
+        None,
+        False,
+        ["A CLI run's start announcement was refused (TOOL_BESIDE_RELAY)"],
+    )
+
+
+def test_an_accepted_announcement_returns_without_a_log(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+
+    examine_announcement(a_surface(RelayState.CONNECTED), relay_attached=True)
+
+    assert caplog.records == []

@@ -28,7 +28,7 @@ from agent_providers.claude.provider import (
     CliLoginRefusedError,
     UnavailableError,
 )
-from agent_providers.cli_run import astream_cli_run
+from agent_providers.cli_run import RunSurfaceRefused, SurfaceVerdict, astream_cli_run
 from agent_providers.config import PrivateWorkingRoot, reset_config
 from agent_providers.events import (
     AssistantTextEvent,
@@ -258,7 +258,22 @@ def line(payload: dict[str, Any]) -> bytes:
     return json.dumps(payload).encode() + b"\n"
 
 
-INIT_LINE = line({"type": "system", "subtype": "init"})
+RELAY_ENTRY = {"name": "relay", "status": "connected"}
+
+
+def an_init(**fields: Any) -> bytes:
+    announcement = {
+        "type": "system",
+        "subtype": "init",
+        "tools": [],
+        "mcp_servers": [],
+        "apiKeySource": "none",
+    }
+    return line({**announcement, **fields})
+
+
+INIT_LINE = an_init()
+RELAY_INIT = an_init(tools=["mcp__relay__lookup"], mcp_servers=[RELAY_ENTRY])
 TEXT_LINE = line({"type": "assistant", "message": {"content": [{"type": "text", "text": "hi"}]}})
 TOOL_CALL_LINE = line(
     {
@@ -284,7 +299,7 @@ def events_of_lines(decoder: ClaudeStreamDecoder, *lines: bytes) -> list[Any]:
 
 
 def test_the_decoder_maps_each_block_and_ends_with_the_result() -> None:
-    decoder = ClaudeStreamDecoder()
+    decoder = ClaudeStreamDecoder(relay_attached=False)
 
     steps = events_of_lines(
         decoder, INIT_LINE, TEXT_LINE, TOOL_CALL_LINE, TOOL_RESULT_LINE, SUCCESS_LINE
@@ -298,8 +313,18 @@ def test_the_decoder_maps_each_block_and_ends_with_the_result() -> None:
     assert decoder.ending(0) == FinalEvent(text="done")
 
 
+def test_a_run_with_a_relay_config_starts_a_decoder_that_accepts_the_relays_tools(
+    tmp_path: Path,
+) -> None:
+    decoder = started(tmp_path, relay_config=tmp_path / "home" / "relay.json").decoder
+
+    steps = events_of_lines(decoder, RELAY_INIT, TEXT_LINE, SUCCESS_LINE)
+
+    assert (steps, decoder.ending(0)) == ([AssistantTextEvent(text="hi")], FinalEvent(text="done"))
+
+
 def test_a_run_without_a_result_line_fails() -> None:
-    decoder = ClaudeStreamDecoder()
+    decoder = ClaudeStreamDecoder(relay_attached=False)
     events_of_lines(decoder, INIT_LINE, TEXT_LINE)
 
     with pytest.raises(UnavailableError) as refusal:
@@ -329,7 +354,8 @@ def test_a_run_without_a_result_line_fails() -> None:
     ],
 )
 def test_an_error_result_fails_at_its_line(error_line: bytes) -> None:
-    decoder = ClaudeStreamDecoder()
+    decoder = ClaudeStreamDecoder(relay_attached=False)
+    decoder.events_of(INIT_LINE)
 
     with pytest.raises(UnavailableError) as refusal:
         decoder.events_of(error_line)
@@ -341,7 +367,8 @@ def test_a_refused_login_fails_with_the_closed_cause_and_no_cli_text(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.DEBUG)
-    decoder = ClaudeStreamDecoder()
+    decoder = ClaudeStreamDecoder(relay_attached=False)
+    decoder.events_of(INIT_LINE)
     refused = line(
         {
             "type": "assistant",
@@ -361,8 +388,8 @@ def test_a_refused_login_fails_with_the_closed_cause_and_no_cli_text(
 
 
 def test_a_non_zero_exit_fails_after_a_success_result() -> None:
-    decoder = ClaudeStreamDecoder()
-    events_of_lines(decoder, SUCCESS_LINE)
+    decoder = ClaudeStreamDecoder(relay_attached=False)
+    events_of_lines(decoder, INIT_LINE, SUCCESS_LINE)
 
     with pytest.raises(UnavailableError):
         decoder.ending(1)
@@ -372,9 +399,9 @@ def test_a_malformed_line_before_the_result_is_skipped_without_cli_bytes(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.DEBUG)
-    decoder = ClaudeStreamDecoder()
+    decoder = ClaudeStreamDecoder(relay_attached=False)
 
-    steps = events_of_lines(decoder, b"\xff" + CLI_MARKER.encode() + b"\n", SUCCESS_LINE)
+    steps = events_of_lines(decoder, INIT_LINE, b"\xff" + CLI_MARKER.encode() + b"\n", SUCCESS_LINE)
 
     assert (steps, decoder.ending(0), CLI_MARKER in caplog.text) == (
         [],
@@ -387,7 +414,8 @@ def test_an_object_as_a_text_block_fails_closed_with_no_cli_bytes(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.DEBUG)
-    decoder = ClaudeStreamDecoder()
+    decoder = ClaudeStreamDecoder(relay_attached=False)
+    decoder.events_of(INIT_LINE)
     object_as_text = line(
         {
             "type": "assistant",
@@ -406,8 +434,12 @@ def test_an_object_as_a_text_block_fails_closed_with_no_cli_bytes(
     ) == (CLAUDE_CLI_UNAVAILABLE_DETAIL, None, None, False)
 
 
-def a_fake_claude(directory: Path) -> Path:
-    stream = b"".join((INIT_LINE, TEXT_LINE, SUCCESS_LINE)).decode()
+def a_fake_claude(
+    directory: Path,
+    stream: tuple[bytes, ...] = (INIT_LINE, TEXT_LINE, SUCCESS_LINE),
+    then: str = "exit 0",
+) -> Path:
+    stream_text = b"".join(stream).decode()
     binary = directory / "claude"
     binary.write_text(
         "#!/bin/sh\n"
@@ -418,7 +450,8 @@ def a_fake_claude(directory: Path) -> Path:
         f"[ \"$stdin_line\" = '{HISTORY_STDIN_LINE.decode().strip()}' ] || exit 13\n"
         '[ -n "$CLAUDE_CODE_OAUTH_TOKEN" ] || exit 14\n'
         '[ -z "$(ls -A)" ] || exit 15\n'
-        f"cat <<'EOF'\n{stream}EOF\n"
+        f"cat <<'EOF'\n{stream_text}EOF\n"
+        f"{then}\n"
     )
     binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
     return binary
@@ -456,3 +489,244 @@ def test_a_claude_run_streams_through_the_neutral_entry(
         [],
         [],
     )
+
+
+def refusal_of(decoder: ClaudeStreamDecoder, *lines: bytes) -> RunSurfaceRefused:
+    with pytest.raises(RunSurfaceRefused) as refusal:
+        events_of_lines(decoder, *lines)
+    return refusal.value
+
+
+@pytest.mark.parametrize(
+    ("relay_attached", "tool"),
+    [
+        pytest.param(True, "Bash", id="built-in-with-a-relay"),
+        pytest.param(False, "Bash", id="built-in-without-a-relay"),
+        pytest.param(True, "mcp__notes__get_note", id="another-servers-tool-beside-the-relay"),
+        pytest.param(False, "mcp__relay__lookup", id="a-relay-tool-without-a-relay"),
+        pytest.param(True, "mcp__relayx__foo", id="a-server-named-like-the-relay-with-a-suffix"),
+    ],
+)
+def test_a_tool_beside_the_relay_in_init_refuses_the_run(relay_attached: bool, tool: str) -> None:
+    relay_servers = [RELAY_ENTRY] if relay_attached else []
+    decoder = ClaudeStreamDecoder(relay_attached=relay_attached)
+
+    refusal = refusal_of(decoder, an_init(tools=[tool], mcp_servers=relay_servers))
+
+    assert refusal.verdict is SurfaceVerdict.TOOL_BESIDE_RELAY
+
+
+def test_a_relay_entry_without_a_relay_attached_refuses_the_run() -> None:
+    decoder = ClaudeStreamDecoder(relay_attached=False)
+
+    refusal = refusal_of(decoder, an_init(mcp_servers=[RELAY_ENTRY]))
+
+    assert refusal.verdict is SurfaceVerdict.SERVER_BESIDE_RELAY
+
+
+def test_a_foreign_mcp_server_in_init_refuses_the_run() -> None:
+    decoder = ClaudeStreamDecoder(relay_attached=True)
+    servers = [RELAY_ENTRY, {"name": "notes", "status": "connected"}]
+
+    refusal = refusal_of(decoder, an_init(mcp_servers=servers))
+
+    assert refusal.verdict is SurfaceVerdict.SERVER_BESIDE_RELAY
+
+
+@pytest.mark.parametrize(
+    "servers",
+    [
+        [{"name": "relay", "status": "failed"}],
+        [{"name": "relay", "status": "pending"}],
+        [],
+    ],
+    ids=["failed", "pending", "no-relay-entry"],
+)
+def test_a_relay_that_is_not_connected_refuses_the_run(servers: list[dict[str, str]]) -> None:
+    decoder = ClaudeStreamDecoder(relay_attached=True)
+
+    refusal = refusal_of(decoder, an_init(mcp_servers=servers))
+
+    assert refusal.verdict is SurfaceVerdict.RELAY_NOT_CONNECTED
+
+
+@pytest.mark.parametrize(
+    "source",
+    ["ANTHROPIC_API_KEY", "apiKeyHelper", "/login managed key"],
+)
+def test_an_api_key_source_refuses_the_run(source: str) -> None:
+    decoder = ClaudeStreamDecoder(relay_attached=False)
+
+    refusal = refusal_of(decoder, an_init(apiKeySource=source))
+
+    assert refusal.verdict is SurfaceVerdict.FOREIGN_CREDENTIAL
+
+
+NOT_JUDGED_LISTS = an_init(
+    slash_commands=["compact"], skills=["debug"], agents=["general-purpose"], plugins=["p"]
+)
+
+
+@pytest.mark.parametrize(
+    ("relay_attached", "init"),
+    [
+        pytest.param(False, INIT_LINE, id="without-a-relay"),
+        pytest.param(True, RELAY_INIT, id="with-a-relay"),
+        pytest.param(False, NOT_JUDGED_LISTS, id="unjudged-lists"),
+        pytest.param(False, b"\xff\n" + INIT_LINE, id="malformed-line-before-init"),
+    ],
+)
+def test_a_valid_init_lets_the_run_continue(relay_attached: bool, init: bytes) -> None:
+    decoder = ClaudeStreamDecoder(relay_attached=relay_attached)
+
+    steps = events_of_lines(
+        decoder, *init.splitlines(keepends=True), TEXT_LINE, TOOL_CALL_LINE, SUCCESS_LINE
+    )
+
+    assert (steps, decoder.ending(0)) == (
+        [
+            AssistantTextEvent(text="hi"),
+            ToolCallEvent(tool_use_id="t1", name="lookup", input={"q": 1}),
+        ],
+        FinalEvent(text="done"),
+    )
+
+
+@pytest.mark.parametrize(
+    "first_object",
+    [
+        TEXT_LINE,
+        SUCCESS_LINE,
+        line({"type": "system", "subtype": "api_retry"}),
+    ],
+    ids=["assistant", "result", "api-retry"],
+)
+def test_an_event_before_init_refuses_the_run(first_object: bytes) -> None:
+    decoder = ClaudeStreamDecoder(relay_attached=False)
+
+    refusal = refusal_of(decoder, first_object)
+
+    assert refusal.verdict is SurfaceVerdict.NOT_ANNOUNCED
+
+
+@pytest.mark.parametrize(
+    "init",
+    [
+        an_init(tools="x"),
+        an_init(tools=[1]),
+        an_init(mcp_servers=[1]),
+        an_init(mcp_servers=[{"name": 1, "status": "connected"}]),
+        an_init(mcp_servers=[{"name": "relay", "status": None}]),
+        an_init(mcp_servers=[RELAY_ENTRY, RELAY_ENTRY]),
+        line({"type": "system", "subtype": "init", "tools": [], "mcp_servers": []}),
+        an_init(apiKeySource=1),
+        line({"type": "system", "subtype": "init", "mcp_servers": [], "apiKeySource": "none"}),
+        line({"type": "system", "subtype": "init", "tools": [], "apiKeySource": "none"}),
+    ],
+    ids=[
+        "tools-not-a-list",
+        "tool-not-a-string",
+        "server-not-an-object",
+        "server-name-not-a-string",
+        "server-status-null",
+        "two-relay-entries",
+        "api-key-source-absent",
+        "api-key-source-not-a-string",
+        "tools-absent",
+        "mcp-servers-absent",
+    ],
+)
+def test_an_unreadable_init_refuses_the_run(init: bytes) -> None:
+    decoder = ClaudeStreamDecoder(relay_attached=False)
+
+    refusal = refusal_of(decoder, init)
+
+    assert refusal.verdict is SurfaceVerdict.UNREADABLE
+
+
+@pytest.mark.parametrize(
+    ("relay_attached", "fields"),
+    [
+        (True, {"tools": [CANARY_MARKER], "mcp_servers": [RELAY_ENTRY]}),
+        (False, {"tools": [CANARY_MARKER]}),
+        (False, {"mcp_servers": [{"name": CANARY_MARKER, "status": "connected"}]}),
+        (True, {"mcp_servers": [{"name": "relay", "status": CANARY_MARKER}]}),
+        (False, {"apiKeySource": CANARY_MARKER}),
+    ],
+    ids=[
+        "tool-name-with-a-relay",
+        "tool-name-without-a-relay",
+        "server-name",
+        "relay-status",
+        "api-key-source",
+    ],
+)
+def test_no_announced_string_reaches_the_refusal_or_the_log(
+    relay_attached: bool, fields: dict[str, Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    decoder = ClaudeStreamDecoder(relay_attached=relay_attached)
+    refused = None
+
+    try:
+        raise UnicodeDecodeError("utf-8", CLI_MARKER.encode(), 0, 1, "invalid start byte")
+    except UnicodeDecodeError:
+        refused = refusal_of(decoder, an_init(**fields))
+
+    carried = [str(refused), repr(refused), repr(refused.args), repr(refused.__dict__)]
+    leaked = [
+        text for text in (*carried, caplog.text) if CANARY_MARKER in text or CLI_MARKER in text
+    ]
+    assert leaked == []
+    assert (refused.__cause__, refused.__context__) == (None, None)
+
+
+def test_every_init_line_is_judged() -> None:
+    decoder = ClaudeStreamDecoder(relay_attached=False)
+
+    refusal = refusal_of(decoder, INIT_LINE, an_init(tools=["Bash"]), TEXT_LINE)
+
+    assert refusal.verdict is SurfaceVerdict.TOOL_BESIDE_RELAY
+
+
+def test_a_valid_init_repeated_yields_no_event_and_the_run_ends() -> None:
+    decoder = ClaudeStreamDecoder(relay_attached=False)
+
+    steps = events_of_lines(decoder, INIT_LINE, INIT_LINE, TEXT_LINE, SUCCESS_LINE)
+
+    assert (steps, decoder.ending(0)) == ([AssistantTextEvent(text="hi")], FinalEvent(text="done"))
+
+
+def test_a_refused_init_ends_the_run_when_it_is_read(
+    tmp_path: Path,
+    child_cleanup: ChildCleanup,
+    thread_failures: list[Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private_root = a_private_root(tmp_path)
+    binary = a_fake_claude(
+        tmp_path, stream=(an_init(tools=["Bash"]), TEXT_LINE), then="exec sleep 600"
+    )
+    run = a_run(binary=binary)
+    seen: list[StreamEvent] = []
+    refusals: list[RunSurfaceRefused] = []
+
+    async def collect() -> None:
+        async for event in astream_cli_run(PrivateWorkingRoot(private_root), run):
+            seen.append(event)
+
+    async def scenario() -> None:
+        with pytest.raises(RunSurfaceRefused) as refusal:
+            await collect()
+        refusals.append(refusal.value)
+
+    drive_real_children(child_cleanup, monkeypatch, scenario())
+
+    assert (
+        [refusal.verdict for refusal in refusals],
+        seen,
+        list(private_root.iterdir()),
+        held_claude_slots(),
+        [child_cleanup.state(owned) is GONE for owned in child_cleanup.listed()],
+        thread_failures,
+    ) == ([SurfaceVerdict.TOOL_BESIDE_RELAY], [], [], 0, [True], [])

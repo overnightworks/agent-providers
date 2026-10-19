@@ -3533,13 +3533,13 @@ starts, the main run and the r1v repeat.
 
 **m1 `auth status` with the token.** Exit 0, one JSON object with the fields `loggedIn`
 (true), `authMethod` (`"oauth_token"`), `apiProvider` (`"firstParty"`),
-`analyticsDisabled` (false), `projectsDirectory` and `configDirectory` (paths under the
-private home). It reports logged in.
+`analyticsDisabled` (false), `projectsDirectory` and `configDirectory` (names only; their
+values were not retained). It reports logged in.
 
 **m2 `-p /model` with the token.** Exit 0 after 1.9 s. The first line is `Current
-model: Sonnet 5.5 (default)` (the CLI puts the label in backticks), the second `Usage:
-/model <name>. Available: sonnet, opus, haiku, fable, best, sonnet[1m], opus[1m],
-fable[1m], opusplan, default, or a full model ID.`, so the list arrives. The text format
+model: Sonnet 5.5 (default)` (the CLI puts the label in backticks), the second an
+`Available:` line of 11 comma-separated entries (sha256 prefix `4605e992fbc6`, kept
+instead of the text), so the list arrives. The text format
 carries no cost field. That the call bills no model rests on m4b and r3. With no credential and with a rejected token (which reaches no model, r1) the
 CLI printed the same alias list with exit 0, so the list does not come from a model answer.
 
@@ -3579,7 +3579,7 @@ events instead of one object: `system/init` (`apiKeySource` `"none"`, `model`
 (`error` `"authentication_failed"`, `error_status` 401, `attempt` 1 and 2,
 `max_retries` 10), `assistant` (`error` `"authentication_failed"`, `is_api_error_message`
 true, `api_error_status` 401, `api_error_origin` `"first_party"`, `message.model`
-`"<synthetic>"`, the same text) and `result` (the same fields and values as r1). The
+`"<synthetic>"`) and `result` (the same fields and values as r1). The
 assistant's `error` is the field and value that `_raise_for_api_error_message`
 (`claude/provider.py`) reads on the stream paths. The first verbose run's capture was cut
 at the driver's 4,000-character line limit before the `result`. It showed the same events

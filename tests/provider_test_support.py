@@ -1511,6 +1511,7 @@ class ScriptedClaudeChild(ScriptedAnchoredChild):
         )
         self.stderr_failed = asyncio.Event()
         self.stderr_read_started = asyncio.Event()
+        self._records_stderr_cancel = record_stderr_cancel
         self.when_stderr_read_cancelled: Callable[[], None] | None = None
         self.stderr = ClaudeCliStreamReader(
             [stderr] if stderr else [],
@@ -1518,13 +1519,14 @@ class ScriptedClaudeChild(ScriptedAnchoredChild):
             failure=stderr_failure,
             failed=self.stderr_failed,
             stall_started=self.stderr_read_started,
-            on_stall_cancelled=self._stderr_read_cancelled if record_stderr_cancel else None,
+            on_stall_cancelled=self._stderr_read_cancelled,
         )
         self.stdin = MagicMock(spec_set=CLAUDE_CLI_STDIN_SURFACE)
         self.stdin.drain = AsyncMock(side_effect=stdin_failure)
 
     def _stderr_read_cancelled(self) -> None:
-        self._enter("stderr_read_cancelled")
+        if self._records_stderr_cancel:
+            self._enter("stderr_read_cancelled")
         if self.when_stderr_read_cancelled is not None:
             self.when_stderr_read_cancelled()
 

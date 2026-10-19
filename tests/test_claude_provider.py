@@ -712,6 +712,7 @@ def test_call_cli_uses_the_shared_process_pool_and_refuses_at_its_cap(
     monkeypatch,
 ) -> None:
     set_claude_process_limit(monkeypatch, 1)
+    homes = _record_the_homes_the_provider_opens(monkeypatch)
     run_calls = 0
 
     def fake_run(*_args: object, **_kwargs: object) -> MagicMock:
@@ -732,6 +733,7 @@ def test_call_cli_uses_the_shared_process_pool_and_refuses_at_its_cap(
         "Claude CLI process pool is at its concurrency limit (1); refusing to start another"
     )
     assert run_calls == 1
+    assert not homes[-1].path.exists()
     provider.CLAUDE_CLI_PROCESS_POOL.release(live_turn)
 
 

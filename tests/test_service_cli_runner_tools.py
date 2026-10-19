@@ -9,22 +9,26 @@ rows build ``Runners(cli=CliRunner(...))`` as production does; the entry rows go
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import gc
 import json
 import math
+import signal
 import socket
 import threading
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import AsyncGenerator, Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 import pytest
 import uvicorn
-from anchored_support import ChildCleanup
+from anchored_support import TEST_WAIT_SECONDS, ChildCleanup
+from capability_support import canary_token, capability_carrying
 from cli_tools_support import (
     ChildCapture,
     ClaudeCall,
@@ -45,13 +49,18 @@ from provider_test_support import (
     INIT_LINE,
     SUCCESS_LINE,
     TEXT_LINE,
+    ScriptedClaudeChild,
     a_fake_claude,
+    an_init,
+    drive_scripted,
     held_claude_slots,
     line,
     own_real_children,
 )
+from relay_support import RawClient, json_rpc, parked_at, yield_until
 from service_support import (
     PINNED_CLAUDE_VERSION,
+    SteppedLoop,
     assert_rejected,
     decoded_events,
     failure_lines,
@@ -64,7 +73,9 @@ from service_support import (
 from test_service_cli_runner import (
     MINT,
     PLAIN_APP,
+    ScriptedRun,
     a_config,
+    a_scripted_run,
     all_children_gone,
     drive_over_http,
     eventually,
@@ -74,8 +85,10 @@ from test_service_cli_runner import (
     status_of,
     trusting,
 )
+from test_service_run_tools import Stall
 
 import agent_service.app as app_module
+import agent_service.cli_runner as cli_runner_module
 import agent_service.config as config_module
 from agent_client.sse import RunStreamDecoder
 from agent_client.wire import (
@@ -92,12 +105,17 @@ from agent_client.wire import (
     ToolResult,
 )
 from agent_providers import spawn
+from agent_providers.cli_run import CliRunAdapter
+from agent_providers.config import PrivateWorkingRoot
+from agent_providers.events import FinalEvent, StreamEvent
+from agent_providers.procfs import GroupCensus
+from agent_service.capability import Capability
 from agent_service.cli import main
 from agent_service.cli_runner import CliRunner, mcp_tls_context
 from agent_service.config import ServiceConfig
 from agent_service.run_events import RUNNER_FAILED_MESSAGE
 from agent_service.run_liveness import LoopClock
-from agent_service.run_tools import RunTools
+from agent_service.run_tools import UPSTREAM_ABORT_SECONDS, RunTools
 from agent_service.runners import Runners
 from agent_service.tool_relay import ToolCallBarrier
 
@@ -107,6 +125,8 @@ TOOLS = {"save_note": "side_effecting", "read_note": "read_only"}
 SETTLE_SECONDS = 10.0
 STUCK_APP_BOUND_SECONDS = 30.0
 HELD_RUN_CLIENT_TIMEOUT_SECONDS = STUCK_APP_BOUND_SECONDS + SETTLE_SECONDS
+INVALID_PARAMS = -32602
+MCP_PROTOCOL_VERSION = "2025-11-25"
 RELAY_TASK_PREFIXES = ("relay:", "upstream:", "run-tools:")
 
 
@@ -1139,6 +1159,266 @@ def test_a_real_group_keeps_its_place_through_the_service_until_the_reap_ends(
         True,
         (RunState.CANCELLED, None),
     )
+
+
+RELAY_INIT_LINE = an_init(
+    tools=[f"mcp__relay__{name}" for name in TOOLS],
+    mcp_servers=[{"name": "relay", "status": "connected"}],
+)
+
+
+class ChildHeldAtItsReap(ScriptedClaudeChild):
+    """A parked scripted leader whose group reap waits, in the test's loop, for ``reap_gate``."""
+
+    def __init__(self, **script: Any) -> None:
+        parked = {
+            "returncode": None,
+            "natural_exit": None,
+            "stdout_stalls": True,
+            "stream_lines": [RELAY_INIT_LINE, TEXT_LINE],
+        }
+        super().__init__(2468, **{**parked, **script})
+        self.reap_reached = asyncio.Event()
+        self.reap_gate = asyncio.Event()
+
+    async def kill_until_gone(self, *, within: float) -> spawn.KillUntilGoneResult:
+        self.reap_reached.set()
+        await self.reap_gate.wait()
+        return await super().kill_until_gone(within=within)
+
+
+def capability_for(app: ToolApp) -> Capability:
+    template = capability_carrying(canary_token(), tools=tuple(TOOLS))
+    return Capability(template.claims.model_copy(update={"aud": app.origin}), template.token)
+
+
+def a_scripted_tool_run(tmp_path: Path, authority: TestAuthority, app: ToolApp) -> ScriptedRun:
+    songmaker = {"tools": dict(TOOLS), "mcp_origin": app.origin}
+    config = a_config(tmp_path, a_fake_claude(tmp_path), songmaker=songmaker)
+    return a_scripted_run(
+        tmp_path,
+        config=config,
+        tls_context=mcp_tls_context(authority.ca_file),
+        capability=capability_for(app),
+    )
+
+
+@dataclass(frozen=True)
+class RelayDoor:
+    """Where the scripted child would have connected: the relay the run's tools opened."""
+
+    port: int
+    secret: str
+    path: str
+
+    @classmethod
+    def in_the_run_of(cls, run: ScriptedRun) -> RelayDoor:
+        [relay_file] = run.root.glob("**/relay-mcp.json")
+        relay = json.loads(relay_file.read_text())["mcpServers"]["relay"]
+        address = urlsplit(relay["url"])
+        secret = relay["headers"]["Authorization"].removeprefix("Bearer ")
+        return cls(address.port or 0, secret, address.path)
+
+    async def connect(self) -> RawClient:
+        return await RawClient.connect(self.port)
+
+    def call(self, request_id: int, name: str = "read_note") -> bytes:
+        body = json_rpc("tools/call", request_id, {"name": name, "arguments": {}})
+        head = (
+            f"POST {self.path} HTTP/1.1\r\nHost: 127.0.0.1:{self.port}\r\n"
+            f"Authorization: Bearer {self.secret}\r\nContent-Type: application/json\r\n"
+            f"MCP-Protocol-Version: {MCP_PROTOCOL_VERSION}\r\nContent-Length: {len(body)}\r\n\r\n"
+        )
+        return head.encode() + body
+
+
+async def error_code_of(client: RawClient) -> int:
+    return json.loads((await client.answer()).body)["error"]["code"]
+
+
+def test_a_call_during_the_reap_is_refused_and_never_forwarded(
+    tmp_path, authority, monkeypatch, logging_state_restored
+):
+    child = ChildHeldAtItsReap()
+    with a_tool_app(authority, list(TOOLS)) as app:
+        run = a_scripted_tool_run(tmp_path, authority, app)
+
+        async def scenario() -> None:
+            await anext(run.frames)
+            await anext(run.frames)
+            door = RelayDoor.in_the_run_of(run)
+            idle = await door.connect()
+            closing = asyncio.create_task(run.frames.aclose())
+            try:
+                async with asyncio.timeout(TEST_WAIT_SECONDS):
+                    await child.reap_reached.wait()
+                with pytest.raises(ConnectionRefusedError):
+                    await door.connect()
+                await idle.send(door.call(2))
+                assert await error_code_of(idle) == INVALID_PARAMS
+            finally:
+                child.reap_gate.set()
+            async with asyncio.timeout(TEST_WAIT_SECONDS):
+                await closing
+
+        drive_scripted(monkeypatch, child, scenario(), loop_factory=SteppedLoop)
+
+    assert app.calls == []
+
+
+def core_events_seen(monkeypatch: pytest.MonkeyPatch) -> list[StreamEvent]:
+    """Record each event the core's iterator hands the CLI runner, as the core yields it."""
+    seen: list[StreamEvent] = []
+    core = cli_runner_module.astream_cli_run
+
+    async def recording(root: PrivateWorkingRoot, adapter: CliRunAdapter):
+        async for event in core(root, adapter):
+            seen.append(event)
+            yield event
+
+    monkeypatch.setattr(cli_runner_module, "astream_cli_run", recording)
+    return seen
+
+
+async def collected(frames: AsyncGenerator[bytes, None]) -> list[bytes]:
+    return [frame async for frame in frames]
+
+
+async def loop_settled() -> None:
+    loop = asyncio.get_running_loop()
+    assert isinstance(loop, SteppedLoop)
+    await loop.settled()
+
+
+def test_a_natural_exit_reaps_before_the_final_and_the_relay_closes_after_the_terminal(
+    tmp_path, authority, monkeypatch, logging_state_restored
+):
+    child = ChildHeldAtItsReap(
+        natural_exit=0, stdout_stalls=False, stream_lines=[RELAY_INIT_LINE, TEXT_LINE, SUCCESS_LINE]
+    )
+    seen = core_events_seen(monkeypatch)
+    with a_tool_app(authority, list(TOOLS)) as app:
+        run = a_scripted_tool_run(tmp_path, authority, app)
+
+        async def scenario() -> None:
+            reading = asyncio.create_task(collected(run.frames))
+            async with asyncio.timeout(TEST_WAIT_SECONDS):
+                await child.reap_reached.wait()
+            door = RelayDoor.in_the_run_of(run)
+            await loop_settled()
+            final_before_the_reap = [event for event in seen if isinstance(event, FinalEvent)]
+            child.reap_gate.set()
+            async with asyncio.timeout(TEST_WAIT_SECONDS):
+                frames = await reading
+            assert final_before_the_reap == []
+            assert [type(event) for event in seen if isinstance(event, FinalEvent)] != []
+            assert decoded_events(b"".join(frames))[-1].type == "succeeded"
+            with pytest.raises(ConnectionRefusedError):
+                await door.connect()
+            assert pending_tool_tasks() == []
+
+        drive_scripted(monkeypatch, child, scenario(), loop_factory=SteppedLoop)
+
+    assert app.calls == []
+
+
+def an_unconfirmed_group(**script: Any) -> ChildHeldAtItsReap:
+    return ChildHeldAtItsReap(
+        survives={signal.SIGTERM, signal.SIGKILL},
+        censuses=(GroupCensus.LIVE, GroupCensus.EMPTY),
+        stderr_stalls=True,
+        **script,
+    )
+
+
+async def assert_the_tools_are_closed(app: ToolApp, door: RelayDoor) -> None:
+    with pytest.raises(ConnectionRefusedError):
+        await door.connect()
+    await yield_until(lambda: app.fake.ended_connections == app.fake.accepted_connections)
+    assert pending_tool_tasks() == []
+
+
+def test_an_unconfirmed_group_with_tools_closes_them_and_holds_the_place(
+    tmp_path, authority, monkeypatch, logging_state_restored
+):
+    child = an_unconfirmed_group()
+    child.reap_gate.set()
+    with a_tool_app(authority, list(TOOLS)) as app:
+        run = a_scripted_tool_run(tmp_path, authority, app)
+
+        async def scenario() -> None:
+            await anext(run.frames)
+            await anext(run.frames)
+            door = RelayDoor.in_the_run_of(run)
+            async with asyncio.timeout(TEST_WAIT_SECONDS):
+                await run.frames.aclose()
+            status = run.status()
+            assert (status.state, status.failure_code) == PROVIDER_ERROR
+            assert run.held_state() == (True, 1, True)
+            await assert_the_tools_are_closed(app, door)
+            await run.frees_its_place_once_the_group_is_confirmed(child)
+
+        drive_scripted(monkeypatch, child, scenario(), loop_factory=SteppedLoop)
+
+    assert app.calls == []
+
+
+def test_a_loss_beside_a_cancelled_close_ends_provider_error_with_tools_open(
+    tmp_path, authority, monkeypatch, logging_state_restored
+):
+    child = an_unconfirmed_group()
+    with a_tool_app(authority, list(TOOLS)) as app:
+        run = a_scripted_tool_run(tmp_path, authority, app)
+
+        async def scenario() -> None:
+            await anext(run.frames)
+            await anext(run.frames)
+            door = RelayDoor.in_the_run_of(run)
+            closing = asyncio.create_task(run.frames.aclose())
+            async with asyncio.timeout(TEST_WAIT_SECONDS):
+                await child.reap_reached.wait()
+            closing.cancel()
+            await loop_settled()
+            child.reap_gate.set()
+            with contextlib.suppress(asyncio.CancelledError):
+                async with asyncio.timeout(TEST_WAIT_SECONDS):
+                    await closing
+            status = run.status()
+            assert (status.state, status.failure_code) == PROVIDER_ERROR
+            assert run.held_state() == (True, 1, True)
+            await assert_the_tools_are_closed(app, door)
+            await run.frees_its_place_once_the_group_is_confirmed(child)
+
+        drive_scripted(monkeypatch, child, scenario(), loop_factory=SteppedLoop)
+
+
+def test_an_overrunning_upstream_cleanup_does_not_hold_the_place(
+    tmp_path, authority, monkeypatch, caplog, logging_state_restored
+):
+    child = ChildHeldAtItsReap()
+    child.reap_gate.set()
+    with a_tool_app(authority, list(TOOLS)) as app:
+        run = a_scripted_tool_run(tmp_path, authority, app)
+
+        async def scenario() -> None:
+            await anext(run.frames)
+            await anext(run.frames)
+            stall = Stall(monkeypatch, httpx.AsyncClient, "aclose")
+            closing = asyncio.create_task(run.frames.aclose())
+            await yield_until(lambda: stall.pending)
+            await parked_at(run.clock, UPSTREAM_ABORT_SECONDS)
+            run.clock.advance_to(UPSTREAM_ABORT_SECONDS)
+            async with asyncio.timeout(TEST_WAIT_SECONDS):
+                await closing
+            assert (run.place_is_held(), held_claude_slots()) == (False, 0)
+            assert [kind for _event, kind, _function in failure_lines(caplog)] == [
+                "UpstreamCleanupIncomplete"
+            ]
+            assert stall.pending
+            stall.release()
+            await yield_until(lambda: not stall.pending and pending_tool_tasks() == [])
+
+        drive_scripted(monkeypatch, child, scenario(), loop_factory=SteppedLoop)
 
 
 def test_the_mcp_trust_context_ignores_the_environment(

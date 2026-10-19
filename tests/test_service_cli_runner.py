@@ -9,11 +9,13 @@ rows give the runner no TLS context.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import os
 import re
 import signal
 import socket
+import ssl
 import struct
 import threading
 import time
@@ -98,6 +100,7 @@ from agent_providers.procfs import GroupCensus
 from agent_providers.spawn import KillUntilGoneResult
 from agent_service.admission import AdmissionSlot
 from agent_service.app import create_app
+from agent_service.capability import Capability
 from agent_service.cli import main
 from agent_service.cli_runner import RUN_ADAPTERS, CliRunner, installed_runners
 from agent_service.config import McpConfig, Provider, ServiceConfig
@@ -846,15 +849,21 @@ class ScriptedRun:
         )
 
 
-def a_scripted_run(tmp_path: Path) -> ScriptedRun:
-    config = a_config(tmp_path, a_fake_claude(tmp_path))
+def a_scripted_run(
+    tmp_path: Path,
+    *,
+    config: ServiceConfig | None = None,
+    tls_context: ssl.SSLContext | None = None,
+    capability: Capability | None = None,
+) -> ScriptedRun:
+    config = config or a_config(tmp_path, a_fake_claude(tmp_path))
     clock = StepClock()
     slot = AdmissionSlot(1)
     records = RunRecords(lambda: instant(clock.now))
     run_id = uuid.uuid4()
     frames = run_frames(
-        alice_admitted_run(run_id),
-        CliRunner(config, tls_context=None, clock=clock),
+        dataclasses.replace(alice_admitted_run(run_id), capability=capability),
+        CliRunner(config, tls_context=tls_context, clock=clock),
         SONGMAKER,
         config.runs,
         clock,

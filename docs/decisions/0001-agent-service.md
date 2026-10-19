@@ -1343,28 +1343,23 @@ the plan review.
 The other facts of that list were either pinned in this record or overtaken by a
 landing, so they are not repeated. Three stay live:
 
-- **Signing on the event loop** (#68: about 1.4 ms per admission). The busy check
+- **Fact 13. Signing on the event loop** (#68: about 1.4 ms per admission). The busy check
   comes before signing (line 9), so CLI admissions sign one at a time. Signing stays
   on the loop for A1b; A2b, whose API route runs concurrently, decides again.
-- **A child may renew its login.** The Claude copy carries the refresh token; Codex
+- **Fact 10. A child may renew its login.** The Claude copy carries the refresh token; Codex
   blanks its refresh token because "A child that refreshes would rotate the
   operator's real refresh token" (`codex_login.py:57-63`), which proves Codex's
   behaviour only. Whether a Claude child's renewal rotates the source's refresh
-  token is unmeasured (A1b-0b1 measured that the CLI writes no credential; "the CLI
-  refreshes an expiring token is not measured", above). Whether a Grok child
+  token is unmeasured (A1b-0b1 measured that the CLI writes no credential; "Whether the
+  CLI refreshes an expiring token is not measured.", in A1b-0b1 below). Whether a Grok child
   refreshes and rotates the source token is unmeasured (G0b), as is the access-token
   lifetime of both.
-- **Codex and Grok, not yet measured** (C0a and G0a, PR #267 and PR #262, measured
-  the items that need no login; these need a login or an MCP server, are C0b/G0b
-  and C0c/G0c, and are not guessed):
-  - whether either CLI has a streamable-HTTP MCP client that sends a custom bearer
-    header, and its message sequence against the JSON-only profile (discover,
-    initialize, GET, `tools/list`);
-  - whether `--deny "*"` or `approval_policy` blocks or auto-approves MCP tools, and
-    whether a CLI waits for a held `tools/call` reply;
-  - the tool-name form in the stream, and whether it sends parallel calls;
-  - the form a refused or expired login takes (line 11), and whether the record's
-    "device-code logins" holds for Grok's OIDC login.
+- **Fact 15. Codex and Grok, not yet measured.** C0a and G0a (PR #267 and PR #262)
+  measured the items that need no login. What needs a login or an MCP server stays in
+  "Deferred to A1b-G0b / G0c" (`:1609-1613`) and "Deferred to C0b and C0c"
+  (`:2498-2506`); it is not guessed. Those lists lack one item: whether the record's
+  "device-code logins" holds for Grok's OIDC login. The one MCP item still open is the
+  sequence against the relay's `mcp_wire` in a model turn (X0c).
 
 ### A1b-4c run port (head, 18.10.2026)
 

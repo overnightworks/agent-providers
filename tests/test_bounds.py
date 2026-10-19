@@ -34,16 +34,20 @@ def test_the_helper_returns_what_the_awaitable_returns() -> None:
 
 @pytest.mark.usefixtures("no_time_to_wait")
 def test_an_awaitable_still_running_at_the_bound_ends_in_a_timeout() -> None:
+    waiting = within_the_bound(settle_after_a_loop_turn("late"))
+
     with pytest.raises(TimeoutError):
-        asyncio.run(within_the_bound(settle_after_a_loop_turn("late")))
+        asyncio.run(waiting)
 
 
 @pytest.mark.usefixtures("no_time_to_wait")
 def test_a_timed_out_awaitable_is_cancelled() -> None:
     cancelled: list[bool] = []
 
+    waiting = within_the_bound(settle_after_a_loop_turn("late", cancelled))
+
     with pytest.raises(TimeoutError):
-        asyncio.run(within_the_bound(settle_after_a_loop_turn("late", cancelled)))
+        asyncio.run(waiting)
 
     assert cancelled == [True]
 
@@ -52,8 +56,10 @@ def test_the_awaitables_own_error_arrives_unchanged() -> None:
     async def failing() -> None:
         raise ValueError("the awaitable's own error")
 
+    waiting = within_the_bound(failing())
+
     with pytest.raises(ValueError, match="the awaitable's own error"):
-        asyncio.run(within_the_bound(failing()))
+        asyncio.run(waiting)
 
 
 def test_patching_the_one_bound_moves_the_helper(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -62,11 +68,15 @@ def test_patching_the_one_bound_moves_the_helper(monkeypatch: pytest.MonkeyPatch
         return await within_the_bound(settle_after_a_loop_turn("settled"))
 
     assert asyncio.run(wait_with_the_bound_as_patched(bounds.TEST_WAIT_SECONDS)) == "settled"
+    waiting = wait_with_the_bound_as_patched(0)
+
     with pytest.raises(TimeoutError):
-        asyncio.run(wait_with_the_bound_as_patched(0))
+        asyncio.run(waiting)
 
 
 @pytest.mark.usefixtures("no_time_to_wait")
 def test_the_relay_close_honours_the_one_bound() -> None:
+    closing = close_bounded(RelayClosingAfterALoopTurn())
+
     with pytest.raises(TimeoutError):
-        asyncio.run(close_bounded(RelayClosingAfterALoopTurn()))
+        asyncio.run(closing)

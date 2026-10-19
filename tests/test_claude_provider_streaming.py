@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
+import logging
 import threading
 from typing import Any
 from unittest.mock import MagicMock
@@ -525,7 +527,7 @@ def test_stream_regression_matches_non_streaming_final_text(monkeypatch) -> None
     lines = [
         _assistant_line("The quick "),
         _assistant_line("brown fox"),
-        _result_line(expected),
+        _result_line(f" {expected}\n"),
     ]
 
     install_claude_cli_children(monkeypatch, a_claude_cli_child(stream_lines=lines))
@@ -538,22 +540,13 @@ def test_stream_regression_matches_non_streaming_final_text(monkeypatch) -> None
     assert final[0].text == expected
 
 
-def test_stream_falls_back_to_assembled_text_when_no_result(monkeypatch) -> None:
-    monkeypatch.setattr(
-        provider, "_require_claude_binary", lambda: "/bin/claude",
-    )
-    lines = [
-        _assistant_line("piece one "),
-        _assistant_line("piece two"),
-    ]
+def test_a_stream_without_a_result_line_fails(monkeypatch) -> None:
+    lines = [_assistant_line("piece one "), _assistant_line("piece two")]
 
-    install_claude_cli_children(monkeypatch, a_claude_cli_child(stream_lines=lines))
+    seen, failure = _stream_outcome(monkeypatch, lines)
 
-    events = asyncio.run(_collect(
-        acall_claude_with_mcp_stream(prompt="hi", user_id="u"),
-    ))
-    final = [e for e in events if isinstance(e, FinalEvent)][0]
-    assert final.text == "piece one piece two"
+    assert (type(failure), str(failure)) == (UnavailableError, CLAUDE_CLI_UNAVAILABLE_DETAIL)
+    assert [e.type for e in seen] == ["assistant_text", "assistant_text"]
 
 
 def test_stream_nonzero_exit_raises(monkeypatch) -> None:
@@ -724,11 +717,11 @@ def _error_result_line(text: str = LOGIN_REFUSED_TEXT) -> bytes:
     }).encode() + b"\n"
 
 
-def _stream_outcome(monkeypatch, lines: list[bytes], returncode: int = 0):
+def _stream_outcome(monkeypatch, lines: list[bytes], returncode: int = 0, **script):
     monkeypatch.setattr(provider, "_require_claude_binary", lambda: "/bin/claude")
 
     install_claude_cli_children(
-        monkeypatch, a_claude_cli_child(stream_lines=lines, returncode=returncode),
+        monkeypatch, a_claude_cli_child(stream_lines=lines, returncode=returncode, **script),
     )
     seen: list[StreamEvent] = []
 
@@ -751,13 +744,13 @@ def _chain_text(failure: BaseException | None) -> str:
     return " ".join(texts)
 
 
-def _drive_over_the_turn_transport(monkeypatch, lines: list[bytes], returncode: int):
+def _drive_over_the_turn_transport(monkeypatch, lines: list[bytes], returncode: int, **script):
     from agent_providers.claude.adapter import stream_claude_turn
 
     monkeypatch.setattr(provider, "_require_claude_binary", lambda: "/bin/claude")
 
     install_claude_cli_children(
-        monkeypatch, a_claude_cli_child(stream_lines=lines, returncode=returncode),
+        monkeypatch, a_claude_cli_child(stream_lines=lines, returncode=returncode, **script),
     )
     seen: list[StreamEvent] = []
 
@@ -884,3 +877,213 @@ def test_stream_delivers_every_block_of_a_message_in_order(monkeypatch) -> None:
         "assistant_text", "tool_call", "tool_call", "tool_result", "tool_result", "final",
     ]
     assert [e.tool_use_id for e in seen[1:5]] == ["tu-1", "tu-2", "tu-1", "tu-2"]
+
+
+def test_every_event_and_the_ending_carry_the_turns_correlation_id(monkeypatch) -> None:
+    monkeypatch.setattr(provider, "_require_claude_binary", lambda: "/bin/claude")
+    lines = [
+        _assistant_line("Hi"),
+        _tool_use_line("mcp__notes__get_note", "tu-1", {"note_id": "s1"}),
+        _tool_result_line("tu-1", "note data"),
+        _result_line("Hi."),
+    ]
+    install_claude_cli_children(monkeypatch, a_claude_cli_child(stream_lines=lines))
+
+    events = asyncio.run(_collect(
+        acall_claude_with_mcp_stream(
+            prompt="hi", user_id="u", correlation_id=A_CORRELATION_ID,
+        ),
+    ))
+
+    assert events == [
+        AssistantTextEvent(text="Hi", correlation_id=A_CORRELATION_ID),
+        ToolCallEvent(
+            tool_use_id="tu-1",
+            name="mcp__notes__get_note",
+            input={"note_id": "s1"},
+            correlation_id=A_CORRELATION_ID,
+        ),
+        ToolResultEvent(
+            tool_use_id="tu-1", content="note data", correlation_id=A_CORRELATION_ID,
+        ),
+        FinalEvent(text="Hi.", correlation_id=A_CORRELATION_ID),
+    ]
+
+
+def test_the_old_stream_accepts_an_init_that_announces_the_hosts_own_server(
+    monkeypatch,
+) -> None:
+    init = json.dumps({
+        "type": "system",
+        "subtype": "init",
+        "tools": ["mcp__notes__get_note"],
+        "mcp_servers": [{"name": "notes", "status": "connected"}],
+        "apiKeySource": "none",
+    }).encode() + b"\n"
+
+    seen, failure = _stream_outcome(
+        monkeypatch, [init, _assistant_line("hi"), _result_line("hi")],
+    )
+
+    assert (failure, [e.type for e in seen]) == (None, ["assistant_text", "final"])
+
+
+def test_a_stream_that_exits_non_zero_after_its_result_fails(monkeypatch) -> None:
+    seen, failure = _stream_outcome(
+        monkeypatch, [_assistant_line("hi"), _result_line("hi")], returncode=3,
+    )
+
+    assert (type(failure), str(failure)) == (UnavailableError, CLAUDE_CLI_UNAVAILABLE_DETAIL)
+    assert [e.type for e in seen] == ["assistant_text"]
+
+
+def test_a_stream_without_a_result_line_ends_the_transport_with_a_protocol_error(
+    monkeypatch,
+) -> None:
+    seen, failure = _drive_over_the_turn_transport(
+        monkeypatch, [_assistant_line("partial")], returncode=0,
+    )
+
+    assert failure.reason.code is SafeRouteReasonCode.CLI_PROTOCOL_ERROR
+    assert not any(isinstance(e, FinalEvent) for e in seen)
+
+
+A_TOO_LONG_LINE_LIMIT = 64
+
+
+def _an_over_long_marker_line() -> bytes:
+    return _assistant_line(A_MARKER + "x" * (2 * A_TOO_LONG_LINE_LIMIT))
+
+
+def test_an_over_long_stream_line_ends_the_turn_closed_and_without_its_bytes(
+    monkeypatch, caplog,
+) -> None:
+    caplog.set_level("DEBUG")
+
+    seen, failure = _stream_outcome(
+        monkeypatch, [_an_over_long_marker_line()], stdout_limit=A_TOO_LONG_LINE_LIMIT,
+    )
+
+    assert (type(failure), str(failure), seen) == (
+        UnavailableError, CLAUDE_CLI_UNAVAILABLE_DETAIL, [],
+    )
+    assert_no_marker_in_failure(failure, caplog)
+    assert held_claude_slots() == 0
+
+
+def test_an_over_long_stream_line_ends_the_transport_with_a_protocol_error_and_a_clean_chain(
+    monkeypatch, caplog,
+) -> None:
+    caplog.set_level("DEBUG")
+
+    seen, failure = _drive_over_the_turn_transport(
+        monkeypatch, [_an_over_long_marker_line()], returncode=0,
+        stdout_limit=A_TOO_LONG_LINE_LIMIT,
+    )
+
+    assert failure.reason.code is SafeRouteReasonCode.CLI_PROTOCOL_ERROR
+    assert seen == []
+    assert A_MARKER not in f"{_chain_text(failure)} {caplog.text}"
+
+
+def _run_stream_scenario(monkeypatch, child, scenario) -> None:
+    reap_without_waiting(monkeypatch)
+    monkeypatch.setattr(provider, "_require_claude_binary", lambda: "/bin/claude")
+    install_claude_cli_children(monkeypatch, child)
+    run_bounded(scenario())
+
+
+def _only_the_scenario_runs() -> bool:
+    return asyncio.all_tasks() == {asyncio.current_task()}
+
+
+def _unretrieved_task_errors(caplog) -> list[logging.LogRecord]:
+    gc.collect()
+    return [r for r in caplog.records if "never retrieved" in r.getMessage()]
+
+
+def test_a_stderr_that_never_closes_does_not_hold_the_stream_after_its_exit(
+    monkeypatch,
+) -> None:
+    child = a_claude_cli_child(
+        stream_lines=[_assistant_line("hi"), _result_line("hi")], stderr_stalls=True,
+    )
+    ended: list[bool] = []
+
+    async def scenario() -> None:
+        events = await _collect(acall_claude_with_mcp_stream(prompt="hi", user_id="u"))
+        ended.append(isinstance(events[-1], FinalEvent) and _only_the_scenario_runs())
+
+    _run_stream_scenario(monkeypatch, child, scenario)
+
+    assert ended == [True]
+
+
+def test_a_failed_stderr_read_does_not_fail_the_stream(monkeypatch, caplog) -> None:
+    child = a_claude_cli_child(
+        stream_lines=[_assistant_line("hi"), _result_line("hi")],
+        stderr_failure=OSError("stderr read failed"),
+    )
+    seen: list[StreamEvent] = []
+    drained: list[bool] = []
+
+    async def scenario() -> None:
+        stream = acall_claude_with_mcp_stream(prompt="hi", user_id="u")
+        seen.append(await anext(stream))
+        await child.stderr_failed.wait()
+        async for event in stream:
+            seen.append(event)
+        drained.append(_only_the_scenario_runs())
+
+    _run_stream_scenario(monkeypatch, child, scenario)
+
+    assert ([e.type for e in seen], drained) == (["assistant_text", "final"], [True])
+    assert _unretrieved_task_errors(caplog) == []
+
+
+def test_a_parser_refusal_survives_a_completed_stderr_failure(monkeypatch, caplog) -> None:
+    stderr_failure = OSError("stderr-read-failed-marker")
+    refused_shape = json.dumps(
+        _assistant_payload({"type": "text", "text": {"k": A_MARKER}}),
+    ).encode() + b"\n"
+    child = a_claude_cli_child(
+        stream_lines=[_assistant_line("hi"), refused_shape], stderr_failure=stderr_failure,
+    )
+    refusals: list[tuple[str, str]] = []
+
+    async def scenario() -> None:
+        stream = acall_claude_with_mcp_stream(prompt="hi", user_id="u")
+        await anext(stream)
+        await child.stderr_failed.wait()
+        try:
+            await anext(stream)
+        except UnavailableError as refusal:
+            refusals.append((str(refusal), _chain_text(refusal)))
+
+    _run_stream_scenario(monkeypatch, child, scenario)
+
+    [(message, chain)] = refusals
+    assert message == CLAUDE_CLI_UNAVAILABLE_DETAIL
+    assert "stderr-read-failed-marker" not in chain
+    assert _unretrieved_task_errors(caplog) == []
+
+
+def test_the_final_event_arrives_before_the_leader_is_released(monkeypatch) -> None:
+    child = a_claude_cli_child(stream_lines=[_result_line("ok")])
+    held_after_final: list[tuple[list[tuple[str, int]], int]] = []
+    held_after_close: list[tuple[list[tuple[str, int]], int]] = []
+
+    async def scenario() -> None:
+        stream = acall_claude_with_mcp_stream(prompt="hi", user_id="u")
+        final = await anext(stream)
+        assert isinstance(final, FinalEvent)
+        held_after_final.append((operations(child.log), held_claude_slots()))
+        await stream.aclose()
+        held_after_close.append((operations(child.log), held_claude_slots()))
+
+    _run_stream_scenario(monkeypatch, child, scenario)
+
+    assert held_after_final == [([], 1)]
+    assert held_after_close == [
+        ([("kill_until_gone", child.pid), ("release", child.pid)], 0),
+    ]

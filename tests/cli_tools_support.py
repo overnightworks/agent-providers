@@ -4,7 +4,7 @@
 speaks ``initialize``, ``tools/list`` and ``tools/call`` to the relay with the bearer header
 the file names, announces the relay as connected, optionally prints the CLI's own
 ``tool_use``/``tool_result`` lines, records every start fact and every reply it received under
-``capture``, and ends with a ``result`` line after it wrote ``capture/finished``. A refused
+``capture``, and ends with a ``result`` line. A refused
 ``tools/list`` leaves it with no tools, and ``give_up_when_present`` makes it give each call up
 (``notifications/cancelled``, then a closed connection) once that file exists, instead of waiting.
 """
@@ -148,7 +148,6 @@ for stray in PLAN["stray_lines"]:
 time.sleep(PLAN["linger_seconds"])
 if PLAN["exit_code"]:
     sys.exit(PLAN["exit_code"])
-open(capture + "/finished", "w").close()
 emit({{"type": "result", "subtype": "success", "is_error": False, "result": "done"}})
 """
 

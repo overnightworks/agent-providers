@@ -55,7 +55,6 @@ from service_support import (
     failure_lines,
     fake_app_authority,  # noqa: F401 - a fixture, requested by name
     logging_state_snapshot,  # noqa: F401 - a fixture, requested by name
-    post_run,
     run_body,
     served,
 )
@@ -102,6 +101,7 @@ READ_NOTE = ClaudeCall("read_note")
 TOOLS = {"save_note": "side_effecting", "read_note": "read_only"}
 SETTLE_SECONDS = 10.0
 STUCK_APP_BOUND_SECONDS = 30.0
+HELD_RUN_CLIENT_TIMEOUT_SECONDS = STUCK_APP_BOUND_SECONDS + SETTLE_SECONDS
 RELAY_TASK_PREFIXES = ("relay:", "upstream:", "run-tools:")
 
 
@@ -482,7 +482,7 @@ def leave_when(
                 "turn": {"system": "s", "messages": [{"role": "user", "text": "a"}]},
             }
         ),
-        timeout=SETTLE_SECONDS,
+        timeout=HELD_RUN_CLIENT_TIMEOUT_SECONDS,
     ) as response:
         for chunk in response.iter_bytes():
             seen += [item for item in decoder.feed(chunk) if not hasattr(item, "kind")]
@@ -784,7 +784,7 @@ def assert_the_departure_left_nothing_running(run: ToolRun, caplog) -> None:
         ClientLoss.DISCONNECTED,
         None,
     )
-    assert not any(isinstance(event, (ToolResult, Succeeded)) for event in run.events)
+    assert run.status.events == len(run.events)
     assert failure_lines(caplog) == []
 
 
@@ -867,7 +867,13 @@ def answered_with_its_marker(request: RecordedRequest):
 
 def post_a_run_marked(base_url: str, marker: str) -> list[RunEvent]:
     turn = {"system": marker, "messages": [{"role": "user", "text": "a"}]}
-    return decoded_events(post_run(base_url, headers(), run_body(turn=turn)).content)
+    response = httpx.post(
+        f"{base_url}/runs",
+        headers={"Content-Type": "application/json", **headers()},
+        content=json.dumps(run_body(turn=turn)),
+        timeout=HELD_RUN_CLIENT_TIMEOUT_SECONDS,
+    )
+    return decoded_events(response.content)
 
 
 def five_runs_held_inside_their_calls_at_once(

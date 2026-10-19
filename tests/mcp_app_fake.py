@@ -35,6 +35,12 @@ LOOPBACK: Final = "127.0.0.1"
 CERTIFICATE_HOST: Final = "localhost"
 WAIT_SECONDS: Final = 10.0
 POLL_SECONDS: Final = 0.01
+PEER_GONE_ERRORS: Final = (
+    ConnectionResetError,
+    BrokenPipeError,
+    ssl.SSLZeroReturnError,
+    ssl.SSLEOFError,
+)
 _VALID_FOR: Final = timedelta(days=1)
 _BACKDATED: Final = timedelta(minutes=5)
 
@@ -215,7 +221,7 @@ class HeldRequest:
             received = connection.recv(1)
         except TimeoutError:
             return False
-        except (ConnectionResetError, BrokenPipeError):
+        except PEER_GONE_ERRORS:
             return True
         if received:
             raise RuntimeError("the peer sent more while its request was held")

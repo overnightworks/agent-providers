@@ -749,18 +749,18 @@ def leaving_beside_the_held_request(
     return play
 
 
-def assert_the_departure_left_nothing_running(run: ToolRun) -> None:
+def assert_the_departure_left_nothing_running(run: ToolRun, caplog) -> None:
     assert (run.status.state, run.status.client_lost, run.status.failure_code) == (
         RunState.CANCELLED,
         ClientLoss.DISCONNECTED,
         None,
     )
     assert not any(isinstance(event, (ToolResult, Succeeded)) for event in run.events)
-    assert (held_claude_slots(), pending_tool_tasks()) == (0, [])
+    assert (held_claude_slots(), pending_tool_tasks(), failure_lines(caplog)) == (0, [], [])
 
 
 def test_a_client_leaving_during_a_forward_cancels_it_upstream(
-    tmp_path, authority, child_cleanup, monkeypatch
+    tmp_path, authority, child_cleanup, monkeypatch, caplog
 ):
     held = HeldRequests()
 
@@ -774,14 +774,14 @@ def test_a_client_leaving_during_a_forward_cancels_it_upstream(
         scenario=leaving_beside_the_held_request(held, "tool_call"),
     )
 
-    assert_the_departure_left_nothing_running(run)
+    assert_the_departure_left_nothing_running(run, caplog)
     assert (len(run.app.calls), run.capture.replies) == (1, [])
     with pytest.raises(ConnectionRefusedError):
         socket.create_connection(("127.0.0.1", run.capture.relay_port), timeout=SETTLE_SECONDS)
 
 
 def test_a_client_leaving_beside_a_held_final_cancels_the_forward(
-    tmp_path, authority, child_cleanup, monkeypatch, final_held
+    tmp_path, authority, child_cleanup, monkeypatch, final_held, caplog
 ):
     held = HeldRequests()
 
@@ -798,14 +798,14 @@ def test_a_client_leaving_beside_a_held_final_cancels_the_forward(
         ),
     )
 
-    assert_the_departure_left_nothing_running(run)
+    assert_the_departure_left_nothing_running(run, caplog)
     assert (final_held.is_set(), len(run.app.calls), run.capture.replies) == (True, 1, [])
     with pytest.raises(ConnectionRefusedError):
         socket.create_connection(("127.0.0.1", run.capture.relay_port), timeout=SETTLE_SECONDS)
 
 
 def test_a_client_leaving_during_the_open_starts_no_child(
-    tmp_path, authority, child_cleanup, monkeypatch
+    tmp_path, authority, child_cleanup, monkeypatch, caplog
 ):
     held = HeldRequests()
 
@@ -822,7 +822,7 @@ def test_a_client_leaving_during_the_open_starts_no_child(
         scenario=leaving_beside_the_held_request(held, "run_started"),
     )
 
-    assert_the_departure_left_nothing_running(run)
+    assert_the_departure_left_nothing_running(run, caplog)
     assert (run.capture.started, run.app.calls) == (False, [])
     assert list(private_root_of(run.config).iterdir()) == []
 

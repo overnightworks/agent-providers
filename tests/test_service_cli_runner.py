@@ -550,7 +550,7 @@ def test_a_client_that_leaves_ends_the_cli_before_the_place_is_free(
             list(private_root_of(config).iterdir()),
             held_claude_slots(),
         )
-        next_run = leave_after(base_url, "run_started")
+        next_run = leave_after(base_url, "assistant_text")
         eventually(lambda: read_status(base_url, next_run).state is not RunState.RUNNING)
         return while_held, afterwards, held_reap.reaps
 

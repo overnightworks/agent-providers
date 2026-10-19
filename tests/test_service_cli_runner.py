@@ -9,7 +9,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import signal
+import socket
+import struct
 import threading
 import time
 import uuid
@@ -17,8 +20,8 @@ from collections.abc import AsyncGenerator, Callable, Coroutine, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
-import httpx
 import pytest
 import uvicorn
 from anchored_support import GONE, TEST_WAIT_SECONDS, ChildCleanup
@@ -472,24 +475,30 @@ def eventually(condition: Callable[[], bool]) -> None:
 
 
 def leave_after(base_url: str, event_type: str) -> uuid.UUID:
-    """Start a run, read its stream up to ``event_type`` and close the connection."""
-    body = json.dumps(run_body(turn=THREE_MESSAGE_TURN))
-    with httpx.stream(
-        "POST",
-        f"{base_url}/runs",
-        headers={"Content-Type": "application/json", **headers()},
-        content=body,
-        timeout=10,
-    ) as response:
-        assert response.status_code == 200
-        run_id = None
-        for text in response.iter_lines():
-            if text.startswith("data: "):
-                event = json.loads(text.removeprefix("data: "))
-                run_id = run_id or uuid.UUID(event["run_id"])
-                if event["type"] == event_type:
-                    return run_id
-    raise AssertionError(f"the stream ended before {event_type}")
+    """Start a run, read its stream up to ``event_type`` and reset the connection.
+
+    A reset reaches the server as a lost connection without a write from it.
+    """
+    body = json.dumps(run_body(turn=THREE_MESSAGE_TURN)).encode()
+    request_headers = {
+        "Content-Type": "application/json",
+        "Content-Length": str(len(body)),
+        "Connection": "close",
+        **headers(),
+    }
+    head = "".join(f"{name}: {value}\r\n" for name, value in request_headers.items())
+    host, port = urlsplit(base_url).netloc.split(":")
+    with socket.create_connection((host, int(port)), timeout=TEST_WAIT_SECONDS) as client:
+        client.sendall(f"POST /runs HTTP/1.1\r\nHost: {host}\r\n{head}\r\n".encode() + body)
+        received = b""
+        while f'"type":"{event_type}"'.encode() not in received:
+            chunk = client.recv(4096)
+            assert chunk, f"the stream ended before {event_type}"
+            received += chunk
+        client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+    match = re.search(rb'"run_id":"([0-9a-f-]{36})"', received)
+    assert match is not None
+    return uuid.UUID(match.group(1).decode())
 
 
 def read_status(base_url: str, run_id: uuid.UUID) -> RunStatus:
@@ -497,6 +506,7 @@ def read_status(base_url: str, run_id: uuid.UUID) -> RunStatus:
     return RunStatus.model_validate_json(response.content)
 
 
+FIRST_UVICORN_THAT_SEES_A_LEAVING_CLIENT = (0, 32, 1)
 PARKED_AFTER_ONE_TEXT = (INIT_LINE, TEXT_LINE)
 PARKED = "exec sleep 600"
 
@@ -523,6 +533,11 @@ def a_parked_claude(
     return a_fake_claude(directory, stream=PARKED_AFTER_ONE_TEXT, then=then)
 
 
+@pytest.mark.skipif(
+    tuple(int(part) for part in uvicorn.__version__.split(".")[:3])
+    < FIRST_UVICORN_THAT_SEES_A_LEAVING_CLIENT,
+    reason="uvicorn before 0.32.1 never tells a streaming app that its client left",
+)
 def test_a_client_that_leaves_ends_the_cli_before_the_place_is_free(
     tmp_path: Path,
     child_cleanup: ChildCleanup,

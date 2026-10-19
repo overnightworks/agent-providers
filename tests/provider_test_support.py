@@ -31,6 +31,7 @@ import threading
 import time
 import traceback
 import types
+import uuid
 from collections import deque
 from collections.abc import (
     AsyncIterator,
@@ -1936,3 +1937,128 @@ async def confirm_the_retained_group_gone(child: ScriptedClaudeChild, group: Ret
     child.publish_exit(-signal.SIGKILL)
     async with asyncio.timeout(TEST_WAIT_SECONDS):
         return await lost_groups.confirm_group_gone(group)
+
+
+SYSTEM_TEXT = "Answer briefly."
+SYSTEM_PROMPT_NAME = "system-prompt"
+RELAY_CONFIG_NAME = "relay-mcp.json"
+RELAY_SECRET = "relay-secret-" + uuid.uuid4().hex
+RELAY_CONFIG = {
+    "mcpServers": {
+        "relay": {
+            "type": "http",
+            "url": "http://127.0.0.1:41234/mcp",
+            "headers": {"Authorization": f"Bearer {RELAY_SECRET}"},
+        }
+    }
+}
+RELAY_CONFIG_TEXT = json.dumps(RELAY_CONFIG)
+
+
+def a_claude_stdin_line(content: str) -> bytes:
+    message = {"type": "user", "message": {"role": "user", "content": content}}
+    return json.dumps(message).encode() + b"\n"
+
+
+HISTORY_STDIN_LINE = a_claude_stdin_line("User: a\n\nAssistant: b\n\nUser: c")
+
+
+def line(payload: dict[str, Any]) -> bytes:
+    return json.dumps(payload).encode() + b"\n"
+
+
+def an_init(**fields: Any) -> bytes:
+    announcement = {
+        "type": "system",
+        "subtype": "init",
+        "tools": [],
+        "mcp_servers": [],
+        "apiKeySource": "none",
+    }
+    return line({**announcement, **fields})
+
+
+INIT_LINE = an_init()
+TEXT_LINE = line({"type": "assistant", "message": {"content": [{"type": "text", "text": "hi"}]}})
+SUCCESS_LINE = line(
+    {"type": "result", "subtype": "success", "is_error": False, "result": " done \n"}
+)
+
+
+def a_fake_claude(
+    directory: Path,
+    stream: tuple[bytes, ...] = (INIT_LINE, TEXT_LINE, SUCCESS_LINE),
+    then: str = "exit 0",
+    relay: bool = False,
+    *,
+    system_text: str = SYSTEM_TEXT,
+    stdin_line: bytes = HISTORY_STDIN_LINE,
+    token: str | None = None,
+    max_turns: int | None = None,
+    capture: Path | None = None,
+    version_line: str | None = None,
+) -> Path:
+    """A stand-in for the pinned Claude program that exits with a distinct code on a wrong run.
+
+    It checks the system file, the stdin line, a present token (the exact ``token``
+    when given), ``--max-turns`` when ``max_turns`` is given, an empty working
+    directory and the relay config iff ``relay``. With ``capture`` it first copies
+    its argv, environment, stdin line and every run file there; with
+    ``version_line`` it answers ``--version`` with it.
+    """
+    stream_text = b"".join(stream).decode()
+    version_answer = "exit 1"
+    if version_line:
+        version_answer = f"echo {shlex.quote(version_line.strip())}; exit 0"
+    relay_text = shlex.quote(RELAY_CONFIG_TEXT)
+    relay_check = 'case " $* " in *" --mcp-config "*) exit 26;; esac\n'
+    if relay:
+        relay_check = (
+            f'case " $* " in *" --mcp-config $HOME/{RELAY_CONFIG_NAME} "*) ;; *) exit 21;; esac\n'
+            f'[ "$(stat -c %a "$HOME/{RELAY_CONFIG_NAME}")" = 600 ] || exit 22\n'
+            f'[ "$(cat "$HOME/{RELAY_CONFIG_NAME}")" = {relay_text} ] || exit 23\n'
+        )
+    token_check = (
+        f'[ "$CLAUDE_CODE_OAUTH_TOKEN" = {shlex.quote(token)} ] || exit 24\n' if token else ""
+    )
+    turns_check = (
+        f'case " $* " in *" --max-turns {max_turns} "*) ;; *) exit 25;; esac\n' if max_turns else ""
+    )
+    capture_run = ""
+    if capture is not None:
+        files = shlex.quote(str(capture / "files"))
+        capture_run = (
+            f'mkdir -p {files}\n'
+            f'printf "%s\\n" "$@" > {shlex.quote(str(capture / "argv"))}\n'
+            f'env > {shlex.quote(str(capture / "environment"))}\n'
+            f'printf "%s\\n" "$stdin_line" > {shlex.quote(str(capture / "stdin"))}\n'
+            f'cp -R "$HOME/." {files}\n'
+        )
+    binary = directory / "claude"
+    binary.write_text(
+        "#!/bin/sh\n"
+        f'case "$1" in --version) {version_answer};; esac\n'
+        f'case " $* " in *" --system-prompt-file $HOME/{SYSTEM_PROMPT_NAME} "*) ;;'
+        " *) exit 11;; esac\n"
+        f'[ "$(cat "$HOME/{SYSTEM_PROMPT_NAME}")" = {shlex.quote(system_text)} ] || exit 12\n'
+        "IFS= read -r stdin_line\n"
+        f'[ "$stdin_line" = {shlex.quote(stdin_line.decode().strip())} ] || exit 13\n'
+        '[ -n "$CLAUDE_CODE_OAUTH_TOKEN" ] || exit 14\n'
+        '[ -z "$(ls -A)" ] || exit 15\n'
+        f"{token_check}{turns_check}{relay_check}{capture_run}"
+        f"cat <<'EOF'\n{stream_text}EOF\n"
+        f"{then}\n"
+    )
+    binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
+    return binary
+
+
+def drive_scripted(
+    monkeypatch: pytest.MonkeyPatch,
+    child: ScriptedClaudeChild,
+    scenario: Coroutine[Any, Any, None],
+) -> None:
+    install_claude_cli_children(monkeypatch, child)
+    reap_without_waiting(monkeypatch)
+    with recorded_census_workers(monkeypatch), killpg_forbidden():
+        run_bounded(scenario)

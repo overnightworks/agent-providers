@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import stat
 import uuid
 from pathlib import Path
 from typing import Any
@@ -13,9 +12,21 @@ import pytest
 from anchored_leaders import spawn_warnings
 from anchored_support import GONE, ChildCleanup
 from provider_test_support import (
+    HISTORY_STDIN_LINE,
+    INIT_LINE,
+    RELAY_CONFIG,
+    RELAY_CONFIG_NAME,
+    RELAY_SECRET,
+    SUCCESS_LINE,
+    SYSTEM_PROMPT_NAME,
+    SYSTEM_TEXT,
+    TEXT_LINE,
+    a_fake_claude,
     a_private_root,
+    an_init,
     drive_real_children,
     held_claude_slots,
+    line,
 )
 from pydantic import SecretStr
 
@@ -49,38 +60,12 @@ CANARY_MARKER = "canary-" + uuid.uuid4().hex
 CANARY_TOKEN = "sk-ant-oat01-" + CANARY_MARKER
 HISTORY_MARKER = "history-" + uuid.uuid4().hex
 CLI_MARKER = "cli-" + uuid.uuid4().hex
-SYSTEM_TEXT = "Answer briefly."
 OPERATOR_HOME = "/home/operator"
-SYSTEM_PROMPT_NAME = "system-prompt"
-RELAY_CONFIG_NAME = "relay-mcp.json"
-RELAY_SECRET = "relay-secret-" + uuid.uuid4().hex
 ACCESS = RelayAccess("http://127.0.0.1:41234/mcp", RELAY_SECRET)
-RELAY_CONFIG = {
-    "mcpServers": {
-        "relay": {
-            "type": "http",
-            "url": "http://127.0.0.1:41234/mcp",
-            "headers": {"Authorization": f"Bearer {RELAY_SECRET}"},
-        }
-    }
-}
-
-RELAY_CONFIG_TEXT = json.dumps(RELAY_CONFIG)
 HISTORY = (
     TurnMessage(role=TurnRole.USER, text="a"),
     TurnMessage(role=TurnRole.ASSISTANT, text="b"),
     TurnMessage(role=TurnRole.USER, text="c"),
-)
-
-
-HISTORY_STDIN_LINE = (
-    json.dumps(
-        {
-            "type": "user",
-            "message": {"role": "user", "content": "User: a\n\nAssistant: b\n\nUser: c"},
-        }
-    ).encode()
-    + b"\n"
 )
 
 
@@ -318,27 +303,10 @@ def test_a_run_requires_its_relay_by_keyword(arguments: tuple[Any, ...], refusal
         ClaudeRun(*arguments)  # type: ignore[misc]
 
 
-def line(payload: dict[str, Any]) -> bytes:
-    return json.dumps(payload).encode() + b"\n"
-
-
 RELAY_ENTRY = {"name": "relay", "status": "connected"}
 
 
-def an_init(**fields: Any) -> bytes:
-    announcement = {
-        "type": "system",
-        "subtype": "init",
-        "tools": [],
-        "mcp_servers": [],
-        "apiKeySource": "none",
-    }
-    return line({**announcement, **fields})
-
-
-INIT_LINE = an_init()
 RELAY_INIT = an_init(tools=["mcp__relay__lookup"], mcp_servers=[RELAY_ENTRY])
-TEXT_LINE = line({"type": "assistant", "message": {"content": [{"type": "text", "text": "hi"}]}})
 TOOL_CALL_LINE = line(
     {
         "type": "assistant",
@@ -352,9 +320,6 @@ TOOL_RESULT_LINE = line(
         "type": "user",
         "message": {"content": [{"type": "tool_result", "tool_use_id": "t1", "content": "out"}]},
     }
-)
-SUCCESS_LINE = line(
-    {"type": "result", "subtype": "success", "is_error": False, "result": " done \n"}
 )
 
 
@@ -496,38 +461,6 @@ def test_an_object_as_a_text_block_fails_closed_with_no_cli_bytes(
         refusal.value.__context__,
         CLI_MARKER in caplog.text,
     ) == (CLAUDE_CLI_UNAVAILABLE_DETAIL, None, None, False)
-
-
-def a_fake_claude(
-    directory: Path,
-    stream: tuple[bytes, ...] = (INIT_LINE, TEXT_LINE, SUCCESS_LINE),
-    then: str = "exit 0",
-    relay: bool = False,
-) -> Path:
-    stream_text = b"".join(stream).decode()
-    relay_check = ""
-    if relay:
-        relay_check = (
-            f'case " $* " in *" --mcp-config $HOME/{RELAY_CONFIG_NAME} "*) ;; *) exit 21;; esac\n'
-            f'[ "$(stat -c %a "$HOME/{RELAY_CONFIG_NAME}")" = 600 ] || exit 22\n'
-            f'[ "$(cat "$HOME/{RELAY_CONFIG_NAME}")" = \'{RELAY_CONFIG_TEXT}\' ] || exit 23\n'
-        )
-    binary = directory / "claude"
-    binary.write_text(
-        "#!/bin/sh\n"
-        f'case " $* " in *" --system-prompt-file $HOME/{SYSTEM_PROMPT_NAME} "*) ;;'
-        " *) exit 11;; esac\n"
-        f'[ "$(cat "$HOME/{SYSTEM_PROMPT_NAME}")" = \'{SYSTEM_TEXT}\' ] || exit 12\n'
-        "IFS= read -r stdin_line\n"
-        f"[ \"$stdin_line\" = '{HISTORY_STDIN_LINE.decode().strip()}' ] || exit 13\n"
-        '[ -n "$CLAUDE_CODE_OAUTH_TOKEN" ] || exit 14\n'
-        '[ -z "$(ls -A)" ] || exit 15\n'
-        f"{relay_check}"
-        f"cat <<'EOF'\n{stream_text}EOF\n"
-        f"{then}\n"
-    )
-    binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
-    return binary
 
 
 def test_a_claude_run_streams_through_the_neutral_entry(

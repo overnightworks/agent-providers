@@ -1356,8 +1356,8 @@ landing, so they are not repeated. Three stay live:
   lifetime of both.
 - **Fact 15. Codex and Grok, not yet measured.** C0a and G0a (PR #267 and PR #262)
   measured the items that need no login. What needs a login or an MCP server stays in
-  "Deferred to A1b-G0b / G0c" (`:1609-1613`) and "Deferred to C0b and C0c"
-  (`:2498-2506`); it is not guessed. Those lists lack one item: whether the record's
+  "Deferred to A1b-G0b / G0c" and "Deferred to C0b and C0c"
+ ; it is not guessed. Those lists lack one item: whether the record's
   "device-code logins" holds for Grok's OIDC login. The one MCP item still open is the
   sequence against the relay's `mcp_wire` in a model turn (X0c).
 

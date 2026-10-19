@@ -1,8 +1,0 @@
-claim_id = "fb9f120324734f9db710258cdd7dc879"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "6966b013c204290dcb4922133050c52738c1e2d1"
-branch = "claude/issue-316-8b-run-ending-hardening"
-scope = ["docs/decisions/0001-agent-service.md", "packages/agent-service/src/agent_service/admission.py", "packages/agent-service/src/agent_service/run_events.py", "packages/agent-service/src/agent_service/run_liveness.py", "tests/service_support.py", "tests/test_service_containment_ending.py", "tests/test_service_quarantine.py", "tests/test_service_run_recording.py"]
-opened_commit = "98fd7bbd1b86a3cce2718c2fce4d988bae161d7a"
-whole_reason = "The commit split changes the writer protocol, its only two callers and its test fake together, and the rig move is the same test files' edit: separating either leaves the protocol or the tests inconsistent."

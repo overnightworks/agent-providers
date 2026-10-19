@@ -33,6 +33,7 @@ from agent_providers.anchored_turn import (
 )
 from agent_providers.cli_run import (
     CliRunStart,
+    RelayAccess,
     RelayState,
     RunSurface,
     StepEvent,
@@ -40,6 +41,7 @@ from agent_providers.cli_run import (
     drain_without_keeping,
     examine_announcement,
     refuse_announcement,
+    relay_authorization,
 )
 from agent_providers.config import (
     McpServerSpec,
@@ -164,6 +166,7 @@ _TOOL_SURFACE_PROBE_PROMPT: Final = "."
 
 _STREAM_BUFFER_LIMIT = 4 * 1024 * 1024
 _SYSTEM_PROMPT_FILE_NAME: Final = "system-prompt"
+_RELAY_CONFIG_FILE_NAME: Final = "relay-mcp.json"
 _CLAUDE_TURN_HOME_PREFIX: Final = "agent-cli-claude-turn-"
 _CLAUDE_CREDENTIAL_PATH: Final = Path(".claude/.credentials.json")
 
@@ -771,7 +774,8 @@ class ClaudeRun:
     """One subscription run of the pinned CLI, as the neutral run entry's adapter.
 
     It describes the run and starts nothing; the entry makes the directories and
-    the spawn owner starts the child.
+    the spawn owner starts the child. Its `relay` is attached as given, on the
+    trust `RelayAccess` states.
     """
 
     binary: Path
@@ -779,15 +783,13 @@ class ClaudeRun:
     system: str = field(repr=False)
     max_tool_calls: int
     history: tuple[TurnMessage, ...] = field(repr=False)
-    relay_config: Path | None = None
+    relay: RelayAccess | None = field(kw_only=True)
 
     def __post_init__(self) -> None:
         if not isinstance(self.token, SecretStr):
             raise ChildProcessSpecificationError("A Claude run needs its token as a SecretStr")
-        paths = {"binary": self.binary, "relay_config": self.relay_config}
-        for name, path in paths.items():
-            if path is not None and not path.is_absolute():
-                raise ChildProcessSpecificationError(f"A Claude run needs an absolute {name}")
+        if not self.binary.is_absolute():
+            raise ChildProcessSpecificationError("A Claude run needs an absolute binary")
         if self.max_tool_calls < 1:
             raise ChildProcessSpecificationError("A Claude run needs max_tool_calls of at least 1")
         if not self.history:
@@ -802,12 +804,24 @@ class ClaudeRun:
         return _STREAM_BUFFER_LIMIT
 
     def run_files(self) -> dict[str, bytes]:
-        return {_SYSTEM_PROMPT_FILE_NAME: self.system.encode()}
+        files = {_SYSTEM_PROMPT_FILE_NAME: self.system.encode()}
+        if self.relay is not None:
+            files[_RELAY_CONFIG_FILE_NAME] = self._relay_config(self.relay)
+        return files
+
+    @staticmethod
+    def _relay_config(relay: RelayAccess) -> bytes:
+        server = {
+            "type": "http",
+            "url": relay.url,
+            "headers": {"Authorization": relay_authorization(relay.secret)},
+        }
+        return json.dumps({"mcpServers": {RELAY_SERVER_NAME: server}}).encode()
 
     def start(self, home: Path, working_directory: Path) -> CliRunStart:
         child = ChildProcess(
             binary=self.binary,
-            arguments=self._arguments(home / _SYSTEM_PROMPT_FILE_NAME),
+            arguments=self._arguments(home),
             environment=closed_environment(
                 home,
                 **{_OAUTH_TOKEN_VARIABLE: self.token.get_secret_value()},
@@ -815,7 +829,7 @@ class ClaudeRun:
             ),
             working_directory=working_directory,
         )
-        decoder = ClaudeStreamDecoder(relay_attached=self.relay_config is not None)
+        decoder = ClaudeStreamDecoder(relay_attached=self.relay is not None)
         return CliRunStart(child, self.stdin_message(), decoder)
 
     def stdin_message(self) -> bytes:
@@ -826,7 +840,7 @@ class ClaudeRun:
         line = {"type": "user", "message": {"role": "user", "content": transcript}}
         return (json.dumps(line) + "\n").encode()
 
-    def _arguments(self, system_prompt_file: Path) -> tuple[str, ...]:
+    def _arguments(self, home: Path) -> tuple[str, ...]:
         arguments = (
             "-p",
             "--input-format",
@@ -839,14 +853,14 @@ class ClaudeRun:
             "--max-turns",
             str(self.max_tool_calls + TURNS_BEYOND_TOOL_CALLS),
             "--system-prompt-file",
-            str(system_prompt_file),
+            str(home / _SYSTEM_PROMPT_FILE_NAME),
         )
-        if self.relay_config is None:
+        if self.relay is None:
             return arguments
         return (
             *arguments,
             "--mcp-config",
-            str(self.relay_config),
+            str(home / _RELAY_CONFIG_FILE_NAME),
             "--allowedTools",
             f"{_mcp_tool_prefix(RELAY_SERVER_NAME)}*",
         )

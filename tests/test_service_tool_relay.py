@@ -1,13 +1,17 @@
 import asyncio
 import base64
+import json
 import logging
 import signal
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from http import HTTPStatus
+from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 from mcp_app_fake import WAIT_SECONDS
+from pydantic import SecretStr
 from relay_support import (
     OWNER_ANSWER,
     OWNER_BODY,
@@ -33,7 +37,9 @@ from relay_support import (
     yield_until,
 )
 
-from agent_client.wire import MAX_EVENT_BYTES
+from agent_client.wire import MAX_EVENT_BYTES, TurnMessage, TurnRole
+from agent_providers.claude.provider import ClaudeRun
+from agent_providers.cli_run import RelayAccess as CoreRelayAccess
 from agent_service.mcp_wire import ACKNOWLEDGEMENT, JSON_MEDIA_TYPE, HttpAnswer
 from agent_service.run_liveness import LoopClock
 from agent_service.tool_relay import (
@@ -43,6 +49,7 @@ from agent_service.tool_relay import (
     RECEIVE_CHUNK_BYTES,
     UNANSWERED,
     Relay,
+    RelayAccess,
 )
 
 CANARY = "canary-4c9e1b7a"
@@ -86,12 +93,35 @@ def padded_values(relay: Relay) -> RequestHead:
     )
 
 
+def head_from_the_claude_run_file(relay: Relay) -> bytes:
+    run = ClaudeRun(
+        Path("/opt/claude/claude"),
+        SecretStr("token"),
+        "system",
+        1,
+        (TurnMessage(role=TurnRole.USER, text="hi"),),
+        relay=relay.access,
+    )
+    server = json.loads(run.run_files()["relay-mcp.json"])["mcpServers"]["relay"]
+    return (
+        standard(relay)
+        .replace_target(urlsplit(server["url"]).path)
+        .with_field("Authorization", server["headers"]["Authorization"])
+        .encode()
+    )
+
+
 ADMITTED_HEADS = [
+    pytest.param(head_from_the_claude_run_file, id="5r"),
     pytest.param(lambda r: padded_values(r).encode(), id="C35"),
     pytest.param(lambda r: mixed_case_names(standard(r)).encode(), id="C36"),
     pytest.param(lambda r: padded_to(standard(r), HEAD_LIMIT_BYTES), id="C37"),
     pytest.param(lambda r: padded_to(standard(r), ADMITTED_LONG_HEAD_BYTES), id="C38"),
 ]
+
+
+def test_the_released_relay_access_import_is_the_core_type() -> None:
+    assert RelayAccess is CoreRelayAccess
 
 
 @pytest.mark.parametrize("build", ADMITTED_HEADS)

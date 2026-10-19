@@ -22,7 +22,7 @@ from http import HTTPStatus
 from typing import Any
 
 import pytest
-from bounds import TEST_WAIT_SECONDS
+from bounds import TEST_WAIT_SECONDS, within_the_bound
 from capability_support import canary_token, capability_carrying
 from mcp_app_fake import CERTIFICATE_HOST, McpAppFake, ScriptedApp, serving
 from relay_support import (
@@ -448,13 +448,8 @@ def streamed(runner: BarrierRunner, runs: RunConfig | None = None) -> asyncio.Ta
     return asyncio.create_task(collected())
 
 
-async def settled_bytes(task: asyncio.Task[bytes]) -> bytes:
-    async with asyncio.timeout(TEST_WAIT_SECONDS):
-        return await task
-
-
 async def settled_stream(task: asyncio.Task[bytes]) -> list[Any]:
-    return decoded_events(await settled_bytes(task))
+    return decoded_events(await within_the_bound(task))
 
 
 EDIT_SONG = CallToolParams(name="edit_song", arguments={"text": "a"})
@@ -1690,7 +1685,7 @@ def test_a_result_whose_text_carries_the_capability_never_becomes_an_event_and_f
         rig.fake.release()
         client = await rig.pending(1, "edit_song", {"n": 1})
 
-        raw = await settled_bytes(stream)
+        raw = await within_the_bound(stream)
 
         started, called, failed = decoded_events(raw)
         assert isinstance(started, RunStarted)

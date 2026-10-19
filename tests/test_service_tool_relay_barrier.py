@@ -864,7 +864,8 @@ def test_the_barrier_has_a_ready_event_while_a_reflected_capability_is_pending()
 def test_a_reflection_reported_by_the_owner_fails_the_next_event() -> None:
     async def scenario(rig: Rig) -> None:
         waiting = asyncio.ensure_future(rig.barrier.next_event())
-        await yield_until(lambda: not waiting.done() and not rig.barrier.has_ready_event())
+        await asyncio.sleep(0)
+        assert not waiting.done()
 
         rig.barrier.reflected()
 

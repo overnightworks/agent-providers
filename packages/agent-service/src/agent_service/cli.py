@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import ssl
 import sys
 from pathlib import Path
 from typing import Final
@@ -72,7 +71,7 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_BAD_CONFIG
     try:
         tls_context = None if config.mcp is None else mcp_tls_context(config.mcp.ca_file)
-    except (OSError, ssl.SSLError) as error:
+    except OSError as error:
         print(
             "agent-service: refusing to start: mcp.ca_file: cannot be loaded:"
             f" {shown_text(str(error))}",

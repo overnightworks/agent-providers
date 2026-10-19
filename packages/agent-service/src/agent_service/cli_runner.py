@@ -11,9 +11,11 @@ installed core configuration: each fact arrives as an argument.
 
 from __future__ import annotations
 
+import asyncio
 import ssl
 from collections.abc import AsyncGenerator, Callable, Mapping
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Final
 
@@ -123,15 +125,11 @@ class CliRunner:
 
     @staticmethod
     async def _finish(tools: RunTools | None, events: RelayedEvents | None) -> None:
-        reap = events.close if events is not None else _nothing_to_reap
+        reap = events.close if events is not None else partial(asyncio.sleep, 0)
         if tools is None:
             await reap()
         else:
             await tools.close(reap)
-
-
-async def _nothing_to_reap() -> None:
-    return None
 
 
 def installed_runners(

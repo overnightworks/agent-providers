@@ -311,7 +311,8 @@ def test_a_result_past_the_byte_budget_never_reaches_the_model(
         1,
         [],
     )
-    assert too_big not in json.dumps([event.model_dump(mode="json") for event in run.events])
+    sent = json.dumps([event.model_dump(mode="json") for event in run.events])
+    assert sent.count(too_big) == 0
 
 
 def test_a_call_the_wire_cannot_carry_never_reaches_the_app(

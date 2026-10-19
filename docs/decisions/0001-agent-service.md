@@ -2525,7 +2525,8 @@ start-up with every feature off executes no `bwrap` and creates no namespace.
 Measured on 17.10.2026 on `$HOME/.local/share/claude/versions/2.1.302`
 (`claude --version` prints `2.1.302 (Claude Code)`), a 285,793,528-byte Bun
 executable. No cell used a login, a token or an Anthropic account, except
-A1b-0b1, A1b-0b2 and A1b-0e, which used the dedicated measurement token. Nothing here
+A1b-0b1, A1b-0b2 and A1b-0e, which used the dedicated measurement token, and A1b-0f,
+which ran on 2.1.303. Nothing here
 reads `~/.claude`.
 
 **Harness (every cell).** Each run is the CLI under `bwrap` with the network
@@ -3496,9 +3497,11 @@ without the token in the same sandbox) for #334, with the operator's dedicated
 measurement token, authorized for this cell on 19.10.2026. It reached the CLI only as
 `CLAUDE_CODE_OAUTH_TOKEN` in the child's environment (the A1b-0b1 route); no
 `ANTHROPIC_*` variable was set, and `<token>` stands for its value. Every stored output
-was redacted (the token value and any `sk-ant-` string become `<token>`), and the
+was projected to field names, codes and yes/no results and redacted (the token value and any `sk-ant-` string become `<token>`), and the
 token-aware scan found the token and `sk-ant-` neither in the stored evidence nor in this
-section's diff. Billed model calls: 0 (cap 1; m2 below says why), no retry of a billed run.
+section's diff. Billing was not independently measured (the text formats carry no cost
+field). Zero billed model calls is inferred from m4b and r3 (m2 below says why), cap 1,
+no retry of a billed run.
 
 **Harness.** A1b-0b1's harness: network not unshared, `/run/systemd/resolve` bound
 read-only, a fresh private home (mode 700, holding only the empty `tmp`) and an empty
@@ -3514,7 +3517,8 @@ fresh per driver start and never derived from the real one. The arguments are th
 `auth status` (`CLAUDE_CLI_STATUS_ARGS`), `-p /model` (`cli_model_catalog`), and for
 the turn `_cli_arguments("haiku")`, that is `-p --model haiku --output-format json
 --tools "" --setting-sources "" --strict-mcp-config --disable-slash-commands`. Every
-run held `/tmp/probe-stack.lock`.
+run held `/tmp/probe-stack.lock`: `flock -o /tmp/probe-stack.lock` wrapped both driver
+starts, the main run and the r1v repeat.
 
 | Run | Token | Arguments | Exit | Outcome |
 |---|---|---|---|---|

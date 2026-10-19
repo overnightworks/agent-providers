@@ -230,7 +230,7 @@ class ToolApp:
 @contextmanager
 def a_tool_app(
     serving_authority: TestAuthority,
-    tools: Sequence[str] = ("save_lyrics", "read_song"),
+    tools: Sequence[str] = ("save_note", "read_note"),
     *,
     overrides: Mapping[str, Responder] | None = None,
 ) -> Iterator[ToolApp]:

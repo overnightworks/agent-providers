@@ -83,9 +83,9 @@ from agent_service.run_liveness import LoopClock
 from agent_service.run_tools import RunTools
 from agent_service.runners import Runners
 
-SAVE_LYRICS = ClaudeCall("save_lyrics", {"text": "la la"})
-READ_SONG = ClaudeCall("read_song")
-TOOLS = {"save_lyrics": "side_effecting", "read_song": "read_only"}
+SAVE_NOTE = ClaudeCall("save_note", {"text": "la la"})
+READ_NOTE = ClaudeCall("read_note")
+TOOLS = {"save_note": "side_effecting", "read_note": "read_only"}
 SETTLE_SECONDS = 10.0
 RELAY_TASK_PREFIXES = ("relay:", "upstream:", "run-tools:")
 
@@ -191,12 +191,12 @@ def test_a_relay_call_reaches_the_wire_under_the_apps_own_tool_name(
     tmp_path, authority, child_cleanup, monkeypatch
 ):
     run = a_tool_run(
-        tmp_path, authority, child_cleanup, monkeypatch, calls=[SAVE_LYRICS], stray_tool_lines=True
+        tmp_path, authority, child_cleanup, monkeypatch, calls=[SAVE_NOTE], stray_tool_lines=True
     )
 
     assert wire_shape(run.events) == [
-        ("tool_call", "save_lyrics", "call-1", "side_effecting"),
-        ("tool_result", "call-1", "save_lyrics", False),
+        ("tool_call", "save_note", "call-1", "side_effecting"),
+        ("tool_result", "call-1", "save_note", False),
         ("succeeded", "done"),
     ]
     assert [call.message["params"]["arguments"] for call in run.app.calls] == [{"text": "la la"}]
@@ -205,8 +205,8 @@ def test_a_relay_call_reaches_the_wire_under_the_apps_own_tool_name(
 @pytest.mark.parametrize(
     ("call", "effect"),
     [
-        pytest.param(READ_SONG, "read_only", id="read-only"),
-        pytest.param(SAVE_LYRICS, "side_effecting", id="side-effecting"),
+        pytest.param(READ_NOTE, "read_only", id="read-only"),
+        pytest.param(SAVE_NOTE, "side_effecting", id="side-effecting"),
     ],
 )
 def test_each_calls_effect_follows_the_apps_list(
@@ -253,7 +253,7 @@ def test_the_clis_own_tool_lines_never_reach_the_wire(
             authority,
             child_cleanup,
             monkeypatch,
-            calls=[SAVE_LYRICS],
+            calls=[SAVE_NOTE],
             stray_tool_lines=True,
         )
         events = run.events
@@ -262,7 +262,7 @@ def test_the_clis_own_tool_lines_never_reach_the_wire(
         events = drive_over_http(child_cleanup, monkeypatch, config, post_a_run)
 
     assert [shape[1] for shape in wire_shape(events) if shape[0] == "tool_call"] == (
-        ["save_lyrics"] if with_relay else []
+        ["save_note"] if with_relay else []
     )
     assert [event.type for event in events if event.type == "tool_result"] == (
         ["tool_result"] if with_relay else []
@@ -277,7 +277,7 @@ def test_a_call_past_the_tool_budget_never_reaches_the_app(
         authority,
         child_cleanup,
         monkeypatch,
-        calls=[SAVE_LYRICS, SAVE_LYRICS],
+        calls=[SAVE_NOTE, SAVE_NOTE],
         runs={"max_tool_calls": 1},
     )
 
@@ -301,7 +301,7 @@ def test_a_result_past_the_byte_budget_never_reaches_the_model(
         authority,
         child_cleanup,
         monkeypatch,
-        calls=[SAVE_LYRICS],
+        calls=[SAVE_NOTE],
         runs={"max_bytes": 3_000},
         overrides={"tools/call": big_result},
     )
@@ -317,7 +317,7 @@ def test_a_result_past_the_byte_budget_never_reaches_the_model(
 def test_a_call_the_wire_cannot_carry_never_reaches_the_app(
     tmp_path, authority, child_cleanup, monkeypatch
 ):
-    too_wide = ClaudeCall("save_lyrics", {"text": "w" * (MAX_EVENT_BYTES - 150)})
+    too_wide = ClaudeCall("save_note", {"text": "w" * (MAX_EVENT_BYTES - 150)})
 
     run = a_tool_run(tmp_path, authority, child_cleanup, monkeypatch, calls=[too_wide])
 
@@ -329,7 +329,7 @@ def test_a_capability_never_reaches_the_child_of_a_tool_run(
 ):
     caplog.set_level("DEBUG")
 
-    run = a_tool_run(tmp_path, authority, child_cleanup, monkeypatch, calls=[SAVE_LYRICS])
+    run = a_tool_run(tmp_path, authority, child_cleanup, monkeypatch, calls=[SAVE_NOTE])
 
     capability, secret = run.app.capability, run.capture.relay_secret
     visible_to_the_service_outputs = "".join(
@@ -365,7 +365,7 @@ def test_a_capability_reflected_in_an_upstream_result_fails_the_run(
         authority,
         child_cleanup,
         monkeypatch,
-        calls=[SAVE_LYRICS],
+        calls=[SAVE_NOTE],
         overrides={"tools/call": reflects_the_capability},
     )
 
@@ -407,7 +407,7 @@ def test_an_app_that_cannot_be_opened_ends_the_run_before_any_child(
         authority,
         child_cleanup,
         monkeypatch,
-        calls=[SAVE_LYRICS],
+        calls=[SAVE_NOTE],
         serving_authority=authority if unreachable else other_authority,
         app_stays_up=not unreachable,
     )
@@ -420,7 +420,7 @@ def test_a_cli_that_never_connects_the_relay_ends_at_the_start_check(
     tmp_path, authority, child_cleanup, monkeypatch
 ):
     run = a_tool_run(
-        tmp_path, authority, child_cleanup, monkeypatch, calls=[SAVE_LYRICS], relay_status="failed"
+        tmp_path, authority, child_cleanup, monkeypatch, calls=[SAVE_NOTE], relay_status="failed"
     )
 
     assert (ended_as(run), wire_shape(run.events), run.app.calls) == (
@@ -477,12 +477,12 @@ def pending_tool_tasks() -> list[str]:
 @pytest.mark.parametrize(
     ("ending", "options"),
     [
-        pytest.param("success", {"calls": [SAVE_LYRICS]}, id="success"),
-        pytest.param("cli-exit", {"calls": [SAVE_LYRICS], "exit_code": 1}, id="cli-exit-1"),
+        pytest.param("success", {"calls": [SAVE_NOTE]}, id="success"),
+        pytest.param("cli-exit", {"calls": [SAVE_NOTE], "exit_code": 1}, id="cli-exit-1"),
         pytest.param(
             "client-leaves",
             {
-                "calls": [SAVE_LYRICS],
+                "calls": [SAVE_NOTE],
                 "linger_seconds": 60.0,
                 "scenario": leave_after_the_first_tool_call,
             },
@@ -490,7 +490,7 @@ def pending_tool_tasks() -> list[str]:
         ),
         pytest.param(
             "refused-event",
-            {"calls": [SAVE_LYRICS, SAVE_LYRICS], "runs": {"max_tool_calls": 1}},
+            {"calls": [SAVE_NOTE, SAVE_NOTE], "runs": {"max_tool_calls": 1}},
             id="refused-event",
         ),
     ],
@@ -548,7 +548,7 @@ def test_a_run_trusts_exactly_the_configured_bundle(
     signed_by_the_configured_ca,
     outcome,
 ):
-    binary = a_relay_calling_claude(tmp_path, version=PINNED_CLAUDE_VERSION, calls=[SAVE_LYRICS])
+    binary = a_relay_calling_claude(tmp_path, version=PINNED_CLAUDE_VERSION, calls=[SAVE_NOTE])
     serving_authority = authority if signed_by_the_configured_ca else other_authority
     with a_tool_app(serving_authority, list(TOOLS)) as app:
         songmaker = {"tools": TOOLS, "mcp_origin": app.origin}

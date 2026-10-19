@@ -48,7 +48,7 @@ from agent_service.tool_relay import (
 CANARY = canary_token()
 TEXT = AssistantTextEvent(text="hi")
 FINAL = FinalEvent(text="done")
-EDIT_SONG = CallToolParams(name="edit_song", arguments={})
+EDIT_NOTE = CallToolParams(name="edit_note", arguments={})
 GROUP = RetainedGroup(pgid=4242, generation=1)
 
 
@@ -133,7 +133,7 @@ class BarrierBroken(ToolCallBarrier):
 
 
 def a_barrier(app: RecordingApp, barrier_class: type[ToolCallBarrier] = ToolCallBarrier):
-    return barrier_class(RUN_ID, app, capability_carrying(CANARY, tools=("edit_song",)))
+    return barrier_class(RUN_ID, app, capability_carrying(CANARY, tools=("edit_note",)))
 
 
 class Arrivals:
@@ -145,7 +145,7 @@ class Arrivals:
 
     def arrive(self, count: int) -> None:
         for request_id in range(len(self._calls) + 1, len(self._calls) + count + 1):
-            self._calls.append(asyncio.ensure_future(self._barrier.call(request_id, EDIT_SONG)))
+            self._calls.append(asyncio.ensure_future(self._barrier.call(request_id, EDIT_NOTE)))
 
 
 async def taken(events: RelayedEvents, count: int) -> list[StreamEvent]:
@@ -196,7 +196,7 @@ def test_a_relay_event_is_accepted_only_when_the_service_asks_for_the_next() -> 
         called_before_the_ask = list(app.called)
         await taken(events, 1)
 
-        assert (called_before_the_ask, app.called) == ([], ["edit_song"])
+        assert (called_before_the_ask, app.called) == ([], ["edit_note"])
         barrier.stop()
         await events.close()
 
@@ -235,7 +235,7 @@ def test_a_ready_final_waits_for_every_queued_barrier_event() -> None:
             *[("tool_result", f"call-{number}") for number in (1, 2, 3)],
             ("final", "done"),
         ]
-        assert app.called == ["edit_song"] * 3
+        assert app.called == ["edit_note"] * 3
         barrier.stop()
         await events.close()
 
@@ -246,7 +246,7 @@ def test_the_clis_own_tool_lines_are_dropped_from_the_merged_stream() -> None:
     async def scenario() -> None:
         core = ScriptedCore()
         core.feed(
-            ToolCallEvent(tool_use_id="toolu_1", name="mcp__relay__edit_song", input={}),
+            ToolCallEvent(tool_use_id="toolu_1", name="mcp__relay__edit_note", input={}),
             ToolResultEvent(tool_use_id="toolu_1", content="ok"),
             TEXT,
         )
@@ -300,9 +300,9 @@ def test_a_barrier_step_pending_at_the_close_leaves_no_unretrieved_failure(
 async def real_tools(
     barrier_class: type[ToolCallBarrier] = ToolCallBarrier,
 ) -> AsyncIterator[RunTools]:
-    capability = capability_carrying(CANARY, tools=("edit_song",))
+    capability = capability_carrying(CANARY, tools=("edit_note",))
     barrier = barrier_class(RUN_ID, RecordingApp(), capability)
-    offered = [ToolDefinition.model_validate({"name": "edit_song", "inputSchema": {}})]
+    offered = [ToolDefinition.model_validate({"name": "edit_note", "inputSchema": {}})]
     relay = await Relay.start(RUN_ID, McpRelayOwner(capability, offered, barrier), LoopClock())
     yield RunTools(RUN_ID, LoopClock(), relay, barrier, AsyncExitStack())
 
@@ -319,7 +319,7 @@ def a_runner_behind(
         service_config(), tls_context=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT), clock=LoopClock()
     )
     admitted = replace(
-        alice_admitted_run(uuid.uuid4()), capability=capability_carrying(CANARY, ("edit_song",))
+        alice_admitted_run(uuid.uuid4()), capability=capability_carrying(CANARY, ("edit_note",))
     )
     return runner.run(admitted), urlsplit(tools.access.url).port or 0
 

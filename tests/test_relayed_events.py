@@ -8,12 +8,11 @@ cleanup cases run behind ``CliRunner.run`` with the real ``RunTools``.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import gc
 import logging
 import ssl
 import uuid
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import replace
 from typing import Any
@@ -277,77 +276,131 @@ def test_a_final_ready_as_the_one_result_is_queued_waits_for_that_result() -> No
     drive(scenario())
 
 
-def ready_at_each_core_yield(events: RelayedEvents, barrier: ToolCallBarrier) -> list[bool]:
-    """Whether the barrier had a ready event at the instant a core event was returned."""
-    found: list[bool] = []
-    finished_core_event = events._finished_core_event
-
-    def recording() -> StreamEvent | None:
-        event = finished_core_event()
-        if event is not None:
-            found.append(barrier.has_ready_event())
-        return event
-
-    events._finished_core_event = recording
-    return found
+def after_hops(hops: int, action: Callable[[], object]) -> None:
+    """Run ``action`` from a loop callback ``hops`` loop passes from now."""
+    loop = asyncio.get_running_loop()
+    if hops == 0:
+        loop.call_soon(action)
+    else:
+        loop.call_soon(after_hops, hops - 1, action)
 
 
-async def run_to_its_end_with_a_final_ready_while_forwards_run(
-    app: RecordingApp, core: ScriptedCore, events: RelayedEvents, count: int, ticks_before: int
+async def delivered_before_the_final(events: RelayedEvents) -> list[StreamEvent]:
+    """Asked for in the caller's own coroutine, so what the barrier holds when the final is
+    returned is what it holds when the caller goes on."""
+    delivered: list[StreamEvent] = []
+    while not isinstance(event := await anext(events), FinalEvent):
+        delivered.append(event)
+    return delivered
+
+
+async def the_calls_taken_then_the_final_fed_and_the_forwards_released_after_hops(
+    app: RecordingApp,
+    core: ScriptedCore,
+    events: RelayedEvents,
+    count: int,
+    feed_and_release_hops: tuple[int, int],
 ) -> None:
-    """The calls taken, the forwards running, a final fed, and the forwards ended ``ticks_before``
-    loop turns later, so their results queue while the final is being handed on."""
+    feed_hops, release_hops = feed_and_release_hops
     await taken(events, count)
-    next_event = asyncio.ensure_future(anext(events))
-    await yield_until(lambda: len(app.called) == count)
-    core.feed(FINAL)
-    for _ in range(ticks_before):
-        await asyncio.sleep(0)
-    app.release()
-    for _ in range(count + 1):
-        if isinstance(await asyncio.wait_for(next_event, WAIT_SECONDS), FinalEvent):
-            return
-        next_event = asyncio.ensure_future(anext(events))
+    after_hops(feed_hops, lambda: core.feed(FINAL))
+    after_hops(release_hops, app.release)
 
 
-@pytest.mark.parametrize("ticks_before", [0, 1, 2])
+@pytest.mark.parametrize("hops", [(0, 1), (1, 1), (2, 2), (3, 3)])
 @pytest.mark.parametrize("count", [1, 2, 3])
-def test_a_final_is_never_handed_on_while_the_forwards_it_overtook_have_queued_results(
-    count: int, ticks_before: int
+def test_a_final_is_handed_on_only_with_no_result_of_the_forwards_it_overtook_ready(
+    count: int, hops: tuple[int, int]
 ) -> None:
     async def scenario() -> None:
         app, core = RecordingApp(gated=True), ScriptedCore()
         barrier = a_barrier(app)
         Arrivals(barrier).arrive(count)
         events = RelayedEvents(core.stream(), barrier)
-        ready = ready_at_each_core_yield(events, barrier)
-
-        await run_to_its_end_with_a_final_ready_while_forwards_run(
-            app, core, events, count, ticks_before
+        await the_calls_taken_then_the_final_fed_and_the_forwards_released_after_hops(
+            app, core, events, count, hops
         )
 
-        assert ready == [False]
+        delivered = await delivered_before_the_final(events)
+
+        assert (
+            {event.type for event in delivered} <= {"tool_result"},
+            barrier.has_ready_event(),
+        ) == (True, False)
         barrier.stop()
         await events.close()
 
     drive(scenario())
 
 
-@pytest.mark.parametrize("ticks_before", [0, 1, 2])
-def test_a_final_is_never_handed_on_while_a_reflected_result_is_pending(ticks_before: int) -> None:
+@pytest.mark.parametrize("hops", [(1, 1), (2, 2), (3, 3)])
+def test_a_final_is_not_handed_on_while_a_reflected_result_is_pending(
+    hops: tuple[int, int],
+) -> None:
     async def scenario() -> None:
         app, core = RecordingApp(CANARY, gated=True), ScriptedCore()
         barrier = a_barrier(app)
         Arrivals(barrier).arrive(1)
         events = RelayedEvents(core.stream(), barrier)
-        ready = ready_at_each_core_yield(events, barrier)
+        await the_calls_taken_then_the_final_fed_and_the_forwards_released_after_hops(
+            app, core, events, 1, hops
+        )
 
-        with contextlib.suppress(CapabilityReflected):
-            await run_to_its_end_with_a_final_ready_while_forwards_run(
-                app, core, events, 1, ticks_before
-            )
+        with pytest.raises(CapabilityReflected):
+            await delivered_before_the_final(events)
 
-        assert ready in ([], [False])
+        barrier.stop()
+        await events.close()
+
+    drive(scenario())
+
+
+@pytest.mark.parametrize("how", ["notification", "request-cancelled"])
+def test_a_final_is_handed_on_when_the_one_ready_call_is_given_up_before_the_reader_runs(
+    how: str,
+) -> None:
+    async def scenario() -> None:
+        app, core = RecordingApp(), ScriptedCore()
+        barrier = a_barrier(app)
+        events = RelayedEvents(core.stream(), barrier)
+        arrived: list[asyncio.Future[object]] = []
+
+        def give_up() -> None:
+            if how == "notification":
+                barrier.cancel(1)
+            else:
+                arrived[0].cancel()
+
+        def the_call_arrives_and_is_given_up_later() -> None:
+            after_hops(1, give_up)
+            arrived.append(asyncio.ensure_future(barrier.call(1, EDIT_NOTE)))
+
+        def the_final_is_fed_and_the_call_arrives_one_pass_later() -> None:
+            core.feed(FINAL)
+            after_hops(0, the_call_arrives_and_is_given_up_later)
+
+        after_hops(3, the_final_is_fed_and_the_call_arrives_one_pass_later)
+
+        assert await anext(events) == FINAL
+        assert app.called == []
+        barrier.stop()
+        await events.close()
+
+    drive(scenario())
+
+
+def test_a_final_is_handed_on_while_a_forward_still_runs_and_nothing_is_queued() -> None:
+    async def scenario() -> None:
+        app, core = RecordingApp(gated=True), ScriptedCore()
+        barrier = a_barrier(app)
+        Arrivals(barrier).arrive(1)
+        events = RelayedEvents(core.stream(), barrier)
+        await taken(events, 1)
+        core.feed(FINAL)
+
+        assert await anext(events) == FINAL
+        assert app.called == ["edit_note"]
+        app.release()
         barrier.stop()
         await events.close()
 

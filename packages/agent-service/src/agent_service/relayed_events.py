@@ -116,13 +116,14 @@ class RelayedEvents:
     async def _wait_for_the_barrier_while_it_has_a_ready_event(self) -> None:
         """A ready core event is returned only while the barrier has nothing ready.
 
-        The check and the return have no await between them, so nothing can be queued in
-        between.
+        The readiness is looked at again on every loop pass, because the ready call can be given
+        up before the reader runs; the last look and the return have no await between them, so
+        nothing can be queued in between.
         """
         core_ready = self._core_step is not None and self._core_step.done()
         reader = self._relay_step
-        if core_ready and reader is not None and not reader.done() and self._barrier_is_ready():
-            await asyncio.wait({reader})
+        while core_ready and reader is not None and not reader.done() and self._barrier_is_ready():
+            await asyncio.sleep(0)
 
     def _barrier_is_ready(self) -> bool:
         return self._calls is not None and self._calls.has_ready_event()

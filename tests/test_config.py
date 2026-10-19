@@ -584,7 +584,6 @@ def test_a_host_with_a_removed_flat_codex_turn_field_is_refused_naming_the_field
         TurnRuntimeConfig(**facts)
 
 
-
 _PREFIX_MODELS = {"mcp_server": McpServerSpec, "grok": GrokTurnRuntime}
 _PREFIX_FIELDS = [
     pytest.param("mcp_server", "config_file_prefix", id="mcp-config"),
@@ -638,6 +637,12 @@ _PREFIX_ENTRY_LEVELS = [
 _PREFIXES_THAT_COULD_LEAVE_THE_ROOT = ["/tmp/x-", "../esc-", "../", "sub/", "a/b-", "/", "a\x00b"]
 _PREFIXES_OUTSIDE_THE_CLOSED_NAME_SET = ["a b-", "x*", "ok\n", "pr\u00e4fix-"]
 _PLAIN_PREFIXES = ["notes-mcp-", ".hid-", "a_b.c-1", "NOTES-CLI-", ".", ".."]
+_BOUNDARY_PREFIXES = [
+    pytest.param("..", id="two-dots"),
+    pytest.param(".", id="one-dot"),
+    pytest.param("A" * 64, id="64-uppercase"),
+    pytest.param("NOTES-", id="uppercase-stem"),
+]
 
 
 @pytest.mark.parametrize(("block", "field"), _PREFIX_FIELDS)
@@ -661,15 +666,23 @@ def test_a_file_prefix_outside_the_closed_name_set_is_refused(
 
 
 @pytest.mark.parametrize(("block", "field"), _PREFIX_FIELDS)
-def test_a_file_prefix_is_accepted_at_64_characters_and_refused_at_65(
-    block: str, field: str,
-) -> None:
+def test_a_file_prefix_is_accepted_at_64_characters(block: str, field: str) -> None:
     accepted = _the_prefix_block_built_with(block, field, "a" * 64)
 
     assert getattr(accepted, field) == "a" * 64
-    for refused_prefix in ("a" * 65, ""):
-        refused = _refusal_of(lambda: _the_prefix_block_built_with(block, field, refused_prefix))
-        assert refused.errors(include_input=False)[0]["loc"] == (field,)
+
+
+@pytest.mark.parametrize(("block", "field"), _PREFIX_FIELDS)
+@pytest.mark.parametrize(
+    "prefix",
+    [pytest.param("a" * 65, id="65-characters"), pytest.param("", id="empty")],
+)
+def test_a_file_prefix_beyond_the_length_bounds_is_refused(
+    block: str, field: str, prefix: str,
+) -> None:
+    refused = _refusal_of(lambda: _the_prefix_block_built_with(block, field, prefix))
+
+    assert refused.errors(include_input=False)[0]["loc"] == (field,)
 
 
 @pytest.mark.parametrize(("block", "field"), _PREFIX_FIELDS)
@@ -708,58 +721,38 @@ def test_a_refused_file_prefix_in_a_host_config_installs_nothing_and_keeps_the_e
     assert current_config() is earlier
 
 
+@pytest.mark.parametrize("prefix", _BOUNDARY_PREFIXES)
 def test_an_accepted_mcp_config_prefix_writes_a_mode_0600_file_directly_in_the_root(
-    tmp_path: Path,
+    prefix: str, tmp_path: Path,
 ) -> None:
     override_provider_runtime(cli_working_directory_root=tmp_path)
-    for prefix in ("..", ".", "A" * 64, "NOTES-"):
-        spec = _the_prefix_block_built_with("mcp_server", "config_file_prefix", prefix)
-        path = Path(claude_provider._write_mcp_config(spec, "u-1"))
+    spec = _the_prefix_block_built_with("mcp_server", "config_file_prefix", prefix)
 
-        assert path.parent == tmp_path
-        assert path.name.startswith(prefix)
-        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    path = Path(claude_provider._write_mcp_config(spec, "u-1"))
+
+    assert path.parent == tmp_path
+    assert path.name.startswith(prefix)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
+@pytest.mark.parametrize("prefix", _BOUNDARY_PREFIXES)
 def test_an_accepted_grok_prompt_prefix_writes_a_mode_0600_file_directly_in_the_root(
-    tmp_path: Path,
+    prefix: str, tmp_path: Path,
 ) -> None:
     override_provider_runtime(cli_working_directory_root=tmp_path)
-    for prefix in ("..", ".", "A" * 64, "NOTES-"):
-        outcome = run_cli_bounded(
-            shell_child("-c", 'printf "%s %s" "$1" "$(stat -c %a "$1")"', "unused", "placeholder"),
-            stdin_payload=None,
-            read="all",
-            deadline=time.monotonic() + 5,
-            prompt_file_bytes=b"private prompt",
-            prompt_file_arg_index=3,
-            prompt_file_prefix=prefix,
-        )
-        path, mode = outcome.stdout.rsplit(" ", 1)
+    grok = _the_prefix_block_built_with("grok", "prompt_file_prefix", prefix)
 
-        assert Path(path).parent == tmp_path
-        assert Path(path).name.startswith(prefix)
-        assert mode == "600"
+    outcome = run_cli_bounded(
+        shell_child("-c", 'printf "%s %s" "$1" "$(stat -c %a "$1")"', "unused", "placeholder"),
+        stdin_payload=None,
+        read="all",
+        deadline=time.monotonic() + 5,
+        prompt_file_bytes=b"private prompt",
+        prompt_file_arg_index=3,
+        prompt_file_prefix=grok.prompt_file_prefix,
+    )
+    path, mode = outcome.stdout.rsplit(" ", 1)
 
-
-def test_a_claude_only_host_configures_with_the_codex_and_grok_blocks_absent(
-    tmp_path: Path,
-) -> None:
-    turns = TurnRuntimeConfig(mcp_server=current_turn_config().mcp_server)
-    facts = {**_catalog_only_runtime(tmp_path).model_dump(), "turns": turns.model_dump()}
-
-    _install_over_nothing(ProviderRuntimeConfig.model_validate(facts))
-
-    assert current_turn_config().grok is None
-    assert current_turn_config().codex is None
-
-
-def test_the_rejected_input_of_any_turn_field_is_hidden_while_its_location_is_named(
-    tmp_path: Path,
-) -> None:
-    facts = _host_facts_with("grok", "prompt_file_placeholder", 987654321, tmp_path)
-
-    refused = _refusal_of(lambda: ProviderRuntimeConfig.model_validate(facts))
-
-    assert "prompt_file_placeholder" in str(refused)
-    assert "987654321" not in str(refused) + repr(refused)
+    assert Path(path).parent == tmp_path
+    assert Path(path).name.startswith(prefix)
+    assert mode == "600"

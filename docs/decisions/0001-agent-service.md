@@ -1276,6 +1276,90 @@ the parallel-run limit stands once, in H7's Decision.
     - *Default:* entfällt; als Quarantäne entschieden.
     - *Beleg:* A1b-3, A1b-3f, A1b-8.
 
+### A1b rulings and inherited constraints (harvested from #115, 19.10.2026)
+
+#115 is A1b's container item. Its operator rulings, its inherited constraints and
+its head decisions stand here, so that the item's body carries the expectation list
+and the cut only. The text below is copied from #115 as it stood on 19.10.2026;
+line numbers in `:NNN` anchors are those of this record at main `ea4e37c`, and
+"line N" is a line of #115's expectation list.
+
+#### Operator rulings of 18.10.2026 and the defaults
+
+The rulings of 17.10.2026 (Q3, the five parallel runs, Q1, Q2, Q8 and the ruled
+lines) stand above in "A1b ruling (operator, 17.10.2026)". These are the others:
+
+- **The CLI runner serves Claude, Codex and Grok alike. Ruled on 18.10.2026**, verbatim: "du hast hier nur claude als beispiel => grok und codex müssen genauso gehen!" and "wieso musst du was von /ki-abo wissen? also die lib sollte davon nichts wissen" ([journal](https://github.com/overnightworks/agent-providers/issues/115#issuecomment-6244540824)). Consequences: one neutral core (isolation, private home per profile, places, relay, group reap and retention, quarantine) with one CLI adapter per provider; no library or service code names the deployment group (landed: `subscription_group` is a required config field, PR #247; the core moved out of the Claude module, #248, PR #249).
+- **Order. Ruled on 18.10.2026**, verbatim: "ob claude zuerst ist mir egal ! alle müssen funktionieren". The head takes order (a): Claude reaches the first real run first, because its facts are measured; Codex and Grok probe in parallel and join right after. Done means all three providers work.
+- **Probes. Ruled on 18.10.2026**, verbatim: "logins für die proben? mein login welches denn sonst?". The Codex and Grok probes run under the operator's own logins. Tokens are never read or printed; the CLIs use their own login as on the operator's machine. Risk the probe briefs carry: a child that refreshes could rotate the operator's real refresh token (fact 10). C0a and G0a use no login. How C0b and G0b handle the login (the CLI's normal home in place, or the library's own blanked copy in a throwaway home) is a secrets decision the head puts to the operator before C0b and G0b start; until then no probe copies, reads or prints an auth file.
+- **Neutral wording and deletion. Ruled on 18.10.2026**: the neutral wording of lines 2, 14, 15 and 16 ("ja") and line 19 (a), the deletion of a run's directories, in the lines themselves.
+- **Line 3. Ruled on 18.10.2026**, verbatim in the line: one profile per provider, switchable by changing the login file and restarting; a provider without a built adapter stops the start.
+- **Conversation memory. Not pulled.** The app's history stays the only history a run sees (line 5). A central, provider-neutral conversation store with a data and backup store is an idea on #18 ("ja B => longterm"), not an item.
+- **Settled by default** (the review agreed; the operator may still object):
+  - former Q4 is lines 12 and 13 (line 3 is ruled above), plus `[cli]` holding `claude_binary`, `claude_version` and `working_root` (the per-provider shape is the open decision HQ4);
+  - former Q5 is line 8;
+  - former Q6 and Q7 are line 9's retry time and that only subscription runs take a place.
+
+
+#### Inherited constraints (settled; A1b makes them true and does not reopen them)
+
+H1–H12 are head rulings recorded in the ADR (`:3-5`). The operator's own rulings are:
+- the ADR's "Operator rulings" list (`:58-67`);
+- H2's residual-risk acceptance (`:201-203`);
+- H11;
+- the O items of A1a4.
+
+The constraints:
+- **H7 (head):**
+  - a pinned, tested Claude Code version;
+  - an unprivileged user and an empty private working directory;
+  - a strict per-run MCP config with an exact tool allowlist, and restricted built-in tools;
+  - no session persistence and a finite max-turns;
+  - a process-group kill and reap on cancel or timeout;
+  - no token in argv, events or logs;
+  - a service-wide limit of parallel subscription runs: a request beyond it gets `429 Retry-After`, and there is no queue. The operator set the limit to 5 on 17.10.2026 (line 9); #119 writes it into H7's Decision.
+- **A1a3 item 20 (head, `:693-698`):** a runner executes a tool only after the service accepted its `tool_call`, and stopping the runner is not an execution barrier.
+- **#40 (head):** a place is freed when the runner's stop finishes (`_reap`, A1a2 item 8, `:821-845`).
+- **A1a4 item 14 (head, `:476-484`):** three deferrals to A1b: content a runner yields; `run` raising before it returns its generator; and a recorder failure whose chain carries a yielded event.
+- **Operator:**
+  - the subscription group alone decides who uses a subscription (H2, `:196-203`);
+  - no app container holds a subscription login (`:64`);
+  - O1 (`:259-287`) for the signing key;
+  - O3: https-only origins;
+  - O4: the capability's lifetime and replay (`:362-368`);
+  - O5: the tools table grants permission (`:369-371`).
+- **H3 (head, `:242-243`) is the one inherited sentence A1b proposes to change:** "The CLI gets it in its per-run MCP config header." Under Q1 (a), the CLI never gets the capability. The operator ruled Q1 (a) and line 16 on 17.10.2026; A1b-R writes the new sentence into H3.
+
+#### Head decisions for the plan review (internal machinery; no operator ruling, the operator may object)
+
+HD1 (the small JSON-only MCP profile, no MCP SDK dependency) stands in "A1b MCP
+transport (head decision HD1, 17.10.2026)" above, with HD2 (results are released
+only after acceptance, line 17) and HD3 (the init check detects; it does not gate,
+line 18) under its "Neighbouring decisions". #115 held no other head decision for
+the plan review.
+
+#### Facts still open from the re-measurement at `ea4e37c`
+
+The other facts of that list were either pinned in this record or overtaken by a
+landing, so they are not repeated. Three stay live:
+
+- **Fact 13. Signing on the event loop** (#68: about 1.4 ms per admission). The busy check
+  comes before signing (line 9), so CLI admissions sign one at a time. Signing stays
+  on the loop for A1b; A2b, whose API route runs concurrently, decides again.
+- **Fact 10. A child may renew its login.** The Claude copy carries the refresh token; Codex
+  blanks its refresh token because "A child that refreshes would rotate the
+  operator's real refresh token" (`codex_login.py:57-63`), which proves Codex's
+  behaviour only. Whether a Claude child's renewal rotates the source's refresh
+  token is unmeasured (A1b-0b1 measured that the CLI writes no credential; "Whether the
+  CLI refreshes an expiring token is not measured.", in A1b-0b1 below). Whether a Grok child
+  refreshes and rotates the source token is unmeasured (G0b), as is the access-token
+  lifetime of both.
+- **Fact 15. Codex and Grok, not yet measured.** C0a and G0a (PR #267 and PR #262)
+  measured the items that need no login. What needs a login or an MCP server stays in
+  "Deferred to A1b-G0b / G0c" and "Deferred to C0b and C0c"; it is not guessed.
+  Those lists lack one item: whether the record's "device-code logins" holds for Grok's OIDC login. The one MCP item still open is the
+  sequence against the relay's `mcp_wire` in a model turn (X0c).
+
 ### A1b-4c run port (head, 18.10.2026)
 
 Every provider's subscription run goes through one neutral entry (README, `agent_providers.cli_run`); an adapter states only its pool, line limit, run files, child, stdin and line decoder, and the decoder decides the ending. Checked against A1b-0a, C0a and G0a (stdin line, stdin prompt, prompt file; JSON lines everywhere; Codex's `error` lines not terminal). The version (P1, HQ4), the turn bound (HQ6), the surface verdict (5i, HQ5) and the login form (HQ2, HQ3) stay outside the port.

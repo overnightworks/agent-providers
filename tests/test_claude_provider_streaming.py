@@ -1087,3 +1087,82 @@ def test_the_final_event_arrives_before_the_leader_is_released(monkeypatch) -> N
     assert held_after_close == [
         ([("kill_until_gone", child.pid), ("release", child.pid)], 0),
     ]
+
+
+def _a_stalled_stderr_child() -> Any:
+    return a_claude_cli_child(
+        stream_lines=[_assistant_line("hi"), _result_line("hi")],
+        stderr_stalls=True,
+        record_stderr_cancel=True,
+    )
+
+
+def _retain_inner_streams(monkeypatch) -> None:
+    retained: list[Any] = []
+    consume_stream = provider._consume_stream
+
+    def retaining(*arguments: Any, **keywords: Any) -> Any:
+        inner = consume_stream(*arguments, **keywords)
+        retained.append(inner)
+        return inner
+
+    monkeypatch.setattr(provider, "_consume_stream", retaining)
+
+
+def test_an_early_close_settles_the_stderr_drain_before_the_reap(monkeypatch, caplog) -> None:
+    child = _a_stalled_stderr_child()
+    _retain_inner_streams(monkeypatch)
+    closed: list[tuple[list[tuple[str, int]], bool]] = []
+
+    async def scenario() -> None:
+        stream = acall_claude_with_mcp_stream(prompt="hi", user_id="u")
+        await anext(stream)
+        await child.stderr_read_started.wait()
+        await stream.aclose()
+        closed.append((operations(child.log), _only_the_scenario_runs()))
+
+    _run_stream_scenario(monkeypatch, child, scenario)
+
+    assert closed == [(
+        [
+            ("stderr_read_cancelled", child.pid),
+            ("kill_until_gone", child.pid),
+            ("release", child.pid),
+        ],
+        True,
+    )]
+    assert _unretrieved_task_errors(caplog) == []
+
+
+def test_a_cancelled_early_close_still_reaps_after_the_drain_settlement_starts(
+    monkeypatch,
+) -> None:
+    child = _a_stalled_stderr_child()
+    _retain_inner_streams(monkeypatch)
+    outcome: list[tuple[list[tuple[str, int]], bool, int]] = []
+
+    async def scenario() -> None:
+        stream = acall_claude_with_mcp_stream(prompt="hi", user_id="u")
+        await anext(stream)
+        await child.stderr_read_started.wait()
+        closer = asyncio.create_task(stream.aclose())
+        child.when_stderr_read_cancelled = closer.cancel
+        with pytest.raises(asyncio.CancelledError):
+            await closer
+        outcome.append((
+            operations(child.log),
+            _only_the_scenario_runs(),
+            held_claude_slots(),
+        ))
+
+    _run_stream_scenario(monkeypatch, child, scenario)
+
+    assert outcome == [(
+        [
+            ("stderr_read_cancelled", child.pid),
+            ("kill_until_gone", child.pid),
+            ("release", child.pid),
+        ],
+        True,
+        0,
+    )]

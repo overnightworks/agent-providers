@@ -16,7 +16,7 @@ import tempfile
 import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
-from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
+from contextlib import AsyncExitStack, aclosing, asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final, Literal
@@ -384,8 +384,11 @@ async def acall_claude_with_mcp_stream(
                 proc.stdin.write(stdin_body.encode())
                 await proc.stdin.drain()
                 proc.stdin.close()
-                async for event in _consume_stream(proc, timeout_seconds, correlation_id):
-                    yield event
+                async with aclosing(
+                    _consume_stream(proc, timeout_seconds, correlation_id),
+                ) as events:
+                    async for event in events:
+                        yield event
     finally:
         home.close()
 

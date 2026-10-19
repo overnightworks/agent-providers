@@ -545,9 +545,13 @@ async def yield_until(condition: Callable[[], bool]) -> None:
             await asyncio.sleep(0)
 
 
-async def close_bounded(relay: Relay) -> None:
+async def within_the_bound[T](awaitable: Awaitable[T]) -> T:
     async with asyncio.timeout(WAIT_SECONDS):
-        await relay.close()
+        return await awaitable
+
+
+async def close_bounded(relay: Relay) -> None:
+    await within_the_bound(relay.close())
 
 
 _HeldCallback = tuple[Callable[..., object], tuple[object, ...], contextvars.Context | None]

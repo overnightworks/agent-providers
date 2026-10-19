@@ -1,8 +1,0 @@
-claim_id = "019536f71155449ea2f5274303910ea8"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "fca3ff9aa100af969d80ea6982476279d6d0ff93"
-branch = "claude/issue-309-8d-old-stream-entry-decoder"
-scope = ["README.md", "docs/decisions/0001-agent-service.md", "src/agent_providers/claude/provider.py", "src/agent_providers/cli_run.py", "tests/test_claude_provider_streaming.py", "tests/test_claude_run.py"]
-opened_commit = "fdc1400359f4c0e876b3c7bbe6dbdd7d7a93e8a8"
-whole_reason = "One decoder base, its two shared helpers, the one entry that adopts them and the docs and tests that pin their behaviour change together; split, the helpers would have no second caller or the entry would keep a second ending."

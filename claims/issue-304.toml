@@ -3,6 +3,6 @@ agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
 role = "builder"
 base = "4e330fe56c01867bfe4980e98defeda5bdeeda8c"
 branch = "claude/issue-304-5r-claude-relay-attachment"
-scope = ["README.md", "docs/decisions/0001-agent-service.md", "packages/agent-service/src/agent_service/run_tools.py", "packages/agent-service/src/agent_service/tool_relay.py", "src/agent_providers/claude/provider.py", "src/agent_providers/cli_run.py", "tests/test_claude_run.py", "tests/test_service_run_tools.py", "tests/test_service_tool_relay.py"]
+scope = [".github/workflows/ci.yml", "README.md", "docs/decisions/0001-agent-service.md", "packages/agent-service/src/agent_service/run_tools.py", "packages/agent-service/src/agent_service/tool_relay.py", "src/agent_providers/claude/provider.py", "src/agent_providers/cli_run.py", "tests/test_claude_run.py", "tests/test_service_run_tools.py", "tests/test_service_tool_relay.py"]
 opened_commit = "2e21c829f6179762e7e22b429d57c88c1e6fe218"
 whole_reason = "One contract, the run's relay attached through one core access type: the Claude adapter writes the config from it, the service's relay builds and compares against it, and the docs and tests that pin both move with it; split, either half would ship a second owner of the relay's header."

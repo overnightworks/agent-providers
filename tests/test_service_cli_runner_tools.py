@@ -190,7 +190,9 @@ SUCCEEDED = (RunState.SUCCEEDED, None)
 def test_a_relay_call_reaches_the_wire_under_the_apps_own_tool_name(
     tmp_path, authority, child_cleanup, monkeypatch
 ):
-    run = a_tool_run(tmp_path, authority, child_cleanup, monkeypatch, calls=[SAVE_LYRICS])
+    run = a_tool_run(
+        tmp_path, authority, child_cleanup, monkeypatch, calls=[SAVE_LYRICS], stray_tool_lines=True
+    )
 
     assert wire_shape(run.events) == [
         ("tool_call", "save_lyrics", "call-1", "side_effecting"),

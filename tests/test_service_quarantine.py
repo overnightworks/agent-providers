@@ -572,21 +572,34 @@ async def test_a_cancelled_close_is_made_inert_though_its_line_fails(
     assert _close_line_failure(drive.run_id) in _the_lines(caplog)
 
 
+class _CloseLineThatBreaksTheClock(RunnerCloseLineFails):
+    """The failing close line, after which the store clock breaks once."""
+
+    def __init__(self, clock: ClockBreaksOnce) -> None:
+        self._clock = clock
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.getMessage().startswith("Closing the runner of run"):
+            self._clock.arm()
+        return super().filter(record)
+
+
 @in_loop
-async def test_a_later_cleanup_failure_is_raised_and_the_close_line_failure_logged_once(
-    runner_close_line_fails, caplog
-):
+async def test_a_later_cleanup_failure_is_raised_and_the_close_line_failure_logged_once(caplog):
     caplog.set_level(logging.ERROR)
     clock = ClockBreaksOnce()
+    caplog.handler.addFilter(line_breaks_the_clock := _CloseLineThatBreaksTheClock(clock))
     runner = GatedRunner()
     runner.close_error = RuntimeError("the close broke")
-    async with driven(runner, records=RunRecords(clock), read=False) as drive:
-        drive.took(await anext(drive.frames))
-        clock.arm()
-        runner.release(FINAL)
+    try:
+        async with driven(runner, records=RunRecords(clock), read=False) as drive:
+            drive.took(await anext(drive.frames))
+            runner.release(FINAL)
 
-        with pytest.raises(RuntimeError, match="the store clock broke once"):
-            await anext(drive.frames)
+            with pytest.raises(RuntimeError, match="the store clock broke once"):
+                await anext(drive.frames)
+    finally:
+        caplog.handler.removeFilter(line_breaks_the_clock)
 
     _assert_ended(drive, RunState.FAILED, FailureCode.PROVIDER_ERROR)
     assert drive.types == ["run_started"]

@@ -533,11 +533,8 @@ def test_the_mcp_trust_context_ignores_the_environment(
 
 
 @pytest.mark.parametrize(
-    ("signed_by_the_configured_ca", "outcome"),
-    [
-        pytest.param(True, SUCCEEDED, id="the-configured-ca"),
-        pytest.param(False, PROVIDER_ERROR, id="another-ca"),
-    ],
+    "signed_by_the_configured_ca",
+    [pytest.param(True, id="the-configured-ca"), pytest.param(False, id="another-ca")],
 )
 def test_a_run_trusts_exactly_the_configured_bundle(
     tmp_path,
@@ -547,7 +544,6 @@ def test_a_run_trusts_exactly_the_configured_bundle(
     monkeypatch,
     logging_state_restored,
     signed_by_the_configured_ca,
-    outcome,
 ):
     binary = a_relay_calling_claude(tmp_path, version=PINNED_CLAUDE_VERSION, calls=[SAVE_NOTE])
     serving_authority = authority if signed_by_the_configured_ca else other_authority
@@ -573,4 +569,6 @@ def test_a_run_trusts_exactly_the_configured_bundle(
 
         status = own_real_children(child_cleanup, monkeypatch, start_and_post)
 
-    assert (status.state, status.failure_code) == outcome
+    assert (status.state, status.failure_code) == (
+        SUCCEEDED if signed_by_the_configured_ca else PROVIDER_ERROR
+    )

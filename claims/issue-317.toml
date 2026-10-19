@@ -3,6 +3,6 @@ agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
 role = "builder"
 base = "6966b013c204290dcb4922133050c52738c1e2d1"
 branch = "claude/issue-317-11a-cli-runner-tool-path"
-scope = ["README.md", "packages/agent-service/src/agent_service/cli.py", "packages/agent-service/src/agent_service/cli_runner.py", "packages/agent-service/src/agent_service/config.py", "packages/agent-service/src/agent_service/relayed_events.py", "tests/cli_tools_support.py", "tests/service_support.py", "tests/test_relayed_events.py", "tests/test_service_cli_runner.py", "tests/test_service_cli_runner_tools.py", "tests/test_service_config.py"]
+scope = ["README.md", "packages/agent-service/src/agent_service/cli.py", "packages/agent-service/src/agent_service/cli_runner.py", "packages/agent-service/src/agent_service/config.py", "packages/agent-service/src/agent_service/relayed_events.py", "packages/agent-service/src/agent_service/tool_relay.py", "tests/cli_tools_support.py", "tests/service_support.py", "tests/test_relayed_events.py", "tests/test_service_cli_runner.py", "tests/test_service_cli_runner_tools.py", "tests/test_service_config.py", "tests/test_service_tool_relay_barrier.py"]
 opened_commit = "bb4c4fc402179fcdfd671978b5513e8b21e7effe"
 whole_reason = "One contract: the runner's tool path, from the open through the merge and the accept to the close; the merge module, the runner wiring and its callers change together, and the tests share one fake CLI and one fake app."

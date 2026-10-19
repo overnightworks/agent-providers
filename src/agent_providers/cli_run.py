@@ -52,6 +52,18 @@ class RelayState(Enum):
 
 
 @dataclass(frozen=True)
+class RelayAccess:
+    """One run's relay as its adapter attaches it; the secret stays out of `repr`."""
+
+    url: str
+    secret: str = field(repr=False)
+
+
+def relay_authorization(secret: str) -> str:
+    return f"Bearer {secret}"
+
+
+@dataclass(frozen=True)
 class RunSurface:
     """What a run's CLI announced at its start, classified; it holds no CLI string."""
 

@@ -18,6 +18,7 @@ import h11
 
 from agent_client.capability import MCP_ENDPOINT_PATH
 from agent_client.wire import MAX_EVENT_BYTES
+from agent_providers.cli_run import RelayAccess, relay_authorization
 from agent_providers.errors import raise_without_chain
 from agent_providers.events import ToolCallEvent, ToolResultEvent
 from agent_service.capability import Capability
@@ -61,7 +62,6 @@ BODY_RECEIVE_SECONDS: Final = 10.0
 RELAY_CLOSE_SECONDS: Final = 1.0
 MAX_PENDING_TOOL_CALLS: Final = MAX_RELAY_CONNECTIONS - 1
 _SECRET_BYTES: Final = 32
-_BEARER_SCHEME: Final = b"Bearer "
 _ENDPOINT_TARGET: Final = MCP_ENDPOINT_PATH.encode()
 _VERSION_FIELD: Final = b"mcp-protocol-version"
 _VERSION_SEPARATOR: Final = b", "
@@ -106,12 +106,6 @@ class _Refusal(Exception):
     def __init__(self, status: HTTPStatus) -> None:
         super().__init__(status)
         self.status = status
-
-
-@dataclass(frozen=True)
-class RelayAccess:
-    url: str
-    secret: str = field(repr=False)
 
 
 def _field_values(request: h11.Request, name: bytes) -> list[bytes]:
@@ -195,7 +189,7 @@ class Relay:
         self._run_id = run_id
         self._owner = owner
         self._clock = clock
-        self._bearer = _BEARER_SCHEME + secret.encode()
+        self._bearer = relay_authorization(secret).encode()
         self._secret = secret
         self._expected_host = b""
         self._connection_numbers = count(1)

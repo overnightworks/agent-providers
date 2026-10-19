@@ -28,7 +28,13 @@ from agent_providers.claude.provider import (
     CliLoginRefusedError,
     UnavailableError,
 )
-from agent_providers.cli_run import RunSurfaceRefused, SurfaceVerdict, astream_cli_run
+from agent_providers.cli_run import (
+    RelayAccess,
+    RunSurfaceRefused,
+    SurfaceVerdict,
+    astream_cli_run,
+    relay_authorization,
+)
 from agent_providers.config import PrivateWorkingRoot, reset_config
 from agent_providers.events import (
     AssistantTextEvent,
@@ -46,7 +52,20 @@ CLI_MARKER = "cli-" + uuid.uuid4().hex
 SYSTEM_TEXT = "Answer briefly."
 OPERATOR_HOME = "/home/operator"
 SYSTEM_PROMPT_NAME = "system-prompt"
+RELAY_CONFIG_NAME = "relay-mcp.json"
+RELAY_SECRET = "relay-secret-" + uuid.uuid4().hex
+ACCESS = RelayAccess("http://127.0.0.1:41234/mcp", RELAY_SECRET)
+RELAY_CONFIG = {
+    "mcpServers": {
+        "relay": {
+            "type": "http",
+            "url": "http://127.0.0.1:41234/mcp",
+            "headers": {"Authorization": f"Bearer {RELAY_SECRET}"},
+        }
+    }
+}
 
+RELAY_CONFIG_TEXT = json.dumps(RELAY_CONFIG)
 HISTORY = (
     TurnMessage(role=TurnRole.USER, text="a"),
     TurnMessage(role=TurnRole.ASSISTANT, text="b"),
@@ -78,6 +97,7 @@ def a_run(**overrides: object) -> ClaudeRun:
         "system": SYSTEM_TEXT,
         "max_tool_calls": 30,
         "history": HISTORY,
+        "relay": None,
     }
     return ClaudeRun(**{**fields, **overrides})  # type: ignore[arg-type]
 
@@ -128,14 +148,12 @@ def test_a_tool_free_run_has_the_exact_isolated_command_line(tmp_path: Path) -> 
 
 
 def test_a_run_with_a_relay_attaches_only_the_relay_server(tmp_path: Path) -> None:
-    relay_config = tmp_path / "home" / "relay.json"
-
-    arguments = started(tmp_path, relay_config=relay_config).child.arguments
+    arguments = started(tmp_path, relay=ACCESS).child.arguments
 
     assert arguments == (
         *expected_arguments(tmp_path),
         "--mcp-config",
-        str(relay_config),
+        str(tmp_path / "home" / RELAY_CONFIG_NAME),
         "--allowedTools",
         "mcp__relay__*",
     )
@@ -146,13 +164,24 @@ def test_the_run_files_hold_only_the_system_text_and_never_the_token() -> None:
     assert a_run().run_files() == {SYSTEM_PROMPT_NAME: SYSTEM_TEXT.encode()}
 
 
-@pytest.mark.parametrize("relay", [False, True])
+def test_a_run_with_a_relay_writes_only_the_relay_with_its_secret_header() -> None:
+    files = a_run(relay=ACCESS).run_files()
+
+    assert sorted(files) == sorted([SYSTEM_PROMPT_NAME, RELAY_CONFIG_NAME])
+    assert json.loads(files[RELAY_CONFIG_NAME]) == RELAY_CONFIG
+    assert CANARY_MARKER.encode() not in files[RELAY_CONFIG_NAME]
+
+
+def test_the_relay_authorization_is_the_bearer_scheme_and_the_secret() -> None:
+    assert relay_authorization("s3cr3t") == "Bearer s3cr3t"
+
+
+@pytest.mark.parametrize("access", [None, ACCESS], ids=["tool-free", "with-a-relay"])
 def test_the_token_and_the_system_text_are_in_no_argument_and_not_in_stdin(
     tmp_path: Path,
-    relay: bool,
+    access: RelayAccess | None,
 ) -> None:
-    relay_config = tmp_path / "home" / "relay.json" if relay else None
-    start = started(tmp_path, relay_config=relay_config)
+    start = started(tmp_path, relay=access)
     command = start.child.command
 
     assert not any(CANARY_MARKER in element for element in command)
@@ -161,6 +190,27 @@ def test_the_token_and_the_system_text_are_in_no_argument_and_not_in_stdin(
         False,
         False,
     )
+
+
+@pytest.mark.parametrize("access", [None, ACCESS], ids=["tool-free", "with-a-relay"])
+def test_the_relay_secret_is_only_in_the_relay_file(
+    tmp_path: Path, access: RelayAccess | None
+) -> None:
+    run = a_run(relay=access)
+    start = run.start(tmp_path / "home", tmp_path / "work")
+    shown = repr(run) + str(run) + repr(start) + str(start) + repr(start.child) + repr(ACCESS)
+    carriers = {
+        "argv": " ".join(start.child.command),
+        "environment": " ".join(start.child.environment.values()),
+        "stdin": start.stdin.decode(),
+        "repr": shown,
+    }
+    files_with_the_secret = [
+        name for name, content in run.run_files().items() if RELAY_SECRET.encode() in content
+    ]
+
+    assert [name for name, text in carriers.items() if RELAY_SECRET in text] == []
+    assert files_with_the_secret == ([] if access is None else [RELAY_CONFIG_NAME])
 
 
 def test_the_environment_is_the_closed_one_plus_the_token_and_the_switches(
@@ -222,10 +272,9 @@ def test_a_token_that_is_a_plain_string_is_refused_by_field_name() -> None:
     assert CANARY_MARKER not in str(refusal.value)
 
 
-@pytest.mark.parametrize("field", ["binary", "relay_config"])
-def test_a_relative_path_is_refused_by_field_name_only(field: str) -> None:
-    with pytest.raises(ChildProcessSpecificationError, match=field) as refusal:
-        a_run(**{field: Path("relative-marker-path")})
+def test_a_relative_path_is_refused_by_field_name_only() -> None:
+    with pytest.raises(ChildProcessSpecificationError, match="binary") as refusal:
+        a_run(binary=Path("relative-marker-path"))
 
     assert "relative-marker-path" not in str(refusal.value)
 
@@ -252,6 +301,20 @@ def test_the_history_is_one_transcript_line_in_order(tmp_path: Path) -> None:
 def test_an_empty_history_is_refused() -> None:
     with pytest.raises(ChildProcessSpecificationError, match="history"):
         a_run(history=())
+
+
+def test_a_run_requires_its_relay_by_keyword_omitted() -> None:
+    with pytest.raises(TypeError):
+        ClaudeRun(  # type: ignore[call-arg]
+            Path("/opt/claude/claude"), SecretStr(CANARY_TOKEN), SYSTEM_TEXT, 30, HISTORY
+        )
+
+
+def test_a_run_requires_its_relay_by_keyword_not_by_position() -> None:
+    with pytest.raises(TypeError):
+        ClaudeRun(  # type: ignore[misc]
+            Path("/opt/claude/claude"), SecretStr(CANARY_TOKEN), SYSTEM_TEXT, 30, HISTORY, None
+        )
 
 
 def line(payload: dict[str, Any]) -> bytes:
@@ -313,10 +376,10 @@ def test_the_decoder_maps_each_block_and_ends_with_the_result() -> None:
     assert decoder.ending(0) == FinalEvent(text="done")
 
 
-def test_a_run_with_a_relay_config_starts_a_decoder_that_accepts_the_relays_tools(
+def test_a_run_with_a_relay_starts_a_decoder_that_accepts_the_relays_tools(
     tmp_path: Path,
 ) -> None:
-    decoder = started(tmp_path, relay_config=tmp_path / "home" / "relay.json").decoder
+    decoder = started(tmp_path, relay=ACCESS).decoder
 
     steps = events_of_lines(decoder, RELAY_INIT, TEXT_LINE, SUCCESS_LINE)
 
@@ -438,8 +501,16 @@ def a_fake_claude(
     directory: Path,
     stream: tuple[bytes, ...] = (INIT_LINE, TEXT_LINE, SUCCESS_LINE),
     then: str = "exit 0",
+    relay: bool = False,
 ) -> Path:
     stream_text = b"".join(stream).decode()
+    relay_check = ""
+    if relay:
+        relay_check = (
+            f'case " $* " in *" --mcp-config $HOME/{RELAY_CONFIG_NAME} "*) ;; *) exit 21;; esac\n'
+            f'[ "$(stat -c %a "$HOME/{RELAY_CONFIG_NAME}")" = 600 ] || exit 22\n'
+            f'[ "$(cat "$HOME/{RELAY_CONFIG_NAME}")" = \'{RELAY_CONFIG_TEXT}\' ] || exit 23\n'
+        )
     binary = directory / "claude"
     binary.write_text(
         "#!/bin/sh\n"
@@ -450,6 +521,7 @@ def a_fake_claude(
         f"[ \"$stdin_line\" = '{HISTORY_STDIN_LINE.decode().strip()}' ] || exit 13\n"
         '[ -n "$CLAUDE_CODE_OAUTH_TOKEN" ] || exit 14\n'
         '[ -z "$(ls -A)" ] || exit 15\n'
+        f"{relay_check}"
         f"cat <<'EOF'\n{stream_text}EOF\n"
         f"{then}\n"
     )
@@ -488,6 +560,31 @@ def test_a_claude_run_streams_through_the_neutral_entry(
         [True],
         [],
         [],
+    )
+
+
+def test_a_claude_run_with_a_relay_reads_its_private_relay_config_through_the_neutral_entry(
+    tmp_path: Path,
+    child_cleanup: ChildCleanup,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    private_root = a_private_root(tmp_path)
+    binary = a_fake_claude(tmp_path, stream=(RELAY_INIT, TEXT_LINE, SUCCESS_LINE), relay=True)
+    run = a_run(binary=binary, relay=ACCESS)
+    seen: list[StreamEvent] = []
+
+    async def scenario() -> None:
+        async for event in astream_cli_run(PrivateWorkingRoot(private_root), run):
+            seen.append(event)
+
+    drive_real_children(child_cleanup, monkeypatch, scenario())
+
+    assert (seen, list(private_root.iterdir()), RELAY_SECRET in caplog.text) == (
+        [AssistantTextEvent(text="hi"), FinalEvent(text="done")],
+        [],
+        False,
     )
 
 

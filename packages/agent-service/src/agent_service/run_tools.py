@@ -8,6 +8,7 @@ from contextlib import AsyncExitStack
 from typing import Any, Final, Self
 
 from agent_client.capability import McpOrigin
+from agent_providers.cli_run import RelayAccess
 from agent_providers.outlasting import outlast, wait_outlasting_cancellation
 from agent_service.app_tools import open_app_tools
 from agent_service.capability import Capability
@@ -19,7 +20,6 @@ from agent_service.run_liveness import (
 from agent_service.tool_relay import (
     McpRelayOwner,
     Relay,
-    RelayAccess,
     ToolCallBarrier,
 )
 

@@ -13,7 +13,7 @@ import asyncio
 import logging
 import threading
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Final
 
@@ -22,31 +22,41 @@ import pytest
 from provider_test_support import Recorded, ScriptedAnchoredChild, operations
 from service_support import (
     CUT_BY_ITS_SCOPE,
+    STRAY_CANCELLATION_CANARY,
+    ClientSocket,
     ClockBreaksOnce,
     Drive,
     GatedRunner,
     QuarantineLineFails,
     RunnerCloseLineFails,
+    RunnerRaisingThisStray,
     ScriptedConfirmation,
     SplitFailureRunner,
     StepClock,
     client_leaves_mid_run,
     client_takes_nothing_until_dropped,
     closed_inside,
+    decoded_events,
     driven,
     failure_lines,
     in_loop,
     quarantine_lines,
+    respond_through,
+    service_config,
+    the_app_on,
 )
 
-from agent_client.wire import FailureCode, RunState
+from agent_client.run_stream import ViolationKind
+from agent_client.wire import FailureCode, RunState, RunStatus
 from agent_providers.errors import ContainmentLost, RetainedGroup
-from agent_providers.events import FinalEvent
+from agent_providers.events import AssistantTextEvent, FinalEvent
 from agent_providers.lost_groups import confirm_group_gone, retain_lost_group
 from agent_providers.procfs import GroupCensus
 from agent_providers.spawn import ChildIdentityLost
 from agent_service.admission import AdmissionSlot, Lease
+from agent_service.config import RunConfig
 from agent_service.quarantine import QUARANTINE_RETRY_SECONDS, Quarantine
+from agent_service.run_records import RunRecords
 
 FIRST = RetainedGroup(pgid=4242, generation=777)
 SECOND = RetainedGroup(pgid=4343, generation=888)
@@ -322,7 +332,11 @@ class _HandOver:
     record: RunState
 
 
-def _spying_on_the_hand_over(drive: Drive, monkeypatch: pytest.MonkeyPatch) -> list[_HandOver]:
+def _spying_on_the_hand_over(
+    drive: Drive,
+    monkeypatch: pytest.MonkeyPatch,
+    after_noting: Callable[[], None] = lambda: None,
+) -> list[_HandOver]:
     hand_overs: list[_HandOver] = []
     hold = drive.quarantine.hold
 
@@ -330,6 +344,7 @@ def _spying_on_the_hand_over(drive: Drive, monkeypatch: pytest.MonkeyPatch) -> l
         status = drive.status()
         assert status is not None
         hand_overs.append(_HandOver(groups, drive.slot_is_full(), status.state))
+        after_noting()
         hold(run_id, lease, groups)
 
     monkeypatch.setattr(drive.quarantine, "hold", spy)
@@ -450,6 +465,188 @@ async def test_a_close_line_that_fails_cannot_keep_the_place_from_the_quarantine
         assert drive.slot_is_full()
         await drive.quarantine_clock.step_to_next_deadline()
         assert not drive.slot_is_full()
+
+
+def _close_line_failure(run_id: uuid.UUID) -> tuple[str, str]:
+    return f"The close line of run {run_id} failed", "OSError"
+
+
+def _the_lines(caplog: pytest.LogCaptureFixture) -> list[tuple[str, str]]:
+    return [(event, kind) for event, kind, _raiser in failure_lines(caplog)]
+
+
+def _assert_ended_run(status: RunStatus | None, state: RunState, code: FailureCode | None) -> None:
+    assert status is not None
+    assert (status.state, status.failure_code) == (state, code)
+
+
+def _assert_ended(drive: Drive, state: RunState, code: FailureCode | None) -> None:
+    _assert_ended_run(drive.status(), state, code)
+
+
+DECIDED_ENDINGS: Final = [
+    pytest.param(RunConfig(), FINAL, RunState.SUCCEEDED, None, "succeeded", id="a-decided-success"),
+    pytest.param(
+        RunConfig(max_bytes=10),
+        AssistantTextEvent(text="Too long for the budget."),
+        RunState.FAILED,
+        FailureCode.LIMIT_EXCEEDED,
+        "failed",
+        id="a-decided-limit-failure",
+    ),
+]
+
+
+@pytest.mark.parametrize(("runs", "ending", "state", "code", "terminal"), DECIDED_ENDINGS)
+@in_loop
+async def test_a_close_line_that_fails_leaves_the_ending_the_run_had_decided(
+    runs, ending, state, code, terminal, runner_close_line_fails, caplog
+):
+    caplog.set_level(logging.ERROR)
+    runner = GatedRunner()
+    runner.close_error = RuntimeError("the close broke")
+    async with driven(runner, runs=runs) as drive:
+        runner.release(ending)
+        await drive.run_to_end()
+        await drive.finished()
+
+    _assert_ended(drive, state, code)
+    assert drive.types[-1] == terminal
+    assert drive.end_of_stream() == []
+    assert not drive.slot_is_full()
+    assert _the_lines(caplog) == [_close_line_failure(drive.run_id)]
+
+
+@in_loop
+async def test_a_close_line_that_fails_beside_a_stream_closed_before_any_decision_ends_it_cancelled(
+    runner_close_line_fails, caplog
+):
+    caplog.set_level(logging.ERROR)
+    runner = GatedRunner()
+    runner.close_error = RuntimeError("the close broke")
+    async with driven(runner, read=False) as drive:
+        drive.took(await anext(drive.frames))
+        await drive.clock.parked()
+        await drive.frames.aclose()
+
+    _assert_ended(drive, RunState.CANCELLED, None)
+    assert drive.types == ["run_started"]
+    assert drive.end_of_stream() == [ViolationKind.TRUNCATED]
+    assert not drive.slot_is_full()
+    assert _the_lines(caplog) == [_close_line_failure(drive.run_id)]
+
+
+@in_loop
+async def test_a_close_line_that_fails_over_a_loss_still_ends_the_record_failed_and_holds_the_place(
+    runner_close_line_fails, caplog, monkeypatch
+):
+    caplog.set_level(logging.ERROR)
+    runner = GatedRunner()
+    runner.close_error = ExceptionGroup("close", [_lost()])
+    async with driven(runner) as drive:
+        hand_overs = _spying_on_the_hand_over(drive, monkeypatch)
+        runner.release(FINAL)
+        await drive.run_to_end()
+        await asyncio.gather(drive.reader, return_exceptions=True)
+
+    assert hand_overs == [_HandOver((FIRST,), True, RunState.RUNNING)]
+    _assert_ended(drive, RunState.FAILED, FailureCode.PROVIDER_ERROR)
+    _assert_place_held_for(drive, caplog, FIRST)
+    assert _the_lines(caplog) == [_close_line_failure(drive.run_id)]
+
+
+@in_loop
+async def test_a_cancelled_close_is_made_inert_though_its_line_fails(
+    runner_close_line_fails, caplog
+):
+    caplog.set_level(logging.ERROR)
+    stray = asyncio.CancelledError(STRAY_CANCELLATION_CANARY)
+    stray.__cause__ = RuntimeError("its cause")
+    stray.__context__ = RuntimeError("its context")
+    async with driven(RunnerRaisingThisStray(stray), read=False) as drive:
+        drive.took(await anext(drive.frames))
+        await drive.clock.parked()
+        await drive.frames.aclose()
+
+    assert (stray.__traceback__, stray.__cause__, stray.__context__) == (None, None, None)
+    assert _close_line_failure(drive.run_id) in _the_lines(caplog)
+
+
+@in_loop
+async def test_a_later_cleanup_failure_is_raised_and_the_close_line_failure_logged_once(
+    runner_close_line_fails, caplog
+):
+    caplog.set_level(logging.ERROR)
+    clock = ClockBreaksOnce()
+    runner = GatedRunner()
+    runner.close_error = RuntimeError("the close broke")
+    async with driven(runner, records=RunRecords(clock), read=False) as drive:
+        drive.took(await anext(drive.frames))
+        clock.arm()
+        runner.release(FINAL)
+
+        with pytest.raises(RuntimeError, match="the store clock broke once"):
+            await anext(drive.frames)
+
+    _assert_ended(drive, RunState.FAILED, FailureCode.PROVIDER_ERROR)
+    assert drive.types == ["run_started"]
+    assert _the_lines(caplog) == [_close_line_failure(drive.run_id)]
+
+
+@in_loop
+async def test_a_broken_commit_after_a_loss_hands_over_first_and_ends_the_record_failed(
+    caplog, monkeypatch
+):
+    caplog.set_level(logging.ERROR)
+    clock = ClockBreaksOnce()
+    runner = GatedRunner()
+    runner.close_error = _lost()
+    async with driven(runner, records=RunRecords(clock), read=False) as drive:
+        hand_overs = _spying_on_the_hand_over(drive, monkeypatch, after_noting=clock.arm)
+        drive.took(await anext(drive.frames))
+        runner.release(FINAL)
+
+        with pytest.raises(RuntimeError, match="the store clock broke once"):
+            await anext(drive.frames)
+
+    assert hand_overs == [_HandOver((FIRST,), True, RunState.RUNNING)]
+    _assert_ended(drive, RunState.FAILED, FailureCode.PROVIDER_ERROR)
+    _assert_place_held_for(drive, caplog, FIRST)
+
+
+@pytest.mark.parametrize(("runs", "ending", "state", "code", "terminal"), DECIDED_ENDINGS)
+@in_loop
+async def test_a_failed_close_line_reads_the_decided_ending_through_the_app_and_frees_the_place(
+    runs, ending, state, code, terminal, runner_close_line_fails, caplog, monkeypatch
+):
+    caplog.set_level(logging.ERROR)
+    runner = GatedRunner()
+    runner.close_error = RuntimeError("the close broke")
+    async with driven(runner, runs=runs, read=False) as drive:
+        app = the_app_on(
+            drive,
+            monkeypatch,
+            config=service_config(runs={**runs.model_dump(), "max_parallel_cli_runs": 1}),
+        )
+        client = ClientSocket()
+        response = await respond_through(app, client)
+        await client.received(b"run_started")
+        runner.release(ending)
+        await response
+
+        _assert_ended_run(drive.status(client.run_id), state, code)
+        assert [event.type for event in decoded_events(client.body)][-1] == terminal
+        next_run = ClientSocket()
+        next_response = await respond_through(app, next_run)
+        await next_run.received(b"run_started")
+        assert next_run.messages[0]["status"] == 200
+        runner.release(FINAL)
+        await next_response
+
+    assert _the_lines(caplog) == [
+        _close_line_failure(client.run_id),
+        _close_line_failure(next_run.run_id),
+    ]
 
 
 @in_loop

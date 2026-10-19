@@ -25,7 +25,7 @@ from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine, 
 from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import Any, Final
+from typing import Any
 
 import anyio
 import pytest
@@ -33,7 +33,6 @@ from service_support import (
     ALICE,
     CUT_BY_ITS_SCOPE,
     MOST_BUSY_TURNS_BEFORE_THE_RUN_NEVER_SETTLES,
-    QUIET,
     SONGMAKER,
     STRAY_CANCELLATION_CANARY,
     BrokenClock,
@@ -41,14 +40,15 @@ from service_support import (
     ClockBreaksOnce,
     Drive,
     GatedRunner,
+    RunnerRaisingThisStray,
     ScriptedRunner,
     StepClock,
     StrayCancelledRunner,
     TokenMint,
     alice_admitted_run,
-    closed_inside,
     client_leaves_mid_run,
     client_takes_nothing_until_dropped,
+    closed_inside,
     driven,
     failure_lines,
     get_run,
@@ -57,12 +57,14 @@ from service_support import (
     post_run,
     quarantine_on,
     reaches_text,
+    respond_through,
     respond_through_the_app,
     run_headers,
     served,
     service_config,
     stray_cancellation,
     supervision_fails,
+    the_app_on,
     tool_call,
 )
 from starlette.requests import ClientDisconnect
@@ -93,7 +95,7 @@ from agent_service.run_liveness import (
     RunStepCancelled,
     log_failure,
 )
-from agent_service.run_records import RunRecorder, RunRecords
+from agent_service.run_records import RunRecorder, RunRecords, utc_now
 from agent_service.runners import Runners
 
 TEXT = AssistantTextEvent(text="Let me read the song.")
@@ -884,8 +886,9 @@ class _RecordsThatFail(RunRecords):
         failing: frozenset[_Step] = frozenset(),
         taking: Callable[[_Step], None] = lambda _step: None,
         breaks: Callable[[_Step], BaseException] = _Step.fails,
+        now: Callable[[], datetime] = utc_now,
     ) -> None:
-        super().__init__()
+        super().__init__(now)
         self._failing = failing
         self._taking = taking
         self._breaks = breaks
@@ -909,6 +912,150 @@ async def test_a_recording_defect_surfaces_as_a_supervision_failure(caplog):
             await anext(drive.frames)
 
     assert failure_lines(caplog) == []
+
+
+_CLOCK_BREAKS = "the store clock broke once"
+
+
+class _RecordsWhoseClockBreaksAfterBegin(RunRecords):
+    def __init__(self, clock: ClockBreaksOnce) -> None:
+        super().__init__(clock)
+        self._clock = clock
+
+    def begin(self, started, app, principal):
+        recorder = super().begin(started, app, principal)
+        self._clock.arm()
+        return recorder
+
+
+@pytest.mark.parametrize(
+    ("runs", "ending"),
+    [
+        pytest.param(RunConfig(), FINAL, id="a-decided-success"),
+        pytest.param(RunConfig(max_bytes=10), TEXT, id="a-decided-failure-over-the-budget"),
+    ],
+)
+@in_loop
+async def test_a_terminal_commit_that_breaks_ends_the_record_as_provider_error_whatever_was_decided(
+    runs, ending
+):
+    clock = ClockBreaksOnce()
+    async with driven(runs=runs, records=RunRecords(clock), read=False) as drive:
+        drive.took(await anext(drive.frames))
+        clock.arm()
+        drive.runner.release(ending)
+
+        with pytest.raises(RuntimeError, match=_CLOCK_BREAKS):
+            await anext(drive.frames)
+
+        _assert_recorded(
+            drive.status(),
+            RunState.FAILED,
+            code=FailureCode.PROVIDER_ERROR,
+            events=1,
+            at=0,
+            lost=ClientLoss.DROPPED,
+        )
+        assert drive.types == ["run_started"]
+        assert drive.runner.closes == 1
+
+
+@in_loop
+async def test_a_run_without_a_runner_whose_terminal_commit_breaks_ends_its_record_failed():
+    clock = ClockBreaksOnce()
+    records = _RecordsWhoseClockBreaksAfterBegin(clock)
+    run_id, frames = _frames_of_a_run_without_a_runner(records)
+
+    with pytest.raises(RuntimeError, match=_CLOCK_BREAKS):
+        await anext(frames)
+
+    status = records.read(run_id, "songmaker", ALICE)
+    assert status is not None
+    assert (status.state, status.failure_code) == (RunState.FAILED, FailureCode.PROVIDER_ERROR)
+
+
+@in_loop
+async def test_the_commit_failure_is_raised_and_the_failed_end_of_the_record_logged_once(caplog):
+    caplog.set_level(logging.ERROR)
+    clock = ClockBreaksOnce()
+    records = _RecordsThatFail(frozenset({_Step.RECORD_END}), now=clock)
+    async with driven(records=records, read=False) as drive:
+        drive.took(await anext(drive.frames))
+        clock.arm()
+        drive.runner.release(FINAL)
+
+        with pytest.raises(RuntimeError, match=_CLOCK_BREAKS):
+            await anext(drive.frames)
+
+    assert [(event, kind) for event, kind, _raiser in failure_lines(caplog)] == [
+        (_CLEANUP.format(drive.run_id), "_EndNotRecorded")
+    ]
+    assert drive.types == ["run_started"]
+
+
+@in_loop
+async def test_a_delivered_cancellation_still_wins_over_a_failed_commit(caplog):
+    caplog.set_level(logging.ERROR)
+    clock = ClockBreaksOnce()
+    runner = GatedRunner()
+    runner.hold_close()
+    async with driven(runner, records=RunRecords(clock), read=False) as drive:
+        drive.took(await anext(drive.frames))
+        runner.release(FINAL)
+        reader = asyncio.create_task(drive.drain())
+        await drive.clock.parked()
+        reader.cancel()
+        await drive.clock.parked()
+
+        clock.arm()
+        runner.release_close()
+        await asyncio.wait({reader})
+
+    assert reader.cancelled()
+    assert [(event, kind) for event, kind, _raiser in failure_lines(caplog)] == [
+        (_CLEANUP.format(drive.run_id), "RuntimeError")
+    ]
+    _assert_recorded(
+        drive.status(),
+        RunState.FAILED,
+        code=FailureCode.PROVIDER_ERROR,
+        events=1,
+        at=0,
+        lost=ClientLoss.DISCONNECTED,
+    )
+
+
+@in_loop
+async def test_a_run_whose_commit_broke_reads_failed_and_frees_its_place_through_the_app(
+    monkeypatch,
+):
+    clock = ClockBreaksOnce()
+    async with driven(records=RunRecords(clock), read=False) as drive:
+        app = the_app_on(
+            drive, monkeypatch, config=service_config(runs={"max_parallel_cli_runs": 1})
+        )
+        broken = ClientSocket()
+        broken_response = await respond_through(app, broken)
+        await broken.received(b"run_started")
+        clock.arm()
+        drive.runner.release(FINAL)
+        await asyncio.wait({broken_response})
+
+        assert isinstance(broken_response.exception(), RuntimeError)
+        _assert_recorded(
+            drive.status(broken.run_id),
+            RunState.FAILED,
+            code=FailureCode.PROVIDER_ERROR,
+            events=1,
+            at=0,
+            lost=ClientLoss.DROPPED,
+        )
+        next_run = ClientSocket()
+        next_response = await respond_through(app, next_run)
+        await next_run.received(b"run_started")
+        assert next_run.messages[0]["status"] == 200
+        drive.runner.release(FINAL)
+        await next_response
 
 
 class _Closer(enum.Enum):
@@ -1529,26 +1676,13 @@ async def test_a_failed_record_end_keeps_no_frame_of_how_a_runner_was_cancelled_
     assert not _reaches_a_frame_of(propagated, stray_cancellation)
 
 
-class _RunnerRaisingThisStray(GatedRunner):
-    def __init__(self, stray: asyncio.CancelledError) -> None:
-        super().__init__()
-        self._stray = stray
-
-    async def run(self, admitted):
-        try:
-            raise self._stray
-            yield QUIET
-        finally:
-            await self._closed()
-
-
 @in_loop
 async def test_a_runner_cancelled_unasked_is_made_inert_once_its_close_is_logged():
     """Rule 14: the stray the runner's close met keeps neither its traceback nor its chain."""
     stray = asyncio.CancelledError(STRAY_CANCELLATION_CANARY)
     stray.__cause__ = RuntimeError("its cause")
     stray.__context__ = RuntimeError("its context")
-    async with driven(_RunnerRaisingThisStray(stray), read=False) as drive:
+    async with driven(RunnerRaisingThisStray(stray), read=False) as drive:
         closer = asyncio.create_task(_closed_while_it_waits(drive))
         await asyncio.wait({closer})
 

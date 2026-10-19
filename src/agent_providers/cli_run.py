@@ -8,8 +8,8 @@ cannot be confirmed raises ``ContainmentLost`` instead of an answer. A decoder
 judges what its CLI announced at the start as a :class:`RunSurface` through
 :func:`examine_announcement`, and a refused announcement ends the run with
 ``RunSurfaceRefused``. :func:`read_line` and :func:`settle_drain` are the one
-stdout line reader and the one stderr-drain settlement, which the old Claude stream
-entry shares. Nothing here names a provider or reads installed
+stdout line reader and the one stderr-drain settlement, which every stream entry
+reads and settles through. Nothing here names a provider or reads installed
 configuration.
 """
 

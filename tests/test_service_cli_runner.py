@@ -167,12 +167,17 @@ def drive_over_http[T](
     monkeypatch: pytest.MonkeyPatch,
     config: ServiceConfig,
     scenario: Callable[[str], T],
+    runners: Runners | None = None,
 ) -> T:
-    """Serve the app with the installed runners and run ``scenario(base_url)`` against it.
+    """Serve the app with ``runners`` (the installed ones by default) and run ``scenario``.
 
     The fake program's children are owned by ``child_cleanup`` and their watchers joined.
     """
-    app = create_app(config, runners=tool_free_runners(config), fetch_key_set=MINT.fetch_key_set)
+    app = create_app(
+        config,
+        runners=runners or tool_free_runners(config),
+        fetch_key_set=MINT.fetch_key_set,
+    )
 
     def serve() -> T:
         with served(app) as base_url:

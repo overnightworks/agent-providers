@@ -359,8 +359,7 @@ def _refuse_an_origin_without_a_ca_bundle(document: object) -> None:
     for app_name, app in _named_tables(document, "apps", AppConfig):
         if _value(app, "mcp_origin") is not None:
             raise ValueError(
-                f"mcp.ca_file: required because apps.{shown_text(app_name)} declares an"
-                " mcp_origin"
+                f"mcp.ca_file: required because apps.{shown_text(app_name)} declares an mcp_origin"
             )
 
 

@@ -1049,7 +1049,7 @@ def test_a_parser_refusal_survives_a_completed_stderr_failure(monkeypatch, caplo
     child = a_claude_cli_child(
         stream_lines=[_assistant_line("hi"), refused_shape], stderr_failure=stderr_failure,
     )
-    failures: list[BaseException] = []
+    refusals: list[tuple[str, str]] = []
 
     async def scenario() -> None:
         stream = acall_claude_with_mcp_stream(prompt="hi", user_id="u")
@@ -1058,13 +1058,13 @@ def test_a_parser_refusal_survives_a_completed_stderr_failure(monkeypatch, caplo
         try:
             await anext(stream)
         except UnavailableError as refusal:
-            failures.append(refusal)
+            refusals.append((str(refusal), _chain_text(refusal)))
 
     _run_stream_scenario(monkeypatch, child, scenario)
 
-    [refusal] = failures
-    assert str(refusal) == CLAUDE_CLI_UNAVAILABLE_DETAIL
-    assert "stderr-read-failed-marker" not in _chain_text(refusal)
+    [(message, chain)] = refusals
+    assert message == CLAUDE_CLI_UNAVAILABLE_DETAIL
+    assert "stderr-read-failed-marker" not in chain
     assert _unretrieved_task_errors(caplog) == []
 
 

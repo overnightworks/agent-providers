@@ -21,13 +21,13 @@ from pydantic import SecretStr
 
 from agent_client.wire import TurnMessage, TurnRole
 from agent_providers.claude.provider import (
-    _ClaudeLineDecoder,
     CLAUDE_CLI_LOGIN_REFUSED_DETAIL,
     CLAUDE_CLI_UNAVAILABLE_DETAIL,
     ClaudeRun,
     ClaudeStreamDecoder,
     CliLoginRefusedError,
     UnavailableError,
+    _ClaudeLineDecoder,
 )
 from agent_providers.cli_run import (
     RelayAccess,

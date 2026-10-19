@@ -477,6 +477,8 @@ def test_a_stall_released_before_its_first_call_lets_that_call_through(monkeypat
         return call.result()
 
     assert asyncio.run(first_call()) == "ran"
+    assert stall.original_ran
+    assert not stall.pending
 
 
 @pytest.mark.parametrize("app_holds", [held_before_the_head, held_after_the_head])

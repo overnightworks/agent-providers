@@ -23,6 +23,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import pytest
+import uvicorn
 from anchored_support import GONE, TEST_WAIT_SECONDS, ChildCleanup
 from fastapi import FastAPI
 from provider_test_support import (

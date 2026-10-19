@@ -630,37 +630,40 @@ PROMPT_SUPERVISION = {"heartbeat_interval_s": 1, "stall_timeout_s": 1.5}
 
 
 @pytest.mark.parametrize(
-    ("ending", "options", "expected"),
+    ("options", "state", "code", "client_lost"),
     [
         pytest.param(
-            "idle-expiry",
             {"runs": {**PROMPT_SUPERVISION, "idle_timeout_s": 2.0, "max_duration_s": 30.0}},
-            (RunState.FAILED, FailureCode.IDLE_TIMEOUT, None),
+            RunState.FAILED,
+            FailureCode.IDLE_TIMEOUT,
+            None,
             id="idle-expiry",
         ),
         pytest.param(
-            "maximum-duration",
             {
                 "runs": {**PROMPT_SUPERVISION, "idle_timeout_s": 3.0, "max_duration_s": 3.5},
                 "linger_before_calls_seconds": 2.0,
             },
-            (RunState.FAILED, FailureCode.LIMIT_EXCEEDED, None),
+            RunState.FAILED,
+            FailureCode.LIMIT_EXCEEDED,
+            None,
             id="maximum-duration",
         ),
         pytest.param(
-            "client-departure",
             {
                 "runs": {**PROMPT_SUPERVISION, "idle_timeout_s": 20.0, "max_duration_s": 30.0},
                 "scenario": leave_after_the_first_tool_call,
                 "calls": [READ_NOTE],
             },
-            (RunState.CANCELLED, None, ClientLoss.DISCONNECTED),
+            RunState.CANCELLED,
+            None,
+            ClientLoss.DISCONNECTED,
             id="client-departure",
         ),
     ],
 )
 def test_a_held_final_with_a_stuck_app_ends_by_supervision(
-    tmp_path, authority, child_cleanup, monkeypatch, ending, options, expected
+    tmp_path, authority, child_cleanup, monkeypatch, options, state, code, client_lost
 ):
     release = threading.Event()
     scenario = options.pop("scenario", post_a_run)
@@ -676,7 +679,9 @@ def test_a_held_final_with_a_stuck_app_ends_by_supervision(
         **{"calls": [SAVE_NOTE], **options},
     )
 
-    assert (run.status.state, run.status.failure_code, run.status.client_lost) == expected
+    assert run.status.state == state
+    assert run.status.failure_code == code
+    assert run.status.client_lost == client_lost
     assert not any(isinstance(event, Succeeded) for event in run.events)
     assert (len(run.app.calls), pending_tool_tasks()) == (1, [])
     with pytest.raises(ConnectionRefusedError):

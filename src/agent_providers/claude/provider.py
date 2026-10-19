@@ -774,7 +774,8 @@ class ClaudeRun:
     """One subscription run of the pinned CLI, as the neutral run entry's adapter.
 
     It describes the run and starts nothing; the entry makes the directories and
-    the spawn owner starts the child.
+    the spawn owner starts the child. Its `relay` is attached as given, on the
+    trust `RelayAccess` states.
     """
 
     binary: Path

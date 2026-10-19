@@ -18,7 +18,8 @@ import h11
 
 from agent_client.capability import MCP_ENDPOINT_PATH
 from agent_client.wire import MAX_EVENT_BYTES
-from agent_providers.cli_run import RelayAccess, relay_authorization
+from agent_providers.cli_run import RelayAccess as RelayAccess
+from agent_providers.cli_run import relay_authorization
 from agent_providers.errors import raise_without_chain
 from agent_providers.events import ToolCallEvent, ToolResultEvent
 from agent_service.capability import Capability

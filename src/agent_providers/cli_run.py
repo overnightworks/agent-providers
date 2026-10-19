@@ -53,7 +53,12 @@ class RelayState(Enum):
 
 @dataclass(frozen=True)
 class RelayAccess:
-    """One run's relay as its adapter attaches it; the secret stays out of `repr`."""
+    """One run's relay as its adapter attaches it; the secret stays out of `repr`.
+
+    Trusted only as this run's own `Relay.start` built it: the CLI sends the
+    `Authorization` header before init, so a host that builds one itself owns the
+    trust in its destination (ADR A1b-5r).
+    """
 
     url: str
     secret: str = field(repr=False)

@@ -450,7 +450,9 @@ def test_a_barrier_failure_reaches_the_service_unchanged(
             events, _port = a_runner_behind(monkeypatch, core, tools)
             await provoke(tools, events)
 
+            next_event = asyncio.ensure_future(anext(events))
+
             with pytest.raises(failure):
-                await asyncio.wait_for(anext(events), WAIT_SECONDS)
+                await asyncio.wait_for(next_event, WAIT_SECONDS)
 
     drive(scenario())

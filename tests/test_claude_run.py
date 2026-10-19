@@ -21,6 +21,7 @@ from pydantic import SecretStr
 
 from agent_client.wire import TurnMessage, TurnRole
 from agent_providers.claude.provider import (
+    _ClaudeLineDecoder,
     CLAUDE_CLI_LOGIN_REFUSED_DETAIL,
     CLAUDE_CLI_UNAVAILABLE_DETAIL,
     ClaudeRun,
@@ -358,7 +359,7 @@ SUCCESS_LINE = line(
 )
 
 
-def events_of_lines(decoder: ClaudeStreamDecoder, *lines: bytes) -> list[Any]:
+def events_of_lines(decoder: _ClaudeLineDecoder, *lines: bytes) -> list[Any]:
     return [event for each in lines for event in decoder.events_of(each)]
 
 
@@ -777,6 +778,19 @@ def test_no_announced_string_reaches_the_refusal_or_the_log(
     ]
     assert leaked == []
     assert (refused.__cause__, refused.__context__) == (None, None)
+
+
+def test_the_line_decoder_judges_no_announcement() -> None:
+    decoder = _ClaudeLineDecoder()
+    foreign_init = an_init(
+        tools=["Bash", "mcp__notes__get_note"],
+        mcp_servers=[{"name": "notes", "status": "connected"}],
+        apiKeySource="ANTHROPIC_API_KEY",
+    )
+
+    steps = events_of_lines(decoder, TEXT_LINE, foreign_init, SUCCESS_LINE)
+
+    assert (steps, decoder.ending(0)) == ([AssistantTextEvent(text="hi")], FinalEvent(text="done"))
 
 
 def test_every_init_line_is_judged() -> None:

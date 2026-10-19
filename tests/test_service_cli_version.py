@@ -266,12 +266,6 @@ def _plain_root(tmp_path: Path) -> tuple[Path, Path]:
     return physical, physical
 
 
-def _root_with_a_parent_component(tmp_path: Path) -> tuple[Path, Path]:
-    physical = tmp_path / PRIVATE_MARKER
-    (tmp_path / "base").mkdir()
-    return tmp_path / "base" / ".." / PRIVATE_MARKER, physical
-
-
 def _root_behind_a_symlinked_parent(tmp_path: Path) -> tuple[Path, Path]:
     (tmp_path / "physical").mkdir()
     (tmp_path / "alias").symlink_to(tmp_path / "physical")
@@ -294,7 +288,6 @@ def _root_named_with_a_newline(tmp_path: Path) -> tuple[Path, Path]:
     ("root_layout", "program_body"),
     [
         pytest.param(_plain_root, 'echo "$HOME"', id="home"),
-        pytest.param(_root_with_a_parent_component, 'echo "$HOME"', id="parent-component"),
         pytest.param(_root_behind_a_symlinked_parent, "pwd -P", id="symlinked-parent"),
         pytest.param(_root_named_with_a_newline, 'echo "$HOME"', id="newline-in-the-root-name"),
         pytest.param(

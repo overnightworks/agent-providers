@@ -3604,7 +3604,7 @@ def test_a_reservation_is_released_once(tmp_path: Path, callbacks: tuple[str, st
     assert not home.path.exists()
 
 
-def _ways_to_release(reservation: process.HomeReservation) -> dict[str, Callable[[], None]]:
+def _ways_to_release(reservation: process.Reservation) -> dict[str, Callable[[], None]]:
     released_with_the_runner = process.released_when_the_runner_ends(reservation)
     return {
         "release": reservation.release,

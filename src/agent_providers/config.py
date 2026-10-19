@@ -37,10 +37,24 @@ import threading
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
+from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, StringConstraints
 
 from agent_providers.errors import raise_without_chain
+
+MAX_FILE_PREFIX_LENGTH = 64
+
+FilePrefix = Annotated[
+    str,
+    StringConstraints(
+        min_length=1,
+        max_length=MAX_FILE_PREFIX_LENGTH,
+        pattern=r"^[A-Za-z0-9._-]+$",
+    ),
+]
+"""A file-name stem: the library appends random characters and creates the
+file directly in ``cli_working_directory_root``, so no separator can be in it."""
 
 
 class McpServerSpec(BaseModel):
@@ -55,25 +69,30 @@ class McpServerSpec(BaseModel):
     ``environment`` is written into that file in the order given, with
     ``user_id_environment_variable`` appended per turn; the file is mode 0600,
     which is why credentials belong here and never on the command line.
+
+    ``config_file_prefix`` is a :data:`FilePrefix`.
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
 
     name: str = Field(min_length=1)
     command: str = Field(min_length=1)
     args: tuple[str, ...] = ()
     environment: dict[str, SecretStr] = Field(default_factory=dict)
     user_id_environment_variable: str = Field(min_length=1)
-    config_file_prefix: str = Field(min_length=1)
+    config_file_prefix: FilePrefix
     tool_names: frozenset[str] = Field(min_length=1)
 
 
 class GrokTurnRuntime(BaseModel):
-    """The Grok turn facts, present only on a host that runs Grok turns."""
+    """The Grok turn facts, present only on a host that runs Grok turns.
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    ``prompt_file_prefix`` is a :data:`FilePrefix`.
+    """
 
-    prompt_file_prefix: str = Field(min_length=1)
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
+
+    prompt_file_prefix: FilePrefix
     prompt_file_placeholder: str = Field(min_length=1)
 
 
@@ -95,7 +114,7 @@ class TurnRuntimeConfig(BaseModel):
     ``cli_working_directory_root``. Codex does the same for its own turn paths.
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
 
     mcp_server: McpServerSpec | None
 
@@ -171,7 +190,7 @@ class ProviderRuntimeConfig(BaseModel):
     succeed with the parent's rights.
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
 
     anthropic_api_key: SecretStr | None = None
     xai_api_key: SecretStr | None = None

@@ -1162,6 +1162,18 @@ async def respond_through_the_app(
     return await respond_through(the_app_on(drive, monkeypatch, runners, config), client)
 
 
+async def status_through(app: FastAPI, run_id: uuid.UUID) -> RunStatus:
+    """Alice's ``GET /runs/{id}`` answered by ``app`` in process; its decoded status."""
+    mint = shared_mint()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://service") as client:
+        response = await client.get(
+            f"/runs/{run_id}", headers=run_headers(mint.workload(), mint.user())
+        )
+    assert response.status_code == 200
+    return RunStatus.model_validate_json(response.content)
+
+
 class ScriptedConfirmation:
     """A ``GroupConfirmation`` that answers each group from its script, then ``True`` for good.
 

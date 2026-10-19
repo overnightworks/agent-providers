@@ -43,6 +43,7 @@ from service_support import (
     quarantine_lines,
     respond_through,
     service_config,
+    status_through,
     the_app_on,
 )
 
@@ -647,7 +648,7 @@ async def test_a_failed_close_line_reads_the_decided_ending_through_the_app_and_
         runner.release(ending)
         await response
 
-        _assert_ended_run(drive.status(client.run_id), state, code)
+        _assert_ended_run(await status_through(app, client.run_id), state, code)
         assert [event.type for event in decoded_events(client.body)][-1] == terminal
         next_run = ClientSocket()
         next_response = await respond_through(app, next_run)

@@ -62,6 +62,7 @@ from service_support import (
     run_headers,
     served,
     service_config,
+    status_through,
     stray_cancellation,
     supervision_fails,
     the_app_on,
@@ -958,6 +959,7 @@ async def test_a_terminal_commit_that_breaks_ends_the_record_as_provider_error_w
         )
         assert drive.types == ["run_started"]
         assert drive.runner.closes == 1
+        assert not drive.slot_is_full()
 
 
 @in_loop
@@ -1043,7 +1045,7 @@ async def test_a_run_whose_commit_broke_reads_failed_and_frees_its_place_through
 
         assert isinstance(broken_response.exception(), RuntimeError)
         _assert_recorded(
-            drive.status(broken.run_id),
+            await status_through(app, broken.run_id),
             RunState.FAILED,
             code=FailureCode.PROVIDER_ERROR,
             events=1,

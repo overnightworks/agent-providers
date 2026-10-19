@@ -227,7 +227,9 @@ class _WireRun:
             recorder = self._recorder_of_started_run()
             if self._terminal_frame is not None:
                 recorder.over()
-            elif self.ended or losses:
+            elif losses:
+                recorder.over(self._failed_event(_CONTAINMENT_LOST))
+            elif self.ended:
                 recorder.over(self._failed_event(_COMMIT_FAILED))
             else:
                 recorder.over(self._stream.cancellation_terminal())

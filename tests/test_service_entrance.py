@@ -81,6 +81,14 @@ def test_a_subscription_member_with_both_tokens_runs_on_the_cli_route(service, r
     assert runners.cli.admitted[-1].principal.subject == "user-alice"
 
 
+def test_a_runner_that_offers_tools_serves_an_app_with_tools(service):
+    assert service_config().apps["songmaker"].tools
+
+    response = post_run(service, run_headers(MINT.workload(), MINT.user()))
+
+    assert decoded_events(response.content)[-1].text == "CLI answer"
+
+
 def test_a_run_request_body_with_a_utf8_byte_order_mark_is_admitted(service):
     body = b"\xef\xbb\xbf" + json.dumps(run_body()).encode()
 

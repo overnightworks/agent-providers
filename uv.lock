@@ -735,7 +735,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.7,<3" },
     { name = "pyjwt", extras = ["crypto"], specifier = ">=2.15.1,<3" },
     { name = "starlette", specifier = ">=1,<2" },
-    { name = "uvicorn", specifier = ">=0.30,<1" },
+    { name = "uvicorn", specifier = ">=0.32.1,<1" },
 ]
 
 [[package]]

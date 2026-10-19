@@ -886,7 +886,9 @@ def test_a_document_with_no_profile_or_one_sound_claude_profile_reaches_serving(
     app_configs = []
     create_app = app_module.create_app
     monkeypatch.setattr(
-        app_module, "create_app", lambda config: app_configs.append(config) or create_app(config)
+        app_module,
+        "create_app",
+        lambda config, **keywords: app_configs.append(config) or create_app(config, **keywords),
     )
 
     assert main(["--config", str(config_file := _written(tmp_path, text))]) == 0

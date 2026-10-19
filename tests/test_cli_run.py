@@ -29,13 +29,9 @@ from provider_test_support import (
     a_private_root,
     confirm_the_retained_group_gone,
     drive_real_children,
+    drive_scripted,
     held_claude_slots,
     held_slots,
-    install_claude_cli_children,
-    killpg_forbidden,
-    reap_without_waiting,
-    recorded_census_workers,
-    run_bounded,
     the_only_tree,
 )
 
@@ -504,17 +500,6 @@ def test_a_run_needs_no_installed_configuration(
     adapter = LineScriptAdapter(pool, script=SAYS_THEN_CALLS_THEN_SAYS)
 
     assert events_of_run(drive, root, adapter) == READS_IN_ORDER
-
-
-def drive_scripted(
-    monkeypatch: pytest.MonkeyPatch,
-    child: ScriptedClaudeChild,
-    scenario: Coroutine[Any, Any, None],
-) -> None:
-    install_claude_cli_children(monkeypatch, child)
-    reap_without_waiting(monkeypatch)
-    with recorded_census_workers(monkeypatch), killpg_forbidden():
-        run_bounded(scenario)
 
 
 async def free_the_retained_group(

@@ -42,6 +42,7 @@ import httpx
 import jwt
 import pytest
 import uvicorn
+from anchored_support import TEST_WAIT_SECONDS
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import FastAPI
@@ -181,6 +182,7 @@ def _service_config_document(
     issuer: str,
     runs: Mapping[str, object] | None,
     songmaker: Mapping[str, object] | None,
+    claude_binary: Path | None = None,
 ) -> dict[str, Any]:
     return {
         **({} if runs is None else {"runs": runs}),
@@ -193,7 +195,10 @@ def _service_config_document(
         },
         "cli": {
             "working_root": str(process_working_root().path),
-            "claude": {"binary": str(process_claude_cli()), "version": PINNED_CLAUDE_VERSION},
+            "claude": {
+                "binary": str(claude_binary or process_claude_cli()),
+                "version": PINNED_CLAUDE_VERSION,
+            },
         },
         "signing": {"key_file": str(process_signing_key_file())},
         "profiles": {CLI_PROFILE: {"provider": "claude", "token_file": str(process_token_file())}},
@@ -219,8 +224,11 @@ def service_config(
     runs: Mapping[str, object] | None = None,
     *,
     songmaker: Mapping[str, object] | None = None,
+    claude_binary: Path | None = None,
 ) -> ServiceConfig:
-    return ServiceConfig.model_validate(_service_config_document(issuer, runs, songmaker))
+    return ServiceConfig.model_validate(
+        _service_config_document(issuer, runs, songmaker, claude_binary)
+    )
 
 
 def plain_service_config() -> ServiceConfig:
@@ -976,7 +984,9 @@ class ClientSocket:
         self.scope = _run_scope(spec_version, user_token)
         self.messages: list[dict[str, Any]] = []
         self.released = asyncio.Event()
+        self.blocked = asyncio.Event()
         self.answering = asyncio.Event()
+        self._sent = asyncio.Event()
         self._blocks_the_first_chunk = blocks_the_first_chunk
         self._blocks_the_second_chunk = blocks_the_second_chunk
         self._second_chunk_raises = second_chunk_raises
@@ -1009,8 +1019,17 @@ class ClientSocket:
             if self._second_chunk_raises is not None:
                 raise self._second_chunk_raises
             if self._blocks_the_second_chunk:
+                self.blocked.set()
                 await self.released.wait()
         self.messages.append(message)
+        self._sent.set()
+
+    async def received(self, needle: bytes) -> None:
+        """Wait until the body taken so far holds ``needle``, within the test bound."""
+        async with asyncio.timeout(TEST_WAIT_SECONDS):
+            while needle not in self.body:
+                self._sent.clear()
+                await self._sent.wait()
 
     def _bodies(self) -> int:
         return sum(m["type"] == "http.response.body" for m in self.messages)
@@ -1049,37 +1068,54 @@ def _run_scope(spec_version: str, user_token: str | None = None) -> dict[str, An
     }
 
 
-async def respond_through_the_app(
+def the_app_on(
     drive: Drive,
-    client: ClientSocket,
     monkeypatch: pytest.MonkeyPatch,
     runners: Runners | None = None,
-) -> asyncio.Task[None]:
-    """Post a run to the real app on the drive's runner, clock and store; its response task.
+    config: ServiceConfig | None = None,
+) -> FastAPI:
+    """The real app on the drive's runner, clock and store.
 
     ``runners`` replace the drive's runner, as ``Runners()`` serves a run without one.
+    ``config`` replaces the default one, which lists the songmaker's tools.
 
     The app builds its own quarantine on ``drive.clock`` with its own
     ``ScriptedConfirmation``, so a custom ``confirm`` and ``drive.quarantine_clock``
     do not reach it.
-
-    The token checks leave the loop for a worker thread, so this returns only
-    once the app has begun to answer: from then on the run waits on the clock alone.
     """
     monkeypatch.setattr("agent_service.app.LoopClock", lambda: drive.clock)
-    app = create_app(
-        service_config(runs=drive.runs.model_dump()),
+    return create_app(
+        config or service_config(runs=drive.runs.model_dump()),
         runners=runners or Runners(cli=drive.runner),
         records=drive.records,
         fetch_key_set=shared_mint().fetch_key_set,
         confirm_group_gone=ScriptedConfirmation(clock=drive.clock),
     )
+
+
+async def respond_through(app: FastAPI, client: ClientSocket) -> asyncio.Task[None]:
+    """Post the client's run to ``app``; its response task.
+
+    The token checks leave the loop for a worker thread, so this returns only
+    once the app has begun to answer: from then on the run waits on the clock alone.
+    """
     response = asyncio.create_task(app(client.scope, client.receive, client.send))
     answering = asyncio.create_task(client.answering.wait())
     await asyncio.wait({response, answering}, return_when=asyncio.FIRST_COMPLETED)
     answering.cancel()
     await asyncio.gather(answering, return_exceptions=True)
     return response
+
+
+async def respond_through_the_app(
+    drive: Drive,
+    client: ClientSocket,
+    monkeypatch: pytest.MonkeyPatch,
+    runners: Runners | None = None,
+    config: ServiceConfig | None = None,
+) -> asyncio.Task[None]:
+    """Post a run to a fresh ``the_app_on`` the drive; its response task."""
+    return await respond_through(the_app_on(drive, monkeypatch, runners, config), client)
 
 
 class ScriptedConfirmation:

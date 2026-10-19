@@ -1,0 +1,7 @@
+claim_id = "9d6d8463fba440939871bd29d9169702"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "a9bd387d6a6c4ccfbd2d200bbaa668ef8a1c95d8"
+branch = "docs/harvest-115-rulings"
+scope = ["docs/decisions/0001-agent-service.md"]
+opened_commit = "f2d2030b23c1bdd002149163111535fb536c0479"

@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 from http import HTTPStatus
 
 import pytest
-from mcp_app_fake import WAIT_SECONDS
+from bounds import TEST_WAIT_SECONDS
 from relay_support import (
     RUN_ID,
     AbsorbingOwner,
@@ -498,7 +498,7 @@ def test_two_concurrent_closes_share_one_attempt_and_both_return() -> None:  # L
     async def scenario(relay: Relay, clock: StepClock) -> None:
         names = record_task_names()
         await start_gated_request(relay, owner)
-        async with asyncio.timeout(WAIT_SECONDS):
+        async with asyncio.timeout(TEST_WAIT_SECONDS):
             results = await asyncio.gather(relay.close(), relay.close())
         assert results == [None, None]
         assert names.count(CLOSE_TASK) == 1
@@ -517,7 +517,7 @@ def test_two_concurrent_closes_share_one_incomplete_outcome() -> None:  # L19
         deadline = clock.now + RELAY_CLOSE_SECONDS
         await parked_at(clock, deadline)
         clock.advance_to(deadline)
-        async with asyncio.timeout(WAIT_SECONDS):
+        async with asyncio.timeout(TEST_WAIT_SECONDS):
             results = await asyncio.gather(first, second, return_exceptions=True)
         assert all(isinstance(result, RelayCleanupIncomplete) for result in results)
         assert names.count(CLOSE_TASK) == 1
@@ -537,7 +537,7 @@ def test_cancelling_one_close_caller_leaves_the_attempt_to_the_other() -> None: 
         with pytest.raises(asyncio.CancelledError):
             await cancelled
         owner.release()
-        async with asyncio.timeout(WAIT_SECONDS):
+        async with asyncio.timeout(TEST_WAIT_SECONDS):
             assert await waiting is None
         assert relay_tasks() == []
 
@@ -626,7 +626,7 @@ def test_a_connection_whose_acceptance_runs_after_the_close_began_is_aborted() -
         closing = asyncio.create_task(relay.close())
         await parked_at(clock, clock.now + RELAY_CLOSE_SECONDS)
         loop.release_acceptance()
-        async with asyncio.timeout(WAIT_SECONDS):
+        async with asyncio.timeout(TEST_WAIT_SECONDS):
             assert await closing is None
         assert await client.delivery() is Delivery.ABSENT
         assert relay_tasks() == []

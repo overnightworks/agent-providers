@@ -28,19 +28,18 @@ from anchored_leaders import (
     LEADER_WITH_GRANDCHILD,
     Leaders,
     Opened,
-    bounded,
     open_door,
     spawn_warnings,
 )
 from anchored_support import (
     GONE,
     SIGKILLED,
-    TEST_WAIT_SECONDS,
     ChildCleanup,
     pidfd_open,
     pidfd_send_signal,
     wait_for_exits,
 )
+from bounds import TEST_WAIT_SECONDS, within_the_bound
 from provider_test_support import (
     Hold,
     Recorded,
@@ -453,7 +452,7 @@ def hold_the_grandchild_stdin_open(
 ) -> int:
     pipe = opened.child.stdin.transport.get_extra_info("pipe")
     child_cleanup.close_at_cleanup(os.dup(pipe.fileno()))
-    grandchild = int(runner.run(bounded(opened.child.stdout.readline())))
+    grandchild = int(runner.run(within_the_bound(opened.child.stdout.readline())))
     pidfd = pidfd_open(grandchild)
     child_cleanup.close_at_cleanup(pidfd)
     return pidfd
@@ -481,24 +480,24 @@ def test_a_real_retained_group_ends_dead_reaped_and_released_once(
     try:
         if script is not None:
             grandchild_pidfd = hold_the_grandchild_stdin_open(door_runner, child_cleanup, opened)
-            assert door_runner.run(bounded(child.exited())) == 3
+            assert door_runner.run(within_the_bound(child.exited())) == 3
         group = retain_lost_group(child, slot_releases(log, owned.pid))
 
-        first = door_runner.run(bounded(confirm_group_gone(group)))
+        first = door_runner.run(within_the_bound(confirm_group_gone(group)))
 
         if grandchild_pidfd is not None:
             assert wait_for_exits([grandchild_pidfd], TEST_WAIT_SECONDS) == {grandchild_pidfd}
         else:
-            assert door_runner.run(bounded(child.exited())) == SIGKILLED
+            assert door_runner.run(within_the_bound(child.exited())) == SIGKILLED
         if first is False:
             child_cleanup.wait_exited(owned)
         join_watcher(watchers.thread(owned.pid))
         if first is False:
-            assert door_runner.run(bounded(confirm_group_gone(group))) is True
+            assert door_runner.run(within_the_bound(confirm_group_gone(group))) is True
 
         assert child_cleanup.state(owned) is GONE
         assert trail(log, owned.pid) == [SLOT]
-        assert door_runner.run(bounded(confirm_group_gone(group))) is True
+        assert door_runner.run(within_the_bound(confirm_group_gone(group))) is True
     finally:
         if grandchild_pidfd is not None and not wait_for_exits([grandchild_pidfd], 0):
             with contextlib.suppress(ProcessLookupError):
@@ -515,13 +514,13 @@ def test_a_real_lost_leader_is_never_confirmed_and_never_frees_its_place(
     model = KernelModel(loses_at="wait")
     install_kernel(monkeypatch, model)
     opened = open_door(door_runner, child_cleanup, leaders.describe())
-    exited = bounded(opened.child.exited())
+    exited = within_the_bound(opened.child.exited())
     with pytest.raises(ChildIdentityLost):
         door_runner.run(exited)
     group = retain_lost_group(opened.child, slot_releases(log, opened.owned.pid))
 
     for _ in range(2):
-        confirmation = bounded(confirm_group_gone(group))
+        confirmation = within_the_bound(confirm_group_gone(group))
         with pytest.raises(ChildIdentityLost):
             door_runner.run(confirmation)
 

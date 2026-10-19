@@ -18,6 +18,7 @@ from typing import Final
 
 import httpx
 import pytest
+from bounds import TEST_WAIT_SECONDS, within_the_bound
 from service_support import (
     PRESENTER,
     SONGMAKER,
@@ -56,7 +57,6 @@ from agent_service.run_liveness import LoopClock
 from agent_service.run_records import RunRecords
 from agent_service.runners import Runner, Runners
 
-WAIT_LIMIT_S: Final = 10
 PLACES: Final = 2
 MINT = TokenMint()
 FINAL = (FinalEvent(text="done"),)
@@ -77,7 +77,7 @@ class HeldRunner:
         self.entered.set()
         if self._everything_proceeds.is_set():
             gate.set()
-        await asyncio.to_thread(gate.wait, WAIT_LIMIT_S)
+        await asyncio.to_thread(gate.wait, TEST_WAIT_SECONDS)
         yield FinalEvent(text="done")
 
     def proceed_all(self) -> None:
@@ -108,7 +108,7 @@ class _Service:
     def begin_held_cli_run(self) -> _HeldRun:
         self.held.entered.clear()
         response = self.pool.submit(self.run)
-        assert self.held.entered.wait(WAIT_LIMIT_S), "the CLI run was not admitted"
+        assert self.held.entered.wait(TEST_WAIT_SECONDS), "the CLI run was not admitted"
         return _HeldRun(response, self.held.gates[-1])
 
     def fill_the_places(self) -> list[_HeldRun]:
@@ -116,7 +116,7 @@ class _Service:
 
     def let_go(self, run: _HeldRun) -> httpx.Response:
         run.gate.set()
-        return run.response.result(WAIT_LIMIT_S)
+        return run.response.result(TEST_WAIT_SECONDS)
 
     def let_all_go(self, runs: list[_HeldRun]) -> None:
         for run in runs:
@@ -234,14 +234,14 @@ def test_simultaneous_cli_requests_beyond_the_places_give_exactly_one_busy_answe
     service,
 ):
     requests = [service.pool.submit(service.run) for _ in range(service.places + 1)]
-    refused, admitted = wait(requests, WAIT_LIMIT_S, return_when=FIRST_COMPLETED)
+    refused, admitted = wait(requests, TEST_WAIT_SECONDS, return_when=FIRST_COMPLETED)
 
     (busy,) = (request.result() for request in refused)
     assert_rejected(busy, RejectionCode.BUSY, 429)
     assert len(admitted) == service.places
     service.held.proceed_all()
     for request in admitted:
-        _assert_streamed_to_a_terminal(request.result(WAIT_LIMIT_S))
+        _assert_streamed_to_a_terminal(request.result(TEST_WAIT_SECONDS))
 
 
 def test_releasing_one_lease_admits_exactly_one_more_request(service):
@@ -399,10 +399,6 @@ class GatedRunner:
                 self.closed.set()
 
 
-async def _bounded(awaitable):
-    return await asyncio.wait_for(awaitable, WAIT_LIMIT_S)
-
-
 class _Asking:
     """One more CLI request over the ASGI app, answered or still streaming."""
 
@@ -413,13 +409,13 @@ class _Asking:
         )
 
     async def status(self) -> int:
-        await _bounded(self.client.answering.wait())
+        await within_the_bound(self.client.answering.wait())
         return self.client.messages[0]["status"]
 
     async def finished(self, runner: GatedRunner) -> None:
         runner.later_runs_proceed.set()
         self.client.leave()
-        await _bounded(self.response)
+        await within_the_bound(self.response)
 
 
 async def _asked_until_admitted(app, attempts: int = 100) -> _Asking:
@@ -455,16 +451,16 @@ def test_the_place_stays_taken_until_the_stopped_run_has_been_closed(gone):
         runner, app = _gated_app()
         departing = ClientSocket(**gone)
         old_response = asyncio.create_task(app(departing.scope, departing.receive, departing.send))
-        await _bounded(runner.entered.wait())
+        await within_the_bound(runner.entered.wait())
         if gone["spec_version"] == "2.3":
-            await _bounded(departing.answering.wait())
+            await within_the_bound(departing.answering.wait())
             departing.leave()
-        await _bounded(runner.closing.wait())
+        await within_the_bound(runner.closing.wait())
 
         during_the_close = await _Asking(app).status()
         runner.close_gate.set()
         with suppress(ClientDisconnect):
-            await _bounded(old_response)
+            await within_the_bound(old_response)
         after_the_close = _Asking(app)
         after_status = await after_the_close.status()
         await after_the_close.finished(runner)
@@ -479,13 +475,13 @@ def test_the_next_run_is_admitted_while_the_old_connection_hangs_and_the_old_res
         runner.close_gate.set()
         hanging = ClientSocket(blocks_the_second_chunk=True)
         old_response = asyncio.create_task(app(hanging.scope, hanging.receive, hanging.send))
-        await _bounded(runner.closed.wait())
+        await within_the_bound(runner.closed.wait())
 
         successor = await _asked_until_admitted(app)
         old_still_hanging = not old_response.done()
         hanging.released.set()
         hanging.leave()
-        await _bounded(old_response)
+        await within_the_bound(old_response)
         while_successor_runs = await _Asking(app).status()
         await successor.finished(runner)
         after_successor = _Asking(app)
@@ -542,14 +538,14 @@ async def test_a_place_whose_group_is_not_confirmed_gone_refuses_cli_runs_until_
         confirm_group_gone=confirmation,
     )
     lost = ClientSocket()
-    await _bounded(app(lost.scope, lost.receive, lost.send))
+    await within_the_bound(app(lost.scope, lost.receive, lost.send))
     bob = shared_mint().user(**BOB_ON_THE_API_ROUTE)
 
     busy = _Asking(app)
     api = _Asking(app, user_token=bob)
     statuses = [await busy.status(), await api.status()]
     api.client.leave()
-    await _bounded(api.response)
+    await within_the_bound(api.response)
     await clock.step_to_next_deadline()
     still_busy = await _Asking(app).status()
     await clock.step_to_next_deadline()

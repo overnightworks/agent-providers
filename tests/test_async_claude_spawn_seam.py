@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from anchored_support import TEST_WAIT_SECONDS
+from bounds import TEST_WAIT_SECONDS
 from provider_test_support import (
     EventGate,
     ScenarioDeadline,

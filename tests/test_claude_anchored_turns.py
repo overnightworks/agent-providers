@@ -22,14 +22,8 @@ from unittest.mock import AsyncMock
 import pytest
 from anchored_kernel import WatcherStarts, join_watcher, recorded_watcher_starts
 from anchored_leaders import spawn_warnings
-from anchored_support import (
-    GONE,
-    TEST_WAIT_SECONDS,
-    ChildCleanup,
-    pidfd_open,
-    pidfd_send_signal,
-    wait_for_exits,
-)
+from anchored_support import GONE, ChildCleanup, pidfd_open, pidfd_send_signal, wait_for_exits
+from bounds import TEST_WAIT_SECONDS
 from descendant_support import (
     CONSUMES_STDIN,
     WAITS_WITHOUT_READING_STDIN,

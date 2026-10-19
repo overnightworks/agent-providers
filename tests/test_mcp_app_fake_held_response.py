@@ -15,9 +15,9 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 
 import pytest
+from bounds import TEST_WAIT_SECONDS
 from mcp_app_fake import (
     CERTIFICATE_HOST,
-    WAIT_SECONDS,
     HeldRequests,
     McpAppFake,
     TestAuthority,
@@ -41,7 +41,7 @@ def an_app_holding_every_request(
 def a_client_that_asked(
     fake: McpAppFake, authority: TestAuthority, request_id: int = 1
 ) -> ssl.SSLSocket:
-    raw = socket.create_connection(("127.0.0.1", fake.server_address[1]), timeout=WAIT_SECONDS)
+    raw = socket.create_connection(("127.0.0.1", fake.server_address[1]), timeout=TEST_WAIT_SECONDS)
     context = authority.client_context()
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     client = context.wrap_socket(raw, server_hostname=CERTIFICATE_HOST)

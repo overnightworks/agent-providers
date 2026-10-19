@@ -19,12 +19,12 @@ from typing import Any
 
 import httpx
 import pytest
+from bounds import TEST_WAIT_SECONDS
 from capability_support import capability_carrying
 from mcp_app_fake import (
     ACKNOWLEDGED,
     CERTIFICATE_HOST,
     DROPPED,
-    WAIT_SECONDS,
     FakeResponse,
     Fate,
     McpAppFake,
@@ -363,7 +363,7 @@ def test_concurrent_calls_answered_in_reverse_order_each_get_their_own_answer(se
         name = request.message["params"]["name"]
         if name == "slow":
             slow_arrived.set()
-            assert fast_answered.wait(WAIT_SECONDS)
+            assert fast_answered.wait(TEST_WAIT_SECONDS)
         return rpc_result(request, {"content": [{"type": "text", "text": name}]})
 
     fake = serve(ScriptedApp(overrides={"tools/call": slow_waits_for_fast}))
@@ -377,7 +377,7 @@ def test_concurrent_calls_answered_in_reverse_order_each_get_their_own_answer(se
 
     async def both(session: AppToolsSession):
         slow = asyncio.create_task(named(session, "slow"))
-        assert await asyncio.to_thread(slow_arrived.wait, WAIT_SECONDS)
+        assert await asyncio.to_thread(slow_arrived.wait, TEST_WAIT_SECONDS)
         fast = await named(session, "fast")
         fast_answered.set()
         return [await slow, fast]

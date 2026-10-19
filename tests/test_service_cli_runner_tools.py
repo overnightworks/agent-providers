@@ -1010,7 +1010,7 @@ def in_the_descendants_company(
     ],
 )
 def test_a_descendant_of_a_tool_run_is_dead_when_the_run_ends(
-    tmp_path, authority, child_cleanup, monkeypatch, handshake, options, ending
+    tmp_path, authority, child_cleanup, monkeypatch, handshake, caplog, options, ending
 ):
     scenario = options.pop("scenario")
     descendant_dead_at_the_end: list[bool] = []
@@ -1035,6 +1035,10 @@ def test_a_descendant_of_a_tool_run_is_dead_when_the_run_ends(
         )
 
     assert (ended_as(run), descendant_dead_at_the_end) == (ending, [True])
+    if ending == CANCELLED:
+        assert_the_departure_left_nothing_running(run, caplog)
+    else:
+        assert_the_run_logged_no_failure(run.status, run.events, caplog)
 
 
 class FirstReapGate:
@@ -1302,10 +1306,14 @@ async def loop_settled() -> None:
     await loop.settled()
 
 
+async def no_app_handler_lingers(app: ToolApp) -> None:
+    await yield_until(lambda: app.fake.ended_connections == app.fake.accepted_connections)
+
+
 async def the_app_saw_the_client_leave(app: ToolApp) -> None:
     """Bounded below the fake's own idle timeout, which would otherwise end an idle connection."""
     async with asyncio.timeout(CLIENT_LEAVES_WITHIN_SECONDS):
-        await yield_until(lambda: app.fake.ended_connections == app.fake.accepted_connections)
+        await no_app_handler_lingers(app)
 
 
 @contextlib.asynccontextmanager
@@ -1393,7 +1401,7 @@ async def assert_the_tools_are_closed(app: ToolApp, flight: RunWithAForwardInFli
         await flight.door.connect()
     assert await flight.caller.at_eof()
     await asyncio.to_thread(flight.forward.wait_for_peer_left)
-    await yield_until(lambda: app.fake.ended_connections == app.fake.accepted_connections)
+    await no_app_handler_lingers(app)
     assert pending_tool_tasks() == []
 
 

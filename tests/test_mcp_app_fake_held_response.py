@@ -42,7 +42,9 @@ def a_client_that_asked(
     fake: McpAppFake, authority: TestAuthority, request_id: int = 1
 ) -> ssl.SSLSocket:
     raw = socket.create_connection(("127.0.0.1", fake.server_address[1]), timeout=WAIT_SECONDS)
-    client = authority.client_context().wrap_socket(raw, server_hostname=CERTIFICATE_HOST)
+    context = authority.client_context()
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    client = context.wrap_socket(raw, server_hostname=CERTIFICATE_HOST)
     body = json.dumps({"jsonrpc": "2.0", "id": request_id, "method": "tools/call", "params": {}})
     head = f"POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Length: {len(body)}\r\n\r\n"
     client.sendall((head + body).encode())

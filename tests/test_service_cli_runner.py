@@ -85,6 +85,7 @@ from agent_client.wire import (
 )
 from agent_providers import lost_groups, spawn
 from agent_providers.config import PrivateWorkingRoot, reset_config
+from agent_providers.events import AssistantTextEvent
 from agent_providers.procfs import GroupCensus
 from agent_providers.spawn import KillUntilGoneResult
 from agent_service.admission import AdmissionSlot
@@ -679,6 +680,30 @@ def test_a_stop_at_a_yielded_event_closes_the_core_at_once(
             ) == ((RunState.CANCELLED, ClientLoss.DISCONNECTED), [True], [], 0)
 
     in_stepped_loop(child_cleanup, monkeypatch, scenario())
+
+
+def test_a_closed_runner_has_reaped_the_cli_before_its_close_returns(
+    tmp_path: Path, child_cleanup: ChildCleanup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = a_config(tmp_path, a_parked_claude(tmp_path, for_the_client_socket=True))
+
+    async def scenario() -> tuple[AssistantTextEvent, int, list[Path], list[bool]]:
+        events = CliRunner(config).run(alice_admitted_run(uuid.uuid4()))
+        first = await anext(events)
+        await events.aclose()
+        return (
+            first,
+            held_claude_slots(),
+            list(private_root_of(config).iterdir()),
+            all_children_gone(child_cleanup),
+        )
+
+    assert drive_real_children(child_cleanup, monkeypatch, scenario()) == (
+        AssistantTextEvent(text="hi"),
+        0,
+        [],
+        [True],
+    )
 
 
 @dataclass

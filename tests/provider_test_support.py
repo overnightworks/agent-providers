@@ -340,12 +340,16 @@ class ClaudeCliStreamReader:
         stalls: bool = False,
         failure: Exception | None = None,
         failed: asyncio.Event | None = None,
+        stall_started: asyncio.Event | None = None,
+        on_stall_cancelled: Callable[[], None] | None = None,
     ) -> None:
         self._lines = list(lines)
         self._limit = limit
         self._stalls = stalls
         self._failure = failure
         self._failed = failed
+        self._stall_started = stall_started
+        self._on_stall_cancelled = on_stall_cancelled
 
     async def readline(self) -> bytes:
         if not self._lines:
@@ -371,8 +375,18 @@ class ClaudeCliStreamReader:
 
     async def _end_of_stream(self) -> bytes:
         if self._stalls:
-            await asyncio.get_running_loop().create_future()
+            await self._stall()
         return b""
+
+    async def _stall(self) -> None:
+        if self._stall_started is not None:
+            self._stall_started.set()
+        try:
+            await asyncio.get_running_loop().create_future()
+        except asyncio.CancelledError:
+            if self._on_stall_cancelled is not None:
+                self._on_stall_cancelled()
+            raise
 
 
 PROC_DEVICE = "0:25"
@@ -1468,6 +1482,7 @@ class ScriptedClaudeChild(ScriptedAnchoredChild):
         stdout_limit: int | None = None,
         stdout_stalls: bool = False,
         stderr_stalls: bool = False,
+        record_stderr_cancel: bool = False,
         stderr_failure: Exception | None = None,
         stdin_failure: Exception | None = None,
     ) -> None:
@@ -1496,14 +1511,25 @@ class ScriptedClaudeChild(ScriptedAnchoredChild):
             stream_lines, limit=stdout_limit, stalls=stdout_stalls,
         )
         self.stderr_failed = asyncio.Event()
+        self.stderr_read_started = asyncio.Event()
+        self._records_stderr_cancel = record_stderr_cancel
+        self.when_stderr_read_cancelled: Callable[[], None] | None = None
         self.stderr = ClaudeCliStreamReader(
             [stderr] if stderr else [],
             stalls=stderr_stalls,
             failure=stderr_failure,
             failed=self.stderr_failed,
+            stall_started=self.stderr_read_started,
+            on_stall_cancelled=self._stderr_read_cancelled,
         )
         self.stdin = MagicMock(spec_set=CLAUDE_CLI_STDIN_SURFACE)
         self.stdin.drain = AsyncMock(side_effect=stdin_failure)
+
+    def _stderr_read_cancelled(self) -> None:
+        if self._records_stderr_cancel:
+            self._enter("stderr_read_cancelled")
+        if self.when_stderr_read_cancelled is not None:
+            self.when_stderr_read_cancelled()
 
     def commit_exit(self, returncode: int) -> None:
         self.returncode = returncode

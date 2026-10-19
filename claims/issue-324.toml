@@ -1,8 +1,0 @@
-claim_id = "9c3132f7da2b40e79f96bae2a7601402"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "1537008fdae37f1628e174e44a73c05d24b49f21"
-branch = "claude/issue-324-11b1-tool-path-hazards"
-scope = ["README.md", "docs/decisions/0001-agent-service.md", "packages/agent-service/src/agent_service/cli_runner.py", "packages/agent-service/src/agent_service/relayed_events.py", "packages/agent-service/src/agent_service/tool_relay.py", "src/agent_providers/claude/provider.py", "tests/cli_tools_support.py", "tests/relay_support.py", "tests/test_claude_run.py", "tests/test_relayed_events.py", "tests/test_service_cli_runner_tools.py", "tests/test_service_run_tools.py", "tests/test_service_tool_relay.py", "tests/test_service_tool_relay_barrier.py", "tests/test_service_tool_relay_protocol.py"]
-opened_commit = "d9ba3c634409d9306c60404e66740d948f17221b"
-whole_reason = "One contract, the tool path's three hazards behind the kept guard: the barrier, its reader and the child's timeout change together and share one fake CLI, so they do not split further."

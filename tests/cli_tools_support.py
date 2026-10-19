@@ -76,12 +76,13 @@ for name in os.listdir(home):
     with open(home + "/" + name, "rb") as source, open(capture + "/files/" + name, "wb") as copy:
         copy.write(source.read())
 relay = json.load(open(home + "/relay-mcp.json"))["mcpServers"]["relay"]
+first_run = True
 if PLAN["descendant"]:
     program, identity, ack, ready = PLAN["descendant"]
     try:
         os.close(os.open(program + ".started", os.O_CREAT | os.O_EXCL))
     except FileExistsError:
-        pass
+        first_run = False
     else:
         subprocess.Popen(
             [sys.executable, "-I", program, identity, ack, ready, "0"],
@@ -164,7 +165,7 @@ for number, call in enumerate(PLAN["calls"], start=1):
         rpc("tools/call", arguments, 10 + number, version)
 for stray in PLAN["stray_lines"]:
     emit(stray)
-time.sleep(PLAN["linger_seconds"])
+time.sleep(PLAN["linger_seconds"] if first_run else 0)
 if PLAN["exit_code"]:
     sys.exit(PLAN["exit_code"])
 emit({{"type": "result", "subtype": "success", "is_error": False, "result": "done"}})
@@ -205,7 +206,8 @@ def a_relay_calling_claude(
 
     With ``descendant`` the first run's program starts a SIGTERM-ignoring child of its own
     process group that stays in the group (``descendant_support``'s program), and waits for its
-    ready signal; the test's ``DescendantRow`` completes the handshake.
+    ready signal; the test's ``DescendantRow`` completes the handshake. Only that first run
+    lingers for ``linger_seconds``; a later run ends at once.
     """
     plan = {
         "version_line": f"{version} (Claude Code)",
@@ -303,7 +305,9 @@ def a_tool_app(
     tools: Sequence[str] = ("save_note", "read_note"),
     *,
     overrides: Mapping[str, Responder] | None = None,
+    keep_alive: bool = False,
 ) -> Iterator[ToolApp]:
     app = ScriptedApp(pages=[tool_listing(list(tools))], overrides=overrides)
-    with serving(app, serving_authority.credentials_for(CERTIFICATE_HOST)) as fake:
+    credentials = serving_authority.credentials_for(CERTIFICATE_HOST)
+    with serving(app, credentials, keep_alive=keep_alive) as fake:
         yield ToolApp(fake)

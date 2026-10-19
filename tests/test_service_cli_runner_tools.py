@@ -16,7 +16,7 @@ import math
 import signal
 import socket
 import threading
-from collections.abc import AsyncGenerator, Callable, Iterator, Mapping, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
@@ -26,7 +26,6 @@ from urllib.parse import urlsplit
 
 import httpx
 import pytest
-import uvicorn
 from anchored_support import TEST_WAIT_SECONDS, ChildCleanup
 from capability_support import canary_token, capability_carrying
 from cli_tools_support import (
@@ -55,9 +54,8 @@ from provider_test_support import (
     drive_scripted,
     held_claude_slots,
     line,
-    own_real_children,
 )
-from relay_support import RawClient, json_rpc, parked_at, yield_until
+from relay_support import RawClient, RequestHead, json_rpc, parked_at, yield_until
 from service_support import (
     PINNED_CLAUDE_VERSION,
     SteppedLoop,
@@ -68,10 +66,8 @@ from service_support import (
     logging_state_snapshot,  # noqa: F401 - a fixture, requested by name
     post_run,
     run_body,
-    served,
 )
 from test_service_cli_runner import (
-    MINT,
     PLAIN_APP,
     ScriptedRun,
     a_config,
@@ -83,13 +79,12 @@ from test_service_cli_runner import (
     post_a_run,
     private_root_of,
     status_of,
+    through_the_service_entry,
     trusting,
 )
 from test_service_run_tools import Stall
 
-import agent_service.app as app_module
 import agent_service.cli_runner as cli_runner_module
-import agent_service.config as config_module
 from agent_client.sse import RunStreamDecoder
 from agent_client.wire import (
     MAX_EVENT_BYTES,
@@ -111,14 +106,19 @@ from agent_providers.config import PrivateWorkingRoot
 from agent_providers.events import FinalEvent, StreamEvent
 from agent_providers.procfs import GroupCensus
 from agent_service.capability import Capability
-from agent_service.cli import main
 from agent_service.cli_runner import CliRunner, mcp_tls_context
 from agent_service.config import ServiceConfig
+from agent_service.mcp_wire import (
+    JSON_MEDIA_TYPE,
+    LATEST_PROTOCOL_VERSION,
+    PROTOCOL_VERSION_HEADER,
+    JsonRpcErrorCode,
+)
 from agent_service.run_events import RUNNER_FAILED_MESSAGE
 from agent_service.run_liveness import LoopClock
 from agent_service.run_tools import UPSTREAM_ABORT_SECONDS, RunTools
 from agent_service.runners import Runners
-from agent_service.tool_relay import ToolCallBarrier
+from agent_service.tool_relay import LOOPBACK_HOST, ToolCallBarrier
 
 SAVE_NOTE = ClaudeCall("save_note", {"text": "la la"})
 READ_NOTE = ClaudeCall("read_note")
@@ -126,8 +126,6 @@ TOOLS = {"save_note": "side_effecting", "read_note": "read_only"}
 SETTLE_SECONDS = 10.0
 STUCK_APP_BOUND_SECONDS = 30.0
 HELD_RUN_CLIENT_TIMEOUT_SECONDS = STUCK_APP_BOUND_SECONDS + SETTLE_SECONDS
-INVALID_PARAMS = -32602
-MCP_PROTOCOL_VERSION = "2025-11-25"
 RELAY_TASK_PREFIXES = ("relay:", "upstream:", "run-tools:")
 
 
@@ -231,6 +229,8 @@ def ended_as(run: ToolRun) -> tuple[RunState, FailureCode | None]:
 
 PROVIDER_ERROR = (RunState.FAILED, FailureCode.PROVIDER_ERROR)
 SUCCEEDED = (RunState.SUCCEEDED, None)
+CANCELLED = (RunState.CANCELLED, None)
+INTERRUPTED = (RunState.FAILED, FailureCode.INTERRUPTED)
 
 
 def test_a_relay_call_reaches_the_wire_under_the_apps_own_tool_name(
@@ -551,7 +551,7 @@ def pending_tool_tasks() -> list[str]:
     ],
 )
 def test_every_ending_closes_the_runs_tools_once(
-    tmp_path, authority, child_cleanup, monkeypatch, ending, options
+    tmp_path, authority, child_cleanup, monkeypatch, caplog, ending, options
 ):
     closes: list[str] = []
     close = RunTools.close
@@ -562,7 +562,7 @@ def test_every_ending_closes_the_runs_tools_once(
 
     monkeypatch.setattr(RunTools, "close", counted)
 
-    a_tool_run(
+    run = a_tool_run(
         tmp_path,
         authority,
         child_cleanup,
@@ -572,6 +572,10 @@ def test_every_ending_closes_the_runs_tools_once(
     )
 
     assert closes == [ending]
+    if ending == "client-leaves":
+        assert_the_departure_left_nothing_running(run, caplog, ending=INTERRUPTED)
+    if ending == "success":
+        assert_the_run_logged_no_failure(run.status, run.events, caplog)
 
 
 @pytest.fixture(name="final_held")
@@ -815,14 +819,16 @@ def leaving_beside_the_held_request(
     return play
 
 
-def assert_the_departure_left_nothing_running(run: ToolRun, caplog) -> None:
-    assert (run.status.state, run.status.client_lost, run.status.failure_code) == (
-        RunState.CANCELLED,
-        ClientLoss.DISCONNECTED,
-        None,
-    )
-    assert run.status.events == len(run.events)
+def assert_the_run_logged_no_failure(status: RunStatus, events: Sequence[RunEvent], caplog) -> None:
+    assert status.events == len(events)
     assert failure_lines(caplog) == []
+
+
+def assert_the_departure_left_nothing_running(
+    run: ToolRun, caplog, ending: tuple[RunState, FailureCode | None] = CANCELLED
+) -> None:
+    assert (*ending_of(run.status), run.status.client_lost) == (*ending, ClientLoss.DISCONNECTED)
+    assert_the_run_logged_no_failure(run.status, run.events, caplog)
 
 
 def test_a_client_leaving_during_a_forward_cancels_it_upstream(
@@ -970,32 +976,6 @@ def test_five_parallel_tool_runs_stay_apart(tmp_path, authority, child_cleanup, 
     assert all_children_gone(child_cleanup) == [True] * 5
 
 
-def through_the_service_entry[Result](
-    tmp_path: Path,
-    config: ServiceConfig,
-    child_cleanup: ChildCleanup,
-    monkeypatch: pytest.MonkeyPatch,
-    scenario: Callable[[str], Result],
-) -> Result:
-    """Start ``cli.main`` on ``config``, serve the app it builds and play ``scenario`` on it."""
-    served_apps = []
-    create_app_for_the_test = app_module.create_app
-
-    def create_app_with_the_test_key_set(built: ServiceConfig, **keywords: Any):
-        return create_app_for_the_test(built, fetch_key_set=MINT.fetch_key_set, **keywords)
-
-    monkeypatch.setattr(uvicorn, "run", lambda built, **_where: served_apps.append(built))
-    monkeypatch.setattr(config_module, "load_config", lambda _path: config)
-    monkeypatch.setattr(app_module, "create_app", create_app_with_the_test_key_set)
-
-    def start_and_play() -> Result:
-        assert main(["--config", str(tmp_path / "agent-service.toml")]) == 0
-        with served(served_apps[0]) as base_url:
-            return scenario(base_url)
-
-    return own_real_children(child_cleanup, monkeypatch, start_and_play)
-
-
 @contextmanager
 def owning_the_descendant(row: DescendantRow) -> Iterator[None]:
     """Complete the descendant's handshake beside the scenario, which cannot start without it."""
@@ -1099,7 +1079,14 @@ class RunsAcrossAStop:
 
 
 def test_a_real_group_keeps_its_place_through_the_service_until_the_reap_ends(
-    tmp_path, authority, child_cleanup, monkeypatch, logging_state_restored, handshake, first_reap
+    tmp_path,
+    authority,
+    child_cleanup,
+    monkeypatch,
+    logging_state_restored,
+    handshake,
+    first_reap,
+    caplog,
 ):
     held = HeldRequests(bound_seconds=STUCK_APP_BOUND_SECONDS)
     binary = a_relay_calling_claude(
@@ -1122,6 +1109,13 @@ def test_a_real_group_keeps_its_place_through_the_service_until_the_reap_ends(
         def leave_during_the_first_forward(base_url: str) -> list[RunEvent]:
             return leave_when(base_url, "tool_call", lambda: forwards.extend(held.wait_for(1)))
 
+        def run_to_its_end_with_the_call_released(base_url: str) -> list[RunEvent]:
+            with ThreadPoolExecutor(1) as posting:
+                third = posting.submit(post_a_run, base_url)
+                held.wait_for(1)
+                held.release_all()
+                return third.result()
+
         def across_the_stop(base_url: str) -> RunsAcrossAStop:
             with owning_the_descendant(row):
                 try:
@@ -1132,17 +1126,19 @@ def test_a_real_group_keeps_its_place_through_the_service_until_the_reap_ends(
                         row.descendant_is_dead(),
                     )
                     second = post_run(base_url, headers(), run_body())
+                    first_reap.released.set()
+                    [forward] = forwards
+                    forward.wait_for_peer_left()
+                    settled = settled_status(base_url, first)
+                    dead_after = row.descendant_is_dead()
+                    assert_the_run_logged_no_failure(settled, first, caplog)
+                    nothing_left_running([ChildCapture(tmp_path / "capture")])(config)
+                    third = run_to_its_end_with_the_call_released(base_url)
+                    third_status = settled_status(base_url, third)
+                    assert_the_run_logged_no_failure(third_status, third, caplog)
+                    nothing_left_running([ChildCapture(tmp_path / "capture")])(config)
                 finally:
                     first_reap.released.set()
-                [forward] = forwards
-                forward.wait_for_peer_left()
-                settled = settled_status(base_url, first)
-                dead_after = row.descendant_is_dead()
-                nothing_left_running([ChildCapture(tmp_path / "capture")])(config)
-                try:
-                    third = leave_during_the_first_forward(base_url)
-                    third_status = settled_status(base_url, third)
-                finally:
                     held.release_all()
             return RunsAcrossAStop(while_reaping, second, settled, third_status, dead_after)
 
@@ -1156,10 +1152,7 @@ def test_a_real_group_keeps_its_place_through_the_service_until_the_reap_ends(
         (RunState.CANCELLED, None),
         ClientLoss.DISCONNECTED,
     )
-    assert (across.descendant_dead_after, ending_of(across.third_status)) == (
-        True,
-        (RunState.CANCELLED, None),
-    )
+    assert (across.descendant_dead_after, ending_of(across.third_status)) == (True, SUCCEEDED)
 
 
 RELAY_INIT_LINE = an_init(
@@ -1228,9 +1221,18 @@ class RelayDoor:
     ) -> bytes:
         body = json_rpc(method, request_id, params)
         head = (
-            f"POST {self.path} HTTP/1.1\r\nHost: 127.0.0.1:{self.port}\r\n"
-            f"Authorization: Bearer {self.secret}\r\nContent-Type: application/json\r\n"
-            f"MCP-Protocol-Version: {MCP_PROTOCOL_VERSION}\r\nContent-Length: {len(body)}\r\n\r\n"
+            RequestHead(
+                "POST",
+                self.path,
+                "HTTP/1.1",
+                (
+                    ("Host", f"{LOOPBACK_HOST}:{self.port}"),
+                    ("Authorization", f"Bearer {self.secret}"),
+                    ("Content-Length", str(len(body))),
+                ),
+            )
+            .with_field("Content-Type", JSON_MEDIA_TYPE)
+            .with_field(PROTOCOL_VERSION_HEADER, LATEST_PROTOCOL_VERSION.value)
         )
         return head.encode() + body
 
@@ -1246,7 +1248,7 @@ def test_a_call_during_the_reap_is_refused_and_never_forwarded(
     tmp_path, authority, monkeypatch, logging_state_restored
 ):
     child = ChildHeldAtItsReap()
-    with a_tool_app(authority, list(TOOLS)) as app:
+    with a_tool_app(authority, list(TOOLS), keep_alive=True) as app:
         run = a_scripted_tool_run(tmp_path, authority, app)
 
         async def scenario() -> None:
@@ -1261,11 +1263,14 @@ def test_a_call_during_the_reap_is_refused_and_never_forwarded(
                 with pytest.raises(ConnectionRefusedError):
                     await door.connect()
                 await idle.send(door.call(2))
-                assert await error_code_of(idle) == INVALID_PARAMS
+                assert await error_code_of(idle) == JsonRpcErrorCode.INVALID_PARAMS
             finally:
                 child.reap_gate.set()
             async with asyncio.timeout(TEST_WAIT_SECONDS):
                 await closing
+            assert await idle.at_eof()
+            await yield_until(lambda: app.fake.ended_connections == app.fake.accepted_connections)
+            assert pending_tool_tasks() == []
 
         drive_scripted(monkeypatch, child, scenario(), loop_factory=SteppedLoop)
 
@@ -1296,6 +1301,21 @@ async def loop_settled() -> None:
     await loop.settled()
 
 
+@contextlib.asynccontextmanager
+async def reap_released_and_reading_settled(
+    child: ChildHeldAtItsReap, reading: asyncio.Task[Any]
+) -> AsyncIterator[None]:
+    """Whatever the observations do, the parked reap is released and the reading task ends."""
+    try:
+        yield
+    finally:
+        child.reap_gate.set()
+        reading.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            async with asyncio.timeout(TEST_WAIT_SECONDS):
+                await reading
+
+
 def test_a_natural_exit_reaps_before_the_final_and_the_relay_closes_after_the_terminal(
     tmp_path, authority, monkeypatch, logging_state_restored
 ):
@@ -1308,21 +1328,22 @@ def test_a_natural_exit_reaps_before_the_final_and_the_relay_closes_after_the_te
 
         async def scenario() -> None:
             reading = asyncio.create_task(collected(run.frames))
-            async with asyncio.timeout(TEST_WAIT_SECONDS):
-                await child.reap_reached.wait()
-            door = RelayDoor.in_the_run_of(run)
-            await loop_settled()
-            final_before_the_reap = [event for event in seen if isinstance(event, FinalEvent)]
-            (await door.connect()).disconnect()
-            child.reap_gate.set()
-            async with asyncio.timeout(TEST_WAIT_SECONDS):
-                frames = await reading
-            assert final_before_the_reap == []
-            assert [type(event) for event in seen if isinstance(event, FinalEvent)] != []
-            assert decoded_events(b"".join(frames))[-1].type == "succeeded"
-            with pytest.raises(ConnectionRefusedError):
-                await door.connect()
-            assert pending_tool_tasks() == []
+            async with reap_released_and_reading_settled(child, reading):
+                async with asyncio.timeout(TEST_WAIT_SECONDS):
+                    await child.reap_reached.wait()
+                door = RelayDoor.in_the_run_of(run)
+                await loop_settled()
+                final_before_the_reap = [event for event in seen if isinstance(event, FinalEvent)]
+                (await door.connect()).disconnect()
+                child.reap_gate.set()
+                async with asyncio.timeout(TEST_WAIT_SECONDS):
+                    frames = await reading
+                assert final_before_the_reap == []
+                assert [type(event) for event in seen if isinstance(event, FinalEvent)] != []
+                assert decoded_events(b"".join(frames))[-1].type == "succeeded"
+                with pytest.raises(ConnectionRefusedError):
+                    await door.connect()
+                assert pending_tool_tasks() == []
 
         drive_scripted(monkeypatch, child, scenario(), loop_factory=SteppedLoop)
 
@@ -1375,7 +1396,9 @@ def test_an_unconfirmed_group_with_tools_closes_them_and_holds_the_place(
     child = an_unconfirmed_group()
     child.reap_gate.set()
     held = HeldRequests(bound_seconds=STUCK_APP_BOUND_SECONDS)
-    with a_tool_app(authority, list(TOOLS), overrides={"tools/call": held.responder(saved)}) as app:
+    with a_tool_app(
+        authority, list(TOOLS), overrides={"tools/call": held.responder(saved)}, keep_alive=True
+    ) as app:
         run = a_scripted_tool_run(tmp_path, authority, app)
 
         async def scenario() -> None:
@@ -1398,25 +1421,28 @@ def test_a_loss_beside_a_cancelled_close_ends_provider_error_with_tools_open(
 ):
     child = an_unconfirmed_group()
     held = HeldRequests(bound_seconds=STUCK_APP_BOUND_SECONDS)
-    with a_tool_app(authority, list(TOOLS), overrides={"tools/call": held.responder(saved)}) as app:
+    with a_tool_app(
+        authority, list(TOOLS), overrides={"tools/call": held.responder(saved)}, keep_alive=True
+    ) as app:
         run = a_scripted_tool_run(tmp_path, authority, app)
 
         async def scenario() -> None:
             flight = await run_with_a_forward_in_flight(run, held)
-            flight.reading.cancel()
-            async with asyncio.timeout(TEST_WAIT_SECONDS):
-                await child.reap_reached.wait()
-            flight.reading.cancel()
-            await loop_settled()
-            child.reap_gate.set()
-            with contextlib.suppress(asyncio.CancelledError):
+            async with reap_released_and_reading_settled(child, flight.reading):
+                flight.reading.cancel()
                 async with asyncio.timeout(TEST_WAIT_SECONDS):
-                    await flight.reading
-            status = run.status()
-            assert (status.state, status.failure_code) == PROVIDER_ERROR
-            assert run.held_state() == (True, 1, True)
-            await assert_the_tools_are_closed(app, flight)
-            await run.frees_its_place_once_the_group_is_confirmed(child)
+                    await child.reap_reached.wait()
+                flight.reading.cancel()
+                await loop_settled()
+                child.reap_gate.set()
+                with contextlib.suppress(asyncio.CancelledError):
+                    async with asyncio.timeout(TEST_WAIT_SECONDS):
+                        await flight.reading
+                status = run.status()
+                assert (status.state, status.failure_code) == PROVIDER_ERROR
+                assert run.held_state() == (True, 1, True)
+                await assert_the_tools_are_closed(app, flight)
+                await run.frees_its_place_once_the_group_is_confirmed(child)
 
         drive_scripted(monkeypatch, child, scenario(), loop_factory=SteppedLoop)
 
@@ -1500,9 +1526,12 @@ def test_a_run_trusts_exactly_the_configured_bundle(
         songmaker = {"tools": TOOLS, "mcp_origin": app.origin}
         config = trusting(a_config(tmp_path, binary, songmaker=songmaker), authority)
 
+        captures = [ChildCapture(tmp_path / "capture")] if signed_by_the_configured_ca else []
+
         def post_and_settle(base_url: str) -> list[RunEvent]:
             events = post_a_run(base_url)
             settled_status(base_url, events)
+            nothing_left_running(captures)(config)
             return events
 
         events = through_the_service_entry(

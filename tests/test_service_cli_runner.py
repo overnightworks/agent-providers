@@ -922,6 +922,32 @@ def test_an_unconfirmed_group_after_a_clean_end_never_succeeds(
     drive_scripted(monkeypatch, child, scenario(), loop_factory=SteppedLoop)
 
 
+def through_the_service_entry[Result](
+    tmp_path: Path,
+    config: ServiceConfig,
+    child_cleanup: ChildCleanup,
+    monkeypatch: pytest.MonkeyPatch,
+    scenario: Callable[[str], Result],
+) -> Result:
+    """Start ``cli.main`` on ``config``, serve the app it builds and play ``scenario`` on it."""
+    served_apps: list[FastAPI] = []
+    create_app_for_the_test = app_module.create_app
+
+    def create_app_with_the_test_key_set(built: ServiceConfig, **keywords: Any):
+        return create_app_for_the_test(built, fetch_key_set=MINT.fetch_key_set, **keywords)
+
+    monkeypatch.setattr(uvicorn, "run", lambda built, **_where: served_apps.append(built))
+    monkeypatch.setattr(config_module, "load_config", lambda _path: config)
+    monkeypatch.setattr(app_module, "create_app", create_app_with_the_test_key_set)
+
+    def start_and_play() -> Result:
+        assert main(["--config", str(tmp_path / "agent-service.toml")]) == 0
+        with served(served_apps[0]) as base_url:
+            return scenario(base_url)
+
+    return own_real_children(child_cleanup, monkeypatch, start_and_play)
+
+
 def test_the_service_entry_installs_the_cli_runner(
     tmp_path: Path,
     child_cleanup: ChildCleanup,
@@ -931,24 +957,8 @@ def test_the_service_entry_installs_the_cli_runner(
 ) -> None:
     binary = a_fake_claude(tmp_path, version_line=VERSION_LINE)
     config = trusting(a_config(tmp_path, binary, songmaker=PLAIN_APP), authority)
-    served_apps: list[FastAPI] = []
-    create_app_for_the_test = app_module.create_app
-    monkeypatch.setattr(uvicorn, "run", lambda app, **_where: served_apps.append(app))
-    monkeypatch.setattr(config_module, "load_config", lambda _path: config)
-    monkeypatch.setattr(
-        app_module,
-        "create_app",
-        lambda built, **keywords: create_app_for_the_test(
-            built, fetch_key_set=MINT.fetch_key_set, **keywords
-        ),
-    )
 
-    def start_and_post() -> list[RunEvent]:
-        assert main(["--config", str(tmp_path / "agent-service.toml")]) == 0
-        with served(served_apps[0]) as base_url:
-            return post_a_run(base_url)
-
-    events = own_real_children(child_cleanup, monkeypatch, start_and_post)
+    events = through_the_service_entry(tmp_path, config, child_cleanup, monkeypatch, post_a_run)
 
     assert shown(events)[-1] == ("succeeded", "done")
 

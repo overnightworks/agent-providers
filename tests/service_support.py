@@ -38,6 +38,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final, NoReturn
 
+import anyio
 import httpx
 import jwt
 import pytest
@@ -788,6 +789,21 @@ class StrayCancelledRunner(GatedRunner):
             await self._closed()
 
 
+class RunnerRaisingThisStray(GatedRunner):
+    """A runner whose first step raises the given ``CancelledError``, then closes as a gated one."""
+
+    def __init__(self, stray: asyncio.CancelledError) -> None:
+        super().__init__()
+        self._stray = stray
+
+    async def run(self, admitted: AdmittedRun) -> AsyncGenerator[StreamEvent, None]:
+        try:
+            raise self._stray
+            yield QUIET
+        finally:
+            await self._closed()
+
+
 class _SplitFailure(AsyncGenerator[StreamEvent, None]):
     """A runner's generator whose step and close fail independently of each other."""
 
@@ -937,6 +953,34 @@ class BrokenClock(StepClock):
             await super().wait_until(deadline)
             return
         raise self._breaks_with()
+
+
+class ClockBreaksOnce:
+    """A store clock that raises on the first call after ``arm()``, then works again."""
+
+    def __init__(self) -> None:
+        self._armed = False
+
+    def arm(self) -> None:
+        self._armed = True
+
+    def __call__(self) -> datetime:
+        if self._armed:
+            self._armed = False
+            raise RuntimeError("the store clock broke once")
+        return instant(0)
+
+
+CUT_BY_ITS_SCOPE: Final = object()
+
+
+async def closed_inside(scope: anyio.CancelScope, closing: Coroutine[Any, Any, object]) -> object:
+    """Close inside ``scope``; the marker when the scope cut the closing short."""
+    finished = False
+    with scope:
+        await closing
+        finished = True
+    return CUT_BY_ITS_SCOPE if scope.cancelled_caught and not finished else None
 
 
 def tool_call(tool_use_id: str, name: str = "read_song") -> ToolCallEvent:
@@ -1116,6 +1160,18 @@ async def respond_through_the_app(
 ) -> asyncio.Task[None]:
     """Post a run to a fresh ``the_app_on`` the drive; its response task."""
     return await respond_through(the_app_on(drive, monkeypatch, runners, config), client)
+
+
+async def status_through(app: FastAPI, run_id: uuid.UUID) -> RunStatus:
+    """Alice's ``GET /runs/{id}`` answered by ``app`` in process; its decoded status."""
+    mint = shared_mint()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://service") as client:
+        response = await client.get(
+            f"/runs/{run_id}", headers=run_headers(mint.workload(), mint.user())
+        )
+    assert response.status_code == 200
+    return RunStatus.model_validate_json(response.content)
 
 
 class ScriptedConfirmation:

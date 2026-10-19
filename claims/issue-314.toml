@@ -1,8 +1,0 @@
-claim_id = "417705248e434f589b833d658ab8b9ca"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "3639d9fe44121f28709ca8642710970fe3fb80ca"
-branch = "claude/issue-314-8f-early-close-inner-stream"
-scope = ["README.md", "docs/decisions/0001-agent-service.md", "src/agent_providers/claude/provider.py", "tests/provider_test_support.py", "tests/test_claude_provider_streaming.py"]
-opened_commit = "70f6baed4b13968531f86efc70d352929f15afcd"
-whole_reason = "One ordering fix at one call site, with the fake-child hooks that observe it and the two documentation sentences that state it."

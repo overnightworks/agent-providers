@@ -4,8 +4,9 @@ The relay's ``ToolCallBarrier`` is the one source of tool events, so the CLI's o
 the core decodes are dropped. A barrier event is handed out before the core's when both are
 ready, and it is accepted only when the service asks for the next event, which it does only
 after it checked, counted, recorded and queued the one it was given. A ready ``FinalEvent``
-therefore waits until the barrier has nothing queued. ``close`` stops the merged source and
-lets a containment loss of the core leave, whatever else the cleanup met.
+therefore waits until the barrier has nothing ready, a queued event or a failure to raise.
+``close`` stops the merged source and lets a containment loss of the core leave, whatever else
+the cleanup met.
 """
 
 from __future__ import annotations
@@ -37,6 +38,8 @@ class HandedOutCalls(Protocol):
 
     def accept(self, event: RelayEvent) -> None: ...
 
+    def has_ready_event(self) -> bool: ...
+
 
 class RelayedEvents:
     def __init__(
@@ -55,7 +58,7 @@ class RelayedEvents:
         self._accept_the_yielded_event()
         while True:
             await self._wait_for_a_step()
-            await self._let_the_barrier_hand_out_its_queue()
+            await self._wait_for_the_barrier_while_it_has_a_ready_event()
             if (relayed := self._finished_relay_event()) is not None:
                 return relayed
             if (core_event := self._finished_core_event()) is not None:
@@ -110,16 +113,19 @@ class RelayedEvents:
         steps = {step for step in (self._core_step, self._relay_step) if step is not None}
         await asyncio.wait(steps, return_when=asyncio.FIRST_COMPLETED)
 
-    async def _let_the_barrier_hand_out_its_queue(self) -> None:
-        """``next_event`` returns in its first step when the barrier holds a queued event.
+    async def _wait_for_the_barrier_while_it_has_a_ready_event(self) -> None:
+        """A ready core event is returned only while the barrier has nothing ready.
 
-        A core event that overtakes a reader which has not had that step yet would be yielded
-        ahead of an event the barrier already queued, and a final would end the run over it.
+        The check and the return have no await between them, so nothing can be queued in
+        between.
         """
         core_ready = self._core_step is not None and self._core_step.done()
-        reader_pending = self._relay_step is not None and not self._relay_step.done()
-        if core_ready and reader_pending:
-            await asyncio.sleep(0)
+        reader = self._relay_step
+        if core_ready and reader is not None and not reader.done() and self._barrier_is_ready():
+            await asyncio.wait({reader})
+
+    def _barrier_is_ready(self) -> bool:
+        return self._calls is not None and self._calls.has_ready_event()
 
     async def _next_core_event(self) -> StreamEvent | _CoreEnded:
         return await anext(self._core, _CORE_ENDED)

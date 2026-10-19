@@ -8,6 +8,7 @@ cleanup cases run behind ``CliRunner.run`` with the real ``RunTools``.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import gc
 import logging
 import ssl
@@ -58,14 +59,22 @@ class UpstreamBroke(Exception):
 
 
 class RecordingApp:
-    """An ``AppTools`` fake that answers at once and records the names it was called with."""
+    """An ``AppTools`` fake that records the names it was called with and answers, at once or
+    once ``release`` opened its gate."""
 
-    def __init__(self, answer: str | None = None) -> None:
+    def __init__(self, answer: str | None = None, *, gated: bool = False) -> None:
         self.called: list[str] = []
         self._answer = answer
+        self._gate = asyncio.Event()
+        if not gated:
+            self._gate.set()
+
+    def release(self) -> None:
+        self._gate.set()
 
     async def call_tool(self, name: str, arguments: Mapping[str, Any]) -> ToolOutcome:
         self.called.append(name)
+        await self._gate.wait()
         return ToolOutcome(self._answer or f"ran {name}", is_error=False)
 
 
@@ -262,6 +271,83 @@ def test_a_final_ready_as_the_one_result_is_queued_waits_for_that_result() -> No
             ("tool_result", "call-1"),
             ("final", "done"),
         ]
+        barrier.stop()
+        await events.close()
+
+    drive(scenario())
+
+
+def ready_at_each_core_yield(events: RelayedEvents, barrier: ToolCallBarrier) -> list[bool]:
+    """Whether the barrier had a ready event at the instant a core event was returned."""
+    found: list[bool] = []
+    finished_core_event = events._finished_core_event
+
+    def recording() -> StreamEvent | None:
+        event = finished_core_event()
+        if event is not None:
+            found.append(barrier.has_ready_event())
+        return event
+
+    events._finished_core_event = recording
+    return found
+
+
+async def run_to_its_end_with_a_final_ready_while_forwards_run(
+    app: RecordingApp, core: ScriptedCore, events: RelayedEvents, count: int, ticks_before: int
+) -> None:
+    """The calls taken, the forwards running, a final fed, and the forwards ended ``ticks_before``
+    loop turns later, so their results queue while the final is being handed on."""
+    await taken(events, count)
+    next_event = asyncio.ensure_future(anext(events))
+    await yield_until(lambda: len(app.called) == count)
+    core.feed(FINAL)
+    for _ in range(ticks_before):
+        await asyncio.sleep(0)
+    app.release()
+    for _ in range(count + 1):
+        if isinstance(await asyncio.wait_for(next_event, WAIT_SECONDS), FinalEvent):
+            return
+        next_event = asyncio.ensure_future(anext(events))
+
+
+@pytest.mark.parametrize("ticks_before", [0, 1, 2])
+@pytest.mark.parametrize("count", [1, 2, 3])
+def test_a_final_is_never_handed_on_while_the_forwards_it_overtook_have_queued_results(
+    count: int, ticks_before: int
+) -> None:
+    async def scenario() -> None:
+        app, core = RecordingApp(gated=True), ScriptedCore()
+        barrier = a_barrier(app)
+        Arrivals(barrier).arrive(count)
+        events = RelayedEvents(core.stream(), barrier)
+        ready = ready_at_each_core_yield(events, barrier)
+
+        await run_to_its_end_with_a_final_ready_while_forwards_run(
+            app, core, events, count, ticks_before
+        )
+
+        assert ready == [False]
+        barrier.stop()
+        await events.close()
+
+    drive(scenario())
+
+
+@pytest.mark.parametrize("ticks_before", [0, 1, 2])
+def test_a_final_is_never_handed_on_while_a_reflected_result_is_pending(ticks_before: int) -> None:
+    async def scenario() -> None:
+        app, core = RecordingApp(CANARY, gated=True), ScriptedCore()
+        barrier = a_barrier(app)
+        Arrivals(barrier).arrive(1)
+        events = RelayedEvents(core.stream(), barrier)
+        ready = ready_at_each_core_yield(events, barrier)
+
+        with contextlib.suppress(CapabilityReflected):
+            await run_to_its_end_with_a_final_ready_while_forwards_run(
+                app, core, events, 1, ticks_before
+            )
+
+        assert ready in ([], [False])
         barrier.stop()
         await events.close()
 

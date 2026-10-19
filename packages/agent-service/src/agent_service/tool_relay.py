@@ -602,7 +602,8 @@ class ToolCallBarrier:
     one log line by class. A cancelled forward yields no result. An outcome whose decoded text
     carries the run's capability yields no event and no reply: the barrier is refused for good
     and ``next_event()`` raises ``CapabilityReflected``. ``settle()`` returns once every
-    forward's outcome was retrieved.
+    forward's outcome was retrieved. ``has_ready_event()`` is true while ``next_event()`` would
+    return an event or raise at its first step.
 
     ``call()`` awaits one response future from admission to its answer. It is resolved by the
     release of the reply, by the refusal ``-32602`` at ``stop()``, or by ``Unanswered``
@@ -676,6 +677,17 @@ class ToolCallBarrier:
                 return ready.event
             self._changed.clear()
             await self._changed.wait()
+
+    def has_ready_event(self) -> bool:
+        """Whether ``next_event()`` would return an event or raise at its first step."""
+        return (
+            self._unoffered
+            or self._reflected
+            or any(
+                isinstance(ready.event, ToolResultEvent) or not ready.pending.given_up
+                for ready in self._ready
+            )
+        )
 
     def accept(self, event: ToolCallEvent | ToolResultEvent) -> None:
         handed_out = self._handed_out_for(event)

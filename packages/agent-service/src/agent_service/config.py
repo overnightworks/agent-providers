@@ -352,12 +352,16 @@ def _refuse_tools_without_an_origin(document: object) -> None:
             )
 
 
+def _declares_an_origin(app: object) -> bool:
+    return _value(app, "mcp_origin") is not None
+
+
 def _refuse_an_origin_without_a_ca_bundle(document: object) -> None:
     mcp = _value(document, "mcp")
     if isinstance(mcp, Mapping | McpConfig) and _value(mcp, "ca_file") is not None:
         return
     for app_name, app in _named_tables(document, "apps", AppConfig):
-        if _value(app, "mcp_origin") is not None:
+        if _declares_an_origin(app):
             raise ValueError(
                 f"mcp.ca_file: required because apps.{shown_text(app_name)} declares an mcp_origin"
             )
@@ -461,7 +465,7 @@ class ServiceConfig(_Section):
 
     def mcp_trust_bundle(self) -> Path | None:
         """The CA bundle for the apps' MCP origins; ``None`` while no app declares an origin."""
-        if self.mcp is None or not any(app.mcp_origin for app in self.apps.values()):
+        if self.mcp is None or not any(map(_declares_an_origin, self.apps.values())):
             return None
         return self.mcp.ca_file
 

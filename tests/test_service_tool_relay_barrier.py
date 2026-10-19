@@ -790,6 +790,74 @@ def test_the_hand_out_rule_holds_over_a_given_up_handed_out_call(
     drive_barrier(scenario)
 
 
+async def nothing_arrived(rig: Rig) -> bool:
+    return False
+
+
+async def a_call_waits_to_be_handed_out(rig: Rig) -> bool:
+    arrive(rig.barrier, EDIT_SONG)
+    return True
+
+
+async def a_waiting_call_was_given_up(rig: Rig) -> bool:
+    arrive(rig.barrier, EDIT_SONG)
+    rig.barrier.cancel(1)
+    return False
+
+
+async def a_result_waits_to_be_handed_out(rig: Rig) -> bool:
+    arrive(rig.barrier, EDIT_SONG)
+    await rig.hand_out_and_accept()
+    await rig.fake.forwarded(1)
+    rig.fake.release()
+    await rig.barrier.settle()
+    return True
+
+
+async def a_result_was_handed_out_and_nothing_follows(rig: Rig) -> bool:
+    await a_result_waits_to_be_handed_out(rig)
+    await rig.accept_result("call-1")
+    return False
+
+
+async def the_offer_was_exceeded(rig: Rig) -> bool:
+    rig.barrier.unoffered()
+    return True
+
+
+@pytest.mark.parametrize(
+    "arrangement",
+    [
+        nothing_arrived,
+        a_call_waits_to_be_handed_out,
+        a_waiting_call_was_given_up,
+        a_result_waits_to_be_handed_out,
+        a_result_was_handed_out_and_nothing_follows,
+        the_offer_was_exceeded,
+    ],
+)
+def test_the_barrier_has_a_ready_event_exactly_while_next_event_would_not_wait(
+    arrangement: Callable[[Rig], Awaitable[bool]],
+) -> None:
+    async def scenario(rig: Rig) -> None:
+        expected = await arrangement(rig)
+
+        assert rig.barrier.has_ready_event() is expected
+
+    drive_barrier(scenario)
+
+
+def test_the_barrier_has_a_ready_event_while_a_reflected_capability_is_pending() -> None:
+    async def scenario(rig: Rig) -> None:
+        await a_result_waits_to_be_handed_out(rig)
+
+        assert rig.barrier.has_ready_event()
+        with pytest.raises(CapabilityReflected):
+            await rig.barrier.next_event()
+
+    drive_barrier(scenario, gated_app(outcome=ToolOutcome(CANARY_SIGNATURE, False)))
+
+
 async def an_id_never_seen(rig: Rig) -> None:
     call = arrive(rig.barrier, EDIT_SONG, 1)
 

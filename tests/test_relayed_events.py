@@ -307,10 +307,18 @@ async def the_calls_taken_then_the_final_fed_and_the_forwards_released_after_hop
     after_hops(release_hops, app.release)
 
 
-@pytest.mark.parametrize("hops", [(0, 1), (1, 1), (2, 2), (3, 3)])
+@pytest.mark.parametrize(
+    ("hops", "results_delivered"),
+    [
+        pytest.param((0, 1), False, id="nothing-queued"),
+        pytest.param((1, 1), True, id="results-queued-1"),
+        pytest.param((2, 2), True, id="results-queued-2"),
+        pytest.param((3, 3), True, id="results-queued-3"),
+    ],
+)
 @pytest.mark.parametrize("count", [1, 2, 3])
 def test_a_final_is_handed_on_only_with_no_result_of_the_forwards_it_overtook_ready(
-    count: int, hops: tuple[int, int]
+    count: int, hops: tuple[int, int], results_delivered: bool
 ) -> None:
     async def scenario() -> None:
         app, core = RecordingApp(gated=True), ScriptedCore()
@@ -323,10 +331,12 @@ def test_a_final_is_handed_on_only_with_no_result_of_the_forwards_it_overtook_re
 
         delivered = await delivered_before_the_final(events)
 
-        assert (
-            {event.type for event in delivered} <= {"tool_result"},
-            barrier.has_ready_event(),
-        ) == (True, False)
+        assert (shown(delivered), barrier.has_ready_event()) == (
+            [("tool_result", f"call-{number}") for number in range(1, count + 1)]
+            if results_delivered
+            else [],
+            False,
+        )
         barrier.stop()
         await events.close()
 

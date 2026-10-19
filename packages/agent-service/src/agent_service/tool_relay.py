@@ -603,8 +603,8 @@ class ToolCallBarrier:
     carries the run's capability yields no event and no reply: the barrier is refused for good
     and ``next_event()`` raises ``CapabilityReflected``. ``settle()`` returns once every
     forward's outcome was retrieved. ``has_ready_event()`` is true while a queued event, a ready
-    call that was not given up, an unoffered call or a reflected outcome waits; it is false after
-    ``stop()`` and while an event is handed out (where ``next_event()`` raises
+    call that was not given up, an unoffered call or a reflected outcome waits; it makes no
+    promise after ``stop()`` or while an event is handed out (where ``next_event()`` raises
     ``ToolCallsMisused`` at once). It assumes the merger accepts the handed-out event before it
     asks for the next, and that production stops the barrier only at the close.
 

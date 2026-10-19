@@ -1,7 +1,0 @@
-claim_id = "dc143041bc634ca09af926292a23334f"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "74dd74220cfb1974138e24a3cd371a1ef347545c"
-branch = "claude/issue-329-11t-bounded-run-tools-tests"
-scope = ["tests/relay_support.py", "tests/test_service_run_tools.py"]
-opened_commit = "a949eaaba19e9ad2a724468329b1e5290c10c4b9"

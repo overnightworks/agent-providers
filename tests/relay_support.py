@@ -551,8 +551,7 @@ async def within_the_bound[T](awaitable: Awaitable[T]) -> T:
 
 
 async def close_bounded(relay: Relay) -> None:
-    async with asyncio.timeout(WAIT_SECONDS):
-        await relay.close()
+    await within_the_bound(relay.close())
 
 
 _HeldCallback = tuple[Callable[..., object], tuple[object, ...], contextvars.Context | None]

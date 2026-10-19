@@ -169,6 +169,7 @@ class Stall:
                 return await original(*args, **kwargs)
             self._claimed = True
             if self._released:
+                self.original_ran = True
                 return await original(*args, **kwargs)
             gate = asyncio.Event()
             self._gate = weakref.ref(gate)

@@ -141,4 +141,4 @@ def installed_runners(
     if config.cli is None:
         return Runners()
     runner = CliRunner(config, tls_context=tls_context, clock=clock)
-    return Runners(cli=runner, cli_offers_tools=False)
+    return Runners(cli=runner)

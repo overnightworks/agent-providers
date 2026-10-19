@@ -1,8 +1,7 @@
 """The service's CLI runner answers a tool-free run through the real core and ends it correctly.
 
 HTTP rows serve the real app on a loopback socket and run a fake Claude program as a real
-child; no installed core configuration exists in any of them. Production keeps tool apps on
-``provider_unavailable`` behind ``cli_offers_tools``; the tool path has its own module
+child; no installed core configuration exists in any of them. The tool path has its own module
 (``test_service_cli_runner_tools``). A tool-free run opens no connection to an app, so these
 rows give the runner no TLS context.
 """
@@ -10,11 +9,13 @@ rows give the runner no TLS context.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import os
 import re
 import signal
 import socket
+import ssl
 import struct
 import threading
 import time
@@ -99,6 +100,7 @@ from agent_providers.procfs import GroupCensus
 from agent_providers.spawn import KillUntilGoneResult
 from agent_service.admission import AdmissionSlot
 from agent_service.app import create_app
+from agent_service.capability import Capability
 from agent_service.cli import main
 from agent_service.cli_runner import RUN_ADAPTERS, CliRunner, installed_runners
 from agent_service.config import McpConfig, Provider, ServiceConfig
@@ -301,13 +303,14 @@ def test_a_capability_never_reaches_the_tool_free_cli(
     assert [name for name, text in carriers.items() if any(token in text for token in signed)] == []
 
 
-def test_an_app_with_tools_ends_no_provider_yet_without_a_child(
+def test_without_a_cli_section_a_tool_app_is_provider_unavailable(
     tmp_path: Path, child_cleanup: ChildCleanup, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     capture = tmp_path / "capture"
     config = a_config(tmp_path, a_fake_claude(tmp_path, capture=capture), songmaker={})
+    without_cli = config.model_copy(update={"cli": None})
 
-    events = drive_over_http(child_cleanup, monkeypatch, config, post_a_run)
+    events = drive_over_http(child_cleanup, monkeypatch, without_cli, post_a_run)
 
     terminal = events[-1]
     assert isinstance(terminal, Failed)
@@ -846,15 +849,21 @@ class ScriptedRun:
         )
 
 
-def a_scripted_run(tmp_path: Path) -> ScriptedRun:
-    config = a_config(tmp_path, a_fake_claude(tmp_path))
+def a_scripted_run(
+    tmp_path: Path,
+    *,
+    config: ServiceConfig | None = None,
+    tls_context: ssl.SSLContext | None = None,
+    capability: Capability | None = None,
+) -> ScriptedRun:
+    config = config or a_config(tmp_path, a_fake_claude(tmp_path))
     clock = StepClock()
     slot = AdmissionSlot(1)
     records = RunRecords(lambda: instant(clock.now))
     run_id = uuid.uuid4()
     frames = run_frames(
-        alice_admitted_run(run_id),
-        CliRunner(config, tls_context=None, clock=clock),
+        dataclasses.replace(alice_admitted_run(run_id), capability=capability),
+        CliRunner(config, tls_context=tls_context, clock=clock),
         SONGMAKER,
         config.runs,
         clock,
@@ -913,44 +922,45 @@ def test_an_unconfirmed_group_after_a_clean_end_never_succeeds(
     drive_scripted(monkeypatch, child, scenario(), loop_factory=SteppedLoop)
 
 
-@pytest.mark.parametrize(
-    ("songmaker", "ending"),
-    [
-        pytest.param(PLAIN_APP, ("succeeded", "done"), id="plain"),
-        pytest.param({}, ("failed", NO_RUNNER_MESSAGE), id="tools"),
-    ],
-)
-def test_the_service_entry_installs_the_tool_free_cli_runner(
+def through_the_service_entry[Result](
+    tmp_path: Path,
+    config: ServiceConfig,
+    child_cleanup: ChildCleanup,
+    monkeypatch: pytest.MonkeyPatch,
+    scenario: Callable[[str], Result],
+) -> Result:
+    """Start ``cli.main`` on ``config``, serve the app it builds and play ``scenario`` on it."""
+    served_apps: list[FastAPI] = []
+    create_app_for_the_test = app_module.create_app
+
+    def create_app_with_the_test_key_set(built: ServiceConfig, **keywords: Any):
+        return create_app_for_the_test(built, fetch_key_set=MINT.fetch_key_set, **keywords)
+
+    monkeypatch.setattr(uvicorn, "run", lambda built, **_where: served_apps.append(built))
+    monkeypatch.setattr(config_module, "load_config", lambda _path: config)
+    monkeypatch.setattr(app_module, "create_app", create_app_with_the_test_key_set)
+
+    def start_and_play() -> Result:
+        assert main(["--config", str(tmp_path / "agent-service.toml")]) == 0
+        with served(served_apps[0]) as base_url:
+            return scenario(base_url)
+
+    return own_real_children(child_cleanup, monkeypatch, start_and_play)
+
+
+def test_the_service_entry_installs_the_cli_runner(
     tmp_path: Path,
     child_cleanup: ChildCleanup,
     monkeypatch: pytest.MonkeyPatch,
     logging_state_restored: None,
     authority: TestAuthority,
-    songmaker: dict[str, object],
-    ending: tuple[str, str],
 ) -> None:
     binary = a_fake_claude(tmp_path, version_line=VERSION_LINE)
-    config = trusting(a_config(tmp_path, binary, songmaker=songmaker), authority)
-    served_apps: list[FastAPI] = []
-    create_app_for_the_test = app_module.create_app
-    monkeypatch.setattr(uvicorn, "run", lambda app, **_where: served_apps.append(app))
-    monkeypatch.setattr(config_module, "load_config", lambda _path: config)
-    monkeypatch.setattr(
-        app_module,
-        "create_app",
-        lambda built, **keywords: create_app_for_the_test(
-            built, fetch_key_set=MINT.fetch_key_set, **keywords
-        ),
-    )
+    config = trusting(a_config(tmp_path, binary, songmaker=PLAIN_APP), authority)
 
-    def start_and_post() -> list[RunEvent]:
-        assert main(["--config", str(tmp_path / "agent-service.toml")]) == 0
-        with served(served_apps[0]) as base_url:
-            return post_a_run(base_url)
+    events = through_the_service_entry(tmp_path, config, child_cleanup, monkeypatch, post_a_run)
 
-    events = own_real_children(child_cleanup, monkeypatch, start_and_post)
-
-    assert shown(events)[-1] == ending
+    assert shown(events)[-1] == ("succeeded", "done")
 
 
 @pytest.mark.parametrize("provider", list(Provider))

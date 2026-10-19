@@ -179,8 +179,8 @@ body rules be fixed before the build.
   where an unlisted tool counts as side-effecting. `agent_service.routing.route`
   is the one pure H5 decider.
 - **The stream.** A runner is a port per route. Production installs the
-  tool-free CLI runner (A1b-8), which serves no app that lists tools until
-  A1b-11; a run on a route or for an app without a runner ends as
+  CLI runner when `[cli]` is set; it serves every app, with or without tools
+  (A1b-11b2); a run on a route or for an app without a runner ends as
   `failed: provider_unavailable`, never as a success. The API runner arrives
   with A2b. `agent_service.run_events`
   owns the mapping from the core's turn events onto the wire: a tool call's
@@ -732,8 +732,10 @@ with no MCP SDK dependency.
   that outlasts its caller's cancellations, AnyIO's level one included, and delivers
   them after its outcome; `agent_providers.outlasting.outlast` owns that order (the
   outcome, then the first direct cancellation, then the level one) for this close and
-  for the core's reap of a turn. Not measured: the pinned CLI against it (A1b-12b). Whether an
-  overrun holds the place: A1b-11.
+  for the core's reap of a turn. Not measured: the pinned CLI against it (A1b-12b). An
+  overrun does not hold the place: the place guards the run's child group
+  (line 20); an overrun is logged by class and its task stays referenced until
+  it ends (A1b-11b2, D5).
 - *H9.* Its import contract says "client → stdlib, pydantic, HTTP and the MCP SDK
   only". That sentence is about `agent-client` and is untouched; HD1 adds no
   MCP SDK to any package, so it stays true.

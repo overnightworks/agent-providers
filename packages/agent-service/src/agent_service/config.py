@@ -196,6 +196,9 @@ class ServerConfig(_Section):
     port: int = Field(default=8080, ge=1, le=65535)
 
 
+MAX_TOOL_TIMEOUT_MS: Final = 2_147_483_647
+
+
 class RunConfig(_Section):
     """How a run's pace, length and volume are limited (decision record 0001, H6).
 
@@ -207,7 +210,9 @@ class RunConfig(_Section):
     heartbeat_interval_s: StrictInt = Field(default=15, ge=1, le=300)
     stall_timeout_s: StrictFloat = Field(default=30.0, gt=0, allow_inf_nan=False)
     idle_timeout_s: StrictFloat = Field(default=120.0, gt=0, allow_inf_nan=False)
-    max_duration_s: StrictFloat = Field(default=600.0, gt=0, allow_inf_nan=False)
+    max_duration_s: StrictFloat = Field(
+        default=600.0, gt=0, le=MAX_TOOL_TIMEOUT_MS // 1000, allow_inf_nan=False
+    )
     max_tool_calls: StrictInt = Field(default=30, ge=1)
     max_bytes: StrictInt = Field(default=4 * MAX_EVENT_BYTES, ge=1)
     max_parallel_cli_runs: StrictInt = Field(default=5, ge=1)

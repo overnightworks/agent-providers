@@ -648,13 +648,14 @@ def post_run(
     body: object = None,
     *,
     content: bytes | None = None,
+    timeout: float = 10,
 ) -> httpx.Response:
     payload = content if content is not None else json.dumps(run_body() if body is None else body)
     return httpx.post(
         f"{base_url}/runs",
         headers={"Content-Type": "application/json", **headers},
         content=payload,
-        timeout=10,
+        timeout=timeout,
     )
 
 

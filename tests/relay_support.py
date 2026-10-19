@@ -106,6 +106,7 @@ class ScriptedCalls:
         self.entered = asyncio.Event()
         self.cancelled = False
         self.unoffered_count = 0
+        self.reflected_count = 0
         self._replies = list(replies)
         self._gate = asyncio.Event()
         if not gated:
@@ -129,6 +130,9 @@ class ScriptedCalls:
 
     def unoffered(self) -> None:
         self.unoffered_count += 1
+
+    def reflected(self) -> None:
+        self.reflected_count += 1
 
     async def wait_entered(self) -> None:
         async with asyncio.timeout(WAIT_SECONDS):

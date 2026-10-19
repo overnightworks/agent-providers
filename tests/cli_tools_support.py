@@ -4,7 +4,9 @@
 speaks ``initialize``, ``tools/list`` and ``tools/call`` to the relay with the bearer header
 the file names, announces the relay as connected, optionally prints the CLI's own
 ``tool_use``/``tool_result`` lines, records every start fact and every reply it received under
-``capture``, and ends with a ``result`` line.
+``capture``, and ends with a ``result`` line. A refused
+``tools/list`` leaves it with no tools, and ``give_up_when_present`` makes it give each call up
+(``notifications/cancelled``, then a closed connection) once that file exists, instead of waiting.
 """
 
 from __future__ import annotations
@@ -49,7 +51,7 @@ STRAY_TOOL_LINES = (
 
 _CLAUDE_SOURCE = """\
 #!{python}
-import json, os, sys, time, urllib.error, urllib.request
+import http.client, json, os, sys, time, urllib.error, urllib.parse, urllib.request
 
 PLAN = json.loads({plan!r})
 if sys.argv[1:] == ["--version"]:
@@ -96,6 +98,27 @@ def rpc(method, params=None, request_id=None, version=None):
     return json.loads(raw) if raw else None
 
 
+def wait_for(path):
+    deadline = time.monotonic() + PLAN["timeout"]
+    while not os.path.exists(path):
+        if time.monotonic() > deadline:
+            sys.exit(3)
+        time.sleep(0.02)
+
+
+def call_then_give_up(arguments, request_id, version):
+    address = urllib.parse.urlsplit(relay["url"])
+    connection = http.client.HTTPConnection(address.hostname, address.port, timeout=PLAN["timeout"])
+    body = {{"jsonrpc": "2.0", "method": "tools/call", "id": request_id, "params": arguments}}
+    headers = {{
+        **relay["headers"], "Content-Type": "application/json", "MCP-Protocol-Version": version
+    }}
+    connection.request("POST", address.path, body=json.dumps(body), headers=headers)
+    wait_for(PLAN["give_up_when_present"])
+    rpc("notifications/cancelled", {{"requestId": request_id}}, version=version)
+    connection.close()
+
+
 def emit(payload):
     print(json.dumps(payload), flush=True)
 
@@ -105,17 +128,21 @@ version = None
 if PLAN["relay_status"] == "connected":
     version = rpc("initialize", {{"protocolVersion": "2025-11-25"}}, 1)["result"]["protocolVersion"]
     rpc("notifications/initialized", version=version)
-    listing = rpc("tools/list", {{}}, 2, version)["result"]["tools"]
+    listing = (rpc("tools/list", {{}}, 2, version) or {{}}).get("result", {{}}).get("tools")
 tool_names = ["mcp__relay__" + tool["name"] for tool in listing or []]
 emit({{
     "type": "system", "subtype": "init", "tools": tool_names, "apiKeySource": "none",
     "mcp_servers": [{{"name": "relay", "status": PLAN["relay_status"]}}],
 }})
+time.sleep(PLAN["linger_before_calls_seconds"])
 for number, call in enumerate(PLAN["calls"], start=1):
     for stray in PLAN["stray_lines"]:
         emit(stray)
     arguments = {{"name": call["name"], "arguments": call["arguments"]}}
-    rpc("tools/call", arguments, 10 + number, version)
+    if PLAN["give_up_when_present"]:
+        call_then_give_up(arguments, 10 + number, version)
+    else:
+        rpc("tools/call", arguments, 10 + number, version)
 for stray in PLAN["stray_lines"]:
     emit(stray)
 time.sleep(PLAN["linger_seconds"])
@@ -140,6 +167,8 @@ def a_relay_calling_claude(
     stray_tool_lines: bool = False,
     exit_code: int = 0,
     linger_seconds: float = 0.0,
+    linger_before_calls_seconds: float = 0.0,
+    give_up_when_present: Path | None = None,
     timeout_seconds: float = 20.0,
 ) -> Path:
     """The pinned program's stand-in for a relay run; it captures into ``directory/capture``."""
@@ -151,6 +180,8 @@ def a_relay_calling_claude(
         "stray_lines": list(STRAY_TOOL_LINES) if stray_tool_lines else [],
         "exit_code": exit_code,
         "linger_seconds": linger_seconds,
+        "linger_before_calls_seconds": linger_before_calls_seconds,
+        "give_up_when_present": None if give_up_when_present is None else str(give_up_when_present),
         "timeout": timeout_seconds,
     }
     binary = directory / "claude"

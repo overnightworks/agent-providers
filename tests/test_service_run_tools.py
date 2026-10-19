@@ -614,6 +614,8 @@ def test_a_callers_cancellation_never_cuts_the_close_short_and_is_delivered_afte
         if raises_loss:
             assert ending is loss
             assert scope.cancelled_caught is False
+            if cancellation is Cancellation.DIRECT:
+                assert closer.cancelling() == 1
         elif cancellation is Cancellation.DIRECT:
             assert isinstance(ending, asyncio.CancelledError)
         else:

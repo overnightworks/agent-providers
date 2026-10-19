@@ -11,6 +11,7 @@ import concurrent.futures
 import glob
 import json
 import logging
+import math
 import os
 import tempfile
 import threading
@@ -144,6 +145,8 @@ _TOOL_ISOLATION_FLAGS: Final = (
 
 RELAY_SERVER_NAME: Final = "relay"
 _OAUTH_TOKEN_VARIABLE: Final = "CLAUDE_CODE_OAUTH_TOKEN"
+_TOOL_TIMEOUT_VARIABLE: Final = "MCP_TOOL_TIMEOUT"
+_MILLISECONDS_PER_SECOND: Final = 1000
 _RUN_SWITCHES: Final = {
     "DISABLE_AUTOUPDATER": "1",
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
@@ -786,6 +789,7 @@ class ClaudeRun:
     max_tool_calls: int
     history: tuple[TurnMessage, ...] = field(repr=False)
     relay: RelayAccess | None = field(kw_only=True)
+    tool_timeout_seconds: float = field(kw_only=True)
 
     def __post_init__(self) -> None:
         if not isinstance(self.token, SecretStr):
@@ -796,6 +800,10 @@ class ClaudeRun:
             raise ChildProcessSpecificationError("A Claude run needs max_tool_calls of at least 1")
         if not self.history:
             raise ChildProcessSpecificationError("A Claude run needs a non-empty history")
+        if not (math.isfinite(self.tool_timeout_seconds) and self.tool_timeout_seconds > 0):
+            raise ChildProcessSpecificationError(
+                "A Claude run needs a finite, positive tool_timeout_seconds"
+            )
 
     @property
     def pool(self) -> CliProcessPool:
@@ -820,6 +828,12 @@ class ClaudeRun:
         }
         return json.dumps({"mcpServers": {RELAY_SERVER_NAME: server}}).encode()
 
+    def _tool_timeout_environment(self) -> dict[str, str]:
+        if self.relay is None:
+            return {}
+        milliseconds = math.ceil(self.tool_timeout_seconds * _MILLISECONDS_PER_SECOND)
+        return {_TOOL_TIMEOUT_VARIABLE: str(milliseconds)}
+
     def start(self, home: Path, working_directory: Path) -> CliRunStart:
         child = ChildProcess(
             binary=self.binary,
@@ -828,6 +842,7 @@ class ClaudeRun:
                 home,
                 **{_OAUTH_TOKEN_VARIABLE: self.token.get_secret_value()},
                 **_RUN_SWITCHES,
+                **self._tool_timeout_environment(),
             ),
             working_directory=working_directory,
         )

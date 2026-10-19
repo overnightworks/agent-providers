@@ -4,7 +4,9 @@ The relay's ``ToolCallBarrier`` is the one source of tool events, so the CLI's o
 the core decodes are dropped. A barrier event is handed out before the core's when both are
 ready, and it is accepted only when the service asks for the next event, which it does only
 after it checked, counted, recorded and queued the one it was given. A ready ``FinalEvent``
-therefore waits until the barrier has nothing ready, a queued event or a failure to raise.
+therefore waits until the barrier has nothing ready and no forward running upstream: its
+result, a queued event or a failure to raise comes first. A forward that never ends holds the
+final until the run's supervision ends the run.
 ``close`` stops the merged source and lets a containment loss of the core leave, whatever else
 the cleanup met.
 """
@@ -17,7 +19,7 @@ from collections.abc import AsyncGenerator
 from typing import Final, Protocol
 
 from agent_providers.errors import ContainmentLost
-from agent_providers.events import StreamEvent, ToolCallEvent, ToolResultEvent
+from agent_providers.events import FinalEvent, StreamEvent, ToolCallEvent, ToolResultEvent
 from agent_service.run_liveness import log_failure
 from agent_service.tool_relay import ToolCallsMisused
 
@@ -40,6 +42,8 @@ class HandedOutCalls(Protocol):
 
     def has_ready_event(self) -> bool: ...
 
+    def has_running_forward(self) -> bool: ...
+
 
 class RelayedEvents:
     def __init__(
@@ -58,7 +62,7 @@ class RelayedEvents:
         self._accept_the_yielded_event()
         while True:
             await self._wait_for_a_step()
-            await self._wait_for_the_barrier_while_it_has_a_ready_event()
+            await self._wait_for_the_barrier_while_it_has_work_for_the_core_event()
             if (relayed := self._finished_relay_event()) is not None:
                 return relayed
             if (core_event := self._finished_core_event()) is not None:
@@ -113,20 +117,42 @@ class RelayedEvents:
         steps = {step for step in (self._core_step, self._relay_step) if step is not None}
         await asyncio.wait(steps, return_when=asyncio.FIRST_COMPLETED)
 
-    async def _wait_for_the_barrier_while_it_has_a_ready_event(self) -> None:
-        """A ready core event is returned only while the barrier has nothing ready.
+    async def _wait_for_the_barrier_while_it_has_work_for_the_core_event(self) -> None:
+        """A ready core event is returned only while the barrier has nothing ready or running.
 
         The readiness is looked at again on every loop pass, because the ready call can be given
         up before the reader runs; the last look and the return have no await between them, so
-        nothing can be queued in between.
+        nothing can be queued in between. A running forward holds only a final, and is waited
+        for on the reader, which wakes when its result is queued or the barrier fails; the wait
+        ends with the close.
         """
         core_ready = self._core_step is not None and self._core_step.done()
         reader = self._relay_step
-        while core_ready and reader is not None and not reader.done() and self._barrier_is_ready():
-            await asyncio.sleep(0)
+        if not core_ready or reader is None:
+            return
+        while not reader.done():
+            if self._barrier_is_ready():
+                await asyncio.sleep(0)
+            elif self._core_event_is_final() and self._barrier_has_running_forward():
+                await asyncio.wait({reader})
+            else:
+                return
+
+    def _core_event_is_final(self) -> bool:
+        step = self._core_step
+        return (
+            step is not None
+            and step.done()
+            and not step.cancelled()
+            and step.exception() is None
+            and isinstance(step.result(), FinalEvent)
+        )
 
     def _barrier_is_ready(self) -> bool:
         return self._calls is not None and self._calls.has_ready_event()
+
+    def _barrier_has_running_forward(self) -> bool:
+        return self._calls is not None and self._calls.has_running_forward()
 
     async def _next_core_event(self) -> StreamEvent | _CoreEnded:
         return await anext(self._core, _CORE_ENDED)

@@ -705,6 +705,13 @@ with no MCP SDK dependency.
   up. `cancel()` frees it at once; a forward's completion alone never does, and a
   cancelled call never releases a result (line 22). Not measured: the pinned CLI against
   the release (A1b-12b).
+- *The final and the running forward (A1b-11b1).* A core final is held while a forward
+  runs upstream, also for a call the CLI gave up on: the result is handed out first, then
+  the final, so a side-effecting `tool_call` is never followed by `succeeded` without its
+  `tool_result` (a forward whose own upstream task ends cancelled during shutdown queues no
+  result by design). A forward that never ends holds the final until the run's idle timeout
+  or maximum duration ends it, or the client leaves. A capability hit on any relay answer
+  ends the run `provider_error`.
 - *The bounded close (A1b-10b2b, 18.10.2026).* `agent_service.run_tools` opens a run's
   tool set (the app's client, the barrier, the relay) and closes it in five steps (relay
   design item 13 without the retired DELETE): the listener and the barrier stopped; the
@@ -1374,7 +1381,7 @@ One neutral verdict judges a run's start announcement (`cli_run.verdict_of`): on
 
 ### A1b-5r relay attachment (head, 19.10.2026)
 
-A run's relay reaches its CLI only as the run's MCP config: one http server named `relay`, with the relay's URL and `Authorization: Bearer <secret>`. The config is written as a 0600 file in the run's private home, the way A1b-0c measured it on 2.1.302 (c1), and is passed by path, never inline (line 16). The capability is never in it (Q1 a). `cli_run.RelayAccess` is the one type for a relay's access, and `cli_run.relay_authorization` is the one form of its header, which the service's relay compares. The file inherits the run tree's lifetime and its residual: normal cleanup removes it with the tree, a reservation delays the removal, and a failed cleanup can leave it until the host clears the root. Until then the relay's secret is readable by the service's user and root, as line 19's residual names. The access comes unchanged from the run's own `Relay.start`; init detects a failed connection but neither authenticates the destination nor prevents disclosure, because the CLI sends the header before init, and a host that builds a `RelayAccess` itself owns that trust. The tool timeout is A1b-11's.
+A run's relay reaches its CLI only as the run's MCP config: one http server named `relay`, with the relay's URL and `Authorization: Bearer <secret>`. The config is written as a 0600 file in the run's private home, the way A1b-0c measured it on 2.1.302 (c1), and is passed by path, never inline (line 16). The capability is never in it (Q1 a). `cli_run.RelayAccess` is the one type for a relay's access, and `cli_run.relay_authorization` is the one form of its header, which the service's relay compares. The file inherits the run tree's lifetime and its residual: normal cleanup removes it with the tree, a reservation delays the removal, and a failed cleanup can leave it until the host clears the root. Until then the relay's secret is readable by the service's user and root, as line 19's residual names. The access comes unchanged from the run's own `Relay.start`; init detects a failed connection but neither authenticates the destination nor prevents disclosure, because the CLI sends the header before init, and a host that builds a `RelayAccess` itself owns that trust. The child gets `MCP_TOOL_TIMEOUT` in milliseconds from `[runs] max_duration_s` when a relay is attached (A1b-11b1); holds above 130 s are not measured (A1b-12b).
 
 ### A1b measured: grok 1.0.60
 

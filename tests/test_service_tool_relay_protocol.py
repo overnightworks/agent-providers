@@ -322,11 +322,14 @@ def reflected_in_a_schema() -> list[ToolDefinition]:
     ],
 )
 def test_a_tool_list_carrying_the_capability_is_refused(offer: Any) -> None:
-    owner = owner_of(offer())
+    calls = ScriptedCalls()
+    owner = owner_of(offer(), calls=calls)
     body = json_rpc("tools/list", 2)
 
     with pytest.raises(CapabilityReflected):
         answered(owner, body)
+
+    assert calls.reflected_count == 1
 
 
 @pytest.mark.parametrize(
@@ -345,11 +348,14 @@ def test_a_tool_list_carrying_the_capability_is_refused(offer: Any) -> None:
 def test_a_tool_reply_carrying_the_capability_is_refused(
     reply: JsonRpcResponse | JsonRpcError,
 ) -> None:
-    owner = owner_of(calls=ScriptedCalls([reply]))
+    calls = ScriptedCalls([reply])
+    owner = owner_of(calls=calls)
     body = json_rpc("tools/call", 5, {"name": "save_lyrics"})
 
     with pytest.raises(CapabilityReflected):
         answered(owner, body)
+
+    assert calls.reflected_count == 1
 
 
 @pytest.mark.parametrize(
@@ -362,11 +368,14 @@ def test_a_tool_reply_carrying_the_capability_is_refused(
 def test_a_locally_generated_reply_echoing_the_capability_as_its_id_is_refused(
     method: str, params: dict[str, Any] | None
 ) -> None:
-    owner = owner_of()
+    calls = ScriptedCalls()
+    owner = owner_of(calls=calls)
     body = json_rpc(method, SEGMENT, params)
 
     with pytest.raises(CapabilityReflected):
         answered(owner, body)
+
+    assert calls.reflected_count == 1
 
 
 def test_a_dropped_definition_never_reaches_the_cli_even_when_it_carries_the_capability() -> None:
@@ -495,6 +504,7 @@ def test_a_call_in_flight_when_another_connection_refuses_the_owner_gets_nothing
     assert [(event, kind) for event, kind, _ in failure_lines(caplog)] == [
         (OWNER_FAILED, "CapabilityReflected")
     ] * refused_lines
+    assert calls.reflected_count == 1
 
 
 def test_a_gated_call_sends_nothing_until_released_and_then_exactly_its_reply(

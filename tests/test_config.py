@@ -6,6 +6,8 @@ import copy
 import logging
 import os
 import pickle
+import stat
+import time
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -18,6 +20,7 @@ from provider_test_support import (
     override_grok_runtime,
     override_provider_runtime,
     override_turn_runtime,
+    shell_child,
 )
 from pydantic import ValidationError
 
@@ -26,7 +29,10 @@ from agent_providers.catalog import (
     ProviderRouteReadinessState,
     probe_provider_route,
 )
+from agent_providers.claude import provider as claude_provider
 from agent_providers.config import (
+    GrokTurnRuntime,
+    McpServerSpec,
     PrivateWorkingRoot,
     ProviderNotConfiguredError,
     ProviderRuntimeAlreadyConfiguredError,
@@ -46,6 +52,7 @@ from agent_providers.config import (
     current_turn_config,
     reset_config,
 )
+from agent_providers.process import run_cli_bounded
 
 
 def _catalog_only_runtime(tmp_path: Path) -> ProviderRuntimeConfig:
@@ -576,3 +583,176 @@ def test_a_host_with_a_removed_flat_codex_turn_field_is_refused_naming_the_field
     with pytest.raises(ValidationError, match=removed_flat_field):
         TurnRuntimeConfig(**facts)
 
+
+_PREFIX_MODELS = {"mcp_server": McpServerSpec, "grok": GrokTurnRuntime}
+_PREFIX_FIELDS = [
+    pytest.param("mcp_server", "config_file_prefix", id="mcp-config"),
+    pytest.param("grok", "prompt_file_prefix", id="grok-prompt"),
+]
+
+
+def _turns_facts_with(block: str, field: str, value: object) -> dict:
+    turns = current_turn_config().model_dump()
+    turns[block][field] = value
+    return turns
+
+
+def _host_facts_with(block: str, field: str, value: object, root: Path) -> dict:
+    return {
+        **current_config().model_dump(),
+        "cli_working_directory_root": root,
+        "turns": _turns_facts_with(block, field, value),
+    }
+
+
+def _the_prefix_block_built_with(block: str, field: str, value: object) -> object:
+    return _PREFIX_MODELS[block](**_turns_facts_with(block, field, value)[block])
+
+
+def _refusal_of(build: Callable[[], object]) -> ValidationError:
+    with pytest.raises(ValidationError) as raised:
+        build()
+    return raised.value
+
+
+_PREFIX_ENTRY_LEVELS = [
+    pytest.param(
+        lambda block, field, value, root: _the_prefix_block_built_with(block, field, value),
+        id="block",
+    ),
+    pytest.param(
+        lambda block, field, value, root: TurnRuntimeConfig(
+            **_turns_facts_with(block, field, value),
+        ),
+        id="turn-config",
+    ),
+    pytest.param(
+        lambda block, field, value, root: configure(
+            ProviderRuntimeConfig.model_validate(_host_facts_with(block, field, value, root)),
+        ),
+        id="host-config",
+    ),
+]
+
+_PREFIXES_THAT_COULD_LEAVE_THE_ROOT = ["/tmp/x-", "../esc-", "../", "sub/", "a/b-", "/", "a\x00b"]
+_PREFIXES_OUTSIDE_THE_CLOSED_NAME_SET = ["a b-", "x*", "ok\n", "pr\u00e4fix-"]
+_PLAIN_PREFIXES = ["notes-mcp-", ".hid-", "a_b.c-1", "NOTES-CLI-", ".", ".."]
+_BOUNDARY_PREFIXES = [
+    pytest.param("..", id="two-dots"),
+    pytest.param(".", id="one-dot"),
+    pytest.param("A" * 64, id="64-uppercase"),
+    pytest.param("NOTES-", id="uppercase-stem"),
+]
+
+
+@pytest.mark.parametrize(("block", "field"), _PREFIX_FIELDS)
+@pytest.mark.parametrize("prefix", _PREFIXES_THAT_COULD_LEAVE_THE_ROOT)
+def test_a_file_prefix_that_could_leave_the_root_is_refused_by_both_hosts_fields(
+    block: str, field: str, prefix: str,
+) -> None:
+    refused = _refusal_of(lambda: _the_prefix_block_built_with(block, field, prefix))
+
+    assert refused.errors(include_input=False)[0]["loc"] == (field,)
+
+
+@pytest.mark.parametrize(("block", "field"), _PREFIX_FIELDS)
+@pytest.mark.parametrize("prefix", _PREFIXES_OUTSIDE_THE_CLOSED_NAME_SET)
+def test_a_file_prefix_outside_the_closed_name_set_is_refused(
+    block: str, field: str, prefix: str,
+) -> None:
+    refused = _refusal_of(lambda: _the_prefix_block_built_with(block, field, prefix))
+
+    assert refused.errors(include_input=False)[0]["loc"] == (field,)
+
+
+@pytest.mark.parametrize(("block", "field"), _PREFIX_FIELDS)
+def test_a_file_prefix_is_accepted_at_64_characters(block: str, field: str) -> None:
+    accepted = _the_prefix_block_built_with(block, field, "a" * 64)
+
+    assert getattr(accepted, field) == "a" * 64
+
+
+@pytest.mark.parametrize(("block", "field"), _PREFIX_FIELDS)
+@pytest.mark.parametrize(
+    "prefix",
+    [pytest.param("a" * 65, id="65-characters"), pytest.param("", id="empty")],
+)
+def test_a_file_prefix_beyond_the_length_bounds_is_refused(
+    block: str, field: str, prefix: str,
+) -> None:
+    refused = _refusal_of(lambda: _the_prefix_block_built_with(block, field, prefix))
+
+    assert refused.errors(include_input=False)[0]["loc"] == (field,)
+
+
+@pytest.mark.parametrize(("block", "field"), _PREFIX_FIELDS)
+@pytest.mark.parametrize("prefix", _PLAIN_PREFIXES)
+def test_a_plain_file_prefix_is_accepted(block: str, field: str, prefix: str) -> None:
+    accepted = _the_prefix_block_built_with(block, field, prefix)
+
+    assert getattr(accepted, field) == prefix
+
+
+@pytest.mark.parametrize("entry", _PREFIX_ENTRY_LEVELS)
+@pytest.mark.parametrize(("block", "field"), _PREFIX_FIELDS)
+def test_a_refused_file_prefix_error_names_the_field_and_never_holds_the_value(
+    block: str, field: str, entry: Callable[..., object], tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    canary = "canary/prefix-7f3a"
+
+    with caplog.at_level(logging.DEBUG):
+        refused = _refusal_of(lambda: entry(block, field, canary, tmp_path))
+
+    assert field in str(refused)
+    assert "canary" not in str(refused) + repr(refused) + caplog.text
+
+
+@pytest.mark.parametrize(("block", "field"), _PREFIX_FIELDS)
+def test_a_refused_file_prefix_in_a_host_config_installs_nothing_and_keeps_the_earlier_install(
+    block: str, field: str, tmp_path: Path,
+) -> None:
+    earlier = current_config()
+    facts = _host_facts_with(block, field, "../esc-", tmp_path)
+
+    refused = _refusal_of(lambda: configure(ProviderRuntimeConfig.model_validate(facts)))
+
+    assert refused.errors(include_input=False)[0]["loc"] == ("turns", block, field)
+    assert current_config() is earlier
+
+
+@pytest.mark.parametrize("prefix", _BOUNDARY_PREFIXES)
+def test_an_accepted_mcp_config_prefix_writes_a_mode_0600_file_directly_in_the_root(
+    prefix: str, tmp_path: Path,
+) -> None:
+    override_provider_runtime(cli_working_directory_root=tmp_path)
+    spec = _the_prefix_block_built_with("mcp_server", "config_file_prefix", prefix)
+
+    path = Path(claude_provider._write_mcp_config(spec, "u-1"))
+
+    assert path.parent == tmp_path
+    assert path.name.startswith(prefix)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize("prefix", _BOUNDARY_PREFIXES)
+def test_an_accepted_grok_prompt_prefix_writes_a_mode_0600_file_directly_in_the_root(
+    prefix: str, tmp_path: Path,
+) -> None:
+    override_provider_runtime(cli_working_directory_root=tmp_path)
+    grok = _the_prefix_block_built_with("grok", "prompt_file_prefix", prefix)
+
+    outcome = run_cli_bounded(
+        shell_child("-c", 'printf "%s %s" "$1" "$(stat -c %a "$1")"', "unused", "placeholder"),
+        stdin_payload=None,
+        read="all",
+        deadline=time.monotonic() + 5,
+        prompt_file_bytes=b"private prompt",
+        prompt_file_arg_index=3,
+        prompt_file_prefix=grok.prompt_file_prefix,
+    )
+    path, mode = outcome.stdout.rsplit(" ", 1)
+
+    assert Path(path).parent == tmp_path
+    assert Path(path).name.startswith(prefix)
+    assert mode == "600"

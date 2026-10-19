@@ -565,7 +565,7 @@ def test_the_child_of_a_tool_run_gets_the_configured_tool_timeout(
         runs={"max_duration_s": 300.0005},
     )
 
-    assert "MCP_TOOL_TIMEOUT=300001" in run.capture.text_of("environment").splitlines()
+    assert run.capture.text_of("environment").splitlines().count("MCP_TOOL_TIMEOUT=300001") == 1
 
 
 def noting_the_call_then(tmp_path: Path, wait: Callable[[], None]) -> Mapping[str, Responder]:

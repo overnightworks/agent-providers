@@ -1,0 +1,7 @@
+claim_id = "11ab94cd92c4431394523468dcfe4396"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "3fc40c3ee11e860246d0ca7673e7de372aa43308"
+branch = "claude/issue-311-8e-host-file-prefixes"
+scope = ["README.md", "src/agent_providers/config.py", "tests/test_config.py"]
+opened_commit = "ccd2bbf15b9d670088042d314c0992c9ece07bdc"

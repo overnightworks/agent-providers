@@ -201,8 +201,19 @@ def test_the_relay_secret_is_only_in_the_relay_file(
     assert files_with_the_secret == ([] if access is None else [RELAY_CONFIG_NAME])
 
 
+@pytest.mark.parametrize(
+    ("relay", "tool_timeout"),
+    [
+        pytest.param(None, {}, id="tool-free"),
+        pytest.param(ACCESS, {"MCP_TOOL_TIMEOUT": "600000"}, id="with-a-relay"),
+    ],
+)
 def test_the_environment_is_the_closed_one_plus_the_token_and_the_switches(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_ambient_machine_variables: None
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    no_ambient_machine_variables: None,
+    relay: RelayAccess | None,
+    tool_timeout: dict[str, str],
 ) -> None:
     monkeypatch.setenv("HOME", OPERATOR_HOME)
     monkeypatch.setenv("PATH", "/usr/bin")
@@ -213,7 +224,7 @@ def test_the_environment_is_the_closed_one_plus_the_token_and_the_switches(
     monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", f"{OPERATOR_HOME}/.claude")
 
-    child = started(tmp_path).child
+    child = started(tmp_path, relay=relay).child
 
     assert dict(child.environment) == {
         "HOME": str(tmp_path / "home"),
@@ -225,6 +236,7 @@ def test_the_environment_is_the_closed_one_plus_the_token_and_the_switches(
         "DISABLE_AUTOUPDATER": "1",
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
         "DISABLE_TELEMETRY": "1",
+        **tool_timeout,
     }
     assert child.working_directory == tmp_path / "work"
     assert child.binary == Path("/opt/claude/claude")

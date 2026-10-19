@@ -172,6 +172,28 @@ def shown(events: list[StreamEvent]) -> list[tuple[str, str]]:
 LOOP_PASSES_A_HELD_FINAL_IS_WATCHED = 20
 
 
+class QueryCountingCalls:
+    """The barrier as the owner's port, counting how often the merger asked it a question."""
+
+    def __init__(self, barrier: ToolCallBarrier) -> None:
+        self.questions = 0
+        self._barrier = barrier
+
+    async def next_event(self):
+        return await self._barrier.next_event()
+
+    def accept(self, event) -> None:
+        self._barrier.accept(event)
+
+    def has_ready_event(self) -> bool:
+        self.questions += 1
+        return self._barrier.has_ready_event()
+
+    def has_running_forward(self) -> bool:
+        self.questions += 1
+        return self._barrier.has_running_forward()
+
+
 async def loop_passes(count: int) -> None:
     for _ in range(count):
         await asyncio.sleep(0)
@@ -416,6 +438,31 @@ def test_a_final_waits_for_the_result_of_a_forward_still_running() -> None:
         yielded = [await asyncio.wait_for(next_event, WAIT_SECONDS), *await taken(events, 1)]
 
         assert shown(yielded) == [("tool_result", "call-1"), ("final", "done")]
+        barrier.stop()
+        await events.close()
+
+    drive(scenario())
+
+
+def test_a_held_final_waits_on_the_barrier_and_does_not_spin() -> None:
+    async def scenario() -> None:
+        app, core = RecordingApp(gated=True), ScriptedCore()
+        barrier = a_barrier(app)
+        Arrivals(barrier).arrive(1)
+        calls = QueryCountingCalls(barrier)
+        events = RelayedEvents(core.stream(), calls)
+        await taken(events, 1)
+        core.feed(FINAL)
+        held = asyncio.ensure_future(anext(events))
+        await yield_until(lambda: app.called == ["edit_note"])
+
+        await loop_passes(LOOP_PASSES_A_HELD_FINAL_IS_WATCHED)
+        questions_after_a_few_passes = calls.questions
+        await loop_passes(2 * LOOP_PASSES_A_HELD_FINAL_IS_WATCHED)
+
+        assert (held.done(), calls.questions) == (False, questions_after_a_few_passes)
+        app.release()
+        await asyncio.wait_for(held, WAIT_SECONDS)
         barrier.stop()
         await events.close()
 

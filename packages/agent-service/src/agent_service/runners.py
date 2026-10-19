@@ -28,7 +28,6 @@ from uuid import UUID
 from agent_client.wire import RunRequest
 from agent_providers.events import StreamEvent
 from agent_service.capability import Capability
-from agent_service.config import AppConfig
 from agent_service.identity import Principal
 from agent_service.routing import Api, Cli, ServedRoute
 
@@ -52,7 +51,7 @@ class Runners:
     cli: Runner | None = None
     api: Runner | None = None
 
-    def for_route(self, served: ServedRoute, app: AppConfig) -> Runner | None:
+    def for_route(self, served: ServedRoute) -> Runner | None:
         match served:
             case Cli():
                 return self.cli

@@ -126,6 +126,7 @@ TOOLS = {"save_note": "side_effecting", "read_note": "read_only"}
 SETTLE_SECONDS = 10.0
 STUCK_APP_BOUND_SECONDS = 30.0
 HELD_RUN_CLIENT_TIMEOUT_SECONDS = STUCK_APP_BOUND_SECONDS + SETTLE_SECONDS
+CLIENT_LEAVES_WITHIN_SECONDS = TEST_WAIT_SECONDS / 2
 RELAY_TASK_PREFIXES = ("relay:", "upstream:", "run-tools:")
 
 
@@ -1269,7 +1270,7 @@ def test_a_call_during_the_reap_is_refused_and_never_forwarded(
             async with asyncio.timeout(TEST_WAIT_SECONDS):
                 await closing
             assert await idle.at_eof()
-            await yield_until(lambda: app.fake.ended_connections == app.fake.accepted_connections)
+            await the_app_saw_the_client_leave(app)
             assert pending_tool_tasks() == []
 
         drive_scripted(monkeypatch, child, scenario(), loop_factory=SteppedLoop)
@@ -1299,6 +1300,12 @@ async def loop_settled() -> None:
     loop = asyncio.get_running_loop()
     assert isinstance(loop, SteppedLoop)
     await loop.settled()
+
+
+async def the_app_saw_the_client_leave(app: ToolApp) -> None:
+    """Bounded below the fake's own idle timeout, which would otherwise end an idle connection."""
+    async with asyncio.timeout(CLIENT_LEAVES_WITHIN_SECONDS):
+        await yield_until(lambda: app.fake.ended_connections == app.fake.accepted_connections)
 
 
 @contextlib.asynccontextmanager
@@ -1396,9 +1403,7 @@ def test_an_unconfirmed_group_with_tools_closes_them_and_holds_the_place(
     child = an_unconfirmed_group()
     child.reap_gate.set()
     held = HeldRequests(bound_seconds=STUCK_APP_BOUND_SECONDS)
-    with a_tool_app(
-        authority, list(TOOLS), overrides={"tools/call": held.responder(saved)}, keep_alive=True
-    ) as app:
+    with a_tool_app(authority, list(TOOLS), overrides={"tools/call": held.responder(saved)}) as app:
         run = a_scripted_tool_run(tmp_path, authority, app)
 
         async def scenario() -> None:
@@ -1421,9 +1426,7 @@ def test_a_loss_beside_a_cancelled_close_ends_provider_error_with_tools_open(
 ):
     child = an_unconfirmed_group()
     held = HeldRequests(bound_seconds=STUCK_APP_BOUND_SECONDS)
-    with a_tool_app(
-        authority, list(TOOLS), overrides={"tools/call": held.responder(saved)}, keep_alive=True
-    ) as app:
+    with a_tool_app(authority, list(TOOLS), overrides={"tools/call": held.responder(saved)}) as app:
         run = a_scripted_tool_run(tmp_path, authority, app)
 
         async def scenario() -> None:

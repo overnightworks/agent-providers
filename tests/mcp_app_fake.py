@@ -7,6 +7,8 @@ supplies. Every wait carries a timeout and ``close`` releases every held
 response, so no handler outlives its test. Connections are HTTP/1.0 unless
 the server is started with ``keep_alive``; every accepted connection is
 counted before its TLS handshake, and every ended connection once its handler is done.
+A response from ``HeldRequests`` is held: the request is taken, no answer is sent, and only
+the peer leaving that request's own connection marks it as left.
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ from __future__ import annotations
 import json
 import ssl
 import threading
+import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -138,11 +141,121 @@ class RecordedRequest:
     def rpc_method(self) -> str | None:
         return self.message.get("method")
 
+    @property
+    def identity(self) -> tuple[int, Any]:
+        return self.connection, self.message.get("id")
+
+
+class HeldRequest:
+    """A request the app took and answers only once released.
+
+    The handler of its connection calls ``keep_until_released``; the request counts as left only
+    when that connection shows the peer's TLS end or reset. Running into the bound, the app
+    closing and the test releasing never mark it, and a failure of the handler is kept for the
+    test thread to see in ``wait_for_the_end``.
+    """
+
+    def __init__(self, request: RecordedRequest, answer: FakeResponse, bound_seconds: float):
+        self.request = request
+        self.answer = answer
+        self._bound_seconds = bound_seconds
+        self._released = threading.Event()
+        self._ended = threading.Event()
+        self._peer_left = threading.Event()
+        self._failure: Exception | None = None
+
+    @property
+    def peer_left(self) -> bool:
+        return self._peer_left.is_set()
+
+    @property
+    def released(self) -> bool:
+        return self._released.is_set()
+
+    def release(self) -> None:
+        self._released.set()
+
+    def wait_for_the_end(self) -> bool:
+        """Whether the peer left, once the handler stopped holding; raises what failed it."""
+        assert self._ended.wait(self._bound_seconds + WAIT_SECONDS), "the held request never ended"
+        if self._failure is not None:
+            raise self._failure
+        return self.peer_left
+
+    def wait_for_peer_left(self) -> None:
+        assert self.wait_for_the_end(), "the held request ended without its peer leaving"
+
+    def keep_until_released(self, connection: ssl.SSLSocket, app_closing: threading.Event) -> bool:
+        """Hold the connection; true when the test released it and the answer is to be sent."""
+        connection.settimeout(POLL_SECONDS)
+        deadline = time.monotonic() + self._bound_seconds
+        try:
+            while not (self._released.is_set() or app_closing.is_set()):
+                if time.monotonic() > deadline:
+                    raise TimeoutError("the held request was neither released nor left")
+                if self._peer_has_left(connection):
+                    self._peer_left.set()
+                    return False
+            return self._released.is_set()
+        except Exception as failure:
+            self._failure = failure
+            return False
+        finally:
+            self._ended.set()
+
+    @staticmethod
+    def _peer_has_left(connection: ssl.SSLSocket) -> bool:
+        try:
+            received = connection.recv(1)
+        except TimeoutError:
+            return False
+        except (ConnectionResetError, BrokenPipeError):
+            return True
+        if received:
+            raise RuntimeError("the peer sent more while its request was held")
+        return True
+
+
+class HeldRequests:
+    """The requests a test holds in the app; ``responder`` turns an answer into a held one."""
+
+    def __init__(self, bound_seconds: float = WAIT_SECONDS) -> None:
+        self._bound_seconds = bound_seconds
+        self._condition = threading.Condition()
+        self._held: list[HeldRequest] = []
+
+    def responder(self, answer: Responder) -> Responder:
+        def holding(request: RecordedRequest) -> FakeResponse:
+            held = HeldRequest(request, answer(request), self._bound_seconds)
+            with self._condition:
+                self._held.append(held)
+                self._condition.notify_all()
+            return FakeResponse(fate=Fate.HOLD, hold=held)
+
+        return holding
+
+    def wait_for(self, count: int) -> list[HeldRequest]:
+        """The requests held right now, once at least ``count`` are."""
+        with self._condition:
+            assert self._condition.wait_for(
+                lambda: len(self._unreleased()) >= count, self._bound_seconds
+            ), f"fewer than {count} requests were held"
+            return self._unreleased()
+
+    def release_all(self) -> None:
+        with self._condition:
+            for held in self._held:
+                held.release()
+
+    def _unreleased(self) -> list[HeldRequest]:
+        return [held for held in self._held if not held.released]
+
 
 class Fate(StrEnum):
     ANSWER = "answer"
     DROP_UNANSWERED = "drop_unanswered"
     CUT_MID_BODY = "cut_mid_body"
+    HOLD = "hold"
 
 
 @dataclass(frozen=True)
@@ -151,7 +264,8 @@ class FakeResponse:
 
     ``held_back`` is sent only after the test releases it. The ``fate`` makes
     the app close the connection without any answer, or after ``body`` while
-    the headers promised ``held_back`` as well.
+    the headers promised ``held_back`` as well. The ``HOLD`` fate carries the ``hold`` that
+    decides when, and whether, its answer is sent.
     """
 
     status: int = 200
@@ -160,6 +274,11 @@ class FakeResponse:
     headers: Mapping[str, str] = field(default_factory=dict)
     held_back: bytes = b""
     fate: Fate = Fate.ANSWER
+    hold: HeldRequest | None = None
+
+    def __post_init__(self) -> None:
+        if (self.fate is Fate.HOLD) != (self.hold is not None):
+            raise ValueError("a response is held exactly when it carries its hold")
 
 
 DROPPED: Final = FakeResponse(fate=Fate.DROP_UNANSWERED)
@@ -255,6 +374,11 @@ class _Handler(BaseHTTPRequestHandler):
         if response.fate is Fate.DROP_UNANSWERED:
             self.close_connection = True
             return
+        if response.hold is not None:
+            if not response.hold.keep_until_released(self.connection, self.server.closing):
+                self.close_connection = True
+                return
+            response = response.hold.answer
         self._send(response)
 
     def do_DELETE(self) -> None:
@@ -301,6 +425,7 @@ class McpAppFake(ThreadingHTTPServer):
         self.responder = responder
         self.keep_alive = keep_alive
         self.tail_released = threading.Event()
+        self.closing = threading.Event()
         self._accepted_connections = 0
         self._ended_connections = 0
         self._recorded: list[RecordedRequest] = []
@@ -354,6 +479,7 @@ def serving(
     try:
         yield fake
     finally:
+        fake.closing.set()
         fake.tail_released.set()
         fake.shutdown()
         fake.server_close()

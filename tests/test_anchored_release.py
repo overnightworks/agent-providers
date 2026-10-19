@@ -34,7 +34,8 @@ from anchored_leaders import (
     spawn_warnings,
     start_bound,
 )
-from anchored_support import GONE, TEST_WAIT_SECONDS, ChildCleanup, Exited, OwnedChild
+from anchored_support import GONE, ChildCleanup, Exited, OwnedChild
+from bounds import TEST_WAIT_SECONDS
 from provider_test_support import call_within_deadline
 
 from agent_providers import spawn

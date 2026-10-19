@@ -23,7 +23,7 @@ from types import SimpleNamespace
 from typing import Literal
 
 import pytest
-from anchored_support import TEST_WAIT_SECONDS
+from bounds import TEST_WAIT_SECONDS
 
 from agent_providers.procfs import GroupCensus, ProcView, group_census
 

@@ -12,6 +12,7 @@ import threading
 from collections.abc import Iterator
 from pathlib import Path
 
+import bounds
 import provider_test_support
 import pytest
 import uvicorn
@@ -528,7 +529,7 @@ def test_a_probe_refused_before_its_spawn_keeps_its_tree_until_the_late_spawn_is
     release_spawn = threading.Event()
 
     def held_door(child, *, stderr):
-        assert release_spawn.wait(timeout=provider_test_support.TEST_WAIT_SECONDS)
+        assert release_spawn.wait(timeout=bounds.TEST_WAIT_SECONDS)
         return real_door(child, stderr=stderr)
 
     real_door = install_cli_door(monkeypatch, held_door)

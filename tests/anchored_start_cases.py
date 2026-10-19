@@ -27,13 +27,8 @@ from anchored_kernel import (
     install_kernel,
 )
 from anchored_leaders import ExitProbe, InstrumentedLock, Leaders, spawn_warnings
-from anchored_support import (
-    GONE,
-    TEST_WAIT_SECONDS,
-    ChildCleanup,
-    OwnedChild,
-    kill_children,
-)
+from anchored_support import GONE, ChildCleanup, OwnedChild, kill_children
+from bounds import TEST_WAIT_SECONDS
 
 from agent_providers import spawn
 from agent_providers.spawn import ChildIdentityLost

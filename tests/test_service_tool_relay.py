@@ -10,7 +10,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import pytest
-from mcp_app_fake import WAIT_SECONDS
+from bounds import TEST_WAIT_SECONDS
 from pydantic import SecretStr
 from relay_support import (
     OWNER_ANSWER,
@@ -217,7 +217,7 @@ def test_close_ends_idle_and_mid_head_connections_and_refuses_the_old_port() -> 
         with pytest.raises(ConnectionRefusedError):
             await RawClient.connect(port)
         assert relay_tasks() == []
-        async with asyncio.timeout(WAIT_SECONDS):
+        async with asyncio.timeout(TEST_WAIT_SECONDS):
             await relay.close()
 
     drive(scenario)

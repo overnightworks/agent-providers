@@ -43,7 +43,7 @@ import httpx
 import jwt
 import pytest
 import uvicorn
-from anchored_support import TEST_WAIT_SECONDS
+from bounds import TEST_WAIT_SECONDS
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import FastAPI

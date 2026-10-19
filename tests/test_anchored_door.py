@@ -22,8 +22,9 @@ from anchored_kernel import (
     watcher_names,
     watcher_thread,
 )
-from anchored_leaders import Leaders, asyncio_errors, bounded, open_door
+from anchored_leaders import Leaders, asyncio_errors, open_door
 from anchored_support import GONE, SIGKILLED, ChildCleanup, Exited
+from bounds import within_the_bound
 from provider_test_support import make_the_first_parent_close_of_a_door_fail
 
 from agent_providers import procfs, spawn
@@ -105,7 +106,7 @@ def failed_door(
             raise
 
     with pytest.raises((asyncio.CancelledError, FileNotFoundError, InjectedStop)):
-        child_cleanup.capture(lambda: runner.run(bounded(attempt())))
+        child_cleanup.capture(lambda: runner.run(within_the_bound(attempt())))
     (failure,) = recorded
     return failure
 
@@ -172,7 +173,7 @@ def test_the_door_serves_streams_and_keeps_the_exited_leader_anchored_until_rele
         assert child_cleanup.state(opened.owned) == GONE
         child.release()
 
-    door_runner.run(bounded(scenario()))
+    door_runner.run(within_the_bound(scenario()))
 
     assert child.returncode == 3
     assert descriptors() - descriptors_before_the_door - {opened.owned.pidfd} == frozenset()
@@ -209,7 +210,7 @@ def test_communicate_returns_both_streams_and_leaves_the_leader_unreaped(
 ) -> None:
     opened = open_door(door_runner, child_cleanup, leaders.describe(script=script))
 
-    streams = door_runner.run(bounded(opened.child.communicate(given)))
+    streams = door_runner.run(within_the_bound(opened.child.communicate(given)))
 
     assert streams == expected_streams
     assert child_cleanup.state(opened.owned) == Exited(expected_code)
@@ -245,7 +246,7 @@ def test_release_discards_stdin_output_that_is_still_buffered(
         return buffered_before, buffered_after, held_bytes, remaining
 
     buffered_before, buffered_after, held_bytes, remaining = door_runner.run(
-        bounded(hold_stdin_and_release())
+        within_the_bound(hold_stdin_and_release())
     )
 
     assert (buffered_before > 0) == (pending_bytes > 0)
@@ -273,7 +274,7 @@ def test_a_cancelled_communicate_under_backpressure_still_closes_stdin(
         child.release()
         return closing
 
-    assert door_runner.run(bounded(scenario()))
+    assert door_runner.run(within_the_bound(scenario()))
 
 
 def test_a_pipe_whose_file_object_cannot_be_made_leaves_no_descriptor(
@@ -323,7 +324,7 @@ def test_the_stream_limit_is_asyncios_unless_one_is_given(
         child.release()
         return short
 
-    assert door_runner.run(bounded(scenario())) == b"a" * short_line + b"\n"
+    assert door_runner.run(within_the_bound(scenario())) == b"a" * short_line + b"\n"
 
 
 @pytest.mark.parametrize("cancelled_attachment", [1, 2, 3], ids=["stdout", "stderr", "stdin"])
@@ -390,7 +391,7 @@ def test_exited_serves_every_waiter_after_a_cancelled_or_timed_out_one(
         child.release()
         return concurrent, later
 
-    assert door_runner.run(bounded(scenario())) == ([3, 3], 3)
+    assert door_runner.run(within_the_bound(scenario())) == ([3, 3], 3)
 
 
 def test_a_loss_before_the_exit_raises_from_exited_and_release_still_frees_the_child(
@@ -415,7 +416,7 @@ def test_a_loss_before_the_exit_raises_from_exited_and_release_still_frees_the_c
         finally:
             child.stdin.close()
 
-    door_runner.run(bounded(scenario()))
+    door_runner.run(within_the_bound(scenario()))
 
     assert child_cleanup.wait_exited(opened.owned) == 0
     assert child_cleanup.state(opened.owned) == Exited(0)
@@ -473,7 +474,7 @@ def test_releasing_an_exited_child_closes_every_descriptor_though_one_close_rais
         await send_line(opened.child, b"0\n")
         await opened.child.exited()
 
-    door_runner.run(bounded(exit_the_child()))
+    door_runner.run(within_the_bound(exit_the_child()))
     fault.armed = True
     with pytest.raises(OSError) as raised:
         opened.child.release()
@@ -490,7 +491,7 @@ class CloseFaults:
 
 
 def open_the_async_door(door_runner: asyncio.Runner, child: ChildProcess) -> None:
-    door_runner.run(bounded(spawn.open_anchored_pipes(child)))
+    door_runner.run(within_the_bound(spawn.open_anchored_pipes(child)))
 
 
 def open_the_blocking_door(_door_runner: asyncio.Runner, child: ChildProcess) -> None:
@@ -613,7 +614,7 @@ def test_asyncios_child_watcher_leaves_the_anchored_leader_unreaped(
         stock = await asyncio.create_subprocess_exec(sys.executable, "-I", "-c", "pass")
         return await stock.wait()
 
-    assert door_runner.run(bounded(scenario())) == 0
+    assert door_runner.run(within_the_bound(scenario())) == 0
     assert child_cleanup.state(opened.owned) == Exited(3)
     opened.child.release()
     assert child_cleanup.state(opened.owned) == GONE
@@ -655,7 +656,7 @@ def test_the_handle_is_returned_without_an_await_after_the_start_on_the_loop_thr
             raise
 
     with contextlib.suppress(asyncio.CancelledError):
-        child_cleanup.capture(lambda: door_runner.run(bounded(caller())))
+        child_cleanup.capture(lambda: door_runner.run(within_the_bound(caller())))
     assert started_on == [(door_runner.get_loop(), threading.get_ident())]
     assert cancelled_after_the_hand_over == [True]
     (owned,) = child_cleanup.listed()
@@ -666,7 +667,7 @@ def test_the_handle_is_returned_without_an_await_after_the_start_on_the_loop_thr
         assert await child.exited() == 3
         child.release()
 
-    door_runner.run(bounded(finish()))
+    door_runner.run(within_the_bound(finish()))
 
     assert child_cleanup.state(owned) == GONE
 
@@ -708,7 +709,7 @@ def test_the_door_delegates_the_kill_and_census_and_closes_no_pipe_during_it(
             child.kill_and_census()
         return census, open_after_the_call
 
-    census, open_after_the_call = door_runner.run(bounded(scenario()))
+    census, open_after_the_call = door_runner.run(within_the_bound(scenario()))
 
     assert len(pipes) == 3
     assert census is GroupCensus.LIVE

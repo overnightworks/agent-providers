@@ -32,10 +32,11 @@ from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 from unittest import mock
 
+from bounds import TEST_WAIT_SECONDS
+
 from agent_providers.spawn import ChildProcess
 
 P_PIDFD = 3
-TEST_WAIT_SECONDS = 10
 SIGKILLED = -9
 DISARMED = object()
 IMPORT_ROOT_PRELUDE = "import os, sys\nsys.path[:0] = sys.argv[1].split(os.pathsep)\n"

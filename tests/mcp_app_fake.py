@@ -26,6 +26,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Final
 
+from bounds import TEST_WAIT_SECONDS
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -33,7 +34,6 @@ from cryptography.x509.oid import NameOID
 
 LOOPBACK: Final = "127.0.0.1"
 CERTIFICATE_HOST: Final = "localhost"
-WAIT_SECONDS: Final = 10.0
 POLL_SECONDS: Final = 0.01
 PEER_GONE_ERRORS: Final = (
     ConnectionResetError,
@@ -187,7 +187,9 @@ class HeldRequest:
 
     def wait_for_the_end(self) -> bool:
         """Whether the peer left, once the handler stopped holding; raises what failed it."""
-        assert self._ended.wait(self._bound_seconds + WAIT_SECONDS), "the held request never ended"
+        assert self._ended.wait(self._bound_seconds + TEST_WAIT_SECONDS), (
+            "the held request never ended"
+        )
         if self._failure is not None:
             raise self._failure
         return self.peer_left
@@ -231,7 +233,7 @@ class HeldRequest:
 class HeldRequests:
     """The requests a test holds in the app; ``responder`` turns an answer into a held one."""
 
-    def __init__(self, bound_seconds: float = WAIT_SECONDS) -> None:
+    def __init__(self, bound_seconds: float = TEST_WAIT_SECONDS) -> None:
         self._bound_seconds = bound_seconds
         self._condition = threading.Condition()
         self._held: list[HeldRequest] = []
@@ -362,7 +364,7 @@ def _lower_cased(headers: Any) -> dict[str, str]:
 
 class _Handler(BaseHTTPRequestHandler):
     server: McpAppFake
-    timeout = WAIT_SECONDS
+    timeout = TEST_WAIT_SECONDS
 
     def setup(self) -> None:
         super().setup()
@@ -414,7 +416,7 @@ class _Handler(BaseHTTPRequestHandler):
         if response.fate is Fate.CUT_MID_BODY:
             self.close_connection = True
             return
-        if response.held_back and self.server.tail_released.wait(WAIT_SECONDS):
+        if response.held_back and self.server.tail_released.wait(TEST_WAIT_SECONDS):
             self.wfile.write(response.held_back)
 
     def log_message(self, format: str, *args: Any) -> None:
@@ -495,5 +497,5 @@ def serving(
         fake.tail_released.set()
         fake.shutdown()
         fake.server_close()
-        thread.join(WAIT_SECONDS)
+        thread.join(TEST_WAIT_SECONDS)
         assert not thread.is_alive()

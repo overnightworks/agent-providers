@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from functools import partial
 
 import pytest
-from anchored_support import TEST_WAIT_SECONDS
+from bounds import TEST_WAIT_SECONDS
 from provider_test_support import ThreadedOperation, code_of
 
 from agent_providers.process import HolderReservation, LastHolderRemoval

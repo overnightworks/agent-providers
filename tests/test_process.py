@@ -31,7 +31,7 @@ from unittest.mock import patch
 
 import provider_test_support
 import pytest
-from anchored_support import TEST_WAIT_SECONDS
+from bounds import TEST_WAIT_SECONDS
 from descendant_support import process_start_time
 from provider_test_support import (
     A_RUNNER_FAILURE_CANARY,

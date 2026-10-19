@@ -20,18 +20,18 @@ from dataclasses import dataclass, field
 
 import pytest
 from anchored_kernel import CensusRecorder, EventLog, GroupSignalCall, GroupSignalModel
-from anchored_leaders import LEADER_AND_GRANDCHILD_WAITING, Leaders, bounded, open_door
+from anchored_leaders import LEADER_AND_GRANDCHILD_WAITING, Leaders, open_door
 from anchored_support import (
     GONE,
     RUNNING,
     SIGKILLED,
-    TEST_WAIT_SECONDS,
     ChildCleanup,
     Exited,
     OwnedChild,
     pidfd_open,
     wait_for_exits,
 )
+from bounds import TEST_WAIT_SECONDS, within_the_bound
 
 from agent_providers import spawn
 from agent_providers.procfs import GroupCensus
@@ -124,7 +124,7 @@ class Rig:
         self.census_calls.answers.extend(answers)
 
     def run(self, scenario) -> object:
-        return self.runner.run(bounded(scenario))
+        return self.runner.run(within_the_bound(scenario))
 
     @property
     def count_instants(self) -> list[float | None]:

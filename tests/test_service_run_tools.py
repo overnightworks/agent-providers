@@ -25,10 +25,10 @@ import anyio
 import httpcore._backends.anyio as httpcore_anyio
 import httpx
 import pytest
+from bounds import TEST_WAIT_SECONDS, within_the_bound
 from capability_support import canary_token, capability_carrying
 from mcp_app_fake import (
     CERTIFICATE_HOST,
-    WAIT_SECONDS,
     FakeResponse,
     McpAppFake,
     Responder,
@@ -47,7 +47,6 @@ from relay_support import (
     post,
     post_message,
     relay_tasks,
-    within_the_bound,
     yield_until,
 )
 from service_support import (
@@ -101,7 +100,7 @@ def call_result(request: Any) -> FakeResponse:
 
 def held_before_the_head(gate: threading.Event) -> Mapping[str, Responder]:
     def respond(request: Any) -> FakeResponse:
-        gate.wait(WAIT_SECONDS)
+        gate.wait(TEST_WAIT_SECONDS)
         return call_result(request)
 
     return {"tools/call": respond}
@@ -117,7 +116,7 @@ def held_after_the_head(_gate: threading.Event) -> Mapping[str, Responder]:
 
 def listing_held(gate: threading.Event) -> Mapping[str, Responder]:
     def respond(request: Any) -> FakeResponse:
-        gate.wait(WAIT_SECONDS)
+        gate.wait(TEST_WAIT_SECONDS)
         return rpc_result(request, tool_listing(OFFERED))
 
     return {"tools/list": respond}
@@ -307,7 +306,7 @@ class Scene:
             and task.get_name().startswith((f"upstream:{RUN_ID}", f"relay:{RUN_ID}", "run-tools:"))
         }
         if leftovers:
-            await asyncio.wait(leftovers, timeout=WAIT_SECONDS)
+            await asyncio.wait(leftovers, timeout=TEST_WAIT_SECONDS)
 
     def logged(self) -> list[tuple[str, str]]:
         gc.collect()
@@ -352,7 +351,7 @@ def run_scene(
 
 
 async def finished(task: asyncio.Task[Any]) -> None:
-    done, _ = await asyncio.wait({task}, timeout=WAIT_SECONDS)
+    done, _ = await asyncio.wait({task}, timeout=TEST_WAIT_SECONDS)
     assert task in done
 
 

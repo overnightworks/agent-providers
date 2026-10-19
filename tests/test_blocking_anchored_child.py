@@ -26,7 +26,8 @@ from anchored_kernel import (
     install_kernel,
 )
 from anchored_leaders import Leaders
-from anchored_support import GONE, SIGKILLED, TEST_WAIT_SECONDS, ChildCleanup, Exited, OwnedChild
+from anchored_support import GONE, SIGKILLED, ChildCleanup, Exited, OwnedChild
+from bounds import TEST_WAIT_SECONDS
 from descendant_support import DescendantRow, Handshake, lingering_descendant, process_identity
 from provider_test_support import make_the_first_parent_close_of_a_door_fail
 

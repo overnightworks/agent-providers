@@ -14,13 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
 
-from anchored_support import (
-    TEST_WAIT_SECONDS,
-    ChildCleanup,
-    pidfd_open,
-    pidfd_send_signal,
-    wait_for_exits,
-)
+from anchored_support import ChildCleanup, pidfd_open, pidfd_send_signal, wait_for_exits
+from bounds import TEST_WAIT_SECONDS
 
 CONSUMES_STDIN = "while IFS= read -r line; do :; done\n"
 WAITS_WITHOUT_READING_STDIN = "exec sleep 60\n"

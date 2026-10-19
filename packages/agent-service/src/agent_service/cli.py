@@ -66,9 +66,10 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return EXIT_BAD_CONFIG
+    runners = installed_runners(config)
     close_transport_loggers()
     uvicorn.run(
-        create_app(config, runners=installed_runners(config)),
+        create_app(config, runners=runners),
         host=config.server.host,
         port=config.server.port,
     )

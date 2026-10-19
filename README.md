@@ -364,6 +364,12 @@ The agent service's `[cli]` section (exit 2 naming the field until migrated):
 | `[cli] claude_version` | `[cli.claude] version` |
 | (absent) | `[cli] working_root`, required, a private directory (mode 0700, owned by the service user, not a link, written without `..`) |
 
+### Dependencies
+
+| Before | Now |
+|---|---|
+| `uvicorn>=0.30,<1` (agent-service) | `uvicorn>=0.32.1,<1`; uvicorn 0.30.0 to 0.32.0 never tell a streaming app that its client left, so a run would not stop when the client does; a host on an older uvicorn upgrades it with the pin |
+
 ## Migrating to 0.3.0
 
 A host migrates at its pin bump to 0.3.0; both configuration models refuse unknown fields.

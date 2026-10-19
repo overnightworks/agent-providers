@@ -1068,14 +1068,13 @@ def _run_scope(spec_version: str, user_token: str | None = None) -> dict[str, An
     }
 
 
-async def respond_through_the_app(
+def the_app_on(
     drive: Drive,
-    client: ClientSocket,
     monkeypatch: pytest.MonkeyPatch,
     runners: Runners | None = None,
     config: ServiceConfig | None = None,
-) -> asyncio.Task[None]:
-    """Post a run to the real app on the drive's runner, clock and store; its response task.
+) -> FastAPI:
+    """The real app on the drive's runner, clock and store.
 
     ``runners`` replace the drive's runner, as ``Runners()`` serves a run without one.
     ``config`` replaces the default one, which lists the songmaker's tools.
@@ -1083,24 +1082,40 @@ async def respond_through_the_app(
     The app builds its own quarantine on ``drive.clock`` with its own
     ``ScriptedConfirmation``, so a custom ``confirm`` and ``drive.quarantine_clock``
     do not reach it.
-
-    The token checks leave the loop for a worker thread, so this returns only
-    once the app has begun to answer: from then on the run waits on the clock alone.
     """
     monkeypatch.setattr("agent_service.app.LoopClock", lambda: drive.clock)
-    app = create_app(
+    return create_app(
         config or service_config(runs=drive.runs.model_dump()),
         runners=runners or Runners(cli=drive.runner),
         records=drive.records,
         fetch_key_set=shared_mint().fetch_key_set,
         confirm_group_gone=ScriptedConfirmation(clock=drive.clock),
     )
+
+
+async def respond_through(app: FastAPI, client: ClientSocket) -> asyncio.Task[None]:
+    """Post the client's run to ``app``; its response task.
+
+    The token checks leave the loop for a worker thread, so this returns only
+    once the app has begun to answer: from then on the run waits on the clock alone.
+    """
     response = asyncio.create_task(app(client.scope, client.receive, client.send))
     answering = asyncio.create_task(client.answering.wait())
     await asyncio.wait({response, answering}, return_when=asyncio.FIRST_COMPLETED)
     answering.cancel()
     await asyncio.gather(answering, return_exceptions=True)
     return response
+
+
+async def respond_through_the_app(
+    drive: Drive,
+    client: ClientSocket,
+    monkeypatch: pytest.MonkeyPatch,
+    runners: Runners | None = None,
+    config: ServiceConfig | None = None,
+) -> asyncio.Task[None]:
+    """Post a run to a fresh ``the_app_on`` the drive; its response task."""
+    return await respond_through(the_app_on(drive, monkeypatch, runners, config), client)
 
 
 class ScriptedConfirmation:

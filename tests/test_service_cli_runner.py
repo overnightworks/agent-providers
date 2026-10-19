@@ -19,7 +19,7 @@ import uuid
 from collections.abc import AsyncGenerator, Callable, Coroutine, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import urlsplit
 
 import pytest
@@ -68,11 +68,12 @@ from service_support import (
     logging_state_snapshot,  # noqa: F401 - a fixture, requested by name
     post_run,
     record_signed_tokens,
-    respond_through_the_app,
+    respond_through,
     run_body,
     run_headers,
     served,
     service_config,
+    the_app_on,
 )
 
 import agent_service.app as app_module
@@ -324,7 +325,7 @@ FOREIGN_INIT = an_init(apiKeySource="ANTHROPIC_API_KEY")
         ),
         pytest.param(
             (INIT_LINE, TEXT_LINE, SUCCESS_LINE),
-            "exit 1",
+            f"echo {CANARY} >&2; echo {CANARY}; exit 1",
             "UnavailableError",
             [("assistant_text", "hi")],
             None,
@@ -467,11 +468,14 @@ def held_reap(monkeypatch: pytest.MonkeyPatch) -> Iterator[HeldReap]:
     hold.let_go.set()
 
 
+POLL_INTERVAL_SECONDS = 0.02
+
+
 def eventually(condition: Callable[[], bool]) -> None:
     deadline = time.monotonic() + TEST_WAIT_SECONDS
     while not condition():
         assert time.monotonic() < deadline, "the condition never held"
-        threading.Event().wait(0.02)
+        time.sleep(POLL_INTERVAL_SECONDS)
 
 
 def leave_after(base_url: str, event_type: str) -> uuid.UUID:
@@ -507,13 +511,23 @@ def read_status(base_url: str, run_id: uuid.UUID) -> RunStatus:
 
 
 PARKED_AFTER_ONE_TEXT = (INIT_LINE, TEXT_LINE)
+PARKED_AFTER_THREE_TEXTS = (
+    INIT_LINE,
+    TEXT_LINE,
+    an_assistant_line("two"),
+    an_assistant_line("three"),
+)
 PARKED = "exec sleep 600"
 
 
 def a_parked_claude(
-    directory: Path, *, for_the_client_socket: bool = False, says_again_after: Path | None = None
+    directory: Path,
+    *,
+    for_the_client_socket: bool = False,
+    says_again_after: Path | None = None,
+    stream: tuple[bytes, ...] = PARKED_AFTER_ONE_TEXT,
 ) -> Path:
-    """A fake that streams one text and parks, saying one more once ``says_again_after`` is fed.
+    """A fake that streams its texts and parks, saying one more once ``says_again_after`` is fed.
 
     The socket client asks the default one-line turn; the HTTP rows ask the three-message one.
     """
@@ -524,12 +538,12 @@ def a_parked_claude(
     if for_the_client_socket:
         return a_fake_claude(
             directory,
-            stream=PARKED_AFTER_ONE_TEXT,
+            stream=stream,
             then=then,
             system_text="You help write songs.",
             stdin_line=a_claude_stdin_line("User: Hi"),
         )
-    return a_fake_claude(directory, stream=PARKED_AFTER_ONE_TEXT, then=then)
+    return a_fake_claude(directory, stream=stream, then=then)
 
 
 def test_a_client_that_leaves_ends_the_cli_before_the_place_is_free(
@@ -558,15 +572,16 @@ def test_a_client_that_leaves_ends_the_cli_before_the_place_is_free(
             all_children_gone(child_cleanup),
             list(private_root_of(config).iterdir()),
             held_claude_slots(),
+            held_reap.reaps,
         )
         next_run = leave_after(base_url, "assistant_text")
         eventually(lambda: read_status(base_url, next_run).state is not RunState.RUNNING)
-        return while_held, afterwards, held_reap.reaps
+        return while_held, afterwards, all_children_gone(child_cleanup)
 
     assert drive_over_http(child_cleanup, monkeypatch, config, scenario) == (
         (RunState.RUNNING, 429, [False]),
-        (RunState.CANCELLED, ClientLoss.DISCONNECTED, [True], [], 0),
-        2,
+        (RunState.CANCELLED, ClientLoss.DISCONNECTED, [True], [], 0, 1),
+        [True, True],
     )
 
 
@@ -586,6 +601,70 @@ def never_stopped_state(drive: Drive, client: ClientSocket) -> RunState:
     status = drive.status(client.run_id)
     assert status is not None
     return status.state
+
+
+class StoppedRun(NamedTuple):
+    while_held: tuple[RunState, list[bool], int]
+    status: RunStatus
+    afterwards: tuple[list[bool], list[Path], int, int, int, list[bool]]
+
+
+async def post_a_second_run(app: FastAPI) -> ClientSocket:
+    second = ClientSocket()
+    await respond_through(app, second)
+    return second
+
+
+def answer_status(client: ClientSocket) -> int:
+    return client.messages[0]["status"]
+
+
+async def stopped_run_held_then_released(
+    app: FastAPI,
+    drive: Drive,
+    client: ClientSocket,
+    response: asyncio.Task[None],
+    held_reap: HeldReap,
+    child_cleanup: ChildCleanup,
+    config: ServiceConfig,
+) -> StoppedRun:
+    """Observe a stopped run while its reap is held and once it is released.
+
+    The place is taken while held when a second run is refused ``busy``, and free
+    after the release when the next run is admitted.
+    """
+    await settled_and_held(held_reap)
+    refused = await post_a_second_run(app)
+    while_held = (
+        never_stopped_state(drive, client),
+        all_children_gone(child_cleanup),
+        answer_status(refused),
+    )
+    held_reap.let_go.set()
+    client.released.set()
+    await response
+    status = drive.status(client.run_id)
+    assert status is not None
+    after_the_stop = (
+        all_children_gone(child_cleanup),
+        list(private_root_of(config).iterdir()),
+        held_claude_slots(),
+        held_reap.reaps,
+    )
+    admitted = ClientSocket()
+    admitted_response = await respond_through(app, admitted)
+    await admitted.received(b"assistant_text")
+    admitted.leave()
+    await admitted_response
+    afterwards = (*after_the_stop, answer_status(admitted), all_children_gone(child_cleanup))
+    return StoppedRun(while_held, status, afterwards)
+
+
+HELD_WITH_THE_PLACE_TAKEN = (RunState.RUNNING, [False], 429)
+
+
+def the_place_is_free_after_one_reap(afterwards: tuple[Any, ...]) -> bool:
+    return afterwards == ([True], [], 0, 1, 200, [True, True])
 
 
 @pytest.mark.parametrize(
@@ -621,14 +700,13 @@ def test_every_stop_reaps_the_cli_once_before_the_record_ends(
     binary = a_parked_claude(
         tmp_path, for_the_client_socket=True, says_again_after=feed if later_activity else None
     )
-    config = a_config(tmp_path, binary, runs=runs)
+    config = a_config(tmp_path, binary, runs={**runs, "max_parallel_cli_runs": 1})
 
     async def scenario() -> None:
         client = ClientSocket(blocks_the_second_chunk=blocks_the_client)
         async with driven(read=False) as drive:
-            response = await respond_through_the_app(
-                drive, client, monkeypatch, runners=installed_runners(config), config=config
-            )
+            app = the_app_on(drive, monkeypatch, installed_runners(config), config)
+            response = await respond_through(app, client)
             await (
                 client.blocked.wait() if blocks_the_client else client.received(b"assistant_text")
             )
@@ -637,20 +715,16 @@ def test_every_stop_reaps_the_cli_once_before_the_record_ends(
                 await asyncio.to_thread(feed.write_text, "go\n")
                 await client.received(b"again")
             await drive.run_to_end()
-            await settled_and_held(held_reap)
-            while_held = (never_stopped_state(drive, client), all_children_gone(child_cleanup))
-            held_reap.let_go.set()
-            client.released.set()
-            await response
-            status = drive.status(client.run_id)
-            assert status is not None
-            assert (while_held, held_reap.reaps) == ((RunState.RUNNING, [False]), 1)
+            stopped = await stopped_run_held_then_released(
+                app, drive, client, response, held_reap, child_cleanup, config
+            )
+            assert stopped.while_held == HELD_WITH_THE_PLACE_TAKEN
             assert (
-                (status.state, status.failure_code, status.client_lost),
-                all_children_gone(child_cleanup),
-                list(private_root_of(config).iterdir()),
-                held_claude_slots(),
-            ) == ((state, failure_code, client_lost), [True], [], 0)
+                stopped.status.state,
+                stopped.status.failure_code,
+                stopped.status.client_lost,
+            ) == (state, failure_code, client_lost)
+            assert the_place_is_free_after_one_reap(stopped.afterwards)
 
     in_stepped_loop(child_cleanup, monkeypatch, scenario())
 
@@ -661,32 +735,26 @@ def test_a_stop_at_a_yielded_event_closes_the_core_at_once(
     monkeypatch: pytest.MonkeyPatch,
     held_reap: HeldReap,
 ) -> None:
-    binary = a_parked_claude(tmp_path, for_the_client_socket=True)
-    config = a_config(tmp_path, binary)
+    binary = a_parked_claude(tmp_path, for_the_client_socket=True, stream=PARKED_AFTER_THREE_TEXTS)
+    config = a_config(tmp_path, binary, runs={"max_parallel_cli_runs": 1})
 
     async def scenario() -> None:
         client = ClientSocket(blocks_the_second_chunk=True)
         async with driven(read=False) as drive:
-            response = await respond_through_the_app(
-                drive, client, monkeypatch, runners=installed_runners(config), config=config
-            )
+            app = the_app_on(drive, monkeypatch, installed_runners(config), config)
+            response = await respond_through(app, client)
             await client.blocked.wait()
             await asyncio.get_running_loop().settled()
             client.leave()
-            await settled_and_held(held_reap)
-            while_held = (never_stopped_state(drive, client), all_children_gone(child_cleanup))
-            held_reap.let_go.set()
-            client.released.set()
-            await response
-            status = drive.status(client.run_id)
-            assert status is not None
-            assert (while_held, held_reap.reaps) == ((RunState.RUNNING, [False]), 1)
-            assert (
-                (status.state, status.client_lost),
-                all_children_gone(child_cleanup),
-                list(private_root_of(config).iterdir()),
-                held_claude_slots(),
-            ) == ((RunState.CANCELLED, ClientLoss.DISCONNECTED), [True], [], 0)
+            stopped = await stopped_run_held_then_released(
+                app, drive, client, response, held_reap, child_cleanup, config
+            )
+            assert stopped.while_held == HELD_WITH_THE_PLACE_TAKEN
+            assert (stopped.status.state, stopped.status.client_lost) == (
+                RunState.CANCELLED,
+                ClientLoss.DISCONNECTED,
+            )
+            assert the_place_is_free_after_one_reap(stopped.afterwards)
 
     in_stepped_loop(child_cleanup, monkeypatch, scenario())
 
@@ -872,9 +940,11 @@ def test_a_profile_loads_only_for_a_provider_with_a_run_adapter(provider: Provid
 
     try:
         ServiceConfig.model_validate(document)
-    except ValidationError:
+    except ValidationError as refusal:
+        refusal_names_the_provider = provider.value in str(refusal)
         loads = False
     else:
+        refusal_names_the_provider = True
         loads = True
 
-    assert loads == (provider in RUN_ADAPTERS)
+    assert (loads, refusal_names_the_provider) == (provider in RUN_ADAPTERS, True)

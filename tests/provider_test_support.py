@@ -1973,16 +1973,15 @@ RELAY_CONFIG = {
 RELAY_CONFIG_TEXT = json.dumps(RELAY_CONFIG)
 
 
+def line(payload: dict[str, Any]) -> bytes:
+    return json.dumps(payload).encode() + b"\n"
+
+
 def a_claude_stdin_line(content: str) -> bytes:
-    message = {"type": "user", "message": {"role": "user", "content": content}}
-    return json.dumps(message).encode() + b"\n"
+    return line({"type": "user", "message": {"role": "user", "content": content}})
 
 
 HISTORY_STDIN_LINE = a_claude_stdin_line("User: a\n\nAssistant: b\n\nUser: c")
-
-
-def line(payload: dict[str, Any]) -> bytes:
-    return json.dumps(payload).encode() + b"\n"
 
 
 def an_init(**fields: Any) -> bytes:

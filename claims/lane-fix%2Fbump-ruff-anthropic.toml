@@ -1,0 +1,7 @@
+claim_id = "273953a8da7f45aeb1b6936429843527"
+agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
+role = "builder"
+base = "6da869876f8c1a7c99d48e8b76564344cfca1b8c"
+branch = "fix/bump-ruff-anthropic"
+scope = ["uv.lock"]
+opened_commit = "6b514a64e7407a8187c9df22e4a41837f760cad1"

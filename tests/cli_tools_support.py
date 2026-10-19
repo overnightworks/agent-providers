@@ -60,6 +60,10 @@ if sys.argv[1:] == ["--version"]:
 stdin_line = sys.stdin.readline()
 home = os.environ["HOME"]
 capture = PLAN["capture"]
+marker = None
+if PLAN["marked_by_system_prompt"]:
+    marker = open(home + "/system-prompt").read()
+    capture = capture + "/" + marker
 os.makedirs(capture + "/files", exist_ok=True)
 with open(capture + "/stdin", "w") as handle:
     handle.write(stdin_line)
@@ -138,7 +142,8 @@ time.sleep(PLAN["linger_before_calls_seconds"])
 for number, call in enumerate(PLAN["calls"], start=1):
     for stray in PLAN["stray_lines"]:
         emit(stray)
-    arguments = {{"name": call["name"], "arguments": call["arguments"]}}
+    marked = {{"marker": marker}} if marker else {{}}
+    arguments = {{"name": call["name"], "arguments": {{**call["arguments"], **marked}}}}
     if PLAN["give_up_when_present"]:
         call_then_give_up(arguments, 10 + number, version)
     else:
@@ -170,8 +175,14 @@ def a_relay_calling_claude(
     linger_before_calls_seconds: float = 0.0,
     give_up_when_present: Path | None = None,
     timeout_seconds: float = 20.0,
+    marked_by_system_prompt: bool = False,
 ) -> Path:
-    """The pinned program's stand-in for a relay run; it captures into ``directory/capture``."""
+    """The pinned program's stand-in for a relay run; it captures into ``directory/capture``.
+
+    With ``marked_by_system_prompt`` one executable serves parallel runs: the run's system text
+    is its marker, naming its capture directory ``capture/<marker>`` and travelling in every
+    call's arguments as ``marker``.
+    """
     plan = {
         "version_line": f"{version} (Claude Code)",
         "capture": str(directory / "capture"),
@@ -183,6 +194,7 @@ def a_relay_calling_claude(
         "linger_before_calls_seconds": linger_before_calls_seconds,
         "give_up_when_present": None if give_up_when_present is None else str(give_up_when_present),
         "timeout": timeout_seconds,
+        "marked_by_system_prompt": marked_by_system_prompt,
     }
     binary = directory / "claude"
     binary.write_text(_CLAUDE_SOURCE.format(python=sys.executable, plan=json.dumps(plan)))

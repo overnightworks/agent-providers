@@ -15,6 +15,7 @@ import json
 import socket
 import threading
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,6 +33,8 @@ from cli_tools_support import (
     a_tool_app,
 )
 from mcp_app_fake import (
+    HeldRequest,
+    HeldRequests,
     RecordedRequest,
     Responder,
     TestAuthority,
@@ -48,15 +51,18 @@ from provider_test_support import (
 )
 from service_support import (
     PINNED_CLAUDE_VERSION,
+    decoded_events,
     failure_lines,
     fake_app_authority,  # noqa: F401 - a fixture, requested by name
     logging_state_snapshot,  # noqa: F401 - a fixture, requested by name
+    run_body,
     served,
 )
 from test_service_cli_runner import (
     MINT,
     PLAIN_APP,
     a_config,
+    all_children_gone,
     drive_over_http,
     eventually,
     headers,
@@ -95,6 +101,7 @@ READ_NOTE = ClaudeCall("read_note")
 TOOLS = {"save_note": "side_effecting", "read_note": "read_only"}
 SETTLE_SECONDS = 10.0
 STUCK_APP_BOUND_SECONDS = 30.0
+HELD_RUN_CLIENT_TIMEOUT_SECONDS = STUCK_APP_BOUND_SECONDS + SETTLE_SECONDS
 RELAY_TASK_PREFIXES = ("relay:", "upstream:", "run-tools:")
 
 
@@ -147,12 +154,15 @@ def a_tool_run(
     serving_authority: TestAuthority | None = None,
     app_stays_up: bool = True,
     scenario: Callable[[str], list[RunEvent]] = post_a_run,
+    before_stop: Callable[[ServiceConfig], None] = lambda _config: None,
     **claude_options: Any,
 ) -> ToolRun:
     """One run of the real runner with its tools on, against a TLS fake app, over HTTP.
 
     The runner trusts ``authority``; the app is signed by ``serving_authority`` (default the
     same). ``app_stays_up=False`` stops the app before the run, so its origin refuses.
+    ``before_stop`` runs once the run has settled and the service still serves, because stopping
+    the service cancels what a faulty close would have left behind.
     """
     binary = a_relay_calling_claude(
         tmp_path, version=PINNED_CLAUDE_VERSION, calls=calls, **claude_options
@@ -178,7 +188,9 @@ def a_tool_run(
 
         def play(base_url: str) -> tuple[list[RunEvent], RunStatus]:
             events = scenario(base_url)
-            return events, settled_status(base_url, events)
+            status = settled_status(base_url, events)
+            before_stop(config)
+            return events, status
 
         events, status = drive_over_http(child_cleanup, monkeypatch, config, play, runners)
     return ToolRun(events, status, app, ChildCapture(tmp_path / "capture"), config)
@@ -453,9 +465,10 @@ def test_a_call_to_a_tool_outside_the_apps_grant_ends_the_run_and_never_reaches_
     assert (ended_as(run), run.app.calls) == (PROVIDER_ERROR, [])
 
 
-def leave_after_the_first_tool_call(
-    base_url: str, final_held: threading.Event | None = None
+def leave_when(
+    base_url: str, event_type: str, ready: Callable[[], None] = lambda: None
 ) -> list[RunEvent]:
+    """Start a run, read its stream up to ``event_type``, wait until ``ready``, then leave."""
     decoder = RunStreamDecoder()
     seen: list[RunEvent] = []
     with httpx.stream(
@@ -469,15 +482,18 @@ def leave_after_the_first_tool_call(
                 "turn": {"system": "s", "messages": [{"role": "user", "text": "a"}]},
             }
         ),
-        timeout=SETTLE_SECONDS,
+        timeout=HELD_RUN_CLIENT_TIMEOUT_SECONDS,
     ) as response:
         for chunk in response.iter_bytes():
             seen += [item for item in decoder.feed(chunk) if not hasattr(item, "kind")]
-            if any(event.type == "tool_call" for event in seen) and (
-                final_held is None or final_held.is_set()
-            ):
+            if any(event.type == event_type for event in seen):
+                ready()
                 break
     return seen
+
+
+def leave_after_the_first_tool_call(base_url: str) -> list[RunEvent]:
+    return leave_when(base_url, "tool_call")
 
 
 def pending_tool_tasks() -> list[str]:
@@ -588,13 +604,31 @@ def test_the_child_of_a_tool_run_gets_the_configured_tool_timeout(
     assert run.capture.text_of("environment").splitlines().count("MCP_TOOL_TIMEOUT=300001") == 1
 
 
+def saved(request: RecordedRequest):
+    return rpc_result(request, {"content": [{"type": "text", "text": "saved"}]})
+
+
+def note_the_call(tmp_path: Path) -> None:
+    noted = tmp_path / "capture" / "app_has_call"
+    noted.parent.mkdir(exist_ok=True)
+    noted.touch()
+
+
 def noting_the_call_then(tmp_path: Path, wait: Callable[[], None]) -> Mapping[str, Responder]:
     def answer(request: RecordedRequest):
-        noted = tmp_path / "capture" / "app_has_call"
-        noted.parent.mkdir(exist_ok=True)
-        noted.touch()
+        note_the_call(tmp_path)
         wait()
-        return rpc_result(request, {"content": [{"type": "text", "text": "saved"}]})
+        return saved(request)
+
+    return {"tools/call": answer}
+
+
+def noting_the_call_then_holding(tmp_path: Path, held: HeldRequests) -> Mapping[str, Responder]:
+    holding = held.responder(saved)
+
+    def answer(request: RecordedRequest):
+        note_the_call(tmp_path)
+        return holding(request)
 
     return {"tools/call": answer}
 
@@ -661,7 +695,9 @@ PROMPT_SUPERVISION = {"heartbeat_interval_s": 1, "stall_timeout_s": 1.5}
         pytest.param(
             {
                 "runs": {**PROMPT_SUPERVISION, "idle_timeout_s": 20.0, "max_duration_s": 30.0},
-                "scenario_when_held": leave_after_the_first_tool_call,
+                "scenario_when_held": lambda base_url, held: leave_when(
+                    base_url, "tool_call", lambda: eventually(held.is_set)
+                ),
                 "calls": [READ_NOTE],
             },
             RunState.CANCELLED,
@@ -698,6 +734,206 @@ def test_a_held_final_with_a_stuck_app_ends_by_supervision(
     assert (len(run.app.calls), pending_tool_tasks()) == (1, [])
     with pytest.raises(ConnectionRefusedError):
         socket.create_connection(("127.0.0.1", run.capture.relay_port), timeout=SETTLE_SECONDS)
+
+
+def relay_refuses(port: int) -> bool:
+    try:
+        socket.create_connection(("127.0.0.1", port), timeout=SETTLE_SECONDS).close()
+    except ConnectionRefusedError:
+        return True
+    return False
+
+
+def nothing_left_running(
+    captures: Sequence[ChildCapture], *, private_root_left_empty: bool = False
+) -> Callable[[ServiceConfig], None]:
+    def check(config: ServiceConfig) -> None:
+        eventually(lambda: (held_claude_slots(), pending_tool_tasks()) == (0, []))
+        for capture in captures:
+            eventually(lambda: relay_refuses(capture.relay_port))
+        if private_root_left_empty:
+            eventually(lambda: list(private_root_of(config).iterdir()) == [])
+
+    return check
+
+
+def leaving_beside_the_held_request(
+    held: HeldRequests, event_type: str, also_ready: Callable[[], None] = lambda: None
+) -> Callable[[str], list[RunEvent]]:
+    def play(base_url: str) -> list[RunEvent]:
+        holding: list[HeldRequest] = []
+
+        def ready() -> None:
+            holding.extend(held.wait_for(1))
+            also_ready()
+
+        try:
+            events = leave_when(base_url, event_type, ready)
+            [request] = holding
+            request.wait_for_peer_left()
+            return events
+        finally:
+            held.release_all()
+
+    return play
+
+
+def assert_the_departure_left_nothing_running(run: ToolRun, caplog) -> None:
+    assert (run.status.state, run.status.client_lost, run.status.failure_code) == (
+        RunState.CANCELLED,
+        ClientLoss.DISCONNECTED,
+        None,
+    )
+    assert run.status.events == len(run.events)
+    assert failure_lines(caplog) == []
+
+
+def test_a_client_leaving_during_a_forward_cancels_it_upstream(
+    tmp_path, authority, child_cleanup, monkeypatch, caplog
+):
+    held = HeldRequests()
+
+    run = a_tool_run(
+        tmp_path,
+        authority,
+        child_cleanup,
+        monkeypatch,
+        calls=[READ_NOTE],
+        overrides={"tools/call": held.responder(saved)},
+        scenario=leaving_beside_the_held_request(held, "tool_call"),
+        before_stop=nothing_left_running([ChildCapture(tmp_path / "capture")]),
+    )
+
+    assert_the_departure_left_nothing_running(run, caplog)
+    assert (len(run.app.calls), run.capture.replies) == (1, [])
+
+
+def test_a_client_leaving_beside_a_held_final_cancels_the_forward(
+    tmp_path, authority, child_cleanup, monkeypatch, final_held, caplog
+):
+    held = HeldRequests()
+
+    run = a_tool_run(
+        tmp_path,
+        authority,
+        child_cleanup,
+        monkeypatch,
+        calls=[READ_NOTE],
+        give_up_when_present=tmp_path / "capture" / "app_has_call",
+        overrides=noting_the_call_then_holding(tmp_path, held),
+        scenario=leaving_beside_the_held_request(
+            held, "tool_call", lambda: eventually(final_held.is_set)
+        ),
+        before_stop=nothing_left_running([ChildCapture(tmp_path / "capture")]),
+    )
+
+    assert_the_departure_left_nothing_running(run, caplog)
+    assert (final_held.is_set(), len(run.app.calls), run.capture.replies) == (True, 1, [])
+
+
+def test_a_client_leaving_during_the_open_starts_no_child(
+    tmp_path, authority, child_cleanup, monkeypatch, caplog
+):
+    held = HeldRequests()
+
+    def initialized(request: RecordedRequest):
+        return rpc_result(request, {"protocolVersion": "2025-11-25"})
+
+    run = a_tool_run(
+        tmp_path,
+        authority,
+        child_cleanup,
+        monkeypatch,
+        calls=[SAVE_NOTE],
+        overrides={"initialize": held.responder(initialized)},
+        scenario=leaving_beside_the_held_request(held, "run_started"),
+        before_stop=nothing_left_running([], private_root_left_empty=True),
+    )
+
+    assert_the_departure_left_nothing_running(run, caplog)
+    assert (run.capture.started, run.app.calls) == (False, [])
+
+
+PARALLEL_MARKERS = [f"run-{number}" for number in range(5)]
+
+
+def marker_of(request: RecordedRequest) -> str:
+    return request.message["params"]["arguments"]["marker"]
+
+
+def answered_with_its_marker(request: RecordedRequest):
+    return rpc_result(request, {"content": [{"type": "text", "text": marker_of(request)}]})
+
+
+def post_a_run_marked(base_url: str, marker: str) -> list[RunEvent]:
+    turn = {"system": marker, "messages": [{"role": "user", "text": "a"}]}
+    response = httpx.post(
+        f"{base_url}/runs",
+        headers={"Content-Type": "application/json", **headers()},
+        content=json.dumps(run_body(turn=turn)),
+        timeout=HELD_RUN_CLIENT_TIMEOUT_SECONDS,
+    )
+    return decoded_events(response.content)
+
+
+def five_runs_held_inside_their_calls_at_once(
+    held: HeldRequests, outcomes: dict[str, tuple[list[RunEvent], RunStatus]]
+) -> Callable[[str], list[RunEvent]]:
+    def play(base_url: str) -> list[RunEvent]:
+        with ThreadPoolExecutor(len(PARALLEL_MARKERS)) as clients:
+            try:
+                posted = {
+                    marker: clients.submit(post_a_run_marked, base_url, marker)
+                    for marker in PARALLEL_MARKERS
+                }
+                forwards = held.wait_for(len(PARALLEL_MARKERS))
+                assert len({forward.request.identity for forward in forwards}) == 5
+                assert sorted(marker_of(forward.request) for forward in forwards) == (
+                    PARALLEL_MARKERS
+                )
+            finally:
+                held.release_all()
+            for marker, future in posted.items():
+                events = future.result()
+                outcomes[marker] = (events, settled_status(base_url, events))
+        return outcomes[PARALLEL_MARKERS[0]][0]
+
+    return play
+
+
+def test_five_parallel_tool_runs_stay_apart(tmp_path, authority, child_cleanup, monkeypatch):
+    held = HeldRequests(bound_seconds=STUCK_APP_BOUND_SECONDS)
+    outcomes: dict[str, tuple[list[RunEvent], RunStatus]] = {}
+    captures = {marker: ChildCapture(tmp_path / "capture" / marker) for marker in PARALLEL_MARKERS}
+
+    run = a_tool_run(
+        tmp_path,
+        authority,
+        child_cleanup,
+        monkeypatch,
+        calls=[SAVE_NOTE],
+        marked_by_system_prompt=True,
+        overrides={"tools/call": held.responder(answered_with_its_marker)},
+        scenario=five_runs_held_inside_their_calls_at_once(held, outcomes),
+        before_stop=nothing_left_running(list(captures.values())),
+    )
+
+    assert {marker: wire_shape(events) for marker, (events, _status) in outcomes.items()} == {
+        marker: [
+            ("tool_call", "save_note", "call-1", "side_effecting"),
+            ("tool_result", "call-1", marker, False),
+            ("succeeded", "done"),
+        ]
+        for marker in PARALLEL_MARKERS
+    }
+    assert {ending_of(status) for _events, status in outcomes.values()} == {SUCCEEDED}
+    assert {
+        marker: [marker in reply["body"] for reply in capture.replies]
+        for marker, capture in captures.items()
+    } == {marker: [True] for marker in captures}
+    assert len({capture.relay_secret for capture in captures.values()}) == 5
+    assert len({call.headers["authorization"] for call in run.app.calls}) == 5
+    assert all_children_gone(child_cleanup) == [True] * 5
 
 
 def test_the_mcp_trust_context_ignores_the_environment(

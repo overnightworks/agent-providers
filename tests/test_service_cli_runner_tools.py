@@ -1434,17 +1434,19 @@ def test_an_overrunning_upstream_cleanup_does_not_hold_the_place(
             await anext(run.frames)
             stall = Stall(monkeypatch, httpx.AsyncClient, "aclose")
             closing = asyncio.create_task(run.frames.aclose())
-            await yield_until(lambda: stall.pending)
-            await parked_at(run.clock, UPSTREAM_ABORT_SECONDS)
-            run.clock.advance_to(UPSTREAM_ABORT_SECONDS)
-            async with asyncio.timeout(TEST_WAIT_SECONDS):
-                await closing
-            assert (run.place_is_held(), held_claude_slots()) == (False, 0)
-            assert [kind for _event, kind, _function in failure_lines(caplog)] == [
-                "UpstreamCleanupIncomplete"
-            ]
-            assert stall.pending
-            stall.release()
+            try:
+                await yield_until(lambda: stall.pending)
+                await parked_at(run.clock, UPSTREAM_ABORT_SECONDS)
+                run.clock.advance_to(UPSTREAM_ABORT_SECONDS)
+                closed, _ = await asyncio.wait({closing}, timeout=TEST_WAIT_SECONDS)
+                assert closed, "the close waited for the parked cleanup"
+                assert (run.place_is_held(), held_claude_slots()) == (False, 0)
+                assert [kind for _event, kind, _function in failure_lines(caplog)] == [
+                    "UpstreamCleanupIncomplete"
+                ]
+                assert stall.pending
+            finally:
+                stall.release()
             await yield_until(lambda: not stall.pending and pending_tool_tasks() == [])
 
         drive_scripted(monkeypatch, child, scenario(), loop_factory=SteppedLoop)

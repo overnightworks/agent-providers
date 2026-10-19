@@ -1,8 +1,0 @@
-claim_id = "d533d0566d6646cc8da1aeead6891e48"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "d4ad3acefbeb94e41b2030d0a480e4872e47bd75"
-branch = "claude/issue-326-11b2a-stop-path-proofs"
-scope = ["tests/cli_tools_support.py", "tests/mcp_app_fake.py", "tests/test_mcp_app_fake_held_response.py", "tests/test_service_cli_runner_tools.py"]
-opened_commit = "b7ab21d6a57f54ee447e8cd094c18fc927a19538"
-whole_reason = "One proof surface: the fake's held-response mode and the cells that exercise it land together, or the mode is unproven machinery."

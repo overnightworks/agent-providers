@@ -1778,17 +1778,10 @@ def _probe_cli_surface_sync(
         child = _claude_child_process(binary, _tool_surface_probe_arguments(mcp=mcp), home.path)
         stdin_payload = _TOOL_SURFACE_PROBE_PROMPT.encode()
         home_reservation = home.reserve()
-        reservation = CLAUDE_CLI_PROCESS_POOL.reserve()
+        reservation = CLAUDE_CLI_PROCESS_POOL.reserve(home_reservation)
         if reservation is None:
             home_reservation.release()
             raise _ClaudeCliProcessPoolSaturated(CLAUDE_CLI_PROCESS_POOL.limit_message())
-
-        def on_reaped(_process_id: int, _became_zombie: bool) -> None:
-            CLAUDE_CLI_PROCESS_POOL.release(reservation)
-            home_reservation.release()
-
-        def on_spawn_failed() -> None:
-            on_reaped(0, False)
 
         outcome = process.run_cli_bounded(
             child,
@@ -1797,8 +1790,7 @@ def _probe_cli_surface_sync(
             deadline=deadline,
             stderr="devnull",
             output_read_limit_bytes=CLI_OUTPUT_READ_LIMIT_BYTES,
-            on_spawn_failed=on_spawn_failed,
-            on_reaped=on_reaped,
+            **process.released_when_the_runner_ends(reservation),
         )
     finally:
         home.close()
@@ -2016,7 +2008,7 @@ def _call_cli(
         home.close()
         raise
 
-    reservation = CLAUDE_CLI_PROCESS_POOL.reserve()
+    reservation = CLAUDE_CLI_PROCESS_POOL.reserve(home_reservation)
     if reservation is None:
         home_reservation.release()
         home.close()
@@ -2054,7 +2046,6 @@ def _call_cli(
         # subprocess.run() returns only after its child has exited, including
         # after its own timeout cleanup, so this opaque handle is safe to free.
         CLAUDE_CLI_PROCESS_POOL.release(reservation)
-        home_reservation.release()
         home.close()
 
 

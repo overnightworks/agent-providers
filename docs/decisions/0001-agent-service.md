@@ -169,8 +169,8 @@ body rules be fixed before the build.
   outside that ordering;
   `[profiles.<name>]` at most one profile, for Claude, with a required `token_file`;
   `[cli]` the private `working_root` (an existing directory the service user
-  owns, mode 0700, not a link) below which every run's and the probe's
-  directories are made, and one `[cli.<provider>]` table per provider whose
+  owns, mode 0700, not a link, written without `..`) below which every run's
+  and the probe's directories are made, and one `[cli.<provider>]` table per provider whose
   version reader is built, today `[cli.claude]` with the absolute `binary` and
   the `version` (three integers) it must report, required by a Claude profile
   and probed at startup (A1b-P1, HQ4 a);

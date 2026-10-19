@@ -712,6 +712,7 @@ def test_call_cli_uses_the_shared_process_pool_and_refuses_at_its_cap(
     monkeypatch,
 ) -> None:
     set_claude_process_limit(monkeypatch, 1)
+    homes = _record_the_homes_the_provider_opens(monkeypatch)
     run_calls = 0
 
     def fake_run(*_args: object, **_kwargs: object) -> MagicMock:
@@ -732,7 +733,50 @@ def test_call_cli_uses_the_shared_process_pool_and_refuses_at_its_cap(
         "Claude CLI process pool is at its concurrency limit (1); refusing to start another"
     )
     assert run_calls == 1
+    assert not homes[-1].path.exists()
     provider.CLAUDE_CLI_PROCESS_POOL.release(live_turn)
+
+
+def _a_child_that_returns_with(returncode: int):
+    def run_capturing(_child, **_kwargs):
+        return MagicMock(returncode=returncode, stdout='{"result": "ok"}', stderr="")
+
+    return run_capturing
+
+
+def _a_child_that_times_out(_child, **_kwargs):
+    raise provider.PipedProcessTimeout("claude", 1)
+
+
+@pytest.mark.parametrize(
+    ("run_capturing", "outcome"),
+    [
+        pytest.param(_a_child_that_returns_with(0), nullcontext(), id="success"),
+        pytest.param(
+            _a_child_that_returns_with(1), pytest.raises(UnavailableError), id="non-zero-exit",
+        ),
+        pytest.param(_a_child_that_times_out, pytest.raises(UnavailableError), id="timeout"),
+    ],
+)
+def test_a_sync_turn_frees_its_slot_and_its_home_once_its_child_has_exited(
+    _no_tool_gate_open, monkeypatch, run_capturing, outcome,
+) -> None:
+    set_claude_process_limit(monkeypatch, 1)
+    homes = _record_the_homes_the_provider_opens(monkeypatch)
+    during_the_run: list[tuple[int, bool]] = []
+
+    def observed_run(child, **kwargs):
+        during_the_run.append((held_claude_slots(), homes[0].path.exists()))
+        return run_capturing(child, **kwargs)
+
+    monkeypatch.setattr(provider, "run_capturing", observed_run)
+
+    with outcome:
+        _call_cli("hello")
+
+    [home] = homes
+    assert during_the_run == [(1, True)]
+    assert (held_claude_slots(), home.path.exists()) == (0, False)
 
 
 @pytest.mark.parametrize(
@@ -3734,11 +3778,42 @@ def test_zombie_reap_reservation_has_no_toctou_window_under_real_concurrency(
                 provider.CLAUDE_CLI_PROCESS_POOL.release(reservation)
 
 
+def _record_the_homes_the_provider_opens(
+    monkeypatch,
+) -> list[process.PrivateCredentialHome]:
+    homes: list[process.PrivateCredentialHome] = []
+    real_private_home = provider._claude_private_home
+
+    def record_home() -> process.PrivateCredentialHome:
+        homes.append(real_private_home())
+        return homes[-1]
+
+    monkeypatch.setattr(provider, "_claude_private_home", record_home)
+    return homes
+
+
+def test_a_tool_surface_probe_refused_by_a_full_pool_leaves_no_home_behind(monkeypatch) -> None:
+    set_claude_process_limit(monkeypatch, 1)
+    homes = _record_the_homes_the_provider_opens(monkeypatch)
+    held = provider.CLAUDE_CLI_PROCESS_POOL.reserve()
+    assert held is not None
+
+    deadline = time.monotonic() + 1
+    try:
+        with pytest.raises(provider._ClaudeCliProcessPoolSaturated):
+            provider._probe_cli_surface_sync(Path("/usr/bin/claude"), mcp=None, deadline=deadline)
+        [home] = homes
+        assert (held_claude_slots(), home.path.exists()) == (1, False)
+    finally:
+        provider.CLAUDE_CLI_PROCESS_POOL.release(held)
+
+
 def test_probe_runner_start_failure_is_a_closed_probe_failure_that_frees_its_reservation(
     monkeypatch, caplog, capfd,
 ) -> None:
     watch = RunnerFailureWatch(monkeypatch, caplog, capfd)
     set_claude_process_limit(monkeypatch, 1)
+    homes = _record_the_homes_the_provider_opens(monkeypatch)
     thread_start_error = RuntimeError(f"thread start failed {A_RUNNER_FAILURE_CANARY}")
     fail_to_start_the_runner_thread(monkeypatch, thread_start_error)
 
@@ -3748,9 +3823,8 @@ def test_probe_runner_start_failure_is_a_closed_probe_failure_that_frees_its_res
 
     assert str(raised.value) == "Claude CLI probe failed to run"
     assert watch.reported_steps() == ["start RuntimeError"]
-    reservation = provider.CLAUDE_CLI_PROCESS_POOL.reserve()
-    assert reservation is not None
-    provider.CLAUDE_CLI_PROCESS_POOL.release(reservation)
+    [home] = homes
+    assert (held_claude_slots(), home.path.exists()) == (0, False)
     watch.assert_nothing_leaked(raised.value)
     assert "thread start failed" not in caplog.text
 
@@ -3758,18 +3832,12 @@ def test_probe_runner_start_failure_is_a_closed_probe_failure_that_frees_its_res
 def _a_probe_runner_that_reports(
     outcome: CliRunOutcome, monkeypatch,
 ) -> list[process.PrivateCredentialHome]:
-    homes: list[process.PrivateCredentialHome] = []
-    real_private_home = provider._claude_private_home
-
-    def record_home() -> process.PrivateCredentialHome:
-        homes.append(real_private_home())
-        return homes[-1]
+    homes = _record_the_homes_the_provider_opens(monkeypatch)
 
     def run_cli_bounded(_child, **kwargs):
         kwargs["on_spawn_failed"]()
         return outcome
 
-    monkeypatch.setattr(provider, "_claude_private_home", record_home)
     monkeypatch.setattr(provider.process, "run_cli_bounded", run_cli_bounded)
     return homes
 

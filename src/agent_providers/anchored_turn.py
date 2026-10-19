@@ -22,7 +22,7 @@ from functools import partial
 from agent_providers.errors import ContainmentLost
 from agent_providers.lost_groups import release_leader_if_gone, retain_lost_group
 from agent_providers.outlasting import outlast
-from agent_providers.process import HomeReservation
+from agent_providers.process import Reservation
 from agent_providers.spawn import AnchoredChild, ChildProcess, open_anchored_pipes
 
 log = logging.getLogger(__name__)
@@ -37,7 +37,10 @@ class CliProcessReservation:
     """One pool slot, and the home reservation that is released with it."""
 
     pool: CliProcessPool
-    home_reservation: HomeReservation | None = None
+    home_reservation: Reservation | None = None
+
+    def release(self) -> None:
+        self.pool.release(self)
 
 
 @dataclass(frozen=True)
@@ -77,7 +80,7 @@ class CliProcessPool:
 
     def reserve(
         self,
-        home_reservation: HomeReservation | None = None,
+        home_reservation: Reservation | None = None,
     ) -> CliProcessReservation | None:
         """Reserve one slot before spawning, or ``None`` when the pool is full."""
         reservation = CliProcessReservation(pool=self, home_reservation=home_reservation)
@@ -165,7 +168,7 @@ async def anchored_turn_child(
     pool: CliProcessPool,
     child: ChildProcess,
     *,
-    home_reservation: HomeReservation,
+    home_reservation: Reservation,
     stream_buffer_limit: int | None = None,
 ) -> AsyncIterator[AnchoredChild]:
     """Run one async turn's child on an anchor that holds a pool slot.

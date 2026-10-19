@@ -565,7 +565,7 @@ class CachedProbe[T]:
         return self._value
 
 
-class HomeReservation(Protocol):
+class Reservation(Protocol):
     def release(self) -> None: ...
 
 
@@ -574,7 +574,7 @@ class RunnerReleases(TypedDict):
     on_reaped: Callable[[int, bool], None]
 
 
-def released_when_the_runner_ends(reservation: HomeReservation) -> RunnerReleases:
+def released_when_the_runner_ends(reservation: Reservation) -> RunnerReleases:
     return {
         "on_spawn_failed": reservation.release,
         "on_reaped": lambda _process_id, _became_zombie: reservation.release(),
@@ -582,7 +582,7 @@ def released_when_the_runner_ends(reservation: HomeReservation) -> RunnerRelease
 
 
 class HeldHome(Protocol):
-    def reserve(self) -> HomeReservation: ...
+    def reserve(self) -> Reservation: ...
 
 
 def run_catalog_cli(

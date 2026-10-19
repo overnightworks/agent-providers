@@ -1819,17 +1819,30 @@ def a_private_root(parent: Path, name: str = "root") -> Path:
     return root
 
 
-def drive_real_children[T](
-    child_cleanup: ChildCleanup, monkeypatch: pytest.MonkeyPatch, scenario: Coroutine[Any, Any, T],
+def own_real_children[T](
+    child_cleanup: ChildCleanup, monkeypatch: pytest.MonkeyPatch, start: Callable[[], T],
 ) -> T:
-    """Run a scenario whose real children ``child_cleanup`` owns and whose watchers are joined."""
+    """Run ``start`` with every real child owned by ``child_cleanup`` and its watchers joined."""
     children_before = len(child_cleanup.listed())
     with recorded_watcher_starts(monkeypatch) as watchers:
         try:
-            return child_cleanup.capture(lambda: run_bounded(scenario)).value  # type: ignore[return-value]
+            return child_cleanup.capture(start).value  # type: ignore[return-value]
         finally:
             for owned in child_cleanup.listed()[children_before:]:
                 join_watcher(watchers.thread(owned.pid))
+
+
+def drive_real_children[T](
+    child_cleanup: ChildCleanup,
+    monkeypatch: pytest.MonkeyPatch,
+    scenario: Coroutine[Any, Any, T],
+    *,
+    loop_factory: Callable[[], asyncio.AbstractEventLoop] | None = None,
+) -> T:
+    """Run a scenario whose real children ``child_cleanup`` owns and whose watchers are joined."""
+    return own_real_children(
+        child_cleanup, monkeypatch, lambda: run_bounded(scenario, loop_factory=loop_factory)
+    )
 
 
 def the_only_tree(root: Path) -> Path:
@@ -1849,8 +1862,13 @@ def set_claude_process_limit(monkeypatch: pytest.MonkeyPatch, limit: int) -> Non
     monkeypatch.setattr(claude_provider.CLAUDE_CLI_PROCESS_POOL, "limit", limit)
 
 
-def run_bounded[T](scenario: Coroutine[Any, Any, T]) -> T:
-    return asyncio.run(asyncio.wait_for(scenario, 2 * TEST_WAIT_SECONDS))
+def run_bounded[T](
+    scenario: Coroutine[Any, Any, T],
+    *,
+    loop_factory: Callable[[], asyncio.AbstractEventLoop] | None = None,
+) -> T:
+    with asyncio.Runner(loop_factory=loop_factory) as runner:
+        return runner.run(asyncio.wait_for(scenario, 2 * TEST_WAIT_SECONDS))
 
 
 @contextmanager
@@ -2057,8 +2075,10 @@ def drive_scripted(
     monkeypatch: pytest.MonkeyPatch,
     child: ScriptedClaudeChild,
     scenario: Coroutine[Any, Any, None],
+    *,
+    loop_factory: Callable[[], asyncio.AbstractEventLoop] | None = None,
 ) -> None:
     install_claude_cli_children(monkeypatch, child)
     reap_without_waiting(monkeypatch)
     with recorded_census_workers(monkeypatch), killpg_forbidden():
-        run_bounded(scenario)
+        run_bounded(scenario, loop_factory=loop_factory)

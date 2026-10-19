@@ -6,39 +6,47 @@ child; no installed core configuration exists in any of them.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import threading
+import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine, Iterator
 from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
-from anchored_leaders import spawn_warnings
-from anchored_kernel import join_watcher, recorded_watcher_starts
-from anchored_support import GONE, ChildCleanup
+from anchored_support import GONE, TEST_WAIT_SECONDS, ChildCleanup
 from provider_test_support import (
     INIT_LINE,
     SUCCESS_LINE,
     SYSTEM_TEXT,
     TEXT_LINE,
+    a_claude_stdin_line,
     a_fake_claude,
     a_private_root,
     an_init,
+    drive_real_children,
     held_claude_slots,
     line,
+    own_real_children,
 )
 from service_support import (
-    CLI_PROFILE,
     PINNED_CLAUDE_VERSION,
     PROCESS_TOKEN,
+    ClientSocket,
+    Drive,
+    SteppedLoop,
     TokenMint,
     decoded_events,
+    driven,
     failure_lines,
     get_run,
     post_run,
     record_signed_tokens,
+    respond_through_the_app,
     run_body,
     run_headers,
     served,
@@ -46,14 +54,14 @@ from service_support import (
 )
 
 from agent_client.wire import (
-    AssistantText,
+    ClientLoss,
     Failed,
     FailureCode,
     RunEvent,
     RunState,
     RunStatus,
-    Succeeded,
 )
+from agent_providers import spawn
 from agent_providers.config import PrivateWorkingRoot, reset_config
 from agent_service.app import create_app
 from agent_service.cli_runner import installed_runners
@@ -91,7 +99,9 @@ def a_config(
     )
     assert config.cli is not None
     private_root = PrivateWorkingRoot(a_private_root(tmp_path))
-    return config.model_copy(update={"cli": config.cli.model_copy(update={"working_root": private_root})})
+    return config.model_copy(
+        update={"cli": config.cli.model_copy(update={"working_root": private_root})}
+    )
 
 
 def private_root_of(config: ServiceConfig) -> Path:
@@ -115,13 +125,7 @@ def drive_over_http[T](
         with served(app) as base_url:
             return scenario(base_url)
 
-    children_before = len(child_cleanup.listed())
-    with recorded_watcher_starts(monkeypatch) as watchers:
-        try:
-            return child_cleanup.capture(serve).value  # type: ignore[return-value]
-        finally:
-            for owned in child_cleanup.listed()[children_before:]:
-                join_watcher(watchers.thread(owned.pid))
+    return own_real_children(child_cleanup, monkeypatch, serve)
 
 
 def headers() -> dict[str, str]:
@@ -195,7 +199,9 @@ def test_the_cli_receives_the_turns_system_history_token_and_bound(
         ("succeeded", "done"),
         1,
     )
-    assert [name for name, text in carriers.items() if name != "environment" and PROCESS_TOKEN in text] == []
+    assert [
+        name for name, text in carriers.items() if name != "environment" and PROCESS_TOKEN in text
+    ] == []
 
 
 def test_each_run_leaves_no_directory_slot_or_place_behind(
@@ -234,9 +240,7 @@ def test_a_capability_never_reaches_the_tool_free_cli(
 
     carriers = captured_carriers(capture)
     assert (bool(signed), shown(events)[-1][0]) == (True, "succeeded")
-    assert [
-        name for name, text in carriers.items() if any(token in text for token in signed)
-    ] == []
+    assert [name for name, text in carriers.items() if any(token in text for token in signed)] == []
 
 
 def test_an_app_with_tools_ends_no_provider_yet_without_a_child(
@@ -278,15 +282,36 @@ FOREIGN_INIT = an_init(apiKeySource="ANTHROPIC_API_KEY")
 @pytest.mark.parametrize(
     ("stream", "then", "class_name", "taken", "verdict"),
     [
-        pytest.param((INIT_LINE, LOGIN_REFUSED_LINE), "exit 0", "CliLoginRefusedError", [], None, id="login"),
         pytest.param(
-            (INIT_LINE, TEXT_LINE, SUCCESS_LINE), "exit 1", "UnavailableError", [("assistant_text", "hi")], None, id="exit"
+            (INIT_LINE, LOGIN_REFUSED_LINE), "exit 0", "CliLoginRefusedError", [], None, id="login"
         ),
         pytest.param(
-            (INIT_LINE, TEXT_LINE), "exit 0", "UnavailableError", [("assistant_text", "hi")], None, id="missing-result"
+            (INIT_LINE, TEXT_LINE, SUCCESS_LINE),
+            "exit 1",
+            "UnavailableError",
+            [("assistant_text", "hi")],
+            None,
+            id="exit",
         ),
-        pytest.param((FOREIGN_INIT, TEXT_LINE), "exit 0", "RunSurfaceRefused", [], "FOREIGN_CREDENTIAL", id="surface"),
-        pytest.param((INIT_LINE, TURN_LIMIT_LINE), "exit 0", "UnavailableError", [], None, id="turn-limit"),
+        pytest.param(
+            (INIT_LINE, TEXT_LINE),
+            "exit 0",
+            "UnavailableError",
+            [("assistant_text", "hi")],
+            None,
+            id="missing-result",
+        ),
+        pytest.param(
+            (FOREIGN_INIT, TEXT_LINE),
+            "exit 0",
+            "RunSurfaceRefused",
+            [],
+            "FOREIGN_CREDENTIAL",
+            id="surface",
+        ),
+        pytest.param(
+            (INIT_LINE, TURN_LIMIT_LINE), "exit 0", "UnavailableError", [], None, id="turn-limit"
+        ),
     ],
 )
 def test_a_failing_cli_ends_with_the_services_text_and_its_closed_cause(
@@ -312,7 +337,11 @@ def test_a_failing_cli_ends_with_the_services_text_and_its_closed_cause(
     assert [(event, kind) for event, kind, _ in failure_lines(caplog)] == [
         (f"The runner of run {events[0].run_id} failed", class_name)
     ]
-    assert (verdict is None or verdict in caplog.text, CANARY in caplog.text, status.failure_code) == (
+    assert (
+        verdict is None or verdict in caplog.text,
+        CANARY in caplog.text,
+        status.failure_code,
+    ) == (
         True,
         False,
         FailureCode.PROVIDER_ERROR,
@@ -371,3 +400,249 @@ def test_a_run_whose_directories_cannot_be_made_fails_after_it_started(
         (),
     )
     assert [kind for _, kind, _ in failure_lines(caplog)] == ["CliEnvironmentUnavailableError"]
+
+
+class HeldReap:
+    """A gate in front of the real group reap: it waits, off the loop, until the test lets go."""
+
+    def __init__(self) -> None:
+        self.reached = threading.Event()
+        self.let_go = threading.Event()
+        self.reaps = 0
+
+    def wait_until_reached(self) -> None:
+        assert self.reached.wait(TEST_WAIT_SECONDS), "the run was never stopped"
+
+
+@pytest.fixture
+def held_reap(monkeypatch: pytest.MonkeyPatch) -> Iterator[HeldReap]:
+    hold = HeldReap()
+    reap = spawn.AnchoredChild.kill_until_gone
+
+    async def held(child: spawn.AnchoredChild, *, within: float) -> spawn.KillUntilGoneResult:
+        hold.reaps += 1
+        hold.reached.set()
+        await asyncio.to_thread(hold.let_go.wait, TEST_WAIT_SECONDS)
+        return await reap(child, within=within)
+
+    monkeypatch.setattr(spawn.AnchoredChild, "kill_until_gone", held)
+    yield hold
+    hold.let_go.set()
+
+
+def eventually(condition: Callable[[], bool]) -> None:
+    deadline = time.monotonic() + TEST_WAIT_SECONDS
+    while not condition():
+        assert time.monotonic() < deadline, "the condition never held"
+        threading.Event().wait(0.02)
+
+
+def leave_after(base_url: str, event_type: str) -> uuid.UUID:
+    """Start a run, read its stream up to ``event_type`` and close the connection."""
+    body = json.dumps(run_body(turn=THREE_MESSAGE_TURN))
+    with httpx.stream(
+        "POST",
+        f"{base_url}/runs",
+        headers={"Content-Type": "application/json", **headers()},
+        content=body,
+        timeout=10,
+    ) as response:
+        assert response.status_code == 200
+        run_id = None
+        for text in response.iter_lines():
+            if text.startswith("data: "):
+                event = json.loads(text.removeprefix("data: "))
+                run_id = run_id or uuid.UUID(event["run_id"])
+                if event["type"] == event_type:
+                    return run_id
+    raise AssertionError(f"the stream ended before {event_type}")
+
+
+def read_status(base_url: str, run_id: uuid.UUID) -> RunStatus:
+    response = get_run(base_url, headers(), str(run_id))
+    return RunStatus.model_validate_json(response.content)
+
+
+PARKED_AFTER_ONE_TEXT = (INIT_LINE, TEXT_LINE)
+PARKED = "exec sleep 600"
+
+
+def a_parked_claude(
+    directory: Path, *, for_the_client_socket: bool = False, says_again_after: Path | None = None
+) -> Path:
+    """A fake that streams one text and parks, saying one more once ``says_again_after`` is fed.
+
+    The socket client asks the default one-line turn; the HTTP rows ask the three-message one.
+    """
+    then = PARKED
+    if says_again_after is not None:
+        again = an_assistant_line("again").decode()
+        then = f"read -r go < {says_again_after}\ncat <<'EOF'\n{again}EOF\n{PARKED}"
+    if for_the_client_socket:
+        return a_fake_claude(
+            directory,
+            stream=PARKED_AFTER_ONE_TEXT,
+            then=then,
+            system_text="You help write songs.",
+            stdin_line=a_claude_stdin_line("User: Hi"),
+        )
+    return a_fake_claude(directory, stream=PARKED_AFTER_ONE_TEXT, then=then)
+
+
+def test_a_client_that_leaves_ends_the_cli_before_the_place_is_free(
+    tmp_path: Path,
+    child_cleanup: ChildCleanup,
+    monkeypatch: pytest.MonkeyPatch,
+    held_reap: HeldReap,
+) -> None:
+    binary = a_parked_claude(tmp_path)
+    config = a_config(tmp_path, binary, runs={"max_parallel_cli_runs": 1})
+
+    def scenario(base_url: str) -> tuple[Any, ...]:
+        run_id = leave_after(base_url, "assistant_text")
+        held_reap.wait_until_reached()
+        while_held = (
+            read_status(base_url, run_id).state,
+            post_run(base_url, headers(), run_body(turn=THREE_MESSAGE_TURN)).status_code,
+            all_children_gone(child_cleanup),
+        )
+        held_reap.let_go.set()
+        eventually(lambda: read_status(base_url, run_id).state is not RunState.RUNNING)
+        status = read_status(base_url, run_id)
+        afterwards = (
+            status.state,
+            status.client_lost,
+            all_children_gone(child_cleanup),
+            list(private_root_of(config).iterdir()),
+            held_claude_slots(),
+        )
+        next_run = leave_after(base_url, "run_started")
+        eventually(lambda: read_status(base_url, next_run).state is not RunState.RUNNING)
+        return while_held, afterwards, held_reap.reaps
+
+    assert drive_over_http(child_cleanup, monkeypatch, config, scenario) == (
+        (RunState.RUNNING, 429, [False]),
+        (RunState.CANCELLED, ClientLoss.DISCONNECTED, [True], [], 0),
+        2,
+    )
+
+
+def in_stepped_loop(
+    child_cleanup: ChildCleanup,
+    monkeypatch: pytest.MonkeyPatch,
+    scenario: Coroutine[Any, Any, None],
+) -> None:
+    drive_real_children(child_cleanup, monkeypatch, scenario, loop_factory=SteppedLoop)
+
+
+async def settled_and_held(held_reap: HeldReap) -> None:
+    await asyncio.to_thread(held_reap.wait_until_reached)
+
+
+def never_stopped_state(drive: Drive, client: ClientSocket) -> RunState:
+    status = drive.status(client.run_id)
+    assert status is not None
+    return status.state
+
+
+@pytest.mark.parametrize(
+    ("runs", "blocks_the_client", "later_activity", "state", "failure_code", "client_lost"),
+    [
+        pytest.param({}, False, False, RunState.FAILED, FailureCode.IDLE_TIMEOUT, None, id="idle"),
+        pytest.param(
+            {"idle_timeout_s": 590.0},
+            False,
+            True,
+            RunState.FAILED,
+            FailureCode.LIMIT_EXCEEDED,
+            None,
+            id="maximum",
+        ),
+        pytest.param({}, True, False, RunState.CANCELLED, None, ClientLoss.DROPPED, id="stall"),
+    ],
+)
+def test_every_stop_reaps_the_cli_once_before_the_record_ends(
+    tmp_path: Path,
+    child_cleanup: ChildCleanup,
+    monkeypatch: pytest.MonkeyPatch,
+    held_reap: HeldReap,
+    runs: dict[str, object],
+    blocks_the_client: bool,
+    later_activity: bool,
+    state: RunState,
+    failure_code: FailureCode | None,
+    client_lost: ClientLoss | None,
+) -> None:
+    feed = tmp_path / "feed"
+    os.mkfifo(feed)
+    binary = a_parked_claude(
+        tmp_path, for_the_client_socket=True, says_again_after=feed if later_activity else None
+    )
+    config = a_config(tmp_path, binary, runs=runs)
+
+    async def scenario() -> None:
+        client = ClientSocket(blocks_the_second_chunk=blocks_the_client)
+        async with driven(read=False) as drive:
+            response = await respond_through_the_app(
+                drive, client, monkeypatch, runners=installed_runners(config), config=config
+            )
+            await (
+                client.blocked.wait() if blocks_the_client else client.received(b"assistant_text")
+            )
+            if later_activity:
+                await drive.run_to(20)
+                await asyncio.to_thread(feed.write_text, "go\n")
+                await client.received(b"again")
+            await drive.run_to_end()
+            await settled_and_held(held_reap)
+            while_held = (never_stopped_state(drive, client), all_children_gone(child_cleanup))
+            held_reap.let_go.set()
+            client.released.set()
+            await response
+            status = drive.status(client.run_id)
+            assert status is not None
+            assert (while_held, held_reap.reaps) == ((RunState.RUNNING, [False]), 1)
+            assert (
+                (status.state, status.failure_code, status.client_lost),
+                all_children_gone(child_cleanup),
+                list(private_root_of(config).iterdir()),
+                held_claude_slots(),
+            ) == ((state, failure_code, client_lost), [True], [], 0)
+
+    in_stepped_loop(child_cleanup, monkeypatch, scenario())
+
+
+def test_a_stop_at_a_yielded_event_closes_the_core_at_once(
+    tmp_path: Path,
+    child_cleanup: ChildCleanup,
+    monkeypatch: pytest.MonkeyPatch,
+    held_reap: HeldReap,
+) -> None:
+    binary = a_parked_claude(tmp_path, for_the_client_socket=True)
+    config = a_config(tmp_path, binary)
+
+    async def scenario() -> None:
+        client = ClientSocket(blocks_the_second_chunk=True)
+        async with driven(read=False) as drive:
+            response = await respond_through_the_app(
+                drive, client, monkeypatch, runners=installed_runners(config), config=config
+            )
+            await client.blocked.wait()
+            await asyncio.get_running_loop().settled()
+            client.leave()
+            await settled_and_held(held_reap)
+            while_held = (never_stopped_state(drive, client), all_children_gone(child_cleanup))
+            held_reap.let_go.set()
+            client.released.set()
+            await response
+            status = drive.status(client.run_id)
+            assert status is not None
+            assert (while_held, held_reap.reaps) == ((RunState.RUNNING, [False]), 1)
+            assert (
+                (status.state, status.client_lost),
+                all_children_gone(child_cleanup),
+                list(private_root_of(config).iterdir()),
+                held_claude_slots(),
+            ) == ((RunState.CANCELLED, ClientLoss.DISCONNECTED), [True], [], 0)
+
+    in_stepped_loop(child_cleanup, monkeypatch, scenario())

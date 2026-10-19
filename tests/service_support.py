@@ -42,6 +42,7 @@ import httpx
 import jwt
 import pytest
 import uvicorn
+from anchored_support import TEST_WAIT_SECONDS
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import FastAPI
@@ -983,7 +984,9 @@ class ClientSocket:
         self.scope = _run_scope(spec_version, user_token)
         self.messages: list[dict[str, Any]] = []
         self.released = asyncio.Event()
+        self.blocked = asyncio.Event()
         self.answering = asyncio.Event()
+        self._sent = asyncio.Event()
         self._blocks_the_first_chunk = blocks_the_first_chunk
         self._blocks_the_second_chunk = blocks_the_second_chunk
         self._second_chunk_raises = second_chunk_raises
@@ -1016,8 +1019,17 @@ class ClientSocket:
             if self._second_chunk_raises is not None:
                 raise self._second_chunk_raises
             if self._blocks_the_second_chunk:
+                self.blocked.set()
                 await self.released.wait()
         self.messages.append(message)
+        self._sent.set()
+
+    async def received(self, needle: bytes) -> None:
+        """Wait until the body taken so far holds ``needle``, within the test bound."""
+        async with asyncio.timeout(TEST_WAIT_SECONDS):
+            while needle not in self.body:
+                self._sent.clear()
+                await self._sent.wait()
 
     def _bodies(self) -> int:
         return sum(m["type"] == "http.response.body" for m in self.messages)

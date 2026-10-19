@@ -179,8 +179,12 @@ def a_tool_run(
     return ToolRun(events, status, app, ChildCapture(tmp_path / "capture"), config)
 
 
+def ending_of(status: RunStatus) -> tuple[RunState, FailureCode | None]:
+    return status.state, status.failure_code
+
+
 def ended_as(run: ToolRun) -> tuple[RunState, FailureCode | None]:
-    return run.status.state, run.status.failure_code
+    return ending_of(run.status)
 
 
 PROVIDER_ERROR = (RunState.FAILED, FailureCode.PROVIDER_ERROR)
@@ -569,6 +573,6 @@ def test_a_run_trusts_exactly_the_configured_bundle(
 
         status = own_real_children(child_cleanup, monkeypatch, start_and_post)
 
-    assert (status.state, status.failure_code) == (
+    assert ending_of(status) == (
         SUCCEEDED if signed_by_the_configured_ca else PROVIDER_ERROR
     )

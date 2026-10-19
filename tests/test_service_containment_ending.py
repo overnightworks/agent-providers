@@ -20,12 +20,14 @@ from functools import partial
 import anyio
 import pytest
 from service_support import (
+    CUT_BY_ITS_SCOPE,
     BrokenClock,
     Drive,
     GatedRunner,
     StepClock,
     client_leaves_mid_run,
     client_takes_nothing_until_dropped,
+    closed_inside,
     driven,
     failure_lines,
     in_loop,
@@ -134,6 +136,9 @@ class _RecordingWriter:
         return None if self.ended else b"frame"
 
     def hand_over(self, losses: tuple[RetainedGroup, ...]) -> None:
+        pass
+
+    def commit_terminal(self, losses: tuple[RetainedGroup, ...]) -> None:
         pass
 
     def run_over(self, losses: tuple[RetainedGroup, ...]) -> None:
@@ -284,27 +289,19 @@ async def test_a_closer_cut_by_its_scope_is_cancelled_after_the_place_passed_to_
     runner = GatedRunner()
     runner.close_error = _lost()
     runner.hold_close()
-    reached_after_the_close: list[bool] = []
     async with driven(runner, read=False) as drive:
         drive.took(await anext(drive.frames))
         await drive.clock.parked()
         scope = anyio.CancelScope()
-
-        async def close_inside_the_scope() -> None:
-            with scope:
-                await drive.frames.aclose()
-                reached_after_the_close.append(True)
-
-        closing = asyncio.create_task(close_inside_the_scope())
+        closing = asyncio.create_task(closed_inside(scope, drive.frames.aclose()))
         await drive.clock.parked()
         scope.cancel()
         await drive.clock.parked()
         assert not closing.done()
 
         runner.release_close()
-        await closing
 
-        assert (scope.cancelled_caught, reached_after_the_close) == (True, [])
+        assert await closing is CUT_BY_ITS_SCOPE
         _assert_recorded(
             drive.status(),
             RunState.FAILED,

@@ -4,6 +4,12 @@ A ``Lease`` is the holder's proof of one place. It frees that place once, and on
 it still holds it, so a late release by an old response never frees the place of a newer run.
 A run whose process group is not confirmed gone passes its place to the quarantine
 (``agent_service.quarantine``) as a new ``Lease``, which only the quarantine releases.
+
+``Lease.release`` is the one decider of freeing a place. Four callers release at four
+moments, and in each of them no other moment exists, so each stays: ``run_over`` once a run's
+record has ended; the response, for a run whose frames never ran, where a lease the run
+released or handed over is a no-op; the app's rejection path, before any response exists;
+and the quarantine, for the transferred lease only, once every outstanding group is gone.
 """
 
 from __future__ import annotations

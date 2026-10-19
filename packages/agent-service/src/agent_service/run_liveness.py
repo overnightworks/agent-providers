@@ -127,7 +127,7 @@ class FrameWriter(Protocol):
 
     @property
     def ended(self) -> bool:
-        """Whether a terminal has been decided; it is committed by ``run_over``."""
+        """Whether a terminal has been decided; it is committed by ``commit_terminal``."""
         ...
 
     def heartbeat(self) -> bytes: ...
@@ -142,12 +142,16 @@ class FrameWriter(Protocol):
         """Pass the run's place to the quarantine when ``losses`` is not empty."""
         ...
 
+    def commit_terminal(self, losses: tuple[RetainedGroup, ...]) -> None:
+        """Commit the decided terminal, a loss turning it into ``failed: provider_error``."""
+        ...
+
     def run_over(self, losses: tuple[RetainedGroup, ...]) -> None:
-        """Commit the decided terminal, end the record, and release the lease."""
+        """End the record, whose fallback is chosen from the state, and release the lease."""
         ...
 
     def terminal_frame(self) -> bytes:
-        """The terminal ``run_over`` committed."""
+        """The terminal ``commit_terminal`` committed."""
         ...
 
     def client_lost(self, loss: ClientLoss) -> None: ...
@@ -254,6 +258,7 @@ class FailedPart(Enum):
 
     SUPERVISION = "supervision"
     CLEANUP = "cleanup"
+    CLOSE_LINE = "close line"
 
 
 class RunStepCancelled(Exception):
@@ -311,6 +316,8 @@ def _exit_of(
        failure is raised over it too.
     3. Otherwise the first supervision failure is raised, unless the body
        raised: then the body's outcome stands.
+
+    A ``CLOSE_LINE`` failure only reports: it is logged once and never raised.
     """
     distinct: list[_Failure] = []
     for failure in failures:
@@ -321,10 +328,11 @@ def _exit_of(
     if cancel_requested:
         return _Exit(None, tuple(distinct))
     cleanup = [failure for failure in distinct if failure.part is FailedPart.CLEANUP]
+    raisable = [failure for failure in distinct if failure.part is not FailedPart.CLOSE_LINE]
     if cleanup:
         raised = cleanup[0]
-    elif distinct and body_failure is None:
-        raised = distinct[0]
+    elif raisable and body_failure is None:
+        raised = raisable[0]
     else:
         return _Exit(None, tuple(distinct))
     return _Exit(raised.error, tuple(failure for failure in distinct if failure is not raised))
@@ -803,7 +811,8 @@ class SupervisedRun:
         await asyncio.wait({self._pump})
         losses = tuple(self._losses)
         self._failures.attempt(FailedPart.CLEANUP, lambda: self._wire.hand_over(losses))
-        self._log_runner_close()
+        self._failures.attempt(FailedPart.CLOSE_LINE, self._log_runner_close)
+        self._failures.attempt(FailedPart.CLEANUP, lambda: self._wire.commit_terminal(losses))
         self._failures.attempt(FailedPart.CLEANUP, lambda: self._wire.run_over(losses))
 
     def _log_runner_close(self) -> None:
@@ -811,6 +820,8 @@ class SupervisedRun:
         closing_failure = _failure_of(self._pump)
         if closing_failure is None or reported_by_the_quarantine(closing_failure):
             return
-        log_failure(log, f"Closing the runner of run {self._run_id} failed", closing_failure)
-        if isinstance(closing_failure, asyncio.CancelledError):
-            _make_inert(closing_failure)
+        try:
+            log_failure(log, f"Closing the runner of run {self._run_id} failed", closing_failure)
+        finally:
+            if isinstance(closing_failure, asyncio.CancelledError):
+                _make_inert(closing_failure)

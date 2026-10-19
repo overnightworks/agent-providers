@@ -1,7 +1,0 @@
-claim_id = "128bbf7830f541fea0c76b14a3beecb8"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "7c635799fbd5feb83b51e6a61dff5cc430b9b92b"
-branch = "fix/quarantine-generation-flake"
-scope = ["tests/test_service_quarantine.py"]
-opened_commit = "792915c42e026c5bf24dd9c997445b1ac0571573"

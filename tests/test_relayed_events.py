@@ -169,6 +169,14 @@ def shown(events: list[StreamEvent]) -> list[tuple[str, str]]:
     ]
 
 
+LOOP_PASSES_A_HELD_FINAL_IS_WATCHED = 20
+
+
+async def loop_passes(count: int) -> None:
+    for _ in range(count):
+        await asyncio.sleep(0)
+
+
 def drive(scenario: Awaitable[None]) -> None:
     asyncio.run(asyncio.wait_for(scenario, WAIT_SECONDS * 3))
 
@@ -307,18 +315,10 @@ async def the_calls_taken_then_the_final_fed_and_the_forwards_released_after_hop
     after_hops(release_hops, app.release)
 
 
-@pytest.mark.parametrize(
-    ("hops", "results_delivered"),
-    [
-        pytest.param((0, 1), False, id="nothing-queued"),
-        pytest.param((1, 1), True, id="results-queued-1"),
-        pytest.param((2, 2), True, id="results-queued-2"),
-        pytest.param((3, 3), True, id="results-queued-3"),
-    ],
-)
+@pytest.mark.parametrize("hops", [(0, 1), (1, 1), (2, 2), (3, 3)])
 @pytest.mark.parametrize("count", [1, 2, 3])
-def test_a_final_is_handed_on_only_with_no_result_of_the_forwards_it_overtook_ready(
-    count: int, hops: tuple[int, int], results_delivered: bool
+def test_a_final_is_handed_on_only_after_the_results_of_the_forwards_it_would_overtake(
+    count: int, hops: tuple[int, int]
 ) -> None:
     async def scenario() -> None:
         app, core = RecordingApp(gated=True), ScriptedCore()
@@ -331,10 +331,9 @@ def test_a_final_is_handed_on_only_with_no_result_of_the_forwards_it_overtook_re
 
         delivered = await delivered_before_the_final(events)
 
-        assert (shown(delivered), barrier.has_ready_event()) == (
-            [("tool_result", f"call-{number}") for number in range(1, count + 1)]
-            if results_delivered
-            else [],
+        assert (shown(delivered), barrier.has_ready_event(), barrier.has_running_forward()) == (
+            [("tool_result", f"call-{number}") for number in range(1, count + 1)],
+            False,
             False,
         )
         barrier.stop()
@@ -399,7 +398,7 @@ def test_a_final_is_handed_on_when_the_one_ready_call_is_given_up_before_the_rea
     drive(scenario())
 
 
-def test_a_final_is_handed_on_while_a_forward_still_runs_and_nothing_is_queued() -> None:
+def test_a_final_waits_for_the_result_of_a_forward_still_running() -> None:
     async def scenario() -> None:
         app, core = RecordingApp(gated=True), ScriptedCore()
         barrier = a_barrier(app)
@@ -407,12 +406,68 @@ def test_a_final_is_handed_on_while_a_forward_still_runs_and_nothing_is_queued()
         events = RelayedEvents(core.stream(), barrier)
         await taken(events, 1)
         core.feed(FINAL)
+        next_event = asyncio.ensure_future(anext(events))
+        await yield_until(lambda: app.called == ["edit_note"])
 
-        assert await anext(events) == FINAL
-        assert app.called == ["edit_note"]
+        await loop_passes(LOOP_PASSES_A_HELD_FINAL_IS_WATCHED)
+
+        assert not next_event.done()
+        app.release()
+        yielded = [await asyncio.wait_for(next_event, WAIT_SECONDS), *await taken(events, 1)]
+
+        assert shown(yielded) == [("tool_result", "call-1"), ("final", "done")]
+        barrier.stop()
+        await events.close()
+
+    drive(scenario())
+
+
+def test_a_text_event_is_not_held_by_a_forward_still_running() -> None:
+    async def scenario() -> None:
+        app, core = RecordingApp(gated=True), ScriptedCore()
+        barrier = a_barrier(app)
+        Arrivals(barrier).arrive(1)
+        events = RelayedEvents(core.stream(), barrier)
+        await taken(events, 1)
+        core.feed(TEXT)
+
+        assert await taken(events, 1) == [TEXT]
+        assert barrier.has_running_forward()
         app.release()
         barrier.stop()
         await events.close()
+
+    drive(scenario())
+
+
+@pytest.mark.parametrize("ending", ["close", "barrier-failure"])
+def test_a_held_final_is_released_by_the_close_and_by_a_barrier_failure(ending: str) -> None:
+    async def scenario() -> None:
+        app, core = RecordingApp(gated=True), ScriptedCore()
+        barrier = a_barrier(app)
+        Arrivals(barrier).arrive(1)
+        events = RelayedEvents(core.stream(), barrier)
+        await taken(events, 1)
+        core.feed(FINAL)
+        held = asyncio.ensure_future(anext(events))
+        await yield_until(lambda: app.called == ["edit_note"])
+        await loop_passes(LOOP_PASSES_A_HELD_FINAL_IS_WATCHED)
+        assert not held.done()
+
+        if ending == "close":
+            held.cancel()
+            await events.close()
+            with pytest.raises(asyncio.CancelledError):
+                await held
+        else:
+            barrier.reflected()
+            with pytest.raises(CapabilityReflected):
+                await asyncio.wait_for(held, WAIT_SECONDS)
+            await events.close()
+
+        barrier.abort_forwards()
+        barrier.stop()
+        await barrier.settle()
 
     drive(scenario())
 

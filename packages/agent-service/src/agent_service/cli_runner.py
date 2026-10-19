@@ -38,6 +38,7 @@ class ProfileLaunch:
     binary: Path
     token: SecretStr
     max_tool_calls: int
+    tool_timeout_seconds: float
 
 
 AdapterFactory = Callable[[ProfileLaunch, AdmittedRun, RelayAccess | None], CliRunAdapter]
@@ -54,6 +55,7 @@ def claude_run(
         max_tool_calls=launch.max_tool_calls,
         history=tuple(turn.messages),
         relay=relay,
+        tool_timeout_seconds=launch.tool_timeout_seconds,
     )
 
 
@@ -71,6 +73,7 @@ def _launches_of(config: ServiceConfig) -> Mapping[str, ProfileLaunch]:
             binary=programs[profile.provider].binary,
             token=profile.token,
             max_tool_calls=config.runs.max_tool_calls,
+            tool_timeout_seconds=config.runs.max_duration_s,
         )
     return launches
 

@@ -165,6 +165,9 @@ class EnteringCalls:
     def unoffered(self) -> None:
         self._barrier.unoffered()
 
+    def reflected(self) -> None:
+        self._barrier.reflected()
+
 
 class BarrierRunner:
     """The fake of the CLI runner's loop: hand out, yield, accept once resumed, then stop.
@@ -856,6 +859,64 @@ def test_the_barrier_has_a_ready_event_while_a_reflected_capability_is_pending()
             await rig.barrier.next_event()
 
     drive_barrier(scenario, gated_app(outcome=ToolOutcome(CANARY_SIGNATURE, False)))
+
+
+def test_a_reflection_reported_by_the_owner_fails_the_next_event() -> None:
+    async def scenario(rig: Rig) -> None:
+        waiting = asyncio.ensure_future(rig.barrier.next_event())
+        await yield_until(lambda: not waiting.done() and not rig.barrier.has_ready_event())
+
+        rig.barrier.reflected()
+
+        with pytest.raises(CapabilityReflected):
+            await asyncio.wait_for(waiting, WAIT_SECONDS)
+        assert rig.barrier.has_ready_event()
+
+    drive_barrier(scenario)
+
+
+async def a_call_waits_without_a_forward(rig: Rig) -> bool:
+    await a_call_waits_to_be_handed_out(rig)
+    return False
+
+
+async def a_forward_is_running(rig: Rig) -> bool:
+    arrive(rig.barrier, EDIT_SONG)
+    await rig.hand_out_and_accept()
+    await rig.fake.forwarded(1)
+    return True
+
+
+async def a_forward_whose_result_is_queued(rig: Rig) -> bool:
+    await a_result_waits_to_be_handed_out(rig)
+    return False
+
+
+async def a_forward_the_cli_gave_up_on(rig: Rig) -> bool:
+    await a_forward_is_running(rig)
+    rig.barrier.cancel(1)
+    return True
+
+
+@pytest.mark.parametrize(
+    "arrangement",
+    [
+        nothing_arrived,
+        a_call_waits_without_a_forward,
+        a_forward_is_running,
+        a_forward_the_cli_gave_up_on,
+        a_forward_whose_result_is_queued,
+    ],
+)
+def test_the_barrier_has_a_running_forward_from_its_accept_until_its_result_is_queued(
+    arrangement: Callable[[Rig], Awaitable[bool]],
+) -> None:
+    async def scenario(rig: Rig) -> None:
+        expected = await arrangement(rig)
+
+        assert rig.barrier.has_running_forward() is expected
+
+    drive_barrier(scenario)
 
 
 async def an_id_never_seen(rig: Rig) -> None:

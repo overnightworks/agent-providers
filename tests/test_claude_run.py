@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import uuid
 from pathlib import Path
 from typing import Any
@@ -84,6 +85,7 @@ def a_run(**overrides: object) -> ClaudeRun:
         "max_tool_calls": 30,
         "history": HISTORY,
         "relay": None,
+        "tool_timeout_seconds": 600.0,
     }
     return ClaudeRun(**{**fields, **overrides})  # type: ignore[arg-type]
 
@@ -280,6 +282,34 @@ def test_fewer_than_one_tool_call_is_refused(tool_calls: int) -> None:
         a_run(max_tool_calls=tool_calls)
 
 
+@pytest.mark.parametrize(
+    ("seconds", "expected"),
+    [(600.0, "600000"), (0.001, "1"), (0.0005, "1"), (1.0001, "1001"), (130, "130000")],
+)
+def test_a_relay_run_carries_the_tool_timeout_of_the_maximum_duration(
+    tmp_path: Path, seconds: float, expected: str
+) -> None:
+    environment = started(tmp_path, relay=ACCESS, tool_timeout_seconds=seconds).child.environment
+
+    assert environment["MCP_TOOL_TIMEOUT"] == expected
+
+
+def test_a_tool_free_run_carries_no_tool_timeout(tmp_path: Path) -> None:
+    environment = started(tmp_path, relay=None, tool_timeout_seconds=600.0).child.environment
+
+    assert "MCP_TOOL_TIMEOUT" not in environment
+
+
+@pytest.mark.parametrize("seconds", [0, 0.0, -1.0, math.nan, math.inf, -math.inf])
+def test_a_tool_timeout_that_is_not_finite_and_positive_is_refused_by_field_name_only(
+    seconds: float,
+) -> None:
+    with pytest.raises(ChildProcessSpecificationError, match="tool_timeout_seconds") as refusal:
+        a_run(tool_timeout_seconds=seconds)
+
+    assert str(seconds) not in str(refusal.value)
+
+
 def test_the_history_is_one_transcript_line_in_order(tmp_path: Path) -> None:
     assert started(tmp_path).stdin == HISTORY_STDIN_LINE
 
@@ -302,6 +332,11 @@ POSITIONAL_FIELDS = (Path("/opt/claude/claude"), SecretStr(CANARY_TOKEN), SYSTEM
 def test_a_run_requires_its_relay_by_keyword(arguments: tuple[Any, ...], refusal: str) -> None:
     with pytest.raises(TypeError, match=refusal):
         ClaudeRun(*arguments)  # type: ignore[misc]
+
+
+def test_a_run_requires_its_tool_timeout_by_keyword() -> None:
+    with pytest.raises(TypeError, match="tool_timeout_seconds"):
+        ClaudeRun(*POSITIONAL_FIELDS, relay=None)  # type: ignore[call-arg]
 
 
 RELAY_ENTRY = {"name": "relay", "status": "connected"}

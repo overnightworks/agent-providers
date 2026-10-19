@@ -535,6 +535,10 @@ class ToolCalls(Protocol):
         """Record that the CLI called a name it was never offered; the owner has refused it."""
         ...
 
+    def reflected(self) -> None:
+        """Record that an answer carried the capability; the owner has refused itself for good."""
+        ...
+
 
 class AppTools(Protocol):
     async def call_tool(self, name: str, arguments: Mapping[str, Any]) -> ToolOutcome: ...
@@ -601,9 +605,11 @@ class ToolCallBarrier:
     an outcome as it is, an upstream failure as ``CALL_FAILED_TEXT`` with ``is_error`` after
     one log line by class. A cancelled forward yields no result. An outcome whose decoded text
     carries the run's capability yields no event and no reply: the barrier is refused for good
-    and ``next_event()`` raises ``CapabilityReflected``. ``settle()`` returns once every
-    forward's outcome was retrieved. ``has_ready_event()`` is true while a queued event, a ready
-    call that was not given up, an unoffered call or a reflected outcome waits; it makes no
+    and ``next_event()`` raises ``CapabilityReflected``; so does the owner's ``reflected()``
+    report of a hit in any other relay answer. ``settle()`` returns once every
+    forward's outcome was retrieved. ``has_running_forward()`` is true from the accept of a
+    call until its outcome was retrieved. ``has_ready_event()`` is true while a queued event, a
+    ready call that was not given up, an unoffered call or a reflected outcome waits; it makes no
     promise after ``stop()`` or while an event is handed out (where ``next_event()`` raises
     ``ToolCallsMisused`` at once). It assumes the merger accepts the handed-out event before it
     asks for the next, and that production stops the barrier only at the close.
@@ -669,6 +675,14 @@ class ToolCallBarrier:
     def unoffered(self) -> None:
         self._unoffered = True
         self._changed.set()
+
+    def reflected(self) -> None:
+        self._reflected = True
+        self._changed.set()
+
+    def has_running_forward(self) -> bool:
+        """Whether a forward still runs upstream, whether or not the CLI still waits for it."""
+        return bool(self._forwards)
 
     async def next_event(self) -> ToolCallEvent | ToolResultEvent:
         while True:
@@ -757,7 +771,7 @@ class ToolCallBarrier:
 
     def _queue_result(self, pending: _PendingCall, outcome: ToolOutcome) -> None:
         if self._capability.appears_in(outcome.content.encode("utf-8")):
-            self._reflected = True
+            self.reflected()
             self._resolve(pending, UNANSWERED)
         else:
             pending.outcome = outcome
@@ -867,7 +881,8 @@ def _narrowed_to(
 class McpRelayOwner:
     """Answers the CLI's MCP messages and lets no body carrying the capability out.
 
-    Every answer leaves through ``_cleared_for_cli``. A hit refuses the owner for good. A
+    Every answer leaves through ``_cleared_for_cli``. A hit refuses the owner for good and is
+    reported once to ``ToolCalls.reflected()``, which ends the run like a reflected result. A
     ``notifications/cancelled`` with a well-formed ``requestId`` is routed to
     ``ToolCalls.cancel``; every notification is still acknowledged. An ``Unanswered`` call
     passes through untouched: it carries no body, and the CLI no longer waits for it.
@@ -895,6 +910,7 @@ class McpRelayOwner:
         self._require_not_refused()
         if self._capability.appears_in(answer.body):
             self._refused = True
+            self._calls.reflected()
             raise_without_chain(CapabilityReflected())
         return answer
 

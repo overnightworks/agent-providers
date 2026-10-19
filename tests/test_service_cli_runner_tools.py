@@ -13,6 +13,8 @@ import dataclasses
 import gc
 import json
 import socket
+import threading
+import time
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -70,6 +72,7 @@ import agent_service.config as config_module
 from agent_client.sse import RunStreamDecoder
 from agent_client.wire import (
     MAX_EVENT_BYTES,
+    ClientLoss,
     Failed,
     FailureCode,
     RunEvent,
@@ -91,6 +94,8 @@ SAVE_NOTE = ClaudeCall("save_note", {"text": "la la"})
 READ_NOTE = ClaudeCall("read_note")
 TOOLS = {"save_note": "side_effecting", "read_note": "read_only"}
 SETTLE_SECONDS = 10.0
+APP_ANSWERS_AFTER_THE_FINAL_SECONDS = 1.0
+STUCK_APP_BOUND_SECONDS = 30.0
 RELAY_TASK_PREFIXES = ("relay:", "upstream:", "run-tools:")
 
 
@@ -521,6 +526,163 @@ def test_every_ending_closes_the_runs_tools_once(
     assert (closes, pending_tool_tasks()) == ([ending], [])
 
 
+def lists_the_capability_as_a_description(request: RecordedRequest):
+    bearer = request.headers["authorization"].removeprefix("Bearer ")
+    tools = [{"name": name, "description": bearer, "inputSchema": {}} for name in TOOLS]
+    return rpc_result(request, {"tools": tools})
+
+
+def test_a_capability_in_the_tool_list_fails_the_run(
+    tmp_path, authority, child_cleanup, monkeypatch, caplog
+):
+    caplog.set_level("DEBUG")
+
+    run = a_tool_run(
+        tmp_path,
+        authority,
+        child_cleanup,
+        monkeypatch,
+        calls=[SAVE_NOTE],
+        overrides={"tools/list": lists_the_capability_as_a_description},
+    )
+
+    everything_seen = json.dumps([event.model_dump(mode="json") for event in run.events])
+    everything_seen += run.status.model_dump_json() + caplog.text
+    assert (ended_as(run), run.app.calls, run.capture.replies) == (PROVIDER_ERROR, [], [])
+    assert "CapabilityReflected" in [kind for _event, kind, _function in failure_lines(caplog)]
+    assert run.app.capability not in everything_seen + run.capture.everything_it_was_given
+
+
+def test_the_child_of_a_tool_run_gets_the_configured_tool_timeout(
+    tmp_path, authority, child_cleanup, monkeypatch
+):
+    run = a_tool_run(
+        tmp_path,
+        authority,
+        child_cleanup,
+        monkeypatch,
+        calls=[SAVE_NOTE],
+        runs={"max_duration_s": 300.0005},
+    )
+
+    assert "MCP_TOOL_TIMEOUT=300001" in run.capture.text_of("environment").splitlines()
+
+
+def noting_the_call_then(tmp_path: Path, wait: Callable[[], None]) -> Mapping[str, Responder]:
+    def answer(request: RecordedRequest):
+        noted = tmp_path / "capture" / "app_has_call"
+        noted.parent.mkdir(exist_ok=True)
+        noted.touch()
+        wait()
+        return rpc_result(request, {"content": [{"type": "text", "text": "saved"}]})
+
+    return {"tools/call": answer}
+
+
+def answering_after_the_cli_finished(tmp_path: Path) -> Callable[[], None]:
+    finished = tmp_path / "capture" / "finished"
+
+    def wait() -> None:
+        deadline = time.monotonic() + STUCK_APP_BOUND_SECONDS
+        while not finished.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        time.sleep(APP_ANSWERS_AFTER_THE_FINAL_SECONDS)
+
+    return wait
+
+
+def test_a_final_after_a_cancelled_call_follows_its_result(
+    tmp_path, authority, child_cleanup, monkeypatch
+):
+    run = a_tool_run(
+        tmp_path,
+        authority,
+        child_cleanup,
+        monkeypatch,
+        calls=[SAVE_NOTE],
+        give_up_when_present=tmp_path / "capture" / "app_has_call",
+        overrides=noting_the_call_then(tmp_path, answering_after_the_cli_finished(tmp_path)),
+    )
+
+    assert wire_shape(run.events) == [
+        ("tool_call", "save_note", "call-1", "side_effecting"),
+        ("tool_result", "call-1", "saved", False),
+        ("succeeded", "done"),
+    ]
+    assert (ended_as(run), len(run.app.calls), run.capture.replies) == (SUCCEEDED, 1, [])
+
+
+def settling_before_the_app_is_released(
+    release: threading.Event, scenario: Callable[[str], list[RunEvent]]
+) -> Callable[[str], list[RunEvent]]:
+    def play(base_url: str) -> list[RunEvent]:
+        try:
+            events = scenario(base_url)
+            settled_status(base_url, events)
+            return events
+        finally:
+            release.set()
+
+    return play
+
+
+PROMPT_SUPERVISION = {"heartbeat_interval_s": 1, "stall_timeout_s": 1.5}
+
+
+@pytest.mark.parametrize(
+    ("ending", "options", "expected"),
+    [
+        pytest.param(
+            "idle-expiry",
+            {"runs": {**PROMPT_SUPERVISION, "idle_timeout_s": 2.0, "max_duration_s": 30.0}},
+            (RunState.FAILED, FailureCode.IDLE_TIMEOUT, None),
+            id="idle-expiry",
+        ),
+        pytest.param(
+            "maximum-duration",
+            {
+                "runs": {**PROMPT_SUPERVISION, "idle_timeout_s": 3.0, "max_duration_s": 3.5},
+                "linger_before_calls_seconds": 2.0,
+            },
+            (RunState.FAILED, FailureCode.LIMIT_EXCEEDED, None),
+            id="maximum-duration",
+        ),
+        pytest.param(
+            "client-departure",
+            {
+                "runs": {**PROMPT_SUPERVISION, "idle_timeout_s": 20.0, "max_duration_s": 30.0},
+                "scenario": leave_after_the_first_tool_call,
+                "calls": [READ_NOTE],
+            },
+            (RunState.CANCELLED, None, ClientLoss.DISCONNECTED),
+            id="client-departure",
+        ),
+    ],
+)
+def test_a_held_final_with_a_stuck_app_ends_by_supervision(
+    tmp_path, authority, child_cleanup, monkeypatch, ending, options, expected
+):
+    release = threading.Event()
+    scenario = options.pop("scenario", post_a_run)
+
+    run = a_tool_run(
+        tmp_path,
+        authority,
+        child_cleanup,
+        monkeypatch,
+        give_up_when_present=tmp_path / "capture" / "app_has_call",
+        overrides=noting_the_call_then(tmp_path, lambda: release.wait(STUCK_APP_BOUND_SECONDS)),
+        scenario=settling_before_the_app_is_released(release, scenario),
+        **{"calls": [SAVE_NOTE], **options},
+    )
+
+    assert (run.status.state, run.status.failure_code, run.status.client_lost) == expected
+    assert [shape[0] for shape in wire_shape(run.events) if shape[0] == "succeeded"] == []
+    assert (len(run.app.calls), pending_tool_tasks()) == (1, [])
+    with pytest.raises(ConnectionRefusedError):
+        socket.create_connection(("127.0.0.1", run.capture.relay_port), timeout=SETTLE_SECONDS)
+
+
 def test_the_mcp_trust_context_ignores_the_environment(
     tmp_path, authority, other_authority, monkeypatch
 ):
@@ -573,6 +735,4 @@ def test_a_run_trusts_exactly_the_configured_bundle(
 
         status = own_real_children(child_cleanup, monkeypatch, start_and_post)
 
-    assert ending_of(status) == (
-        SUCCEEDED if signed_by_the_configured_ca else PROVIDER_ERROR
-    )
+    assert ending_of(status) == (SUCCEEDED if signed_by_the_configured_ca else PROVIDER_ERROR)

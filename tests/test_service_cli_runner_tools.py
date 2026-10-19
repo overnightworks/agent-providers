@@ -96,6 +96,7 @@ from agent_client.wire import (
     ClientLoss,
     Failed,
     FailureCode,
+    JsonObject,
     RejectionCode,
     RunEvent,
     RunState,
@@ -1222,14 +1223,19 @@ class RelayDoor:
     async def connect(self) -> RawClient:
         return await RawClient.connect(self.port)
 
-    def call(self, request_id: int, name: str = "read_note") -> bytes:
-        body = json_rpc("tools/call", request_id, {"name": name, "arguments": {}})
+    def post(
+        self, method: str, request_id: int | None = None, params: JsonObject | None = None
+    ) -> bytes:
+        body = json_rpc(method, request_id, params)
         head = (
             f"POST {self.path} HTTP/1.1\r\nHost: 127.0.0.1:{self.port}\r\n"
             f"Authorization: Bearer {self.secret}\r\nContent-Type: application/json\r\n"
             f"MCP-Protocol-Version: {MCP_PROTOCOL_VERSION}\r\nContent-Length: {len(body)}\r\n\r\n"
         )
         return head.encode() + body
+
+    def call(self, request_id: int, name: str = "read_note") -> bytes:
+        return self.post("tools/call", request_id, {"name": name, "arguments": {}})
 
 
 async def error_code_of(client: RawClient) -> int:
@@ -1307,6 +1313,7 @@ def test_a_natural_exit_reaps_before_the_final_and_the_relay_closes_after_the_te
             door = RelayDoor.in_the_run_of(run)
             await loop_settled()
             final_before_the_reap = [event for event in seen if isinstance(event, FinalEvent)]
+            (await door.connect()).disconnect()
             child.reap_gate.set()
             async with asyncio.timeout(TEST_WAIT_SECONDS):
                 frames = await reading
@@ -1331,9 +1338,33 @@ def an_unconfirmed_group(**script: Any) -> ChildHeldAtItsReap:
     )
 
 
-async def assert_the_tools_are_closed(app: ToolApp, door: RelayDoor) -> None:
+@dataclass(frozen=True)
+class RunWithAForwardInFlight:
+    """A scripted run read by its own task, one call held inside the app, its caller waiting."""
+
+    reading: asyncio.Task[list[bytes]]
+    door: RelayDoor
+    caller: RawClient
+    forward: HeldRequest
+
+
+async def run_with_a_forward_in_flight(
+    run: ScriptedRun, held: HeldRequests
+) -> RunWithAForwardInFlight:
+    reading = asyncio.create_task(collected(run.frames), name="test:reading")
+    await yield_until(lambda: any(run.root.glob("**/relay-mcp.json")))
+    door = RelayDoor.in_the_run_of(run)
+    caller = await door.connect()
+    await caller.send(door.call(1))
+    [forward] = await asyncio.to_thread(held.wait_for, 1)
+    return RunWithAForwardInFlight(reading, door, caller, forward)
+
+
+async def assert_the_tools_are_closed(app: ToolApp, flight: RunWithAForwardInFlight) -> None:
     with pytest.raises(ConnectionRefusedError):
-        await door.connect()
+        await flight.door.connect()
+    assert await flight.caller.at_eof()
+    await asyncio.to_thread(flight.forward.wait_for_peer_left)
     await yield_until(lambda: app.fake.ended_connections == app.fake.accepted_connections)
     assert pending_tool_tasks() == []
 
@@ -1343,50 +1374,48 @@ def test_an_unconfirmed_group_with_tools_closes_them_and_holds_the_place(
 ):
     child = an_unconfirmed_group()
     child.reap_gate.set()
-    with a_tool_app(authority, list(TOOLS)) as app:
+    held = HeldRequests(bound_seconds=STUCK_APP_BOUND_SECONDS)
+    with a_tool_app(authority, list(TOOLS), overrides={"tools/call": held.responder(saved)}) as app:
         run = a_scripted_tool_run(tmp_path, authority, app)
 
         async def scenario() -> None:
-            await anext(run.frames)
-            await anext(run.frames)
-            door = RelayDoor.in_the_run_of(run)
-            async with asyncio.timeout(TEST_WAIT_SECONDS):
-                await run.frames.aclose()
+            flight = await run_with_a_forward_in_flight(run, held)
+            flight.reading.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                async with asyncio.timeout(TEST_WAIT_SECONDS):
+                    await flight.reading
             status = run.status()
             assert (status.state, status.failure_code) == PROVIDER_ERROR
             assert run.held_state() == (True, 1, True)
-            await assert_the_tools_are_closed(app, door)
+            await assert_the_tools_are_closed(app, flight)
             await run.frees_its_place_once_the_group_is_confirmed(child)
 
         drive_scripted(monkeypatch, child, scenario(), loop_factory=SteppedLoop)
-
-    assert app.calls == []
 
 
 def test_a_loss_beside_a_cancelled_close_ends_provider_error_with_tools_open(
     tmp_path, authority, monkeypatch, logging_state_restored
 ):
     child = an_unconfirmed_group()
-    with a_tool_app(authority, list(TOOLS)) as app:
+    held = HeldRequests(bound_seconds=STUCK_APP_BOUND_SECONDS)
+    with a_tool_app(authority, list(TOOLS), overrides={"tools/call": held.responder(saved)}) as app:
         run = a_scripted_tool_run(tmp_path, authority, app)
 
         async def scenario() -> None:
-            await anext(run.frames)
-            await anext(run.frames)
-            door = RelayDoor.in_the_run_of(run)
-            closing = asyncio.create_task(run.frames.aclose())
+            flight = await run_with_a_forward_in_flight(run, held)
+            flight.reading.cancel()
             async with asyncio.timeout(TEST_WAIT_SECONDS):
                 await child.reap_reached.wait()
-            closing.cancel()
+            flight.reading.cancel()
             await loop_settled()
             child.reap_gate.set()
             with contextlib.suppress(asyncio.CancelledError):
                 async with asyncio.timeout(TEST_WAIT_SECONDS):
-                    await closing
+                    await flight.reading
             status = run.status()
             assert (status.state, status.failure_code) == PROVIDER_ERROR
             assert run.held_state() == (True, 1, True)
-            await assert_the_tools_are_closed(app, door)
+            await assert_the_tools_are_closed(app, flight)
             await run.frees_its_place_once_the_group_is_confirmed(child)
 
         drive_scripted(monkeypatch, child, scenario(), loop_factory=SteppedLoop)

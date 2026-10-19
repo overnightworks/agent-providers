@@ -604,7 +604,6 @@ def never_stopped_state(drive: Drive, client: ClientSocket) -> RunState:
 
 
 class StoppedRun(NamedTuple):
-    while_held: tuple[RunState, list[bool], int]
     status: RunStatus
     afterwards: tuple[list[bool], list[Path], int, int, int, list[bool]]
 
@@ -617,6 +616,9 @@ async def post_a_second_run(app: FastAPI) -> ClientSocket:
 
 def answer_status(client: ClientSocket) -> int:
     return client.messages[0]["status"]
+
+
+HELD_WITH_THE_PLACE_TAKEN = (RunState.RUNNING, [False], 429)
 
 
 async def stopped_run_held_then_released(
@@ -640,6 +642,7 @@ async def stopped_run_held_then_released(
         all_children_gone(child_cleanup),
         answer_status(refused),
     )
+    assert while_held == HELD_WITH_THE_PLACE_TAKEN
     held_reap.let_go.set()
     client.released.set()
     await response
@@ -657,10 +660,7 @@ async def stopped_run_held_then_released(
     admitted.leave()
     await admitted_response
     afterwards = (*after_the_stop, answer_status(admitted), all_children_gone(child_cleanup))
-    return StoppedRun(while_held, status, afterwards)
-
-
-HELD_WITH_THE_PLACE_TAKEN = (RunState.RUNNING, [False], 429)
+    return StoppedRun(status, afterwards)
 
 
 def the_place_is_free_after_one_reap(afterwards: tuple[Any, ...]) -> bool:
@@ -718,7 +718,6 @@ def test_every_stop_reaps_the_cli_once_before_the_record_ends(
             stopped = await stopped_run_held_then_released(
                 app, drive, client, response, held_reap, child_cleanup, config
             )
-            assert stopped.while_held == HELD_WITH_THE_PLACE_TAKEN
             assert (
                 stopped.status.state,
                 stopped.status.failure_code,
@@ -749,7 +748,6 @@ def test_a_stop_at_a_yielded_event_closes_the_core_at_once(
             stopped = await stopped_run_held_then_released(
                 app, drive, client, response, held_reap, child_cleanup, config
             )
-            assert stopped.while_held == HELD_WITH_THE_PLACE_TAKEN
             assert (stopped.status.state, stopped.status.client_lost) == (
                 RunState.CANCELLED,
                 ClientLoss.DISCONNECTED,

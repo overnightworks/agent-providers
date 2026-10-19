@@ -23,7 +23,6 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import pytest
-import uvicorn
 from anchored_support import GONE, TEST_WAIT_SECONDS, ChildCleanup
 from fastapi import FastAPI
 from provider_test_support import (
@@ -506,7 +505,6 @@ def read_status(base_url: str, run_id: uuid.UUID) -> RunStatus:
     return RunStatus.model_validate_json(response.content)
 
 
-FIRST_UVICORN_THAT_SEES_A_LEAVING_CLIENT = (0, 32, 1)
 PARKED_AFTER_ONE_TEXT = (INIT_LINE, TEXT_LINE)
 PARKED = "exec sleep 600"
 
@@ -533,11 +531,6 @@ def a_parked_claude(
     return a_fake_claude(directory, stream=PARKED_AFTER_ONE_TEXT, then=then)
 
 
-@pytest.mark.skipif(
-    tuple(int(part) for part in uvicorn.__version__.split(".")[:3])
-    < FIRST_UVICORN_THAT_SEES_A_LEAVING_CLIENT,
-    reason="uvicorn before 0.32.1 never tells a streaming app that its client left",
-)
 def test_a_client_that_leaves_ends_the_cli_before_the_place_is_free(
     tmp_path: Path,
     child_cleanup: ChildCleanup,

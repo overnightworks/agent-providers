@@ -677,7 +677,7 @@ def test_a_held_final_with_a_stuck_app_ends_by_supervision(
     )
 
     assert (run.status.state, run.status.failure_code, run.status.client_lost) == expected
-    assert [shape[0] for shape in wire_shape(run.events) if shape[0] == "succeeded"] == []
+    assert not any(isinstance(event, Succeeded) for event in run.events)
     assert (len(run.app.calls), pending_tool_tasks()) == (1, [])
     with pytest.raises(ConnectionRefusedError):
         socket.create_connection(("127.0.0.1", run.capture.relay_port), timeout=SETTLE_SECONDS)

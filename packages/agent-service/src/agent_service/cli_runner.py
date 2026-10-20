@@ -1,12 +1,15 @@
 """The CLI route's runner: the profile a route names, run through the core with its tools.
 
-``CliRunner.run`` builds the provider run of the route's profile. When the run's capability
-grants tools it first opens the run's tool set (``RunTools``), hands the adapter only the
-relay's address and secret, and merges the relay's tool events with the core's text and ending
-(``RelayedEvents``); the CLI's own tool lines are dropped. Its one exit path closes the tool
-set once, with the core's reap, so a login refusal, a failed exit, a barrier refusal or a
-lost containment reaches the service's run supervision as it was raised. It reads no
-installed core configuration: each fact arrives as an argument.
+``CliRunner.run`` builds the provider run of the route's profile. It first reads the profile's
+token file, so a swapped file takes effect on the next run without a restart, and a file gone
+bad fails that run as an ``UnsoundSecretFile`` before any tool connection or child (decision
+record 0001, lines 2 and 14); the secret file's size limit bounds that read, so it stays on the
+event loop. When the run's capability grants tools it then opens the run's tool set
+(``RunTools``), hands the adapter only the relay's address and secret, and merges the relay's
+tool events with the core's text and ending (``RelayedEvents``); the CLI's own tool lines are
+dropped. Its one exit path closes the tool set once, with the core's reap, so a login refusal,
+a failed exit, a barrier refusal or a lost containment reaches the service's run supervision as
+it was raised. It reads no installed core configuration: each fact arrives as an argument.
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ from agent_providers.claude.provider import ClaudeRun
 from agent_providers.cli_run import CliRunAdapter, RelayAccess, astream_cli_run
 from agent_providers.config import PrivateWorkingRoot
 from agent_providers.events import StreamEvent
+from agent_providers.secret_file import read_token_file
 from agent_service.config import Provider, ServiceConfig
 from agent_service.relayed_events import RelayedEvents
 from agent_service.run_liveness import RunClock
@@ -36,21 +40,23 @@ from agent_service.runners import AdmittedRun, Runners
 class ProfileLaunch:
     provider: Provider
     binary: Path
-    token: SecretStr
+    token_file: Path
     max_tool_calls: int
     tool_timeout_seconds: float
 
 
-AdapterFactory = Callable[[ProfileLaunch, AdmittedRun, RelayAccess | None], CliRunAdapter]
+AdapterFactory = Callable[
+    [ProfileLaunch, SecretStr, AdmittedRun, RelayAccess | None], CliRunAdapter
+]
 
 
 def claude_run(
-    launch: ProfileLaunch, admitted: AdmittedRun, relay: RelayAccess | None
+    launch: ProfileLaunch, token: SecretStr, admitted: AdmittedRun, relay: RelayAccess | None
 ) -> CliRunAdapter:
     turn = admitted.request.turn
     return ClaudeRun(
         binary=launch.binary,
-        token=launch.token,
+        token=token,
         system=turn.system,
         max_tool_calls=launch.max_tool_calls,
         history=tuple(turn.messages),
@@ -67,11 +73,11 @@ def _launches_of(config: ServiceConfig) -> Mapping[str, ProfileLaunch]:
     programs = config.cli.programs()
     launches = {}
     for name, profile in config.profiles.items():
-        assert profile.token is not None
+        assert profile.token_file is not None
         launches[name] = ProfileLaunch(
             provider=profile.provider,
             binary=programs[profile.provider].binary,
-            token=profile.token,
+            token_file=profile.token_file,
             max_tool_calls=config.runs.max_tool_calls,
             tool_timeout_seconds=config.runs.max_duration_s,
         )
@@ -103,10 +109,11 @@ class CliRunner:
         tools: RunTools | None = None
         events: RelayedEvents | None = None
         try:
-            tools = await self._opened_tools(admitted)
             launch = self._launches[admitted.route.profile]
+            token = SecretStr(read_token_file(launch.token_file))
+            tools = await self._opened_tools(admitted)
             adapter = RUN_ADAPTERS[launch.provider](
-                launch, admitted, None if tools is None else tools.access
+                launch, token, admitted, None if tools is None else tools.access
             )
             events = RelayedEvents(
                 astream_cli_run(self._working_root, adapter),

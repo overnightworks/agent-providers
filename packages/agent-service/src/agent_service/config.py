@@ -13,7 +13,9 @@ as soon as any app declares an origin, and otherwise optional and unused.
 A TOML file is read once at startup into frozen models that forbid unknown
 fields. A file the models refuse stops the service with an error naming the
 field, so a typo never becomes a silently ignored policy. The signing key file
-and each profile's token file the TOML names are read and checked with it, in the same pass.
+and each profile's token file the TOML names are read and checked with it, in the same pass;
+the configuration keeps the key, but only a token file's path, since the runner reads the
+token again at the start of every run.
 """
 
 from __future__ import annotations
@@ -33,7 +35,6 @@ from pydantic import (
     ConfigDict,
     Field,
     PlainValidator,
-    SecretStr,
     StrictFloat,
     StrictInt,
     ValidationError,
@@ -115,9 +116,15 @@ def _signing_key_in_file(key_file: object) -> SigningKey:
     return load_signing_key(_absolute_path_to("signing key file", key_file))
 
 
-def _token_in_file(token_file: object) -> SecretStr:
-    """Reads the token the absolute path names; a refusal stops startup as a field error."""
-    return SecretStr(read_token_file(_absolute_path_to("token file", token_file)))
+def _sound_token_file(token_file: object) -> Path:
+    """The absolute path, once its token reads soundly; a refusal stops startup as a field error.
+
+    The token read here is dropped: a swapped file takes effect on the next run without a
+    restart (decision record 0001, line 2), so only the runner's read at each run's start counts.
+    """
+    path = _absolute_path_to("token file", token_file)
+    read_token_file(path)
+    return path
 
 
 class SigningConfig(_Section):
@@ -245,9 +252,7 @@ class ProfileConfig(_Section):
     """One subscription login the CLI route may run under."""
 
     provider: Annotated[Provider, BeforeValidator(_text_only)]
-    token: Annotated[SecretStr, BeforeValidator(_token_in_file)] | None = Field(
-        default=None, validation_alias="token_file"
-    )
+    token_file: Annotated[Path, BeforeValidator(_sound_token_file)] | None = None
 
 
 class PurposeConfig(_Section):
@@ -287,11 +292,11 @@ def _named_tables(
             yield name, table
 
 
-def _value(table: object, key: str, field_name: str | None = None) -> object:
+def _value(table: object, key: str) -> object:
     """What pydantic will see under ``key``: ``None`` is absent, in a mapping or a built model."""
     if isinstance(table, Mapping):
         return table.get(key)
-    return getattr(table, field_name or key)
+    return getattr(table, key)
 
 
 def _raw_profiles(document: object) -> Iterator[tuple[str, object, Provider | None]]:
@@ -323,7 +328,7 @@ def _refuse_a_profile_for_a_provider_without_a_route(document: object) -> None:
 
 def _refuse_a_claude_profile_without_its_token_file(document: object) -> None:
     for name, table, provider in _raw_profiles(document):
-        if provider is Provider.CLAUDE and _value(table, "token_file", "token") is None:
+        if provider is Provider.CLAUDE and _value(table, "token_file") is None:
             raise ValueError(
                 f"profiles.{shown_text(name)}.token_file: required for a claude profile"
             )

@@ -1,0 +1,7 @@
+claim_id = "2982dcc1f7844c128a305f0389f73453"
+agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
+role = "builder"
+base = "ed3f66d6dced220d4de6d11a60378140471c0b41"
+branch = "claude/issue-375-image-test-fifo-leak"
+scope = ["tests/test_codex_cli_adapter.py"]
+opened_commit = "345ea6b157026b9cc6e5635e63d2ed62f763dc60"

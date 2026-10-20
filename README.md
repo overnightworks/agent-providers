@@ -14,7 +14,8 @@ Three distributions ship from this repository, released together from one tag:
 - `overnightworks-agent-providers`, import package `agent_providers` — the
   provider core.
 - `overnightworks-agent-client`, import package `agent_client` — the light
-  client an app installs; it depends on `pydantic` only and owns the tool
+  client an app installs; it depends on `pydantic` only, plus PyJWT with
+  cryptography in `[mcp-server]`, and owns the tool
   contract `ToolDeclaration` and the agent service's run contract: the
   `RunRequest` that starts a run and the events it streams.
 - `overnightworks-agent-service`, import package `agent_service` — the agent
@@ -41,6 +42,8 @@ It owns the machinery that is the same in every deployment:
 | `agent_client.run_stream` | `parse_event` and `RunStream`: the rules a run's event stream keeps, and how a cut-short run ends |
 | `agent_client.sse` | `encode_event` and `RunStreamDecoder`: one SSE frame per run event, decoded and checked against the wire and its stream rules |
 | `agent_client.capability` | The format of the run capability the service mints and an app's MCP server verifies (A1m): token type `agent-capability+jwt`, at most 8,192 characters, the strict `CapabilityClaims`, `McpOrigin`, the one decider of an app's canonical https MCP origin, and `MCP_ENDPOINT_PATH`, the one path an app's MCP server serves and the service's client calls |
+| `agent_client.errors` | `raise_without_chain`: raises an error with no chained context or cause; `agent_providers.errors` imports it |
+| `agent_client.mcp_server` (`[mcp-server]` extra) | The app side of the JSON-only MCP profile. `verify_capability(token, key=, origin=, now=)` returns the `CapabilityClaims` or one closed `CapabilityRefusal` (`too_long`, `malformed`, `unexpected_header`, `wrong_type`, `invalid_signature`, `invalid_claims`, `wrong_audience`, `expired`, `issued_in_future`, the first failing check) and never raises for token content; it pins RS256 and the exact header members, uses the injected clock without leeway, and a refusal carries no part of the token. `CapabilityVerificationKey.from_pem(pem)` trusts exactly one PEM `PUBLIC KEY` block holding an RSA-3072 key with exponent 65537 (`SIGNING_KEY_BITS`, `SIGNING_KEY_EXPONENT`; `openssl pkey -in signing-key.pem -pubout`) and raises `UnsoundVerificationKey` (a `ValueError` naming the rule, never bytes) for a private key, two blocks, an EC key or non-PEM bytes |
 | `agent_providers.codex_login` | `assess_codex_login`: the one decider of whether a Codex login can start a child, and the blanked copy it receives |
 | `agent_providers.tools` | The `ToolCatalog`, its host-declared `ToolProtocolMarkup` and its Anthropic/OpenAI schema projections; re-exports the identical `ToolDeclaration` |
 | `agent_providers.spawn` | `ChildProcess` (its `repr` omits the environment field) and the only calls in this library that create a child process. `open_anchored_pipes` returns an `AnchoredChild`, an async child whose exited leader only its own handle reaps, so its process group can be signalled safely until `release()`; its start runs synchronously on the event loop, as asyncio's own door does, and blocks that loop until the child has executed its binary; `AnchoredLeader.kill_and_census()`, also on `AnchoredChild`, sends SIGKILL to the leader's process group and then counts the group's live members in `/proc` (`procfs.group_census`), both inside one hold of the anchor, so every count follows a kill that could reach only this run's group; its `EMPTY` says nothing about a process that left the group with `setsid` or `setpgid`, and it neither publishes nor releases the leader's exit. `AnchoredChild.kill_until_gone(within=)` repeats that kill and count in a worker thread, `GROUP_CENSUS_INTERVAL_SECONDS` (0.1 s) after each live count, and returns a `KillUntilGoneResult` whose `confirmed` is true only for an `EMPTY` count that ended no later than the bound; the bound is measured from just before the first SIGKILL, the first attempt is unconditional (so a zero bound makes one kill and count and practically never confirms on a real clock), no subsequent attempt starts at or after it, and a count that ends after it is reported as it is but never confirms, so the call can return later than the bound by one wait's overrun and one attempt. The host must not reap children it did not start. After a resource failure or an interruption inside `open_anchored_pipes`, during its start or after the start and before the handle is returned, the host stops using the library and ends the process (see **Interruptions**). `open_blocking_anchored_pipes` returns a `BlockingAnchoredChild`, its blocking twin for a caller's own thread, with the same anchor, `kill_until_gone(within=)` on `time.monotonic`, and `wait_for_exit(timeout)` |
@@ -80,11 +83,12 @@ It leaves the application everything the library cannot know: the MCP tool set
 and its execution, the prompts, where settings are stored, and domain
 ownership. The core depends on the agent client, `pydantic`, `httpx` and
 `anyio` at runtime and on nothing else — no host application, no web framework,
-no database; the client depends on `pydantic` only and never imports the core.
+no database; the client depends on `pydantic` only, plus PyJWT with cryptography in `[mcp-server]`, and never imports the core.
 Import-linter contracts forbid either package reaching back into
 `songmaker_cli` or the sibling `webauth` library and layer the service above
-the core above the client; only the service verifies tokens, so only it imports
-`webauth`. `lint-imports` proves them in CI.
+the core above the client; only the service verifies user and workload tokens,
+so only it imports `webauth`, while an app verifies run capabilities through
+`agent_client.mcp_server`. `lint-imports` proves them in CI.
 
 ## Terms
 
@@ -121,11 +125,14 @@ The core pins the client to its own version exactly, so both URLs name the same
 tag. An app that needs only the tool contract installs the client wheel alone.
 
 Two optional extras of the core cover the paths that import a heavier
-dependency lazily; in URL form they sit between the name and the `@`:
+dependency lazily, and the client has `[mcp-server]` for the app side of the MCP
+profile; in URL form they sit between the name and the `@`:
 
 - `[api]` pulls in the Anthropic SDK (`anthropic`) used by the Claude HTTP-API
   route.
 - `[image]` pulls in Pillow (`pillow`) used by the Codex image path.
+- `[mcp-server]` (on `overnightworks-agent-client`) pulls in PyJWT with cryptography, used by
+  `agent_client.mcp_server` to verify a run capability.
 
 ```bash
 pip install \

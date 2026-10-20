@@ -76,8 +76,9 @@ any app claim to be anyone.
 **Decision.** The app forwards the end user's Keycloak access token, whose
 audience includes `agent-service` and whose `azp` is the app's client. The
 service checks signature, issuer, audience, expiry, `azp` and the full-path group
-claim. The principal is `(iss, sub)`. The RS256 verifier comes from webauth W1
-(overnightworks/webauth#51).
+claim. The principal is `(iss, sub)`. The RS256 verifier for these identity
+tokens comes from webauth W1 (overnightworks/webauth#51); run capabilities are
+verified by `agent_client.mcp_server` (A1m D5).
 
 **Consequence.** There is one verifier owner and no copy of it here; no request
 can name its own user.
@@ -3709,8 +3710,8 @@ with three packages:
   `ToolDeclaration` from `agent-client`;
 - `agent-service`.
 
-Import contracts: client → stdlib, pydantic, HTTP and the MCP SDK only (pydantic
-added by the A0a amendment below); core → client; service → core and client;
+Import contracts: client → stdlib and pydantic, and in its `mcp-server` extra
+PyJWT with cryptography (A1m D5); core → client; service → core and client;
 nothing imports the service. AGENTS.md will name both the library and the
 service; deployment stays in edge (A1d).
 

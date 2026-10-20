@@ -12,7 +12,7 @@ from one tag:
 - `overnightworks-agent-providers`, import package `agent_providers` — the
   provider core, at the root.
 - `overnightworks-agent-client`, import package `agent_client` — the light
-  client (pydantic only) that owns the tool contract `ToolDeclaration` and
+  client (pydantic only; PyJWT in its `[mcp-server]` extra) that owns the tool contract `ToolDeclaration` and
   the agent service's run contract (`agent_client.wire`: the `RunRequest`
   body and the streamed run events).
 - `overnightworks-agent-service`, import package `agent_service` — the agent

@@ -39,8 +39,9 @@ owner needs.
   `ProviderRuntimeConfig` it installs with `configure()`, through the ports it
   supplies, or, for the subscription run the agent service drives without a
   core runtime, as explicit arguments validated at construction.
-- The agent client is light: it depends on `pydantic` only and owns the tool
-  contract `ToolDeclaration` in `agent_client.tools`. The core builds on it and
+- The agent client is light: its base depends on `pydantic` only and owns the tool
+  contract `ToolDeclaration` in `agent_client.tools`; its `[mcp-server]` extra adds
+  PyJWT with cryptography for `agent_client.mcp_server`, which no base module imports. The core builds on it and
   re-exports the identical class from `agent_providers.tools`; the client never
   imports the core.
 - The agent service's wire has one owner, `agent_client.wire`, with its stream
@@ -48,15 +49,17 @@ owner needs.
   in-process turn event and never a second wire; `agent_service.run_events`
   maps it onto the wire.
 - The service builds on the core and the client, and nothing imports it. It
-  alone verifies tokens, through webauth's `JwtVerifier`, and it alone depends
+  alone verifies user and workload tokens, through webauth's `JwtVerifier`; an app
+  verifies its run capabilities through `agent_client.mcp_server`. It alone depends
   on a web framework (FastAPI, uvicorn).
 - `.importlinter` forbids `songmaker_cli` in all three packages and `webauth`
   in the core and the client, and layers `agent_service` above
   `agent_providers` above `agent_client`; `lint-imports` proves it in CI.
-- Two optional extras exist for lazily-imported paths: `agent-providers[api]`
-  for the Anthropic SDK the Claude HTTP-API route uses, and
-  `agent-providers[image]` for the Pillow the Codex image path uses. Core
-  installs neither.
+- Three optional extras exist: `agent-providers[api]` for the Anthropic SDK
+  the Claude HTTP-API route uses, `agent-providers[image]` for the Pillow the
+  Codex image path uses, and `agent-client[mcp-server]` for the PyJWT with
+  cryptography that `agent_client.mcp_server` verifies run capabilities with.
+  Neither package installs them by default.
 - Application concerns — the MCP tool set and its execution, prompts, settings
   storage, and domain ownership — belong to the host, not here.
 

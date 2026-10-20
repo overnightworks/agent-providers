@@ -5,13 +5,9 @@ applications install the library, and apps reach the service over HTTP. The
 service's deployment lives in edge, not here. Every change here is a change to
 a public contract that a tag has already frozen somewhere else.
 
-- Before every repository edit, use the globally installed `aco` CLI to
-  check the live ledger and claim the exact write scope. Subagents remain within
-  their parent's live claim and do not take overlapping claims.
-- Keep the shared `main` checkout clean. Build in an isolated external worktree,
-  and never `git stash` — the stash stack is shared across worktrees.
-- `main` is protected: every change lands through a pull request with green CI.
-  Nobody pushes to `main`.
+Python 3.12+, managed with uv. Extracted from
+[overnightworks/songmaker](https://github.com/overnightworks/songmaker)
+(issue #825) with its history.
 
 ## Repository layout
 
@@ -26,9 +22,7 @@ agent client (distribution `overnightworks-agent-client`) under
 `overnightworks-agent-service`) under `packages/agent-service/`, the suite for
 all three under `tests/`, and the decision records under `docs/decisions/` —
 among them the decision that this repository hosts the agent service and how
-its packages ship. No
-catch-all directory (`tooling/`, `misc/`) and no deeper hierarchy than the
-owner needs.
+its packages ship.
 
 ## Boundaries
 
@@ -62,6 +56,31 @@ owner needs.
   Neither package installs them by default.
 - Application concerns — the MCP tool set and its execution, prompts, settings
   storage, and domain ownership — belong to the host, not here.
+
+## Code patterns
+
+- Deployment facts come from the host, never from an environment variable or a
+  module default. A host that runs the catalog or turn paths installs one
+  `ProviderRuntimeConfig` per process with `configure()`, and those paths read it
+  back with `current_config()`; they gain no explicit-argument twin that skips
+  it. The agent service installs no core runtime: it reads its own config file
+  and passes each fact as an argument to the subscription run (`ClaudeRun`,
+  which validates at construction; `run_directories`, whose root is a
+  `PrivateWorkingRoot` validated at construction and whose file names are
+  checked on entry), none of which reads installed configuration — a test pins
+  each such entry working after `reset_config()`. No path invents a default for a
+  host fact.
+- Host obligations are ports, passed in. The tool set (`ToolExecutor`,
+  `ToolCatalog`), the MCP server (`McpServerSpec`), and the image constraints
+  (`ImagePolicy`) arrive from the host; the library never invents them.
+- One spawn owner, one bounded runner. Every child is a `ChildProcess`
+  (complete environment, absolute binary, explicit `cwd`) created only in
+  `agent_providers.spawn`; the bounded runner
+  `agent_providers.process.run_cli_bounded` owns start, stdin, first line,
+  deadline, and process-group cleanup, and the async Claude turns run on
+  `spawn.AnchoredChild`, whose leader only its own handle reaps.
+- Tests use the builders in `tests/provider_test_support.py` rather than a
+  second set of fakes.
 
 ## Checks
 

@@ -911,12 +911,14 @@ def test_a_relative_token_path_is_refused_naming_the_field(tmp_path, capsys, tok
 
 
 @pytest.mark.parametrize("trailing", ["", "\n"])
-def test_a_sound_token_file_is_read_with_its_trailing_newline_dropped(tmp_path, trailing):
+def test_a_sound_token_file_loads_with_or_without_a_trailing_newline_keeping_its_path(
+    tmp_path, trailing
+):
     token_file = _token_file_with(tmp_path, (CANARY + trailing).encode(), 0o400)
 
     config = load_config(_written(tmp_path, _token_config(str(token_file))))
 
-    assert config.profiles["claude-main"].token.get_secret_value() == CANARY
+    assert config.profiles["claude-main"].token_file == token_file
 
 
 @pytest.mark.parametrize("flag", ["O_NONBLOCK", "O_CLOEXEC"])
@@ -932,7 +934,7 @@ def test_a_token_file_is_refused_without_content_where_os_lacks_an_open_flag(
     assert CANARY not in f"{refusal.value}{refusal.value.__cause__}"
 
 
-def test_a_loaded_token_never_shows_in_the_repr_or_text_of_the_configuration(tmp_path):
+def test_the_checked_token_never_shows_in_the_repr_text_or_dump_of_the_configuration(tmp_path):
     token_file = _token_file_with(tmp_path, CANARY.encode())
 
     config = load_config(_written(tmp_path, _token_config(str(token_file))))
@@ -941,14 +943,14 @@ def test_a_loaded_token_never_shows_in_the_repr_or_text_of_the_configuration(tmp
     assert CANARY not in config.model_dump_json()
 
 
-def test_a_path_swapped_after_the_open_still_loads_the_opened_token_file(tmp_path, monkeypatch):
+def test_a_path_swapped_after_the_open_is_judged_by_the_opened_token_file(tmp_path, monkeypatch):
     token_file = _token_file_with(tmp_path, CANARY.encode())
     real_open = os.open
 
     def open_then_swap(path, flags, *arguments):
         descriptor = real_open(path, flags, *arguments)
         impostor = tmp_path / "impostor.token"
-        impostor.write_bytes(b"impostor")
+        impostor.write_bytes(b'{"impostor": true}')
         impostor.chmod(0o600)
         impostor.rename(token_file)
         return descriptor
@@ -957,16 +959,7 @@ def test_a_path_swapped_after_the_open_still_loads_the_opened_token_file(tmp_pat
 
     config = load_config(_written(tmp_path, _token_config(str(token_file))))
 
-    assert config.profiles["claude-main"].token.get_secret_value() == CANARY
-
-
-def test_the_token_file_is_read_once_so_replacing_it_afterwards_changes_nothing(tmp_path):
-    token_file = _token_file_with(tmp_path, CANARY.encode())
-    config = load_config(_written(tmp_path, _token_config(str(token_file))))
-
-    token_file.write_bytes(b"replacement")
-
-    assert config.profiles["claude-main"].token.get_secret_value() == CANARY
+    assert config.profiles["claude-main"].token_file == token_file
 
 
 PROFILE_TABLE = '[profiles.claude-main]\nprovider = "claude"\n' + TOKEN_FILE_LINE + "\n\n"

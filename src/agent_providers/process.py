@@ -421,6 +421,7 @@ CredentialCopy = Callable[[bytes], bytes | None]
 _PRIVATE_HOME_COPY_MODE: Final = 0o400
 _DESCRIPTOR_LINKS: Final = Path("/proc/self/fd")
 _CREDENTIAL_COPY_FAILED_DETAIL: Final = "could not prepare the private CLI credential copy"
+_PRIVATE_HOME_NOT_PREPARED_DETAIL: Final = "could not prepare the private CLI home"
 # Measured on claude 2.1.266: the CLI reports its subscription login from
 # this file below HOME alone, without a network call.
 _CLAUDE_CATALOG_CREDENTIAL_PATH: Final = Path(".claude/.credentials.json")
@@ -1454,7 +1455,8 @@ class PrivateHome:
             except OSError:
                 raise_without_chain(
                     CliEnvironmentUnavailableError(
-                        _CREDENTIAL_COPY_FAILED_DETAIL, cause=CliEnvironmentCause.HOME_NOT_CREATED,
+                        _PRIVATE_HOME_NOT_PREPARED_DETAIL,
+                        cause=CliEnvironmentCause.HOME_NOT_CREATED,
                     )
                 )
         except BaseException:  # NOSONAR(S5754) removes the tree, re-raises
@@ -1471,7 +1473,7 @@ class PrivateHome:
         if self._cleanup_requested:
             self._reservation_tokens.discard(token)
             self._remove_if_unused()
-            raise RuntimeError("private credential home is closing")
+            raise RuntimeError("private CLI home is closing")
         return token
 
     def close(self) -> None:

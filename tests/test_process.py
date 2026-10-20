@@ -2872,7 +2872,7 @@ def _remove_the_source(monkeypatch: pytest.MonkeyPatch, source: Path) -> None:
         (
             fail_the_home_chmod,
             CliEnvironmentUnavailableError,
-            "could not prepare the private CLI credential copy",
+            "could not prepare the private CLI home",
         ),
         (fail_mkdtemp, CliEnvironmentUnavailableError, "could not create a private CLI home"),
         (
@@ -3485,7 +3485,7 @@ def _run_interleaved_at_every_line(
 
 def _assert_a_reservation_attempt_kept_or_refused_its_home(home, ledger, attempt) -> None:
     if attempt.refusal is not None:
-        assert str(attempt.refusal) == "private credential home is closing"
+        assert str(attempt.refusal) == "private CLI home is closing"
         assert ledger.removals == 1
     else:
         assert ledger.removals == 0
@@ -3570,7 +3570,7 @@ def test_a_closing_home_refuses_a_new_reservation(
     held = home.reserve() if holding_a_reservation else None
     home.close()
 
-    with pytest.raises(RuntimeError, match="private credential home is closing"):
+    with pytest.raises(RuntimeError, match="private CLI home is closing"):
         home.reserve()
 
     assert home.path.exists() is holding_a_reservation

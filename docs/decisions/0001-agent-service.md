@@ -3491,27 +3491,35 @@ an error. Every run was driven and none was withheld.
 
 #### A1b-0f the setup token from the environment for readiness and catalog, live
 
-Measured on 19.10.2026 on 2.1.303 (m5 on 20.10.2026 on 2.1.304, see m5;
-`$HOME/.local/share/claude/versions/2.1.303`, not the section's 2.1.302; `claude
---version` prints `2.1.303 (Claude Code)`, checked without the token in the same
-sandbox) for #334, with the operator's dedicated
-measurement token, authorized for this cell on 19.10.2026. It reached the CLI only as
+Measured on 19.10.2026 on 2.1.303 (`$HOME/.local/share/claude/versions/2.1.303`, not the
+section's 2.1.302; `claude --version` prints `2.1.303 (Claude Code)`, checked without the
+token in the same sandbox), and m5 on 20.10.2026 on 2.1.304 (see m5), for #334, with the
+operator's dedicated measurement token, authorized for this cell on 19.10.2026. The token
+is a supplied measurement token; its validity is unverified in every run. In particular,
+its validity during m5 on 20.10 is not shown. It reached the CLI only as
 `CLAUDE_CODE_OAUTH_TOKEN` in the child's environment (the A1b-0b1 route); no
 `ANTHROPIC_*` variable was set, and `<token>` stands for its value. Every stored output
 was projected to field names, codes and yes/no results and redacted (the token value and any `sk-ant-` string become `<token>`), and the
 token-aware scan found the token and `sk-ant-` neither in the stored evidence nor in this
 section's diff. For m1–m4 and r1–r3 billing was not independently measured (the text
 formats carry no cost field); zero billed model calls there is inferred from m4b and r3
-(m2 below says why). The cell's one billed call is m5's turn t1 (cap 1, not retried). It
-failed with an empty `result.modelUsage`, which by M0's reading (#75) bills no model, and
-s3 after it also returned an empty `modelUsage`, so there was no second call.
+(m2 below says why). The one call in the cell that could bill is m5's turn t1 (cap 1, not
+retried). It returned an empty `modelUsage` and its cost was not recorded, so zero billing
+there is an inference, not a measurement: #75 reads an empty `modelUsage` as billing no
+model only of a successful statement B result, and t1 is a failed turn. s3 was not a
+second billed call: it is statement B, `-p /model`, which returned an empty `modelUsage`
+too.
 
 **Harness.** A1b-0b1's harness: network not unshared, `/run/systemd/resolve` bound
 read-only, a fresh private home (mode 700, holding only the empty `tmp`) and an empty
 working directory per run, both deleted after it, `--die-with-parent`. The environment is
 `PATH=/usr/bin:/bin`, `HOME`, `TMPDIR` (the home's `tmp`), `DISABLE_AUTOUPDATER=1` and,
 where a run says so, `CLAUDE_CODE_OAUTH_TOKEN` with the real or the rejected token.
-Inside the sandbox the CLI runs under `strace -f -qq -e trace=connect`. The scratch
+Inside the sandbox the CLI runs under `strace -f -qq -e trace=connect`. The m5 runs were traced too:
+their connection addresses went to a temporary file that was deleted after each run and
+none was retained, which still deviates from the m5 allowlist (no addresses). The driver
+now runs m5 untraced and writes no address anywhere; that corrected path has not been
+driven. The scratch
 driver lists the home (names and sizes) and scans every file's bytes for the token,
 `sk-ant-` and `oat01` after each run. The status and catalog runs read stdin from
 `/dev/null`. The turn runs get `hello` on stdin, which is then closed. The rejected token
@@ -3555,15 +3563,17 @@ directory `.claude.json.lock`. m2 wrote `.claude.json` (52,434), the 84-byte bac
 session transcript `.claude/projects/<cwd>/<session>.jsonl` (2,921) and the directories
 `.claude/projects/<cwd>/memory`, `.claude/sessions` and `tmp/claude-<uid>`. m4b and r3
 wrote the same apart from the policy and remote-settings files, with `.claude.json` at
-852 bytes and transcripts of 2,918 and 2,921 bytes. As in A1b-0b1 c3, only the accepted
-token produced the policy and remote-settings files. The catalog arguments do not
+852 bytes and transcripts of 2,918 and 2,921 bytes. As in A1b-0b1 c3, only a token the CLI
+accepted produced the policy and remote-settings files; for m2 on 19.10 this is an
+inference that the supplied token was accepted (m2, 19.10), not a measurement, and it does
+not extend to m5. The catalog arguments do not
 include `--no-session-persistence`, so every `/model` run left a transcript.
 
 **m4 No token, no login.** m4a: exit 1, the same six fields with `loggedIn` false and
 `authMethod` `"none"`. m4b: exit 0 after 1.2 s with the same `Available:` list as m2, but
 the first line `Current model: Opus 5.5 (default)`. m2 and r3 both print `Sonnet 5.5
-(default)`, so the stated default follows whether a token is present, not whether it is
-valid, and differs from the default with no login.
+(default)`, so the stated default follows whether a token is present (m2 and r3 agree, so not
+whether it is valid), and differs from the default with no login.
 
 **r1 A rejected token, non-streaming turn.** Exit 1 after 4.2 s, one JSON object with the
 fields `api_error_origin` (`"first_party"`), `api_error_status` (401), `duration_api_ms`
@@ -3591,7 +3601,7 @@ recorded here. Both used a rejected token and billed nothing.
 
 **r2 `auth status` with a rejected token.** Exit 0, the same fields and values as m1
 (`loggedIn` true, `authMethod` `"oauth_token"`). `auth status` does not tell a rejected
-token from an accepted one.
+token from a supplied one whose validity is unverified.
 
 **r3 `-p /model` with a rejected token.** Exit 0 after 2.1 s, the same text as m2,
 including `Sonnet 5.5 (default)`.
@@ -3606,12 +3616,18 @@ whole in memory and stored only L, the `stated_id`s, K, exit codes, `terminal`,
 - **s1** statement A, `-p /model`: exit 0, L `Sonnet 5.5 (default)`.
 - **s2** statement B, `-p /model --output-format stream-json --verbose`: exit 0,
   `terminal` success, `usage_state` empty, `stated_id` (`system/init.model`)
-  `claude-sonnet-5-5`. s2 was complete, so t1 ran.
+  `claude-sonnet-5-5`. The driver judged s2 complete and ran t1. The projection of that
+  time recorded `usage_state` empty for every falsy `modelUsage` (`null`, `false`, `0`,
+  `""`, `[]` and `{}`) without telling `{}` from the others, so the retained evidence
+  does not independently establish t1's prerequisite of a present, empty model-usage
+  map. The projection is corrected to call only a present `{}` empty. The verdict is
+  unaffected.
 - **t1** the turn `_cli_arguments(None)`, that is `-p --output-format json --tools ""
   --setting-sources "" --strict-mcp-config --disable-slash-commands`, `hello` on stdin:
   exit 1, `result.subtype` `"success"`, `is_error` true, `terminal` failure,
-  `usage_state` empty. `result.modelUsage` holds no key, so there is no K.
-- **s3** statement B again, after t1: exit 0, `terminal` success, `usage_state` empty,
+  `usage_state` empty (the same unseparated reading). `result.modelUsage` held no key, so
+  there is no K.
+- **s3** statement B again, after t1 (not a second billed call): exit 0, `terminal` success, `usage_state` empty,
   `stated_id` `claude-sonnet-5-5`.
 
 No run left a `.credentials*` file or token, `sk-ant-` or `oat01` bytes in its home.
@@ -3619,10 +3635,15 @@ No run left a `.credentials*` file or token, `sk-ant-` or `oat01` bytes in its h
 exactly one key K, equal to the one `stated_id` of s2 and s3. s2 and s3 agree on
 `claude-sonnet-5-5`, but t1 failed and gave no K, so nothing shows which model a token
 turn without `--model` executes. Why t1 failed is not recorded: the m5 allowlist keeps
-neither `result` nor `api_error_status`.
+neither `result` nor `api_error_status`. Its retained fields (exit 1, `is_error` true,
+`result.subtype` `"success"`, no model usage key) have the shape of r1, so the cause might
+be a rejected or expired token, an error of the API, or something else; the validity of the
+real token during m5 is not shown. Diagnosing it would take a new ruling for a billed turn
+and the recording of `api_error_status` and `result`.
 
 **Connections.** Every run except `--version` and m5 (whose allowlist keeps no
-addresses) connected to `127.0.0.53:53` and on port
+addresses; the m5 runs' addresses went to a deleted temporary file, see the harness)
+connected to `127.0.0.53:53` and on port
 443 to `160.79.104.10` and `2607:6bc0::10` (`api.anthropic.com`, A1b-0b1 c4), `auth
 status` included. m2 alone also connected to `[2600:1901:0:9e23::]:443` (the Datadog
 intake of A1b-0b1 c4). Port-0 probes during name resolution are left out.
@@ -3632,8 +3653,9 @@ intake of A1b-0b1 c4). Port-0 probes during name resolution are left out.
   and its cache stay, and the second sentence of #255's E4 (a rejected turn clears
   `_claude_login_probes` through `clear_claude_cli_login_cache`) is dropped.
 - **F-Katalog:** m4b shows the `/model` list without any login, so the list needs no
-  token. Its default label, however, follows the login: m4b states `Opus 5.5 (default)`,
-  while m2 and r3 state `Sonnet 5.5 (default)`. Which model a token turn without
+  token. Its default label, however, follows whether a token is present (m2 and r3 agree, so not
+  whether it is valid): m4b states `Opus 5.5 (default)`, while m2 and r3 state `Sonnet 5.5
+  (default)`. Which model a token turn without
   `--model` executes is recorded in m5; m5 does not prove identity, so the library names
   no Claude CLI default (#75 line 6) until a later proof, and #255's E12 decides whether
   the `/model` child gets the token.
@@ -3642,8 +3664,10 @@ intake of A1b-0b1 c4). Port-0 probes during name resolution are left out.
   `api_error_status` 401. S4b is not stopped by this cell.
 
 **Not measured.** Whether a rejected token makes `auth status` or `/model` behave
-differently after a cached accepted run; a revoked or expired real token (the rejected
-token is random); request paths (no proxy); `apiKeySource` with an API key in the child.
+differently after a cached run of an earlier token; a revoked or expired real token (the rejected
+token is random), which also leaves open whether t1's failure in m5 was one; which model a
+token turn without `--model` executes (m5: not proven; whether the real token was accepted
+at m5 is not shown); request paths (no proxy); `apiKeySource` with an API key in the child.
 
 ## H8 atelier-2
 

@@ -1,8 +1,0 @@
-claim_id = "879e2e2142764f469c532dcecd7887ba"
-agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
-role = "builder"
-base = "26eead745b6e44f72af6f8423d4d3f137d1f8c59"
-branch = "claude/issue-347-a1b-6r-profile-login-read-per-run"
-scope = ["README.md", "docs/decisions/0001-agent-service.md", "packages/agent-service/src/agent_service/cli_runner.py", "packages/agent-service/src/agent_service/config.py", "tests/service_support.py", "tests/test_relayed_events.py", "tests/test_service_cli_runner.py", "tests/test_service_cli_runner_tools.py", "tests/test_service_config.py"]
-opened_commit = "eeefe6a463a320571ca702295b989ce3b9730c21"
-whole_reason = "The per-run read moves the token from the config into the runner; config, runner, their shared test support and the ADR lines that rule it change together or the service holds two readers."

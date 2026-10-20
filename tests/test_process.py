@@ -79,6 +79,7 @@ from provider_test_support import (
     start_then_raise,
     traceback_frames_hold,
     tree_snapshot,
+    write_claude_token_file,
 )
 
 from agent_providers import lost_groups, process
@@ -1935,6 +1936,15 @@ def _expected_closed_names(credential_home_variable: str) -> list[str]:
     ]
 
 
+def _prepare_operator_home(tmp_path: Path, monkeypatch) -> Path:
+    original_home = tmp_path / "operator-home"
+    original_home.mkdir()
+    (original_home / "canary").write_text("untouched")
+    monkeypatch.setenv("HOME", str(original_home))
+    monkeypatch.setenv("CATALOG_ENV_LEAK", "should-not-appear")
+    return original_home
+
+
 def _prepare_catalog_credential(
     tmp_path: Path,
     monkeypatch,
@@ -1942,14 +1952,10 @@ def _prepare_catalog_credential(
     provider: str,
     auth_payload: str = _CATALOG_AUTH_PAYLOAD,
 ) -> tuple[Path, Path]:
-    original_home = tmp_path / "operator-home"
-    original_home.mkdir()
-    (original_home / "canary").write_text("untouched")
+    original_home = _prepare_operator_home(tmp_path, monkeypatch)
     credential = tmp_path / "host-named" / "auth.json"
     credential.parent.mkdir()
     credential.write_text(auth_payload)
-    monkeypatch.setenv("HOME", str(original_home))
-    monkeypatch.setenv("CATALOG_ENV_LEAK", "should-not-appear")
     CLI_RUNTIME_OVERRIDES[provider](token_file=credential)
     return original_home, credential
 
@@ -3827,9 +3833,7 @@ def test_catalog_child_cannot_write_the_original_credential_directory(
 
 
 def test_claude_catalog_child_never_sees_the_operator_home(tmp_path, monkeypatch) -> None:
-    original_home, _credential = _prepare_catalog_credential(
-        tmp_path, monkeypatch, provider="claude",
-    )
+    original_home = _prepare_operator_home(tmp_path, monkeypatch)
 
     run = run_claude_catalog_cli(Path("/usr/bin/env"), ())
 
@@ -3848,9 +3852,7 @@ def test_claude_catalog_child_never_sees_the_operator_home(tmp_path, monkeypatch
 
 
 def test_claude_catalog_child_writes_stay_in_the_private_home(tmp_path, monkeypatch) -> None:
-    original_home, _credential = _prepare_catalog_credential(
-        tmp_path, monkeypatch, provider="claude",
-    )
+    original_home = _prepare_operator_home(tmp_path, monkeypatch)
     script = (
         "import os, pathlib, sys\n"
         "path = pathlib.Path(os.environ['HOME']) / 'wrote'\n"
@@ -3923,6 +3925,27 @@ def test_claude_auth_status_with_an_unsound_token_file_starts_no_child_and_logs_
     assert sorted(tmp_path.glob(f"{process._CATALOG_HOME_PREFIX}*")) == []
     assert str(source) in warning.getMessage()
     assert TOKEN_CANARY not in caplog.text
+
+
+def test_claude_auth_status_home_failure_after_the_token_read_keeps_no_token_in_any_frame(
+    tmp_path,
+) -> None:
+    write_claude_token_file(current_claude_runtime().token_file, TOKEN_CANARY)
+    removed_root = tmp_path / "removed-root"
+    removed_root.mkdir(mode=0o700)
+    override_provider_runtime(cli_working_directory_root=removed_root)
+    removed_root.rmdir()
+
+    with pytest.raises(CliEnvironmentUnavailableError) as first:
+        claude_cli_login(Path("/usr/bin/claude"))
+    with pytest.raises(CliEnvironmentUnavailableError) as repeated:
+        claude_cli_login(Path("/usr/bin/claude"))
+
+    assert first.value.cause is CliEnvironmentCause.HOME_NOT_CREATED
+    assert str(first.value) == "could not create a private CLI home"
+    assert first.value.__cause__ is None
+    assert not traceback_frames_hold(first.value, TOKEN_CANARY)
+    assert not traceback_frames_hold(repeated.value, TOKEN_CANARY)
 
 
 def test_a_bare_binary_name_resolves_only_against_the_named_search_path(

@@ -1406,7 +1406,11 @@ def _run_credentialed_catalog_cli(
 
 def _claude_output(binary: Path) -> str | None:
     try:
-        login = claude_token_environment()
+        run = _run_without_credential_remains(
+            lambda: run_claude_catalog_cli(
+                binary, CLAUDE_CLI_STATUS_ARGS, login=claude_token_environment(),
+            ),
+        )
     except CliLoginUnusableError as refusal:
         log.warning(
             "the configured Claude token file is refused (%s); "
@@ -1414,7 +1418,6 @@ def _claude_output(binary: Path) -> str | None:
             str(refusal),
         )
         return None
-    run = run_claude_catalog_cli(binary, CLAUDE_CLI_STATUS_ARGS, login=login)
     if run is None or not run.complete or run.returncode != 0:
         return None
     return run.stdout

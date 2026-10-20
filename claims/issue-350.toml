@@ -1,0 +1,8 @@
+claim_id = "4a4443abc2a6495aa25557825125dc47"
+agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
+role = "builder"
+base = "4e55ebdd46a57ec518bdac62a1ced3bce3a4fddc"
+branch = "claude/issue-350-s4b3-the-claude-catalog-runs-auth-status"
+scope = ["README.md", "src/agent_providers/catalog.py", "src/agent_providers/claude/provider.py", "src/agent_providers/config.py", "src/agent_providers/constants.py", "src/agent_providers/process.py", "tests/test_catalog.py", "tests/test_catalog_home_retention.py", "tests/test_claude_provider.py", "tests/test_process.py"]
+opened_commit = "5b64feb45923545a50ab20c1a5400de1e66f66e7"
+whole_reason = "The catalog runner, its label owner and their public docstrings move together, or the listing names a default no turn runs."

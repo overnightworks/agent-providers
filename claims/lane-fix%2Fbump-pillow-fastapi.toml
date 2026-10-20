@@ -1,0 +1,7 @@
+claim_id = "9d9324aa98d0477c90c100054ad678d2"
+agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
+role = "builder"
+base = "d3546ef3461f547602b51bf1bd63daa01402dc48"
+branch = "fix/bump-pillow-fastapi"
+scope = ["pyproject.toml", "uv.lock"]
+opened_commit = "34dcc3e8e4d796ae4861a98c583d531938263e1f"

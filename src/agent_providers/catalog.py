@@ -177,9 +177,9 @@ class ProviderRouteSnapshot:
     ``readiness`` is ``READY``, and empty otherwise. It is neither fixed nor
     complete: a name missing from it is no proof that the route refuses it.
     ``catalogue_failure`` names why a probed catalogue failed.
-    ``default_model_label`` is the Claude CLI's own name for what a turn with no
-    model runs. It is for display only, never a model to pass, and ``None`` for
-    every other route and for a route that is not ready.
+    ``default_model_label`` is ``None`` for every route: the Claude CLI listing
+    runs without a login, so the library names no Claude CLI default. The field
+    stays for the hosts that read it.
     """
 
     models: tuple[str, ...]

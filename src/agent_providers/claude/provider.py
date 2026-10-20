@@ -55,7 +55,6 @@ from agent_providers.config import (
 )
 from agent_providers.constants import (
     CLAUDE_CLI_COMPLETION_TIMEOUT_SECONDS,
-    CLAUDE_CLI_CURRENT_MODEL_MARKER,
     CLAUDE_CLI_MAX_CONCURRENT_PROCESSES,
     CLAUDE_CLI_MODEL_LIST_MARKER,
     CLAUDE_CLI_NO_TOOL_SURFACE_TIMEOUT_SECONDS,
@@ -191,8 +190,8 @@ class UnavailableError(Exception):
 
 
 class CliUnavailableError(UnavailableError):
-    """Raised when the Claude CLI cannot run here: its binary is missing, its
-    private home cannot be made, or the catalog's credential copy cannot be written."""
+    """Raised when the Claude CLI cannot run here: its binary is missing or its
+    private home cannot be made."""
 
 
 class CliLoginNotConfiguredError(UnavailableError):
@@ -555,8 +554,9 @@ class ClaudeCliModelCatalog:
     """What the CLI's `/model` text states.
 
     ``aliases`` are the names the `--model` flag accepts. ``current_model_label``
-    is the CLI's own name for the model a turn with no model runs: something to
-    show, never a model to pass and never one of the aliases.
+    is always ``None``: the listing runs without a login, and the default the CLI
+    names then is not the one a signed-in turn runs (A1b-0f, m4), so the library
+    names no Claude CLI default. The field stays for the hosts that read it.
     """
 
     aliases: tuple[str, ...]
@@ -564,8 +564,10 @@ class ClaudeCliModelCatalog:
 
 
 def cli_model_catalog() -> ClaudeCliModelCatalog:
-    """Read the CLI's model aliases and its stated default from one `/model` start.
+    """Read the CLI's model aliases from one `/model` start, without a login.
 
+    The child gets no token and its home holds no login file, so the list
+    comes whatever ``claude.token_file`` holds.
     The CLI's own text is the only source for this — there is no
     machine-readable catalog endpoint for a CLI-only login. Raises
     UnavailableError, never returns an empty alias tuple, if that text doesn't
@@ -592,9 +594,7 @@ def cli_model_catalog() -> ClaudeCliModelCatalog:
         raise UnavailableError(
             CLAUDE_CLI_MODEL_CATALOG_ERROR,
         )
-    return ClaudeCliModelCatalog(
-        _model_aliases_in(run.stdout), _current_model_label_in(run.stdout),
-    )
+    return ClaudeCliModelCatalog(_model_aliases_in(run.stdout), current_model_label=None)
 
 
 def _model_aliases_in(stdout: str) -> tuple[str, ...]:
@@ -612,20 +612,6 @@ def _model_aliases_in(stdout: str) -> tuple[str, ...]:
     raise UnavailableError(
         "Claude CLI /model output did not contain a parseable model list",
     )
-
-
-def _current_model_label_in(stdout: str) -> str | None:
-    marked_lines = [
-        line for line in stdout.splitlines()
-        if line.startswith(CLAUDE_CLI_CURRENT_MODEL_MARKER)
-    ]
-    if len(marked_lines) != 1:
-        return None
-    _, opening, after_opening = marked_lines[0].partition("`")
-    label, closing, _ = after_opening.partition("`")
-    if not (opening and closing and label and label.isprintable()):
-        return None
-    return label
 
 
 # ── Shared helpers ─────────────────────────────────────────────────

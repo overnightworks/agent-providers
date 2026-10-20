@@ -32,7 +32,7 @@ It owns the machinery that is the same in every deployment:
 | Module | Owns |
 |---|---|
 | `agent_providers.config` | The deployment facts the catalog and turn paths read, installed once per process via `configure()`, which refuses a working root that is not private; `PrivateWorkingRoot`, a root checked by the same rule at construction, without installing a runtime |
-| `agent_providers.catalog` | Live provider/route readiness probes and the model names each route offers, aliases or ids as the provider lists them (`probe_provider_route`, `list_provider_models`); a snapshot also names the Claude CLI's own default (`default_model_label`) |
+| `agent_providers.catalog` | Live provider/route readiness probes and the model names each route offers, aliases or ids as the provider lists them (`probe_provider_route`, `list_provider_models`); a snapshot's `default_model_label` is always `None`, since the library names no Claude CLI default |
 | `agent_providers.dispatch` | Routing one turn to a provider and route, and the image capability |
 | `agent_providers.events` | The `StreamEvent` union a turn emits in-process (assistant text, tool call, tool result, final); not the service wire |
 | `agent_providers.tool_loop` | The provider-agnostic tool loop driving a `ToolExecutor` over a `ToolTransport` |
@@ -159,8 +159,10 @@ whatever this library does. A host that needs containment brings the sandbox
 described below; this layer only stops the child from *finding* the operator's
 credential directory by convention.
 
-The host names each provider credential *file*. Catalog probes copy the needed
-file into a private home for their bounded run. Every Claude or Grok turn uses
+The host names each provider credential *file*. Grok and Codex catalog probes
+copy the needed file into a private home for their bounded run. A Claude catalog
+probe's home gets no login file: `auth status` gets the setup token only as
+`CLAUDE_CODE_OAUTH_TOKEN`, and `-p /model` gets no login at all. Every Claude or Grok turn uses
 a fresh private home below
 `cli_working_directory_root`: directories are mode 0700 and credential copies
 are mode 0400. The source is opened only for reading. A Claude turn gets no
@@ -340,6 +342,9 @@ the error names the field.
 | `claude_cli_binary_search_globs` | `claude.binary_search_globs` |
 | `claude_cli_auth_file` | `claude.token_file` |
 | every core Claude turn copied `claude.token_file` into its home as `.claude/.credentials.json` | `claude.token_file` holds one line, the token `claude setup-token` prints, mode 0600 or 0400; a turn gets it only as `CLAUDE_CODE_OAUTH_TOKEN` and fails with `CLI_LOGIN_NOT_CONFIGURED` for a credentials file or any other JSON. Write the token into the file before the pin bump |
+| the Claude catalog copied `claude.token_file` into its home as `.claude/.credentials.json` for `auth status` and `-p /model`, and a linked, non-regular or over-256-KiB file stopped the listing with `CLI_LOGIN_NOT_CONFIGURED` | `auth status` gets the token only as `CLAUDE_CODE_OAUTH_TOKEN`; a refused file starts no child, is logged with its path and reason, and reads as not signed in. `-p /model` gets no login and reads no login file, so `catalog.list_provider_models` lists the aliases whatever the file holds |
+| `constants.CLAUDE_CLI_CURRENT_MODEL_MARKER` | removed, with no replacement |
+| `claude.provider.ClaudeCliModelCatalog.current_model_label` and `catalog.ProviderRouteSnapshot.default_model_label` held the Claude CLI's stated default | both fields stay and are always `None`; show no Claude default |
 | `grok_cli_binary` | `grok.binary` |
 | `grok_cli_auth_file` | `grok.token_file`, still a full `auth.json` copy |
 | `turns.cli_prompt_file_prefix` | `turns.grok.prompt_file_prefix` |

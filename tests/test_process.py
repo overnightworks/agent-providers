@@ -41,6 +41,9 @@ from provider_test_support import (
     DESTINATION_FAULTS,
     GROK_LOGGED_IN,
     SECRET_ENV_KEYS,
+    SOUND_TOKEN_FILES,
+    TOKEN_CANARY,
+    UNSOUND_TOKEN_FILES,
     ExitOnKill,
     FailingLogHandler,
     FakeBlockingChild,
@@ -55,6 +58,7 @@ from provider_test_support import (
     a_path_through_a_regular_file,
     a_symlink_to_a_login,
     a_usable_login_over_the_bound,
+    assert_claude_token_child,
     call_within_deadline,
     code_of,
     exception_chain,
@@ -67,7 +71,6 @@ from provider_test_support import (
     install_cli_door,
     killpg_forbidden,
     order_the_thread_start_claims,
-    override_claude_runtime,
     override_codex_runtime,
     override_grok_runtime,
     override_provider_runtime,
@@ -82,10 +85,11 @@ from agent_providers import lost_groups, process
 from agent_providers.codex.pool import CodexProcessKind, CodexProcessPool
 from agent_providers.codex.protocol import codex_child_process, create_codex_turn_home
 from agent_providers.codex_login import _blanked_document, assess_codex_login, blanked_copy
-from agent_providers.config import current_codex_runtime, current_config
+from agent_providers.config import current_claude_runtime, current_codex_runtime, current_config
 from agent_providers.constants import (
     CLAUDE_CLI_AUTH_METHOD_FIELD,
     CLAUDE_CLI_LOGGED_IN_FIELD,
+    CLAUDE_CLI_STATUS_ARGS,
     CLI_GROUP_CONFIRMATION_SECONDS,
     CLI_OUTPUT_READ_LIMIT_BYTES,
     CLI_TERMINATION_GRACE_SECONDS,
@@ -98,6 +102,7 @@ from agent_providers.process import (
     CODEX_CLI_CREDENTIALS_INVALID_DETAIL,
     GROK_CLI_BINARY_MISSING_DETAIL,
     GROK_CLI_CREDENTIALS_INVALID_DETAIL,
+    LOGGED_OUT,
     AgentCliUnavailableError,
     CachedProbe,
     ClaimedStartThread,
@@ -3865,53 +3870,59 @@ def test_claude_catalog_child_writes_stay_in_the_private_home(tmp_path, monkeypa
     assert set(original_home.iterdir()) == {original_home / "canary"}
 
 
-def test_the_claude_catalog_child_reads_the_host_named_credential(tmp_path, monkeypatch) -> None:
-    _prepare_catalog_credential(tmp_path, monkeypatch, provider="claude")
-    script = (
-        "import os, pathlib, sys\n"
-        "credential = pathlib.Path(os.environ['HOME']) / '.claude' / '.credentials.json'\n"
-        "sys.stdout.write(credential.read_text())\n"
-    )
-
-    run = run_claude_catalog_cli(Path(sys.executable), ("-c", script))
-
-    assert run is not None
-    assert run.returncode == 0
-    assert run.stdout == _CATALOG_AUTH_PAYLOAD
+_A_SIGNED_IN_CLAUDE_STATUS = json.dumps({CLAUDE_CLI_LOGGED_IN_FIELD: True}).encode()
 
 
-def test_a_direct_overwrite_of_the_credential_copy_fails(tmp_path, monkeypatch) -> None:
-    """The README hands hosts this sentence; only this much of it is true."""
-    _prepare_catalog_credential(tmp_path, monkeypatch, provider="claude")
-    script = (
-        "import os, pathlib, sys\n"
-        "copy = pathlib.Path(os.environ['HOME']) / '.claude' / '.credentials.json'\n"
-        "try:\n"
-        "    copy.open('w')\n"
-        "except PermissionError:\n"
-        "    sys.stdout.write('refused')\n"
-    )
+def _claude_status_children(monkeypatch, on_start=lambda child: child) -> list:
+    """Answer every Claude ``auth status`` start signed in; keep what ``on_start`` saw."""
+    started: list = []
 
-    run = run_claude_catalog_cli(Path(sys.executable), ("-c", script))
+    def door(child: ChildProcess, *, stderr):
+        assert child.arguments == CLAUDE_CLI_STATUS_ARGS
+        started.append(on_start(child))
+        return fake_cli_process(_A_SIGNED_IN_CLAUDE_STATUS)
 
-    assert run is not None
-    assert run.stdout == "refused"
+    install_cli_door(monkeypatch, door)
+    return started
 
 
-def test_a_credential_path_that_names_nothing_is_reported_not_swallowed(
-    tmp_path,
-    monkeypatch,
-    caplog,
+@pytest.mark.parametrize("token_file", SOUND_TOKEN_FILES)
+def test_claude_auth_status_gets_the_setup_token_only_in_its_environment(
+    token_file, tmp_path, monkeypatch, caplog,
 ) -> None:
-    """A typo in the configured path must not read as a logged-out provider."""
-    missing = tmp_path / "typo" / "auth.json"
-    override_claude_runtime(token_file=missing)
-    caplog.set_level("WARNING", logger="agent_providers.process")
+    source = current_claude_runtime().token_file
+    token_file(source, tmp_path)
+    caplog.set_level(logging.DEBUG)
+    homes = _claude_status_children(
+        monkeypatch,
+        lambda child: assert_claude_token_child(child, root=tmp_path, token=TOKEN_CANARY),
+    )
 
-    run = run_claude_catalog_cli(Path("/bin/sh"), ("-c", ":"))
+    login = claude_cli_login(Path("/usr/bin/claude"))
 
-    assert run is not None
-    assert str(missing) in caplog.text
+    [home] = homes
+    assert (login.logged_in, home.exists()) == (True, False)
+    assert TOKEN_CANARY not in caplog.text
+
+
+@pytest.mark.parametrize("token_file", UNSOUND_TOKEN_FILES)
+def test_claude_auth_status_with_an_unsound_token_file_starts_no_child_and_logs_its_path(
+    token_file, tmp_path, monkeypatch, caplog,
+) -> None:
+    """A typo in the configured path, or any other refused file, reads as logged out with
+    the path and the reason in the log, never the content and never silently."""
+    source = current_claude_runtime().token_file
+    token_file(source, tmp_path)
+    caplog.set_level(logging.DEBUG)
+    started = _claude_status_children(monkeypatch)
+
+    login = claude_cli_login(Path("/usr/bin/claude"))
+
+    [warning] = [record for record in caplog.records if record.levelno == logging.WARNING]
+    assert (login, started) == (LOGGED_OUT, [])
+    assert sorted(tmp_path.glob(f"{process._CATALOG_HOME_PREFIX}*")) == []
+    assert str(source) in warning.getMessage()
+    assert TOKEN_CANARY not in caplog.text
 
 
 def test_a_bare_binary_name_resolves_only_against_the_named_search_path(

@@ -30,7 +30,6 @@ from provider_test_support import (
     A_RUNNER_FAILURE_CANARY,
     A_STREAMED_LINE,
     CLAUDE_MODEL_CATALOG_STDOUT,
-    DESTINATION_FAULTS,
     MCP_TOOL_NAMES,
     SAMPLE_CLAUDE_SETUP_TOKEN,
     SAMPLE_TOOL_CATALOG,
@@ -46,7 +45,6 @@ from provider_test_support import (
     ScriptedClaudeChild,
     a_child_that_outlives_sigkill,
     a_claude_cli_child,
-    a_credential_destination_that_fails,
     assert_claude_token_child,
     call_within_deadline,
     confirm_the_retained_group_gone,
@@ -363,60 +361,28 @@ def _catalog_read_from(stdout: str) -> provider.ClaudeCliModelCatalog:
 
 
 @pytest.mark.parametrize(
-    ("stdout", "label", "aliases"),
+    ("stdout", "aliases"),
     (
         (
-            CLAUDE_MODEL_CATALOG_STDOUT, "Opus 5 (1M context)",
+            CLAUDE_MODEL_CATALOG_STDOUT,
             (
                 "sonnet", "opus", "haiku", "fable", "best", "sonnet[1m]", "opus[1m]",
                 "fable[1m]", "opusplan", "default",
             ),
         ),
-        (
-            "Current model: `Opus 5.5 (default)`\n" + AVAILABLE_LINE,
-            "Opus 5.5 (default)", ("sonnet", "opus"),
-        ),
-        (
-            "Current model: `Opus 5` (effort: `high`)\n" + AVAILABLE_LINE,
-            "Opus 5", ("sonnet", "opus"),
-        ),
+        ("Current model: `Opus 5.5 (default)`\n" + AVAILABLE_LINE, ("sonnet", "opus")),
+        ("Current model: `Opus 5` (effort: `high`)\n" + AVAILABLE_LINE, ("sonnet", "opus")),
     ),
     ids=("fixture-with-effort", "measured-2.1.302-shape", "several-backtick-pairs"),
 )
-def test_claude_catalog_names_the_current_model(
-    stdout: str, label: str, aliases: tuple[str, ...], caplog: pytest.LogCaptureFixture,
+def test_claude_catalog_names_no_current_model_even_for_a_readable_line(
+    stdout: str, aliases: tuple[str, ...], caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.DEBUG)
     catalog = _catalog_read_from(stdout)
 
-    assert catalog.current_model_label == label
-    assert catalog.aliases == aliases
-    assert label not in caplog.text
-
-
-@pytest.mark.parametrize(
-    "current_model_text",
-    (
-        "",
-        "Current model: `Opus 5.5 (default)`\nCurrent model: `Sonnet 5`\n",
-        "Current model: `Opus 5.5 (default)\n",
-        "Current model: ``\n",
-        "Current model: `Opus\x1b[31m 5`\n",
-        "Note: Current model: `Opus 5`\n",
-    ),
-    ids=(
-        "no-line", "two-lines", "no-closing-backtick", "empty-text", "control-character",
-        "marker-mid-line",
-    ),
-)
-def test_claude_catalog_without_one_readable_current_model_has_no_label(
-    current_model_text: str, caplog: pytest.LogCaptureFixture,
-) -> None:
-    caplog.set_level(logging.DEBUG)
-    catalog = _catalog_read_from(current_model_text + AVAILABLE_LINE)
-
     assert catalog.current_model_label is None
-    assert catalog.aliases == ("sonnet", "opus")
+    assert catalog.aliases == aliases
     assert "Opus" not in caplog.text
 
 
@@ -5400,53 +5366,18 @@ def _cli_root_removed(tmp_path: Path) -> None:
     root.rmdir()
 
 
-def _credential_source_replaced_by_a_link(tmp_path: Path) -> None:
-    source = current_claude_runtime().token_file
-    target = tmp_path / "elsewhere.json"
-    target.write_text("{}")
-    source.unlink()
-    source.symlink_to(target)
-
-
-@pytest.mark.parametrize(
-    ("make_fault", "raised_class", "detail"),
-    (
-        (_cli_root_removed, CliUnavailableError, CLAUDE_CLI_UNAVAILABLE_DETAIL),
-        (
-            _credential_source_replaced_by_a_link,
-            CliLoginNotConfiguredError,
-            CLAUDE_CLI_LOGIN_NOT_CONFIGURED_DETAIL,
-        ),
-    ),
-    ids=("home-not-made", "linked-credential"),
-)
-def test_the_claude_model_listing_raises_only_the_claude_family(
-    make_fault, raised_class, detail, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_the_claude_model_listing_without_a_home_raises_only_the_claude_family(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(provider, "_find_claude_binary", lambda: Path("/usr/bin/claude"))
-    make_fault(tmp_path)
+    _cli_root_removed(tmp_path)
 
     with pytest.raises(UnavailableError) as raised:
         cli_model_catalog()
 
-    assert type(raised.value) is raised_class
-    assert str(raised.value) == detail
-    assert isinstance(raised.value.__cause__, process.AgentCliUnavailableError)
-
-
-@pytest.mark.parametrize("fault", DESTINATION_FAULTS)
-def test_a_credential_copy_that_cannot_be_written_raises_cli_unavailable(
-    fault: str, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(provider, "_find_claude_binary", lambda: Path("/usr/bin/claude"))
-    with a_credential_destination_that_fails(fault):
-        with pytest.raises(UnavailableError) as raised:
-            cli_model_catalog()
-
     assert type(raised.value) is CliUnavailableError
     assert str(raised.value) == CLAUDE_CLI_UNAVAILABLE_DETAIL
     assert isinstance(raised.value.__cause__, process.CliEnvironmentUnavailableError)
-    assert raised.value.__cause__.cause is process.CliEnvironmentCause.CREDENTIAL_COPY_NOT_WRITTEN
 
 
 def _probe_failing_with(error_class, message: str, alive: list[weakref.ref]):

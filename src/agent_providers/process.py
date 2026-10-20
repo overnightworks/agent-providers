@@ -21,7 +21,7 @@ import time
 import weakref
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, closing, contextmanager
 from dataclasses import dataclass, field
 from enum import Enum, StrEnum
 from pathlib import Path
@@ -424,9 +424,6 @@ _PRIVATE_HOME_COPY_MODE: Final = 0o400
 _DESCRIPTOR_LINKS: Final = Path("/proc/self/fd")
 _CREDENTIAL_COPY_FAILED_DETAIL: Final = "could not prepare the private CLI credential copy"
 _PRIVATE_HOME_NOT_PREPARED_DETAIL: Final = "could not prepare the private CLI home"
-# Measured on claude 2.1.266: the CLI reports its subscription login from
-# this file below HOME alone, without a network call.
-_CLAUDE_CATALOG_CREDENTIAL_PATH: Final = Path(".claude/.credentials.json")
 _CREDENTIAL_FILE_READ_LIMIT_BYTES: Final = 256 * 1024
 _CREDENTIAL_SYMLINK_DETAIL: Final = "CLI credential is a symbolic link"
 _CREDENTIAL_NOT_REGULAR_DETAIL: Final = "CLI credential is not a regular file"
@@ -619,25 +616,22 @@ def run_claude_catalog_cli(
     binary: Path,
     args: tuple[str, ...],
     *,
+    login: Mapping[str, str] | None = None,
     stderr: StderrPolicy = "capture",
     output_read_limit_bytes: int | None = None,
 ) -> CliRun | None:
-    """Run a Claude catalog probe in a private home holding its credential.
+    """Run a Claude catalog probe in an empty private home, ``login`` its only login.
 
-    Measured on claude 2.1.266: the CLI finds both its model aliases and its
-    subscription login below ``HOME``. A private home with a mode-0400 copy of
-    the host's credential file therefore answers both without offering the
-    operator's own directory, where a renewal write would succeed.
+    ``auth status`` passes the setup token as ``claude_token_environment()`` reads it;
+    the model listing passes none, because the CLI lists its aliases without a login
+    (A1b-0f, m4b). No login file is ever written into the home.
     """
-    with _catalog_credential_home(
-        current_claude_runtime().token_file,
-        _CLAUDE_CATALOG_CREDENTIAL_PATH,
-    ) as owner:
+    with closing(PrivateHome(prefix=_CATALOG_HOME_PREFIX)) as owner:
         return run_catalog_cli(
             ChildProcess(
                 binary=binary,
                 arguments=args,
-                environment=closed_environment(owner.path),
+                environment=closed_environment(owner.path, **(login or {})),
                 working_directory=owner.path,
             ),
             home=owner,
@@ -1411,7 +1405,16 @@ def _run_credentialed_catalog_cli(
 
 
 def _claude_output(binary: Path) -> str | None:
-    run = run_claude_catalog_cli(binary, CLAUDE_CLI_STATUS_ARGS)
+    try:
+        login = claude_token_environment()
+    except CliLoginUnusableError as refusal:
+        log.warning(
+            "the configured Claude token file is refused (%s); "
+            "this probe reports a logged-out provider",
+            str(refusal),
+        )
+        return None
+    run = run_claude_catalog_cli(binary, CLAUDE_CLI_STATUS_ARGS, login=login)
     if run is None or not run.complete or run.returncode != 0:
         return None
     return run.stdout

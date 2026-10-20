@@ -1,0 +1,8 @@
+claim_id = "c130c4223d964e3980637d2e2afdcce9"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "477f8a285c35aa6d78ca01f83b6e8425d6d34d03"
+branch = "claude/issue-365-a1m-s3-capability-verifier"
+scope = [".github/workflows/ci.yml", ".importlinter", "AGENTS.md", "CLAUDE.md", "README.md", "docs/decisions/0001-agent-service.md", "packages/agent-client/pyproject.toml", "packages/agent-client/src/agent_client/__init__.py", "packages/agent-client/src/agent_client/capability.py", "packages/agent-client/src/agent_client/mcp_server/__init__.py", "packages/agent-client/src/agent_client/mcp_server/verification.py", "tests/test_capability_verifier.py", "uv.lock"]
+opened_commit = "1911a14ff92eae6414103478e2b7ebd3b7f2d7c6"
+whole_reason = "The verifier, its extra and the sentences that say only the service verifies tokens change together."

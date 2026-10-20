@@ -3498,16 +3498,17 @@ operator's dedicated measurement token, authorized for this cell on 19.10.2026. 
 is a supplied measurement token; its validity is unverified in every run. In particular,
 its validity during m5 on 20.10 is not shown. It reached the CLI only as
 `CLAUDE_CODE_OAUTH_TOKEN` in the child's environment (the A1b-0b1 route); no
-`ANTHROPIC_*` variable was set, and `<token>` stands for its value. Every stored output
-was projected to field names, codes and yes/no results and redacted (the token value and any `sk-ant-` string become `<token>`), and the
+`ANTHROPIC_*` variable was set, and `<token>` stands for its value. Every stored output,
+except as the harness paragraph and m5 disclose, was projected to field names, codes, sizes,
+timings, a hash prefix, counts and yes/no results and redacted (the token value and any `sk-ant-` string become `<token>`), and the
 token-aware scan found the token and `sk-ant-` neither in the stored evidence nor in this
 section's diff. For m1–m4 and r1–r3 billing was not independently measured (the text
 formats carry no cost field); zero billed model calls there is inferred from m4b and r3
 (m2 below says why). The one call in the cell authorized to bill is m5's turn t1 (cap 1,
 not retried). Whether t1 or s3 billed was not measured, and t1's cost was not recorded;
-zero billing for both is inferred from a `usage_state` recorded empty by the unseparated
-reading described in m5. #75 reads an empty `modelUsage` as billing no model only of a
-successful statement B result, and t1 is a failed turn. s3 is statement B, `-p /model`.
+zero billing for s3 is inferred from a `usage_state` recorded empty (unseparated reading, see
+m5); for t1 not even that, since #75's rule covers only a successful statement B result and
+t1 failed. #75 reads an empty `modelUsage` as billing no model. s3 is statement B, `-p /model`.
 
 **Harness.** A1b-0b1's harness: network not unshared, `/run/systemd/resolve` bound
 read-only, a fresh private home (mode 700, holding only the empty `tmp`) and an empty
@@ -3579,7 +3580,7 @@ whether it is valid), and differs from the default with no login.
 **r1 A rejected token, non-streaming turn.** Exit 1 after 4.2 s, one JSON object with the
 fields `api_error_origin` (`"first_party"`), `api_error_status` (401), `duration_api_ms`
 (0), `duration_ms`, `fast_mode_disabled_reason`, `fast_mode_state`, `is_error` (true),
-`modelUsage` (empty), `num_turns` (1), `permission_denials`, `queued_turn_count`, `result`
+`modelUsage` (projected as empty; its original shape was not distinguished), `num_turns` (1), `permission_denials`, `queued_turn_count`, `result`
 (`"Failed to authenticate. API Error: 401 OAuth access token is invalid."`),
 `result_index`, `safety_stops`, `session_id`, `stop_reason` (`"stop_sequence"`),
 `subagent_stats`, `subtype` (`"success"`), `terminal_reason` (`"api_error"`),
@@ -3593,12 +3594,13 @@ events instead of one object: `system/init` (`apiKeySource` `"none"`, `model`
 (`error` `"authentication_failed"`, `error_status` 401, `attempt` 1 and 2,
 `max_retries` 10), `assistant` (`error` `"authentication_failed"`, `is_api_error_message`
 true, `api_error_status` 401, `api_error_origin` `"first_party"`, `message.model`
-`"<synthetic>"`) and `result` (the same fields and values as r1). The
+`"<synthetic>"`) and `result` (the same projected fields and values as r1). The
 assistant's `error` is the field and value that `_raise_for_api_error_message`
 (`claude/provider.py`) reads on the stream paths. The first verbose run's capture was cut
 at the driver's 4,000-character line limit before the `result`. It showed the same events
 up to the cut and exit 1, and it was repeated once with a full capture, which is the one
-recorded here. Both used a rejected token and billed nothing.
+recorded here. Both used a rejected token. The full repeat reported `total_cost_usd: 0`; zero billing for
+the truncated run is inferred from its authentication failure.
 
 **r2 `auth status` with a rejected token.** Exit 0, the same fields and values as m1
 (`loggedIn` true, `authMethod` `"oauth_token"`). `auth status` does not tell a rejected
@@ -3629,7 +3631,7 @@ was temporary, deleted after each run, with nothing retained.
 - **t1** the turn `_cli_arguments(None)`, that is `-p --output-format json --tools ""
   --setting-sources "" --strict-mcp-config --disable-slash-commands`, `hello` on stdin:
   exit 1, `result.subtype` `"success"`, `is_error` true, `terminal` failure,
-  `usage_state` empty (the same unseparated reading). `result.modelUsage` held no key, so
+  `usage_state` empty (the same unseparated reading). no key was recorded in `result.modelUsage`, so
   there is no K.
 - **s3** statement B again, after t1: exit 0, `terminal` success, `usage_state` empty,
   `stated_id` `claude-sonnet-5-5`.

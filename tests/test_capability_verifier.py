@@ -247,13 +247,21 @@ def test_a_malformed_token_over_the_character_limit_is_refused_as_too_long():
     assert _verified("a" * (MAX_CAPABILITY_CHARACTERS + 1)) is CapabilityRefusal.TOO_LONG
 
 
+class _PlaceholderSigner:
+    """Signs nothing but has the signature's length, to measure a token before signing it."""
+
+    def sign(self, *_: object) -> bytes:
+        return bytes(TRUSTED_PRIVATE_KEY.key_size // 8)
+
+
 def _token_padded_to_the_limit() -> tuple[str, str]:
     """Base64 skips every third length, so a purpose that lands on the limit is searched for."""
     for purpose_length in range(MAX_CAPABILITY_CHARACTERS // 2, MAX_CAPABILITY_CHARACTERS):
         purpose = "p" * purpose_length
-        token = _signed_token(payload=_claims_with(purpose=purpose))
-        if len(token) >= MAX_CAPABILITY_CHARACTERS:
-            return token, purpose
+        payload = _claims_with(purpose=purpose)
+        unsigned = _signed_token(payload=payload, signer=_PlaceholderSigner())
+        if len(unsigned) >= MAX_CAPABILITY_CHARACTERS:
+            return _signed_token(payload=payload), purpose
     raise AssertionError("no purpose reaches the limit")
 
 
@@ -419,6 +427,7 @@ def _pkcs1_public_pem() -> bytes:
         pytest.param(b"not a pem at all", id="garbage"),
         pytest.param(b"", id="empty"),
         pytest.param(b"junk\n" + _public_pem(TRUSTED_PRIVATE_KEY), id="text before the block"),
+        pytest.param(_public_pem(TRUSTED_PRIVATE_KEY) + b"junk\n", id="text after the block"),
         pytest.param(
             _public_pem(TRUSTED_PRIVATE_KEY) + b"junk\n-----END PUBLIC KEY-----\n",
             id="text and a second end marker after the block",

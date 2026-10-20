@@ -63,26 +63,25 @@ class CapabilityRefusal(StrEnum):
 
 @dataclass(frozen=True, eq=False)
 class CapabilityVerificationKey:
-    """The one RSA public key an app trusts; its repr shows no key material."""
+    """The one RSA-3072 key (exponent 65537) an app trusts; its repr shows no key material."""
 
     public_key: rsa.RSAPublicKey = field(repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.public_key, rsa.RSAPublicKey):
             raise_without_chain(UnsoundVerificationKey("is not an RSA public key"))
-        numbers = self.public_key.public_numbers()
         if self.public_key.key_size != SIGNING_KEY_BITS:
             raise_without_chain(
                 UnsoundVerificationKey(f"must be an RSA key of {SIGNING_KEY_BITS} bits")
             )
-        if numbers.e != SIGNING_KEY_EXPONENT:
+        if self.public_key.public_numbers().e != SIGNING_KEY_EXPONENT:
             raise_without_chain(
                 UnsoundVerificationKey(f"must have public exponent {SIGNING_KEY_EXPONENT}")
             )
 
     @classmethod
     def from_pem(cls, pem: bytes) -> CapabilityVerificationKey:
-        """Accepts exactly one PEM ``PUBLIC KEY`` block holding an RSA key."""
+        """Accepts exactly one PEM ``PUBLIC KEY`` block of an RSA-3072 key, exponent 65537."""
         reason = _unsound_pem_reason(pem)
         if reason is not None:
             raise_without_chain(UnsoundVerificationKey(reason))

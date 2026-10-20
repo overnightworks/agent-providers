@@ -113,8 +113,8 @@ installs the client and the core:
 
 ```bash
 pip install \
-  "overnightworks-agent-client @ https://github.com/overnightworks/agent-providers/releases/download/v0.4.0/overnightworks_agent_client-0.4.0-py3-none-any.whl#sha256=69695c3b7b9f1222a7276afd4de7cf86e0384bd02ccb85ed6c98e3888fcf1080" \
-  "overnightworks-agent-providers @ https://github.com/overnightworks/agent-providers/releases/download/v0.4.0/overnightworks_agent_providers-0.4.0-py3-none-any.whl#sha256=a7feb6ec18d8415960057f46ba71ae7258347c69117f0a1f35e429f0043e3684"
+  "overnightworks-agent-client @ https://github.com/overnightworks/agent-providers/releases/download/v0.5.0/overnightworks_agent_client-0.5.0-py3-none-any.whl#sha256=9019e18411e6338629a5397a4f58b0b3cbd70f4b2cbd8184b97a3d53ee8ed94a" \
+  "overnightworks-agent-providers @ https://github.com/overnightworks/agent-providers/releases/download/v0.5.0/overnightworks_agent_providers-0.5.0-py3-none-any.whl#sha256=16dd220515e00a45fdb00cb92f62a56e46a30d0cfdd7cfdf59529cd0b60d9789"
 ```
 
 The core pins the client to its own version exactly, so both URLs name the same
@@ -129,8 +129,8 @@ dependency lazily; in URL form they sit between the name and the `@`:
 
 ```bash
 pip install \
-  "overnightworks-agent-client @ https://github.com/overnightworks/agent-providers/releases/download/v0.4.0/overnightworks_agent_client-0.4.0-py3-none-any.whl#sha256=69695c3b7b9f1222a7276afd4de7cf86e0384bd02ccb85ed6c98e3888fcf1080" \
-  "overnightworks-agent-providers[api,image] @ https://github.com/overnightworks/agent-providers/releases/download/v0.4.0/overnightworks_agent_providers-0.4.0-py3-none-any.whl#sha256=a7feb6ec18d8415960057f46ba71ae7258347c69117f0a1f35e429f0043e3684"
+  "overnightworks-agent-client @ https://github.com/overnightworks/agent-providers/releases/download/v0.5.0/overnightworks_agent_client-0.5.0-py3-none-any.whl#sha256=9019e18411e6338629a5397a4f58b0b3cbd70f4b2cbd8184b97a3d53ee8ed94a" \
+  "overnightworks-agent-providers[api,image] @ https://github.com/overnightworks/agent-providers/releases/download/v0.5.0/overnightworks_agent_providers-0.5.0-py3-none-any.whl#sha256=16dd220515e00a45fdb00cb92f62a56e46a30d0cfdd7cfdf59529cd0b60d9789"
 ```
 
 A uv host lists the same URLs in its `pyproject.toml`; `uv lock` records each wheel's sha256 in the host's own `uv.lock`, and `uv sync` checks it.

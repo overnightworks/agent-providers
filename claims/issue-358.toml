@@ -1,8 +1,0 @@
-claim_id = "9a3053a34f704cd89c810c49da68a9ca"
-agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
-role = "builder"
-base = "3ad11e444b5b520186f45037a67439d6e260dff6"
-branch = "claude/issue-358-s5-release-0-4-0"
-scope = ["README.md", "packages/agent-client/pyproject.toml", "packages/agent-service/pyproject.toml", "pyproject.toml", "src/agent_providers/__init__.py", "uv.lock"]
-opened_commit = "c0279fcec05d07eb56759d0840d688c4a344330f"
-whole_reason = "A release raises all seven lockstep version literals and the lock together; a partial bump fails test_distribution_contract."

@@ -632,7 +632,7 @@ def test_the_server_half_refuses_a_body_that_is_not_a_message() -> None:
         pytest.param('{"a": {"b": 1, "b": 1}}', id="nested-duplicate-member"),
         pytest.param('{"a": NaN}', id="not-a-number"),
         pytest.param("[Infinity]", id="infinity"),
-        pytest.param("[" * 100_000 + "]" * 100_000, id="nesting-past-the-recursion-limit"),
+        pytest.param("[" * 100_000, id="nesting-past-the-recursion-limit"),
     ],
 )
 def test_the_strict_reader_refuses_with_value_error_only_and_no_chain(text: str) -> None:

@@ -1,0 +1,7 @@
+claim_id = "c4acfa31a61340f694f4a52acbc310d1"
+agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
+role = "builder"
+base = "700c637c7b0f3213b5130853959da013661fd544"
+branch = "docs/readme-install-0.5.0"
+scope = ["README.md"]
+opened_commit = "1586a3f99343b8aba6124c826461507eeb0546e9"

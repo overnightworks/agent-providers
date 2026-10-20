@@ -92,6 +92,7 @@ from agent_providers.constants import (
     CLAUDE_CLI_AUTH_METHOD_FIELD,
     CLAUDE_CLI_LOGGED_IN_FIELD,
     CLAUDE_CLI_STATUS_ARGS,
+    CLAUDE_RUN_SWITCHES,
     CLI_GROUP_CONFIRMATION_SECONDS,
     CLI_OUTPUT_READ_LIMIT_BYTES,
     CLI_TERMINATION_GRACE_SECONDS,
@@ -3846,6 +3847,7 @@ def test_claude_catalog_child_never_sees_the_operator_home(tmp_path, monkeypatch
     assert observed["HOME"] != str(original_home)
     assert not Path(observed["HOME"]).is_relative_to(original_home)
     assert observed["PATH"] == os.environ.get("PATH", os.defpath)
+    assert observed.items() >= CLAUDE_RUN_SWITCHES.items()
     assert "CATALOG_ENV_LEAK" not in observed
     assert "GROK_HOME" not in observed
     assert "CODEX_HOME" not in observed

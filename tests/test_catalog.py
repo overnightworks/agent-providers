@@ -28,6 +28,7 @@ from provider_test_support import (
     UNSOUND_TOKEN_FILES,
     a_codex_login,
     a_fifo,
+    assert_claude_run_switches,
     call_within_deadline,
     fake_cli_executable,
     fake_cli_process,
@@ -52,7 +53,11 @@ from agent_providers.catalog import (
     provider_configuration,
 )
 from agent_providers.config import ProviderNotConfiguredError, current_claude_runtime
-from agent_providers.constants import CLAUDE_OAUTH_TOKEN_VARIABLE, ProviderName
+from agent_providers.constants import (
+    CLAUDE_NO_SESSION_PERSISTENCE_FLAG,
+    CLAUDE_OAUTH_TOKEN_VARIABLE,
+    ProviderName,
+)
 from agent_providers.errors import (
     ProviderModelCatalogUnavailableError,
     ProviderUnavailableError,
@@ -78,7 +83,7 @@ CLAUDE_MODEL_CATALOG_ALIASES = sorted([
 CLAUDE_LOGGED_IN = json.dumps({"loggedIn": True, "authMethod": "claude.ai"})
 CODEX_LOGGED_IN = "Logged in using ChatGPT"
 CLAUDE_LOGGED_OUT = json.dumps({"loggedIn": False})
-CLAUDE_MODEL_COMMAND = ("-p", "/model")
+CLAUDE_MODEL_COMMAND = ("-p", "/model", CLAUDE_NO_SESSION_PERSISTENCE_FLAG)
 CLAUDE_MODEL_CATALOG_NAMING_NO_MODEL = "Usage: /model <name>. Available: or a full model ID.\n"
 CLAUDE_STATUS_COMMAND = ("auth", "status")
 CODEX_MODEL_COMMAND = ("debug", "models")
@@ -192,7 +197,7 @@ def test_a_ready_claude_cli_route_names_no_default_though_the_cli_states_one(
     assert list(snapshot.models) == CLAUDE_MODEL_CATALOG_ALIASES
     assert snapshot.catalogue_failure is None
     assert snapshot.default_model_label is None
-    assert calls.read_text().splitlines() == ["auth status", "-p /model"]
+    assert calls.read_text().splitlines() == ["auth status", " ".join(CLAUDE_MODEL_COMMAND)]
 
 
 @pytest.mark.parametrize("token_file", (*SOUND_TOKEN_FILES, *UNSOUND_TOKEN_FILES))
@@ -216,6 +221,7 @@ def test_the_claude_cli_listing_gets_no_login_and_comes_whatever_the_token_file_
     [(child, entries_at_the_start)] = started
     assert listed == CLAUDE_MODEL_CATALOG_ALIASES
     assert child.arguments == CLAUDE_MODEL_COMMAND
+    assert_claude_run_switches(child)
     assert CLAUDE_OAUTH_TOKEN_VARIABLE not in child.environment
     assert entries_at_the_start == []
     assert TOKEN_CANARY not in caplog.text
@@ -355,7 +361,7 @@ def test_listing_the_claude_cli_starts_it_once(tmp_path: Path) -> None:
 
     list_provider_models("claude", ProviderRoute.CLI)
 
-    assert starts.read_text().splitlines() == ["-p /model"]
+    assert starts.read_text().splitlines() == [" ".join(CLAUDE_MODEL_COMMAND)]
 
 
 @pytest.mark.parametrize(("stored", "is_provider"), [

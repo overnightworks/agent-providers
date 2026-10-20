@@ -17,7 +17,9 @@ to the config or the host when it is not.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Final
 
 CLI_LOGIN_STATUS_CACHE_SECONDS = 30
@@ -98,6 +100,14 @@ CLAUDE_MODEL_PREFIX = "claude-"
 CLAUDE_CLI_MODEL_LIST_MARKER = "Available: "
 
 CLAUDE_OAUTH_TOKEN_VARIABLE: Final[str] = "CLAUDE_CODE_OAUTH_TOKEN"
+CLAUDE_NO_SESSION_PERSISTENCE_FLAG: Final[str] = "--no-session-persistence"
+CLAUDE_RUN_SWITCHES: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "DISABLE_AUTOUPDATER": "1",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        "DISABLE_TELEMETRY": "1",
+    },
+)
 CLAUDE_CLI_STATUS_ARGS: Final[tuple[str, ...]] = ("auth", "status")
 CLAUDE_CLI_LOGGED_IN_FIELD: Final[str] = "loggedIn"
 CLAUDE_CLI_AUTH_METHOD_FIELD: Final[str] = "authMethod"

@@ -52,6 +52,7 @@ from agent_providers.constants import (
     CLAUDE_CLI_LOGGED_IN_FIELD,
     CLAUDE_CLI_STATUS_ARGS,
     CLAUDE_OAUTH_TOKEN_VARIABLE,
+    CLAUDE_RUN_SWITCHES,
     CLI_GROUP_CONFIRMATION_SECONDS,
     CLI_LOGIN_STATUS_CACHE_SECONDS,
     CLI_OUTPUT_READ_LIMIT_BYTES,
@@ -631,7 +632,7 @@ def run_claude_catalog_cli(
             ChildProcess(
                 binary=binary,
                 arguments=args,
-                environment=closed_environment(owner.path, **(login or {})),
+                environment=closed_environment(owner.path, **(login or {}), **CLAUDE_RUN_SWITCHES),
                 working_directory=owner.path,
             ),
             home=owner,

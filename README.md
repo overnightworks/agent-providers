@@ -434,9 +434,9 @@ the error names the field.
 | `codex_cli_auth_file` | `codex.token_file`, still an `auth.json` whose per-turn copy is blanked |
 | `turns.codex_code_mode_host_binary` | `turns.codex.code_mode_host_binary` |
 | `turns.codex_resources_directory` | `turns.codex.resources_directory` |
-| `agent_service.mcp_wire` | `agent_client.mcp_wire`, unchanged; no alias remains |
 | `turns.codex_max_concurrent_processes` | `turns.codex.max_concurrent_processes` |
 | `turns.codex_max_concurrent_image_runs` | `turns.codex.max_concurrent_image_runs` |
+| `agent_service.mcp_wire` | `agent_client.mcp_wire`, unchanged; no alias remains |
 | `dispatch.stream_turn` and `dispatch.call_provider_once` raised `ProviderUnavailableError` with `ROUTE_FAILED` when a provider block, `turns`, or the configuration itself was missing | both raise `ProviderNotConfiguredError(provider, block)`, `TurnRuntimeNotConfiguredError` or `ProviderRuntimeNotConfiguredError` unchanged, all `config.HostWiringError`s; a host that caught `ProviderUnavailableError` for a wiring fault catches `HostWiringError` too |
 | `dispatch.image_capability` for the Codex CLI route always answered with the Codex fields set | it raises `ProviderNotConfiguredError("codex", block)` when `codex` or `turns.codex` is missing |
 | `process.run_cli_bounded` read the Grok prompt-file prefix itself | the caller passes `prompt_file_prefix` together with `prompt_file_bytes` and `prompt_file_arg_index`; the Grok transport passes `turns.grok.prompt_file_prefix` |

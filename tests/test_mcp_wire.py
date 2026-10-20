@@ -560,6 +560,10 @@ def _request(method: str, params: dict[str, Any] | None = None) -> dict[str, Any
         ),
         ({"jsonrpc": "2.0", "method": "notifications/initialized"}, Notified()),
         (
+            {"jsonrpc": "2.0", "method": "notifications/progress", "params": {"requestId": 3}},
+            Notified(),
+        ),
+        (
             {"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": []}},
             Notified(),
         ),
@@ -590,11 +594,18 @@ def test_the_server_half_answers_what_needs_no_state_itself(
     assert _decide(message) == Answered(answer_for(reply))
 
 
-@pytest.mark.parametrize("version", [None, "2024-11-05"])
-def test_the_server_half_refuses_a_request_after_initialize_without_a_supported_version(
-    version: str | None,
+@pytest.mark.parametrize(
+    ("message", "version"),
+    [
+        (_request("tools/list"), None),
+        (_request("tools/list"), "2024-11-05"),
+        ({"jsonrpc": "2.0", "method": "notifications/initialized"}, None),
+    ],
+)
+def test_the_server_half_refuses_a_message_after_initialize_without_a_supported_version(
+    message: dict[str, Any], version: str | None
 ) -> None:
-    refused = _decide(_request("tools/list"), version)
+    refused = _decide(message, version)
     assert refused == Answered(HttpAnswer(HTTPStatus.BAD_REQUEST, None, b""))
 
 

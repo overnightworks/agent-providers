@@ -708,6 +708,7 @@ def test_an_oversized_capability_refusal_holds_no_token_anywhere(tmp_path, monke
 CANARY = "canary-token-value-7f3a91"
 API_KEY_SHAPE = "sk-ant-" + "api03-" + CANARY
 WHITESPACE_REASON = "holds whitespace; a setup token holds none"
+JSON_DOCUMENT_REASON = "holds a JSON document; it must hold one setup token"
 TOKEN_FILE_FIELD = "profiles.claude-main.token_file"
 
 
@@ -818,6 +819,45 @@ REFUSED_TOKEN_FILES = [
         _holding(f"{CANARY[:4]} {CANARY[4:]}".encode()), WHITESPACE_REASON, id="inner-space"
     ),
     pytest.param(_holding(f"{CANARY}  ".encode()), WHITESPACE_REASON, id="trailing-spaces"),
+    pytest.param(
+        _holding(
+            f'{{"claudeAiOauth":{{"accessToken":"{CANARY}","refreshToken":"{CANARY}"}}}}'.encode()
+        ),
+        JSON_DOCUMENT_REASON,
+        id="compact-credentials-json",
+    ),
+    pytest.param(_holding(b"{}"), JSON_DOCUMENT_REASON, id="empty-json-object"),
+    pytest.param(
+        _holding(f'{{"claudeAiOauth": {{"accessToken": "{CANARY}"}}}}'.encode()),
+        JSON_DOCUMENT_REASON,
+        id="spaced-one-line-json",
+    ),
+    pytest.param(_holding(f'["{CANARY}"]'.encode()), JSON_DOCUMENT_REASON, id="json-array"),
+    pytest.param(_holding(f'"{CANARY}"'.encode()), JSON_DOCUMENT_REASON, id="json-string"),
+    pytest.param(
+        _holding(b"[" * 15000 + CANARY.encode()),
+        JSON_DOCUMENT_REASON,
+        id="json-nested-past-the-decoder-depth",
+    ),
+    pytest.param(
+        _holding(b" " + b"[" * 15000 + CANARY.encode()),
+        JSON_DOCUMENT_REASON,
+        id="json-nested-past-the-decoder-depth-after-a-space",
+    ),
+    pytest.param(
+        _holding(b" " + b"{" * 15000 + CANARY.encode()),
+        JSON_DOCUMENT_REASON,
+        id="json-object-nested-past-the-decoder-depth-after-a-space",
+    ),
+    pytest.param(_holding(b"12345"), JSON_DOCUMENT_REASON, id="json-number"),
+    pytest.param(
+        _holding(f'{{"a":"{CANARY}"'.encode()), JSON_DOCUMENT_REASON, id="truncated-json-object"
+    ),
+    pytest.param(
+        _holding(f'{{\n  "claudeAiOauth": {{"accessToken": "{CANARY}"}}\n}}\n'.encode()),
+        "holds more than one line; it must hold one token",
+        id="multi-line-json-object",
+    ),
     pytest.param(
         _holding(API_KEY_SHAPE.encode()),
         "holds an API key; it must hold a subscription token from setup-token",

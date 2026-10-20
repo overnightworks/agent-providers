@@ -171,7 +171,11 @@ reaches the child only as `CLAUDE_CODE_OAUTH_TOKEN` in its environment, never
 in its arguments. The token is read through `secret_file` at every child start,
 before the home is made; a file that is missing, open to group or others, over
 16 KiB, or holding JSON fails the turn with `CLI_LOGIN_NOT_CONFIGURED` and
-leaves no home behind. A Codex or Grok turn's home on the bounded runner remains until its group is confirmed gone (below), including a delayed spawn or background reap. The synchronous `call_claude` turn's timeout kills only the direct child. The async Claude turns
+leaves no home behind. Every Claude child also gets the run switches
+(`DISABLE_AUTOUPDATER`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` and
+`DISABLE_TELEMETRY`, each `1`), and every `-p` run passes
+`--no-session-persistence`, so no Claude child stores a session or reports
+telemetry. A Codex or Grok turn's home on the bounded runner remains until its group is confirmed gone (below), including a delayed spawn or background reap. The synchronous `call_claude` turn's timeout kills only the direct child. The async Claude turns
 on the CLI route (`acall_claude` without an `api_key`, which uses the API
 otherwise, `acall_claude_with_mcp` and `acall_claude_with_mcp_stream`) run on a
 `spawn.AnchoredChild`: when the turn ends, its reap sends SIGTERM to the leader's

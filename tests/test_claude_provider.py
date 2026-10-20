@@ -1930,6 +1930,22 @@ def test_mcp_turn_command_disables_slash_commands() -> None:
     assert "--disable-slash-commands" in cmd
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        lambda: _cli_arguments("opus"),
+        lambda: _cli_arguments("opus", stream=True),
+        lambda: _mcp_cli_arguments("opus", "/tmp/mcp.json", _configured_mcp_server()),
+        lambda: _mcp_cli_arguments(
+            "opus", "/tmp/mcp.json", _configured_mcp_server(), stream=True,
+        ),
+    ],
+    ids=["tool-free", "tool-free-stream", "mcp", "mcp-stream"],
+)
+def test_every_turn_command_stores_no_session(command) -> None:
+    assert "--no-session-persistence" in command()
+
+
 def test_tool_free_command_offers_no_tool_at_all() -> None:
     cmd = _cli_arguments("opus")
 

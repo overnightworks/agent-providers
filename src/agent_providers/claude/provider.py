@@ -61,7 +61,9 @@ from agent_providers.constants import (
     CLAUDE_CLI_TOOL_SURFACE_FAILURE_CACHE_SECONDS,
     CLAUDE_CLI_TOOL_SURFACE_TIMEOUT_SECONDS,
     CLAUDE_CLI_ZOMBIE_FAILURE_CACHE_SECONDS,
+    CLAUDE_NO_SESSION_PERSISTENCE_FLAG,
     CLAUDE_OAUTH_TOKEN_VARIABLE,
+    CLAUDE_RUN_SWITCHES,
     CLI_GROUP_CONFIRMATION_SECONDS,
     CLI_OUTPUT_READ_LIMIT_BYTES,
     CLI_TERMINATION_GRACE_SECONDS,
@@ -146,11 +148,6 @@ _TOOL_ISOLATION_FLAGS: Final = (
 RELAY_SERVER_NAME: Final = "relay"
 _TOOL_TIMEOUT_VARIABLE: Final = "MCP_TOOL_TIMEOUT"
 _MILLISECONDS_PER_SECOND: Final = 1000
-_RUN_SWITCHES: Final = {
-    "DISABLE_AUTOUPDATER": "1",
-    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-    "DISABLE_TELEMETRY": "1",
-}
 # The CLI counts one turn per tool-using response and checks its limit after
 # that response's calls ran, so one turn beyond the service's call limit stays
 # behind it (ADR 0001, A1b-0b2 and A1b-4a).
@@ -578,7 +575,9 @@ def cli_model_catalog() -> ClaudeCliModelCatalog:
     """
     binary = _require_claude_binary()
     with _faults_in_the_claude_family():
-        run = run_claude_catalog_cli(binary, ("-p", "/model"))
+        run = run_claude_catalog_cli(
+            binary, ("-p", "/model", CLAUDE_NO_SESSION_PERSISTENCE_FLAG),
+        )
     if run is None:
         raise UnavailableError("Claude CLI /model failed to run")
     if not run.complete:
@@ -828,7 +827,7 @@ class ClaudeRun:
             environment=closed_environment(
                 home,
                 **{CLAUDE_OAUTH_TOKEN_VARIABLE: self.token.get_secret_value()},
-                **_RUN_SWITCHES,
+                **CLAUDE_RUN_SWITCHES,
                 **self._tool_timeout_environment(),
             ),
             working_directory=working_directory,
@@ -853,7 +852,7 @@ class ClaudeRun:
             "stream-json",
             "--verbose",
             *_TOOL_ISOLATION_FLAGS,
-            "--no-session-persistence",
+            CLAUDE_NO_SESSION_PERSISTENCE_FLAG,
             "--max-turns",
             str(self.max_tool_calls + TURNS_BEYOND_TOOL_CALLS),
             "--system-prompt-file",
@@ -904,7 +903,7 @@ def _claude_child_process(
     return ChildProcess(
         binary=binary,
         arguments=tuple(arguments),
-        environment=closed_environment(home, **login),
+        environment=closed_environment(home, **login, **CLAUDE_RUN_SWITCHES),
         working_directory=home,
     )
 
@@ -924,6 +923,7 @@ def _cli_arguments(
         *_model_arguments(model),
         "--output-format",
         "stream-json" if stream else "json",
+        CLAUDE_NO_SESSION_PERSISTENCE_FLAG,
         *_TOOL_ISOLATION_FLAGS,
     ]
     if stream:
@@ -1006,6 +1006,7 @@ def _mcp_cli_arguments(
         *_model_arguments(model),
         "--output-format",
         output_format,
+        CLAUDE_NO_SESSION_PERSISTENCE_FLAG,
         *_TOOL_ISOLATION_FLAGS,
         "--allowedTools",
         _mcp_allowed_tools(spec),
@@ -1725,7 +1726,7 @@ def _tool_surface_probe_arguments(*, mcp: _AttachedMcpServer | None) -> list[str
         "--output-format",
         "stream-json",
         "--verbose",
-        "--no-session-persistence",
+        CLAUDE_NO_SESSION_PERSISTENCE_FLAG,
         *_TOOL_ISOLATION_FLAGS,
     ]
     if mcp is not None:

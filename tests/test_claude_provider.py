@@ -2763,6 +2763,32 @@ def test_tool_surface_treats_a_failed_mcp_connection_as_a_failure_not_a_permanen
     assert len(commands) == 2
 
 
+SURFACE_GATES_WITH_THEIR_CLEAN_ANSWER = (
+    pytest.param(
+        lambda: asyncio.run(verify_cli_tool_surface()), _init_line(_ALL_SAMPLE_TOOLS),
+        id="mcp-tool-surface",
+    ),
+    pytest.param(verify_no_builtin_cli_tools, _init_line([]), id="no-builtin-tools"),
+)
+
+
+@pytest.mark.parametrize("token_file", UNSOUND_TOKEN_FILES)
+@pytest.mark.parametrize(("verify", "clean_answer"), SURFACE_GATES_WITH_THEIR_CLEAN_ANSWER)
+def test_a_tool_surface_gate_refused_for_its_token_file_runs_at_once_after_the_repair(
+    verify, clean_answer: bytes, token_file, claude_binary, monkeypatch, tmp_path: Path,
+) -> None:
+    source = current_claude_runtime().token_file
+    token_file(source, tmp_path)
+    commands = _answer_with(monkeypatch, clean_answer)
+
+    with pytest.raises(CliLoginNotConfiguredError):
+        verify()
+    write_claude_token_file(source, TOKEN_CANARY)
+
+    assert verify() == claude_binary
+    assert len(commands) == 1
+
+
 # ── #351 round 7, Finding 4: /health follows the gate's live verdict ─
 
 
@@ -5405,11 +5431,10 @@ def _failure_of(call) -> tuple[type, str, BaseException | None]:
 @pytest.mark.parametrize(
     ("error_class", "message"),
     (
-        (CliLoginNotConfiguredError, CLAUDE_CLI_LOGIN_NOT_CONFIGURED_DETAIL),
         (CliUnavailableError, CLAUDE_CLI_UNAVAILABLE_DETAIL),
         (provider._ZombieProbeError, "probe process outlived SIGKILL"),
     ),
-    ids=("login", "environment", "zombie"),
+    ids=("environment", "zombie"),
 )
 def test_a_failed_tool_surface_probe_replays_its_class_and_message_without_the_exception(
     probe_kind: str, error_class, message: str, claude_binary, monkeypatch: pytest.MonkeyPatch

@@ -1181,6 +1181,9 @@ class _ToolSurfaceFailure:
 
 
 _ToolSurfaceKey = tuple[BinaryBuild, frozenset[str]]
+_FAILURES_THAT_SAY_NOTHING_ABOUT_THE_BUILD: Final = (
+    _ClaudeCliProcessPoolSaturated, CliLoginNotConfiguredError,
+)
 
 # Extra margin a follower waits beyond the leader's own worst case before
 # giving up on its own — generous, since this only ever fires if the
@@ -1439,8 +1442,7 @@ async def _run_probe_and_resolve_async(
         surface = await probe(deadline)
         mismatch = _evaluate_tool_surface(key, surface)
     except UnavailableError as exc:
-        if not isinstance(exc, _ClaudeCliProcessPoolSaturated):
-            _record_tool_surface_failure(key, exc)
+        _record_tool_surface_failure(key, exc)
         _resolve_inflight_async(key, future, exception=exc)
         return
     except asyncio.CancelledError as exc:
@@ -1543,8 +1545,7 @@ def _verify_tool_surface_sync(
         surface = probe(probe_deadline)
         mismatch = _evaluate_tool_surface(key, surface)
     except UnavailableError as exc:
-        if not isinstance(exc, _ClaudeCliProcessPoolSaturated):
-            _record_tool_surface_failure(key, exc)
+        _record_tool_surface_failure(key, exc)
         _resolve_inflight_sync(key, future, exception=exc)
         raise exc
     except BaseException as exc:
@@ -1645,6 +1646,13 @@ def _cached_tool_surface_verdict(key: _ToolSurfaceKey) -> _ToolSurfaceMismatch |
 
 
 def _record_tool_surface_failure(key: _ToolSurfaceKey, error: UnavailableError) -> None:
+    """Remember a failure that says something about the CLI build.
+
+    A full process pool and a refused login say nothing about it: the next call
+    after a freed slot or a repaired token file probes at once.
+    """
+    if isinstance(error, _FAILURES_THAT_SAY_NOTHING_ABOUT_THE_BUILD):
+        return
     with _tool_surface_lock:
         _tool_surface_failures[key] = _ToolSurfaceFailure(
             time.monotonic(), type(error), str(error),

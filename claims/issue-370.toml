@@ -1,0 +1,8 @@
+claim_id = "37cbde3e73ef4e03a8388df8b71c6db6"
+agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
+role = "builder"
+base = "7b659331b1d74385fc6201aaafd0bad5dad2f839"
+branch = "claude/issue-370-a1m-s4-asgi-mcp-server"
+scope = ["README.md", "docs/decisions/0001-agent-service.md", "packages/agent-client/src/agent_client/capability.py", "packages/agent-client/src/agent_client/mcp_server/__init__.py", "packages/agent-client/src/agent_client/mcp_server/app.py", "packages/agent-client/src/agent_client/mcp_server/verification.py", "packages/agent-client/src/agent_client/mcp_wire.py", "packages/agent-service/src/agent_service/capability.py", "packages/agent-service/src/agent_service/run_request.py", "tests/service_support.py", "tests/test_mcp_server.py", "tests/test_mcp_server_interop.py", "tests/test_mcp_wire.py"]
+opened_commit = "1040c3e9eb77c8b93fedfb640b97a0b5c30b0930"
+whole_reason = "The server, its exit check, the moved needle and the one strict reader change together, or the repository keeps a second copy of a decision."

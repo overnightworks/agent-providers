@@ -186,12 +186,14 @@ class ProviderRuntimeConfig(BaseModel):
     environment this layer closed.
 
     ``claude.token_file``, ``grok.token_file`` and ``codex.token_file``
-    are each provider's login source: the credential files the catalog paths
-    copy, mode 0400, into a private child home. The provider defines the
-    format of its own file. Those children receive only that home, the provider's own home
-    variable, ``PATH`` and the machine's locale, proxy and CA settings — never
-    the operator's credential directory, whose renewal writes would otherwise
-    succeed with the parent's rights.
+    are each provider's login source. ``claude.token_file`` holds the setup token,
+    which a Claude child gets only in its environment; its catalog copies no file.
+    ``grok.token_file`` and ``codex.token_file`` are the credential files the Grok
+    and Codex catalog paths copy, mode 0400, into a private child home; each
+    provider defines the format of its own file. Those children receive only that
+    home, the provider's own home variable, ``PATH`` and the machine's locale, proxy
+    and CA settings — never the operator's credential directory, whose renewal
+    writes would otherwise succeed with the parent's rights.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)

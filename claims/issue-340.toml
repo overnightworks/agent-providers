@@ -1,0 +1,7 @@
+claim_id = "fa086bc1f59d4ee48564fd2a5db6c4c9"
+agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
+role = "builder"
+base = "84b175ca9c5017335904d9f0d5929bdeee9f4aba"
+branch = "claude/issue-340-s4r2-privatehome-names-no-credential"
+scope = ["src/agent_providers/process.py", "tests/test_codex_cli_adapter.py", "tests/test_process.py"]
+opened_commit = "76b861320e50348968a2653229b7870fd59062ee"

@@ -105,8 +105,11 @@ jobs:
 
           assert importlib.util.find_spec("agent_providers") is None, "core leaked in"
           assert importlib.util.find_spec("jwt") is None, "the mcp-server extra leaked in"
+          assert importlib.util.find_spec("cryptography") is None, "cryptography leaked in"
           for module in pkgutil.walk_packages(agent_client.__path__, "agent_client."):
-              if module.name.startswith("agent_client.mcp_server"):
+              if module.name == "agent_client.mcp_server" or module.name.startswith(
+                  "agent_client.mcp_server."
+              ):
                   continue
               importlib.import_module(module.name)
               print("imported", module.name)

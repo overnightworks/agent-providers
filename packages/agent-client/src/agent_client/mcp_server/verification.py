@@ -26,6 +26,8 @@ from pydantic import ValidationError
 from agent_client.capability import (
     CAPABILITY_TOKEN_TYPE,
     MAX_CAPABILITY_CHARACTERS,
+    SIGNING_KEY_BITS,
+    SIGNING_KEY_EXPONENT,
     CapabilityClaims,
 )
 from agent_client.errors import raise_without_chain
@@ -65,6 +67,19 @@ class CapabilityVerificationKey:
 
     public_key: rsa.RSAPublicKey = field(repr=False)
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.public_key, rsa.RSAPublicKey):
+            raise_without_chain(UnsoundVerificationKey("is not an RSA public key"))
+        numbers = self.public_key.public_numbers()
+        if self.public_key.key_size != SIGNING_KEY_BITS:
+            raise_without_chain(
+                UnsoundVerificationKey(f"must be an RSA key of {SIGNING_KEY_BITS} bits")
+            )
+        if numbers.e != SIGNING_KEY_EXPONENT:
+            raise_without_chain(
+                UnsoundVerificationKey(f"must have public exponent {SIGNING_KEY_EXPONENT}")
+            )
+
     @classmethod
     def from_pem(cls, pem: bytes) -> CapabilityVerificationKey:
         """Accepts exactly one PEM ``PUBLIC KEY`` block holding an RSA key."""
@@ -75,13 +90,11 @@ class CapabilityVerificationKey:
             public_key = serialization.load_pem_public_key(pem)
         except (ValueError, UnsupportedAlgorithm):
             raise_without_chain(UnsoundVerificationKey("is not a PEM public key"))
-        if not isinstance(public_key, rsa.RSAPublicKey):
-            raise_without_chain(UnsoundVerificationKey("is not an RSA public key"))
         return cls(public_key)
 
 
 def _unsound_pem_reason(pem: bytes) -> str | None:
-    if pem.count(_PEM_BEGIN) != 1:
+    if pem.count(_PEM_BEGIN) != 1 or pem.count(_PUBLIC_KEY_END) != 1:
         return "must hold exactly one PEM block"
     block = pem.strip()
     if not (block.startswith(_PUBLIC_KEY_BEGIN) and block.endswith(_PUBLIC_KEY_END)):
@@ -173,5 +186,5 @@ def _claims_of(payload: bytes) -> CapabilityClaims | None:
         return None
     try:
         return CapabilityClaims.from_claims(document)
-    except (ValidationError, RecursionError):
+    except ValidationError:
         return None

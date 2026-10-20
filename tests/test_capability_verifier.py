@@ -12,7 +12,7 @@ from uuid import UUID
 
 import pytest
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec, padding
+from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
 from service_support import generated_rsa_key, pem_of
 
 from agent_client.capability import CAPABILITY_TOKEN_TYPE, MAX_CAPABILITY_CHARACTERS
@@ -39,7 +39,7 @@ RUN_ID = UUID("8c2f6c1e-3b5a-4d8e-9f10-2a7b4c6d8e01")
 TOOLS = ("edit_note", "read_note")
 
 TRUSTED_PRIVATE_KEY = generated_rsa_key()
-OTHER_PRIVATE_KEY = generated_rsa_key(2048)
+OTHER_PRIVATE_KEY = rsa.generate_private_key(public_exponent=65537, key_size=3072)
 TRUSTED_SIGNING_KEY = SigningKey.from_private_key(TRUSTED_PRIVATE_KEY)
 
 
@@ -247,14 +247,21 @@ def test_a_malformed_token_over_the_character_limit_is_refused_as_too_long():
     assert _verified("a" * (MAX_CAPABILITY_CHARACTERS + 1)) is CapabilityRefusal.TOO_LONG
 
 
-def test_a_capability_of_exactly_the_character_limit_is_still_verified():
-    filler = MAX_CAPABILITY_CHARACTERS - len(_signed_token(payload=_claims_with(purpose="")))
-    token = _signed_token(payload=_claims_with(purpose="p" * (filler * 3 // 4)))
+def _token_padded_to_the_limit() -> tuple[str, str]:
+    """Base64 skips every third length, so a purpose that lands on the limit is searched for."""
+    for purpose_length in range(MAX_CAPABILITY_CHARACTERS // 2, MAX_CAPABILITY_CHARACTERS):
+        purpose = "p" * purpose_length
+        token = _signed_token(payload=_claims_with(purpose=purpose))
+        if len(token) >= MAX_CAPABILITY_CHARACTERS:
+            return token, purpose
+    raise AssertionError("no purpose reaches the limit")
 
-    assert len(token) <= MAX_CAPABILITY_CHARACTERS
-    assert _verified(token) == _minted_claims().model_copy(
-        update={"purpose": "p" * (filler * 3 // 4)}
-    )
+
+def test_a_capability_of_exactly_the_character_limit_is_still_verified():
+    token, purpose = _token_padded_to_the_limit()
+
+    assert len(token) == MAX_CAPABILITY_CHARACTERS
+    assert _verified(token) == _minted_claims().model_copy(update={"purpose": purpose})
 
 
 NESTED_AS_DEEP_AS_THE_LIMIT_ALLOWS = b"[" * 4_500
@@ -412,6 +419,14 @@ def _pkcs1_public_pem() -> bytes:
         pytest.param(b"not a pem at all", id="garbage"),
         pytest.param(b"", id="empty"),
         pytest.param(b"junk\n" + _public_pem(TRUSTED_PRIVATE_KEY), id="text before the block"),
+        pytest.param(
+            _public_pem(TRUSTED_PRIVATE_KEY) + b"junk\n-----END PUBLIC KEY-----\n",
+            id="text and a second end marker after the block",
+        ),
+        pytest.param(
+            _public_pem(TRUSTED_PRIVATE_KEY) + b"-----END PUBLIC KEY-----",
+            id="a second end marker after the block",
+        ),
     ],
 )
 def test_a_key_that_is_not_one_rsa_public_key_block_is_refused_without_its_bytes(pem):
@@ -467,3 +482,21 @@ def test_a_document_nested_past_the_interpreters_recursion_limit_is_refused_not_
     monkeypatch.setattr(json, "loads", loads_failing_on_the_part)
 
     assert _verified(token) is outcome
+
+
+@pytest.mark.parametrize(
+    "unsound",
+    [
+        pytest.param(lambda: TRUSTED_PRIVATE_KEY, id="RSA private key"),
+        pytest.param(lambda: _public_pem(TRUSTED_PRIVATE_KEY), id="PEM bytes"),
+        pytest.param(lambda: ec.generate_private_key(ec.SECP256R1()).public_key(), id="EC key"),
+        pytest.param(lambda: generated_rsa_key(2048).public_key(), id="2048-bit key"),
+        pytest.param(lambda: generated_rsa_key(3072, 3).public_key(), id="exponent 3"),
+    ],
+)
+def test_the_constructor_refuses_anything_but_a_sound_rsa_public_key(unsound):
+    with pytest.raises(UnsoundVerificationKey) as refusal:
+        CapabilityVerificationKey(unsound())
+
+    assert refusal.value.__cause__ is None
+    assert refusal.value.__context__ is None

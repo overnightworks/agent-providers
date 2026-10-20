@@ -3,7 +3,7 @@
 The service mints one capability per run (decision record 0001, H3 and the A1a4
 ruling) and hands it to the runner as a bearer token of type
 ``agent-capability+jwt``. ``agent_client.mcp_server`` verifies against this module:
-it pins RS256 itself, trusts only configured keys, checks the token type, the
+it pins RS256 itself, trusts the one configured public key, checks the token type, the
 issuer, the audience (its own ``McpOrigin``), the length bound and these claims,
 refuses a token issued in the future, and checks each call's tool against
 ``tools``. This module owns the claim names and the one decider of an origin;
@@ -24,6 +24,8 @@ from agent_client.wire import UnicodeText
 CAPABILITY_ISSUER: Final = "agent-service"
 CAPABILITY_TOKEN_TYPE: Final = "agent-capability+jwt"
 MAX_CAPABILITY_CHARACTERS: Final = 8192
+SIGNING_KEY_BITS: Final = 3072
+SIGNING_KEY_EXPONENT: Final = 65537
 MCP_ENDPOINT_PATH: Final = "/mcp"
 
 _HTTPS_SCHEME: Final = "https://"

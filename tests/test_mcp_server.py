@@ -146,8 +146,8 @@ def handlers() -> RecordingHandlers:
 @pytest.fixture
 def served(handlers: RecordingHandlers) -> Fixture:
     tools = [
-        handlers.tool("edit_note", ToolEffect.SIDE_EFFECTING),
         handlers.tool("read_note"),
+        handlers.tool("edit_note", ToolEffect.SIDE_EFFECTING),
         handlers.tool("other_tool"),
     ]
     server = McpServer(ORIGIN, VERIFICATION_KEY, tools, wall_clock=lambda: ISSUED_AT + 1)
@@ -174,7 +174,7 @@ def test_tools_list_gives_declared_tools_the_capability_allows_in_declaration_or
 ) -> None:
     listed = served.post(rpc("tools/list")).json()["result"]["tools"]
 
-    assert [tool["name"] for tool in listed] == ["edit_note", "read_note"]
+    assert [tool["name"] for tool in listed] == ["read_note", "edit_note"]
     assert set(listed[0]) == {"name", "description", "inputSchema"}
     assert listed[0]["inputSchema"]["type"] == "object"
 
@@ -331,7 +331,7 @@ def host_app() -> Starlette:
     async def answer(request: Any) -> PlainTextResponse:
         return PlainTextResponse("host answer")
 
-    return Starlette(routes=[Route("/", answer), Route("/mcp", answer)])
+    return Starlette(routes=[Route("/", answer), Route("/mcp", answer), Route("/mcpx", answer)])
 
 
 @pytest.mark.parametrize(
@@ -358,14 +358,36 @@ def test_the_prefix_without_authorization_is_401_and_other_paths_are_the_hosts()
     server = McpServer(ORIGIN, VERIFICATION_KEY, [])
     app = server.in_front_of(host_app())
     unauthorized = asyncio.run(drive_scope(app, http_scope(request_headers(None), path="/mcp/")))
-    hosts = asyncio.run(drive_scope(app, http_scope(request_headers(None), path="/", method="GET")))
+    unauthenticated = request_headers(None)
+    hosts = asyncio.run(drive_scope(app, http_scope(unauthenticated, path="/", method="GET")))
+    beside = asyncio.run(drive_scope(app, http_scope(unauthenticated, path="/mcpx", method="GET")))
     premise = asyncio.run(
         drive_scope(host_app(), http_scope(request_headers(None), path="/mcp/", method="GET"))
     )
 
     assert unauthorized.status == 401
     assert (hosts.status, hosts.body) == (200, b"host answer")
+    assert (beside.status, beside.body) == (200, b"host answer")
     assert premise.status == 307
+
+
+@pytest.mark.parametrize(
+    ("extra", "status"),
+    [
+        pytest.param([(b"Origin", b"https://x.example")], 403, id="origin"),
+        pytest.param([(b"HOST", HOST)], 403, id="second-host"),
+        pytest.param([(b"Authorization", b"Bearer {token}")], 401, id="second-authorization"),
+    ],
+)
+def test_header_names_are_matched_without_regard_to_case(
+    served: Fixture, extra: Headers, status: int
+) -> None:
+    written = [(name, value.replace(b"{token}", served.token.encode())) for name, value in extra]
+
+    reply = served.request(request_headers(served.token) + written)
+
+    assert (reply.status, reply.body) == (status, b"")
+    assert served.handlers.calls == []
 
 
 @pytest.mark.parametrize("method", ["GET", "DELETE"])
@@ -494,6 +516,16 @@ def withheld_cases() -> list[Any]:
             id="unregistered-tool-name",
         ),
         pytest.param(lambda s: rpc(s, request_id=s), "unknown_method", id="id-and-unknown-method"),
+        pytest.param(
+            lambda s: rpc("tools/call", {"name": [s]}, request_id=s),
+            "tools/call unknown_tool",
+            id="list-tool-name",
+        ),
+        pytest.param(
+            lambda s: rpc("tools/call", {"name": {"a": 1}}, request_id=s),
+            "tools/call unknown_tool",
+            id="object-tool-name",
+        ),
     ]
 
 
@@ -540,10 +572,10 @@ def failures_carrying(segment: str) -> list[Exception]:
     try:
         raise RuntimeError("outer") from ValueError(segment)
     except RuntimeError as in_cause:
-        return [in_message, in_cause]
+        return [in_message, in_cause, ValueError("\ud800" + segment)]
 
 
-@pytest.mark.parametrize("which", [0, 1], ids=["message", "cause"])
+@pytest.mark.parametrize("which", [0, 1, 2], ids=["message", "cause", "lone-surrogate"])
 def test_a_handler_failure_carrying_the_signature_is_withheld_without_a_chain(
     served: Fixture, which: int, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -572,3 +604,51 @@ def test_the_default_clock_is_the_real_one_so_a_capability_long_expired_is_refus
     reply = asyncio.run(drive_scope(server, http_scope(request_headers(token)), rpc("ping")))
 
     assert reply.status == 401
+
+
+@pytest.mark.parametrize(
+    "outcome_of",
+    [
+        pytest.param(lambda s: ToolOutcome(s, is_error=s), id="non-bool-is-error"),
+        pytest.param(lambda s: ToolOutcome("\ud800" + s, is_error=False), id="lone-surrogate"),
+    ],
+)
+def test_an_outcome_that_cannot_be_written_is_treated_as_a_handler_failure(
+    served: Fixture, outcome_of: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.WARNING, logger=LOGGER)
+    segment = served.token.rsplit(".", 1)[-1]
+    served.handlers.outcome = outcome_of(segment)
+
+    with pytest.raises(HandlerFailureWithheld) as raised:
+        served.post(rpc("tools/call", call_params("read_note")))
+
+    assert (raised.value.__cause__, raised.value.__context__) == (None, None)
+    assert segment not in "".join(traceback.format_exception(raised.value)) + caplog.text
+
+
+@pytest.mark.parametrize(
+    ("path", "method", "body_size", "status"),
+    [
+        pytest.param("/nowhere", "POST", 0, 404, id="not-found"),
+        pytest.param("/mcp", "GET", 0, 405, id="method"),
+        pytest.param("/mcp", "POST", MAX_EVENT_BYTES + 1, 413, id="too-large"),
+    ],
+)
+def test_every_answer_after_verification_leaves_through_the_exit_check(
+    served: Fixture,
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    method: str,
+    body_size: int,
+    status: int,
+) -> None:
+    monkeypatch.setattr("agent_client.mcp_server.app.carries_signature_of", lambda *_: True)
+    unverified = served.request(request_headers(None), path=path, method=method)
+
+    reply = served.request(
+        request_headers(served.token), path=path, method=method, body=b"x" * body_size
+    )
+
+    assert unverified.status == 401
+    assert (reply.status, reply.body) == (500, b"")

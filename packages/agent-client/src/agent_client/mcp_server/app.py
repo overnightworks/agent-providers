@@ -20,7 +20,7 @@ import logging
 import time
 import traceback
 from collections.abc import Awaitable, Callable, MutableMapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from http import HTTPStatus
 from typing import Any, Final
 
@@ -49,6 +49,7 @@ from agent_client.mcp_wire import (
     McpMethod,
     McpWireError,
     Notified,
+    RequestId,
     ToolDefinition,
     ToolOutcome,
     Unoffered,
@@ -103,12 +104,12 @@ class McpTool:
 
 @dataclass(frozen=True)
 class _Verified:
-    token: str
+    token: str = field(repr=False)
     claims: CapabilityClaims
 
 
 def _field_values(scope: Scope, name: bytes) -> list[bytes]:
-    return [value for field_name, value in scope["headers"] if field_name == name]
+    return [value for field_name, value in scope["headers"] if field_name.lower() == name]
 
 
 def _definition_of(declaration: ToolDeclaration) -> ToolDefinition:
@@ -166,30 +167,32 @@ class McpServer:
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             raise TypeError(f"the MCP server serves http only, not {scope['type']}")
-        head = self._decided_head(scope)
-        if isinstance(head, HTTPStatus):
-            await _write(send, HttpAnswer(head, None, b""))
+        verified = self._verified_before_anything_else(scope)
+        if isinstance(verified, HTTPStatus):
+            await _write(send, HttpAnswer(verified, None, b""))
             return
-        body = await _read_body(receive)
-        if body is None:
-            await _write(send, HttpAnswer(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, None, b""))
-            return
-        answer = await self._answer(head, body, _protocol_version(scope))
-        await _write(send, self._cleared(head, answer, body))
+        answer, body = await self._answered_after_verification(verified, scope, receive)
+        await _write(send, self._cleared(verified, answer, body))
 
-    def _decided_head(self, scope: Scope) -> _Verified | HTTPStatus:
+    def _verified_before_anything_else(self, scope: Scope) -> _Verified | HTTPStatus:
         if _field_values(scope, b"host") != [self._host]:
             return HTTPStatus.FORBIDDEN
         if _field_values(scope, b"origin"):
             return HTTPStatus.FORBIDDEN
-        verified = self._verified(scope)
-        if isinstance(verified, HTTPStatus):
-            return verified
+        return self._verified(scope)
+
+    async def _answered_after_verification(
+        self, verified: _Verified, scope: Scope, receive: Receive
+    ) -> tuple[HttpAnswer, bytes]:
+        """The answer and the request body it answers; every refusal here is checked at the exit."""
         if scope["path"] != MCP_ENDPOINT_PATH or scope["query_string"]:
-            return HTTPStatus.NOT_FOUND
+            return HttpAnswer(HTTPStatus.NOT_FOUND, None, b""), b""
         if scope["method"] != "POST":
-            return HTTPStatus.METHOD_NOT_ALLOWED
-        return verified
+            return HttpAnswer(HTTPStatus.METHOD_NOT_ALLOWED, None, b""), b""
+        body = await _read_body(receive)
+        if body is None:
+            return HttpAnswer(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, None, b""), b""
+        return await self._answer(verified, body, _protocol_version(scope)), body
 
     def _verified(self, scope: Scope) -> _Verified | HTTPStatus:
         authorizations = _field_values(scope, b"authorization")
@@ -228,9 +231,9 @@ class McpServer:
             case Unoffered(request_id):
                 return answer_for(error_response(request_id, JsonRpcErrorCode.INVALID_PARAMS))
             case Call(request_id, params):
-                tool = self._tools[params.name]
-                outcome = await _handled(tool, verified, params.arguments)
-                return answer_for(tool_result_response(request_id, outcome))
+                return await _called(
+                    self._tools[params.name], verified, request_id, params.arguments
+                )
             case _:
                 raise AssertionError("a server decision is not handled")
 
@@ -252,15 +255,22 @@ class McpServer:
         if method != McpMethod.TOOLS_CALL:
             return method
         name = message.params.get("name")
-        return f"{method} {name if name in self._tools else _UNKNOWN_TOOL}"
+        known = isinstance(name, str) and name in self._tools
+        return f"{method} {name if known else _UNKNOWN_TOOL}"
 
 
-async def _handled(tool: McpTool, verified: _Verified, arguments: JsonObject) -> ToolOutcome:
+async def _called(
+    tool: McpTool, verified: _Verified, request_id: RequestId, arguments: JsonObject
+) -> HttpAnswer:
+    """The tool's answer; a failure of the handler or of writing its outcome is the same failure."""
+    outcome_text = ""
     try:
-        return await tool.handler(verified.claims, arguments)
+        outcome = await tool.handler(verified.claims, arguments)
+        outcome_text = f"{outcome.content}{outcome.is_error}"
+        return answer_for(tool_result_response(request_id, outcome))
     except Exception as failure:
-        formatted = "".join(traceback.format_exception(failure))
-        if not carries_signature_of(verified.token, formatted.encode("utf-8")):
+        formatted = "".join(traceback.format_exception(failure)) + outcome_text
+        if not carries_signature_of(verified.token, formatted.encode("utf-8", errors="replace")):
             raise
         name = tool.declaration.name
         _LOG.warning("a failure was withheld: tool %s", name)

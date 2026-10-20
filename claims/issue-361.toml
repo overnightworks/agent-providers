@@ -1,0 +1,8 @@
+claim_id = "36c481f55b1d4b1e92fbcf7a95ba10fd"
+agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
+role = "builder"
+base = "d3546ef3461f547602b51bf1bd63daa01402dc48"
+branch = "claude/issue-361-a1m-s2-one-server-half"
+scope = ["packages/agent-client/src/agent_client/mcp_wire.py", "packages/agent-service/src/agent_service/run_request.py", "packages/agent-service/src/agent_service/tool_relay.py", "tests/test_mcp_wire.py"]
+opened_commit = "59cc6b516085066be47a9384a1f13feecdcdc381"
+whole_reason = "One decision moves to one owner; both callers switch in the same commit."

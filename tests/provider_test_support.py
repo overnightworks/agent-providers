@@ -73,6 +73,7 @@ from agent_providers.config import (
     current_config,
     reset_config,
 )
+from agent_providers.constants import CLAUDE_OAUTH_TOKEN_VARIABLE
 from agent_providers.dispatch import stream_turn
 from agent_providers.errors import (
     ProviderUnavailableError,
@@ -278,6 +279,33 @@ def fake_cli_executable(
     executable.write_text(f'#!/bin/sh\n{log_line}case "$*" in\n{cases}  *) exit 1 ;;\nesac\n')
     executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
     return executable
+
+
+SAMPLE_CLAUDE_SETUP_TOKEN: Final = "sk-ant-oat01-sample-setup-token"
+CLAUDE_LOGIN_FILE: Final = Path(".claude/.credentials.json")
+
+
+def write_claude_token_file(
+    path: Path, token: str = SAMPLE_CLAUDE_SETUP_TOKEN, *, mode: int = 0o600,
+) -> Path:
+    """A Claude ``token_file`` as ``claude setup-token`` leaves it: one line, mode 0600."""
+    path.write_text(f"{token}\n")
+    path.chmod(mode)
+    return path
+
+
+def assert_claude_token_child(child: ChildProcess, *, root: Path, token: str) -> Path:
+    """Assert a Claude child at its spawn boundary: an empty private home, the token in
+    its environment as ``CLAUDE_CODE_OAUTH_TOKEN`` and nowhere in its command line."""
+    home = Path(child.environment["HOME"])
+    assert child.working_directory == home
+    assert home.parent == root
+    assert stat.S_IMODE(home.stat().st_mode) == 0o700
+    assert not (home / CLAUDE_LOGIN_FILE).exists()
+    assert list(home.iterdir()) == []
+    assert child.environment[CLAUDE_OAUTH_TOKEN_VARIABLE] == token
+    assert not any(token in part for part in child.command)
+    return home
 
 
 def assert_private_credential_child(

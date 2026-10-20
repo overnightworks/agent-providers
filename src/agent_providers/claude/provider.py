@@ -62,6 +62,7 @@ from agent_providers.constants import (
     CLAUDE_CLI_TOOL_SURFACE_FAILURE_CACHE_SECONDS,
     CLAUDE_CLI_TOOL_SURFACE_TIMEOUT_SECONDS,
     CLAUDE_CLI_ZOMBIE_FAILURE_CACHE_SECONDS,
+    CLAUDE_OAUTH_TOKEN_VARIABLE,
     CLI_GROUP_CONFIRMATION_SECONDS,
     CLI_OUTPUT_READ_LIMIT_BYTES,
     CLI_TERMINATION_GRACE_SECONDS,
@@ -144,7 +145,6 @@ _TOOL_ISOLATION_FLAGS: Final = (
 )
 
 RELAY_SERVER_NAME: Final = "relay"
-_OAUTH_TOKEN_VARIABLE: Final = "CLAUDE_CODE_OAUTH_TOKEN"
 _TOOL_TIMEOUT_VARIABLE: Final = "MCP_TOOL_TIMEOUT"
 _MILLISECONDS_PER_SECOND: Final = 1000
 _RUN_SWITCHES: Final = {
@@ -174,7 +174,6 @@ _STREAM_BUFFER_LIMIT = 4 * 1024 * 1024
 _SYSTEM_PROMPT_FILE_NAME: Final = "system-prompt"
 _RELAY_CONFIG_FILE_NAME: Final = "relay-mcp.json"
 _CLAUDE_TURN_HOME_PREFIX: Final = "agent-cli-claude-turn-"
-_CLAUDE_CREDENTIAL_PATH: Final = Path(".claude/.credentials.json")
 
 
 def clear_client_cache() -> None:
@@ -193,7 +192,7 @@ class UnavailableError(Exception):
 
 class CliUnavailableError(UnavailableError):
     """Raised when the Claude CLI cannot run here: its binary is missing, or
-    its private home or credential copy cannot be made."""
+    its private home cannot be made."""
 
 
 class CliLoginNotConfiguredError(UnavailableError):
@@ -314,10 +313,11 @@ async def acall_claude_with_mcp(
     stdin_body = stdin_prompt(system, flat_prompt)
     log.info("Claude: MCP+CLI backend (model=%s, user=%s)", model, user_id)
 
+    login = _claude_login()
     home = _claude_private_home()
     try:
         with _mcp_turn_cli_arguments(model, user_id, stream=False) as arguments:
-            child = _claude_child_process(binary, arguments, home.path)
+            child = _claude_child_process(binary, arguments, home.path, login)
             async with _anchored_turn_child(child, home_reservation=home.reserve()) as proc:
                 try:
                     stdout_bytes, stderr_bytes = await asyncio.wait_for(
@@ -375,10 +375,11 @@ async def acall_claude_with_mcp_stream(
     stdin_body = stdin_prompt(system, flat_prompt)
     log.info("Claude: streaming MCP+CLI (model=%s, user=%s)", model, user_id)
 
+    login = _claude_login()
     home = _claude_private_home()
     try:
         with _mcp_turn_cli_arguments(model, user_id, stream=True) as arguments:
-            child = _claude_child_process(binary, arguments, home.path)
+            child = _claude_child_process(binary, arguments, home.path, login)
             async with _anchored_turn_child(
                 child,
                 home_reservation=home.reserve(),
@@ -840,7 +841,7 @@ class ClaudeRun:
             arguments=self._arguments(home),
             environment=closed_environment(
                 home,
-                **{_OAUTH_TOKEN_VARIABLE: self.token.get_secret_value()},
+                **{CLAUDE_OAUTH_TOKEN_VARIABLE: self.token.get_secret_value()},
                 **_RUN_SWITCHES,
                 **self._tool_timeout_environment(),
             ),
@@ -893,26 +894,31 @@ def _faults_in_the_claude_family() -> Iterator[None]:
         raise CliUnavailableError(CLAUDE_CLI_UNAVAILABLE_DETAIL) from exc
 
 
-def _claude_private_home() -> process.PrivateCredentialHome:
+def _claude_login() -> dict[str, str]:
+    """The setup token a Claude child starts with, read anew for every child.
+
+    Read before the child's home is made, so a refused token file leaves no home behind.
+    """
     with _faults_in_the_claude_family():
-        return process.PrivateCredentialHome(
-            current_claude_runtime().token_file,
-            _CLAUDE_CREDENTIAL_PATH,
-            prefix=_CLAUDE_TURN_HOME_PREFIX,
-            missing_credential_is_error=True,
-        )
+        return process.claude_token_environment()
+
+
+def _claude_private_home() -> process.PrivateHome:
+    with _faults_in_the_claude_family():
+        return process.PrivateHome(prefix=_CLAUDE_TURN_HOME_PREFIX)
 
 
 def _claude_child_process(
     binary: Path,
     arguments: list[str],
     home: Path,
+    login: dict[str, str],
 ) -> ChildProcess:
-    """Describe one Claude child around its disposable credential home."""
+    """Describe one Claude child in its disposable home, which holds no login file."""
     return ChildProcess(
         binary=binary,
         arguments=tuple(arguments),
-        environment=closed_environment(home),
+        environment=closed_environment(home, **login),
         working_directory=home,
     )
 
@@ -1791,9 +1797,12 @@ def _probe_cli_surface_sync(
     """Run one tool-surface probe through the shared bounded CLI runner."""
     if deadline <= time.monotonic():
         raise UnavailableError("Claude CLI probe preflight budget was already exhausted")
+    login = _claude_login()
     home = _claude_private_home()
     try:
-        child = _claude_child_process(binary, _tool_surface_probe_arguments(mcp=mcp), home.path)
+        child = _claude_child_process(
+            binary, _tool_surface_probe_arguments(mcp=mcp), home.path, login,
+        )
         stdin_payload = _TOOL_SURFACE_PROBE_PROMPT.encode()
         home_reservation = home.reserve()
         reservation = CLAUDE_CLI_PROCESS_POOL.reserve(home_reservation)
@@ -2018,9 +2027,10 @@ def _call_cli(
     binary = verify_no_builtin_cli_tools()
     flat_prompt = flatten_messages(prompt, messages)
     stdin_body = stdin_prompt(system, flat_prompt)
+    login = _claude_login()
     home = _claude_private_home()
     try:
-        child = _claude_child_process(binary, _cli_arguments(model), home.path)
+        child = _claude_child_process(binary, _cli_arguments(model), home.path, login)
         home_reservation = home.reserve()
     except BaseException:
         home.close()
@@ -2082,9 +2092,10 @@ async def _acall_cli(
     binary = await averify_no_builtin_cli_tools()
     flat_prompt = flatten_messages(prompt, messages)
     stdin_body = stdin_prompt(system, flat_prompt)
+    login = _claude_login()
     home = _claude_private_home()
     try:
-        child = _claude_child_process(binary, _cli_arguments(model), home.path)
+        child = _claude_child_process(binary, _cli_arguments(model), home.path, login)
         async with _anchored_turn_child(child, home_reservation=home.reserve()) as proc:
             try:
                 stdout_bytes, stderr_bytes = await asyncio.wait_for(

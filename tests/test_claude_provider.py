@@ -32,6 +32,7 @@ from provider_test_support import (
     CLAUDE_MODEL_CATALOG_STDOUT,
     DESTINATION_FAULTS,
     MCP_TOOL_NAMES,
+    SAMPLE_CLAUDE_SETUP_TOKEN,
     SAMPLE_TOOL_CATALOG,
     SECRET_ENV_KEYS,
     ClaudeCliSpawns,
@@ -43,10 +44,11 @@ from provider_test_support import (
     a_child_that_outlives_sigkill,
     a_claude_cli_child,
     a_credential_destination_that_fails,
-    assert_private_credential_child,
+    assert_claude_token_child,
     call_within_deadline,
     confirm_the_retained_group_gone,
     drive_turn,
+    exception_chain,
     fail_to_start_the_runner_thread,
     fake_cli_process,
     held_claude_slots,
@@ -63,6 +65,8 @@ from provider_test_support import (
     run_bounded,
     scenario_holds,
     set_claude_process_limit,
+    traceback_frames_hold,
+    write_claude_token_file,
 )
 from pydantic import SecretStr
 
@@ -109,6 +113,7 @@ from agent_providers.config import (
 )
 from agent_providers.constants import (
     CLAUDE_CLI_COMPLETION_TIMEOUT_SECONDS,
+    CLAUDE_OAUTH_TOKEN_VARIABLE,
 )
 from agent_providers.dispatch import call_provider_once
 from agent_providers.errors import (
@@ -121,7 +126,13 @@ from agent_providers.events import AssistantTextEvent, FinalEvent, StreamEvent
 from agent_providers.grok import transport as grok_transport
 from agent_providers.process import CliRun, CliRunOutcome, CliRunReason
 from agent_providers.procfs import GroupCensus
-from agent_providers.spawn import AnchorStateError, ChildIdentityLost, KillUntilGoneResult
+from agent_providers.secret_file import MAX_SECRET_FILE_BYTES
+from agent_providers.spawn import (
+    AnchorStateError,
+    ChildIdentityLost,
+    ChildProcess,
+    KillUntilGoneResult,
+)
 from agent_providers.tool_loop import ToolOutcome, stream_tool_loop
 
 ROUTE_FAILED = SafeRouteReasonCode.ROUTE_FAILED
@@ -1303,53 +1314,224 @@ def test_a_saturated_pool_refuses_a_turn_with_no_chained_cause_or_context(
 # ── the child a Claude turn runs as ─────────────────────────────────
 
 
-def test_a_claude_child_gets_a_private_credential_home_not_the_operators(
+def test_a_claude_child_gets_a_private_home_not_the_operators(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "operator-home"))
     monkeypatch.setenv("ANTHROPIC_API_KEY", "value-the-child-must-not-see")
-    credential = tmp_path / "claude-credentials.json"
-    credential.write_text("{}")
-    override_claude_runtime(token_file=credential)
+    override_claude_runtime(token_file=write_claude_token_file(tmp_path / "claude-token"))
 
+    login = provider._claude_login()
     home = provider._claude_private_home()
-    child = provider._claude_child_process(Path("/usr/bin/claude"), ["-p"], home.path)
+    child = provider._claude_child_process(Path("/usr/bin/claude"), ["-p"], home.path, login)
 
     assert child.environment["HOME"] == str(home.path)
     assert child.working_directory == home.path
     assert "ANTHROPIC_API_KEY" not in child.environment
+    assert child.environment[CLAUDE_OAUTH_TOKEN_VARIABLE] == SAMPLE_CLAUDE_SETUP_TOKEN
     assert child.command == ("/usr/bin/claude", "-p")
     home.close()
     assert not child.working_directory.exists()
 
 
-def test_sync_claude_call_owns_a_private_credential_home_until_completion(
-    _no_tool_gate_open,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    source = current_claude_runtime().token_file
-    homes: list[Path] = []
+# ── the setup token a Claude child starts with ──────────────────────
 
-    def run_capturing(child, **_kwargs):
-        homes.append(assert_private_credential_child(
-            child,
-            root=tmp_path,
-            source=source,
-            destination=Path(".claude/.credentials.json"),
-        ))
+_TOKEN_CANARY = "sk-ant-oat01-token-canary-5e2b81"
+_VERIFIED_CLAUDE_BINARY = Path("/usr/bin/claude")
+_AN_EMPTY_TOOL_SURFACE = CliRunOutcome(
+    started=True,
+    spawn_error=None,
+    returncode=0,
+    stdout=json.dumps({"type": "system", "subtype": "init", "tools": [], "slash_commands": []})
+    + "\n",
+    stderr="",
+    complete=True,
+    became_zombie=False,
+    reason=CliRunReason.COMPLETE,
+)
+
+type _OnSpawn = Callable[[ChildProcess], None]
+
+
+def _a_sound_token_file(source: Path, _tmp_path: Path) -> None:
+    write_claude_token_file(source, _TOKEN_CANARY)
+
+
+def _no_token_file(source: Path, _tmp_path: Path) -> None:
+    source.unlink()
+
+
+def _a_token_file_open_to_others(source: Path, _tmp_path: Path) -> None:
+    write_claude_token_file(source, _TOKEN_CANARY, mode=0o644)
+
+
+def _a_link_to_a_token_file_of_mode(mode: int) -> Callable[[Path, Path], None]:
+    def link(source: Path, tmp_path: Path) -> None:
+        target = write_claude_token_file(tmp_path / "linked-token", _TOKEN_CANARY, mode=mode)
+        source.unlink()
+        source.symlink_to(target)
+
+    return link
+
+
+def _a_token_file_over_the_bound(source: Path, _tmp_path: Path) -> None:
+    write_claude_token_file(
+        source, _TOKEN_CANARY * (MAX_SECRET_FILE_BYTES // len(_TOKEN_CANARY) + 1),
+    )
+
+
+def _a_credentials_document(source: Path, _tmp_path: Path) -> None:
+    login = {"accessToken": _TOKEN_CANARY, "refreshToken": _TOKEN_CANARY}
+    write_claude_token_file(source, json.dumps({"claudeAiOauth": login}))
+
+
+SOUND_TOKEN_FILES = (
+    pytest.param(_a_sound_token_file, id="0600-token"),
+    pytest.param(_a_link_to_a_token_file_of_mode(0o600), id="link-to-0600"),
+)
+UNSOUND_TOKEN_FILES = (
+    pytest.param(_no_token_file, id="missing"),
+    pytest.param(_a_token_file_open_to_others, id="0644-token"),
+    pytest.param(_a_link_to_a_token_file_of_mode(0o644), id="link-to-0644"),
+    pytest.param(_a_token_file_over_the_bound, id="over-16KiB"),
+    pytest.param(_a_credentials_document, id="json"),
+)
+
+
+def _async_claude_children_answering(
+    monkeypatch: pytest.MonkeyPatch, on_spawn: _OnSpawn, **script: Any,
+) -> None:
+    def answer(child: ChildProcess, _stream_buffer_limit: int | None) -> ScriptedClaudeChild:
+        on_spawn(child)
+        return a_claude_cli_child(**script)
+
+    install_claude_cli_children(monkeypatch, factory=answer)
+
+
+def _start_the_mcp_completion(monkeypatch: pytest.MonkeyPatch, on_spawn: _OnSpawn) -> None:
+    _async_claude_children_answering(monkeypatch, on_spawn, communicate=(b'{"result":"ok"}', b""))
+    monkeypatch.setattr(
+        provider, "verify_cli_tool_surface", AsyncMock(return_value=_VERIFIED_CLAUDE_BINARY),
+    )
+    assert asyncio.run(provider.acall_claude_with_mcp("hello", user_id="user-1")).text == "ok"
+
+
+def _start_the_mcp_stream(monkeypatch: pytest.MonkeyPatch, on_spawn: _OnSpawn) -> None:
+    _async_claude_children_answering(
+        monkeypatch, on_spawn, stream_lines=[b'{"type":"result","result":"ok"}\n'],
+    )
+    monkeypatch.setattr(
+        provider, "verify_cli_tool_surface", AsyncMock(return_value=_VERIFIED_CLAUDE_BINARY),
+    )
+
+    async def stream() -> list[StreamEvent]:
+        return [event async for event in acall_claude_with_mcp_stream("hello", user_id="user-1")]
+
+    assert asyncio.run(stream())[-1].text == "ok"
+
+
+def _start_the_tool_surface_probe(monkeypatch: pytest.MonkeyPatch, on_spawn: _OnSpawn) -> None:
+    def run_cli_bounded(child: ChildProcess, **kwargs: Any) -> CliRunOutcome:
+        on_spawn(child)
+        kwargs["on_reaped"](2468, False)
+        return _AN_EMPTY_TOOL_SURFACE
+
+    monkeypatch.setattr(provider.process, "run_cli_bounded", run_cli_bounded)
+    assert _probe_the_surface_once().tools == ()
+
+
+def _start_the_sync_completion(monkeypatch: pytest.MonkeyPatch, on_spawn: _OnSpawn) -> None:
+    def run_capturing(child: ChildProcess, **_kwargs: Any) -> MagicMock:
+        on_spawn(child)
         return MagicMock(returncode=0, stdout='{"result":"ok"}', stderr="")
 
     monkeypatch.setattr(provider, "run_capturing", run_capturing)
-
+    monkeypatch.setattr(
+        provider, "verify_no_builtin_cli_tools", lambda *, deadline=None: _VERIFIED_CLAUDE_BINARY,
+    )
     assert call_claude("hello").text == "ok"
-    assert len(homes) == 1
-    assert not homes[0].exists()
-    assert source.read_text() == "{}"
 
 
-def test_sync_claude_call_removes_its_credential_home_when_the_arguments_fail(
+def _start_the_async_completion(monkeypatch: pytest.MonkeyPatch, on_spawn: _OnSpawn) -> None:
+    _async_claude_children_answering(monkeypatch, on_spawn, communicate=(b'{"result":"ok"}', b""))
+    monkeypatch.setattr(
+        provider, "averify_no_builtin_cli_tools", AsyncMock(return_value=_VERIFIED_CLAUDE_BINARY),
+    )
+    assert asyncio.run(acall_claude("hello")).text == "ok"
+
+
+CLAUDE_CHILD_STARTS = (
+    pytest.param(_start_the_mcp_completion, id="mcp-completion"),
+    pytest.param(_start_the_mcp_stream, id="mcp-stream"),
+    pytest.param(_start_the_tool_surface_probe, id="tool-surface-probe"),
+    pytest.param(_start_the_sync_completion, id="call-cli"),
+    pytest.param(_start_the_async_completion, id="acall-cli"),
+)
+
+
+@pytest.mark.parametrize("token_file", SOUND_TOKEN_FILES)
+@pytest.mark.parametrize("start_child", CLAUDE_CHILD_STARTS)
+def test_a_claude_child_gets_the_setup_token_only_in_its_environment_never_a_login_file(
+    start_child, token_file, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog,
+) -> None:
+    source = current_claude_runtime().token_file
+    token_file(source, tmp_path)
+    caplog.set_level(logging.DEBUG)
+    homes: list[Path] = []
+
+    start_child(
+        monkeypatch,
+        lambda child: homes.append(
+            assert_claude_token_child(child, root=tmp_path, token=_TOKEN_CANARY),
+        ),
+    )
+
+    [home] = homes
+    assert not home.exists()
+    assert _TOKEN_CANARY not in caplog.text
+    assert source.read_text() == f"{_TOKEN_CANARY}\n"
+
+
+@pytest.mark.parametrize("token_file", UNSOUND_TOKEN_FILES)
+@pytest.mark.parametrize("start_child", CLAUDE_CHILD_STARTS)
+def test_a_claude_child_with_an_unsound_token_file_is_refused_before_any_home(
+    start_child, token_file, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog,
+) -> None:
+    token_file(current_claude_runtime().token_file, tmp_path)
+    caplog.set_level(logging.DEBUG)
+    homes = _record_the_homes_the_provider_opens(monkeypatch)
+    spawned: list[ChildProcess] = []
+
+    with pytest.raises(CliLoginNotConfiguredError) as refusal:
+        start_child(monkeypatch, spawned.append)
+
+    assert (homes, spawned) == ([], [])
+    assert str(refusal.value) == CLAUDE_CLI_LOGIN_NOT_CONFIGURED_DETAIL
+    assert type(refusal.value.__cause__) is process.CliLoginUnusableError
+    assert not any(_TOKEN_CANARY in f"{link}{link!r}" for link in exception_chain(refusal.value))
+    assert not traceback_frames_hold(refusal.value, _TOKEN_CANARY)
+    assert _TOKEN_CANARY not in caplog.text
+
+
+@pytest.mark.parametrize("start_child", CLAUDE_CHILD_STARTS)
+def test_a_replaced_token_file_reaches_the_next_claude_child(
+    start_child, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = current_claude_runtime().token_file
+    tokens = ("sk-ant-oat01-first-setup-token", "sk-ant-oat01-second-setup-token")
+    seen: list[str] = []
+
+    for token in tokens:
+        write_claude_token_file(source, token)
+        start_child(
+            monkeypatch, lambda child: seen.append(child.environment[CLAUDE_OAUTH_TOKEN_VARIABLE]),
+        )
+
+    assert tuple(seen) == tokens
+
+
+def test_sync_claude_call_removes_its_home_when_the_arguments_fail(
     _no_tool_gate_open,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1626,104 +1808,6 @@ def test_a_refused_home_removal_returns_a_successful_calls_result(
 
 
 @pytest.mark.parametrize(
-    "entrypoint",
-    ("async", "mcp", "stream"),
-    ids=("async-call", "mcp-call", "mcp-stream"),
-)
-def test_async_claude_entrypoints_own_private_credential_homes_until_reap(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    entrypoint: str,
-) -> None:
-    source = current_claude_runtime().token_file
-    homes: list[Path] = []
-
-    def child_started_in_a_private_home(child, _stream_buffer_limit):
-        homes.append(assert_private_credential_child(
-            child,
-            root=tmp_path,
-            source=source,
-            destination=Path(".claude/.credentials.json"),
-        ))
-        if entrypoint == "stream":
-            return a_claude_cli_child(stream_lines=[b'{"type":"result","result":"ok"}\n'])
-        return a_claude_cli_child(communicate=(b'{"result":"ok"}', b""))
-
-    install_claude_cli_children(monkeypatch, factory=child_started_in_a_private_home)
-    monkeypatch.setattr(
-        provider,
-        "averify_no_builtin_cli_tools",
-        AsyncMock(return_value=Path("/usr/bin/claude")),
-    )
-    monkeypatch.setattr(
-        provider,
-        "verify_cli_tool_surface",
-        AsyncMock(return_value=Path("/usr/bin/claude")),
-    )
-
-    async def run_entrypoint() -> str:
-        if entrypoint == "async":
-            return (await acall_claude("hello")).text
-        if entrypoint == "mcp":
-            return (await provider.acall_claude_with_mcp("hello", user_id="user-1")).text
-        events = [
-            event
-            async for event in acall_claude_with_mcp_stream("hello", user_id="user-1")
-        ]
-        return events[-1].text
-
-    assert asyncio.run(run_entrypoint()) == "ok"
-    assert len(homes) == 1
-    assert not homes[0].exists()
-    assert source.read_text() == "{}"
-
-
-def test_claude_surface_probe_owns_a_private_home_until_its_runner_reaps(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    source = current_claude_runtime().token_file
-    homes: list[Path] = []
-
-    def run_cli_bounded(child, **kwargs):
-        homes.append(assert_private_credential_child(
-            child,
-            root=tmp_path,
-            source=source,
-            destination=Path(".claude/.credentials.json"),
-        ))
-        kwargs["on_reaped"](2468, False)
-        return CliRunOutcome(
-            started=True,
-            spawn_error=None,
-            returncode=0,
-            stdout=json.dumps({
-                "type": "system",
-                "subtype": "init",
-                "tools": [],
-                "slash_commands": [],
-            }) + "\n",
-            stderr="",
-            complete=True,
-            became_zombie=False,
-            reason=CliRunReason.COMPLETE,
-        )
-
-    monkeypatch.setattr(provider.process, "run_cli_bounded", run_cli_bounded)
-
-    announced = provider._probe_cli_surface_sync(
-        Path("/usr/bin/claude"),
-        mcp=None,
-        deadline=time.monotonic() + 1,
-    )
-
-    assert announced.tools == ()
-    assert len(homes) == 1
-    assert not homes[0].exists()
-    assert source.read_text() == "{}"
-
-
-@pytest.mark.parametrize(
     ("reason", "callback"),
     (
         (CliRunReason.DEADLINE_BEFORE_SPAWN, "on_spawn_failed"),
@@ -1737,16 +1821,12 @@ def test_claude_surface_probe_keeps_its_home_until_late_runner_confirmation(
     reason: CliRunReason,
     callback: str,
 ) -> None:
-    source = current_claude_runtime().token_file
     captured: dict[str, object] = {}
 
     def run_cli_bounded(child, **kwargs):
         captured.update(kwargs)
-        captured["home"] = assert_private_credential_child(
-            child,
-            root=tmp_path,
-            source=source,
-            destination=Path(".claude/.credentials.json"),
+        captured["home"] = assert_claude_token_child(
+            child, root=tmp_path, token=SAMPLE_CLAUDE_SETUP_TOKEN,
         )
         return CliRunOutcome(
             started=reason is CliRunReason.CLEANUP_OVERRAN,
@@ -1774,7 +1854,6 @@ def test_claude_surface_probe_keeps_its_home_until_late_runner_confirmation(
     else:
         captured[callback](2468, True)
     assert not home.exists()
-    assert source.read_text() == "{}"
 
 
 def _probe_the_surface_once() -> provider._AnnouncedSurface:
@@ -1811,7 +1890,7 @@ def test_a_tool_surface_probe_that_fails_before_the_runner_holds_nothing(
     homes: list[Path] = []
     ran = []
 
-    def refuse_to_build(_binary, _arguments, home):
+    def refuse_to_build(_binary, _arguments, home, _login):
         homes.append(home)
         raise RuntimeError("the child could not be described")
 
@@ -3780,11 +3859,11 @@ def test_zombie_reap_reservation_has_no_toctou_window_under_real_concurrency(
 
 def _record_the_homes_the_provider_opens(
     monkeypatch,
-) -> list[process.PrivateCredentialHome]:
-    homes: list[process.PrivateCredentialHome] = []
+) -> list[process.PrivateHome]:
+    homes: list[process.PrivateHome] = []
     real_private_home = provider._claude_private_home
 
-    def record_home() -> process.PrivateCredentialHome:
+    def record_home() -> process.PrivateHome:
         homes.append(real_private_home())
         return homes[-1]
 
@@ -3831,7 +3910,7 @@ def test_probe_runner_start_failure_is_a_closed_probe_failure_that_frees_its_res
 
 def _a_probe_runner_that_reports(
     outcome: CliRunOutcome, monkeypatch,
-) -> list[process.PrivateCredentialHome]:
+) -> list[process.PrivateHome]:
     homes = _record_the_homes_the_provider_opens(monkeypatch)
 
     def run_cli_bounded(_child, **kwargs):
@@ -4101,7 +4180,6 @@ def test_closing_a_claude_stream_keeps_its_private_home_until_confirmed_reap(
     tmp_path: Path,
     killpg_signals,
 ) -> None:
-    source = current_claude_runtime().token_file
     deadline = ScenarioDeadline()
     reap_gate = EventGate(deadline)
     real_reap = anchored_turn._reap_process_group
@@ -4117,11 +4195,8 @@ def test_closing_a_claude_stream_keeps_its_private_home_until_confirmed_reap(
 
         def child_started_in_a_private_home(spawned, _stream_buffer_limit):
             nonlocal home_seen
-            home_seen = assert_private_credential_child(
-                spawned,
-                root=tmp_path,
-                source=source,
-                destination=Path(".claude/.credentials.json"),
+            home_seen = assert_claude_token_child(
+                spawned, root=tmp_path, token=SAMPLE_CLAUDE_SETUP_TOKEN,
             )
             return child
 

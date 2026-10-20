@@ -8,12 +8,14 @@ import sys
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from provider_test_support import (
     A_STREAMED_LINE,
+    SAMPLE_CLAUDE_SETUP_TOKEN,
     a_child_that_outlives_sigkill,
-    a_credential_destination_that_fails,
+    a_claude_cli_child,
     confirm_the_retained_group_gone,
     install_claude_cli_children,
     killpg_forbidden,
@@ -23,6 +25,7 @@ from provider_test_support import (
     recorded_census_workers,
     reset_cli_process_pool_for_test,
     run_bounded,
+    write_claude_token_file,
 )
 
 from agent_providers.claude import adapter as claude_adapter
@@ -37,9 +40,11 @@ from agent_providers.claude.provider import (
     UnavailableError,
 )
 from agent_providers.config import current_claude_runtime
+from agent_providers.constants import CLAUDE_OAUTH_TOKEN_VARIABLE
 from agent_providers.errors import ContainmentLost, ProviderUnavailableError, SafeRouteReasonCode
 from agent_providers.events import AssistantTextEvent, StreamEvent
 from agent_providers.process import CliEnvironmentUnavailableError, CliLoginUnusableError
+from agent_providers.secret_file import MAX_SECRET_FILE_BYTES
 from agent_providers.tool_loop import ToolOutcome
 
 
@@ -294,22 +299,31 @@ async def _drive_real_claude_turn() -> None:
         pass
 
 
-def _a_credential_that(fault: str, tmp_path) -> None:
+def _the_token_file_replaced_by_a_link_to(target: Path) -> None:
     source = current_claude_runtime().token_file
     source.unlink()
-    if fault == "linked":
-        target = tmp_path / "elsewhere.json"
-        target.write_text("{}")
-        source.symlink_to(target)
+    source.symlink_to(target)
+
+
+def _a_token_file_that(fault: str, tmp_path: Path) -> None:
+    source = current_claude_runtime().token_file
+    if fault == "missing":
+        source.unlink()
+    if fault == "linked-to-0644":
+        _the_token_file_replaced_by_a_link_to(
+            write_claude_token_file(tmp_path / "elsewhere", mode=0o644),
+        )
     if fault == "oversize":
-        source.write_bytes(b"x" * (256 * 1024 + 1))
+        write_claude_token_file(source, "x" * (MAX_SECRET_FILE_BYTES + 1))
+    if fault == "json":
+        write_claude_token_file(source, "{}")
 
 
-@pytest.mark.parametrize("fault", ("missing", "linked", "oversize"))
-def test_claude_cli_turn_with_an_unusable_credential_reports_it_as_not_signed_in(
+@pytest.mark.parametrize("fault", ("missing", "linked-to-0644", "oversize", "json"))
+def test_claude_cli_turn_with_an_unusable_token_file_reports_it_as_not_signed_in(
     fault: str, tmp_path
 ) -> None:
-    _a_credential_that(fault, tmp_path)
+    _a_token_file_that(fault, tmp_path)
 
     driving = _drive_real_claude_turn()
 
@@ -323,6 +337,23 @@ def test_claude_cli_turn_with_an_unusable_credential_reports_it_as_not_signed_in
     assert isinstance(cause.__cause__, CliLoginUnusableError)
 
 
+def test_claude_cli_turn_with_a_link_to_a_sound_token_file_runs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    _the_token_file_replaced_by_a_link_to(write_claude_token_file(tmp_path / "elsewhere"))
+    spawns = install_claude_cli_children(
+        monkeypatch, a_claude_cli_child(stream_lines=[b'{"type":"result","result":"ok"}\n']),
+    )
+    monkeypatch.setattr(
+        claude_provider, "verify_cli_tool_surface", AsyncMock(return_value=Path("/usr/bin/claude")),
+    )
+
+    asyncio.run(_drive_real_claude_turn())
+
+    [child] = spawns.children
+    assert child.environment[CLAUDE_OAUTH_TOKEN_VARIABLE] == SAMPLE_CLAUDE_SETUP_TOKEN
+
+
 @contextlib.contextmanager
 def _a_working_root_that_was_removed(tmp_path) -> Iterator[Path]:
     root = tmp_path / "removed-root"
@@ -332,24 +363,10 @@ def _a_working_root_that_was_removed(tmp_path) -> Iterator[Path]:
     yield root
 
 
-@contextlib.contextmanager
-def _a_credential_copy_that_cannot_be_written(tmp_path) -> Iterator[Path]:
-    root = tmp_path / "working-root"
-    root.mkdir(mode=0o700)
-    override_provider_runtime(cli_working_directory_root=root)
-    with a_credential_destination_that_fails("write"):
-        yield root
-
-
-@pytest.mark.parametrize(
-    "environment_fault",
-    (_a_working_root_that_was_removed, _a_credential_copy_that_cannot_be_written),
-    ids=("home-not-made", "credential-copy-not-written"),
-)
-def test_claude_cli_turn_that_cannot_run_here_reports_the_cli_unavailable(
-    tmp_path, environment_fault,
+def test_claude_cli_turn_that_cannot_make_its_home_reports_the_cli_unavailable(
+    tmp_path,
 ) -> None:
-    with environment_fault(tmp_path) as root:
+    with _a_working_root_that_was_removed(tmp_path) as root:
         driving = _drive_real_claude_turn()
 
         with pytest.raises(ProviderUnavailableError) as failure:

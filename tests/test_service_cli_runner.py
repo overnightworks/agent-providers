@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import os
 import re
 import signal
 import socket
@@ -663,15 +664,14 @@ def a_parked_claude(
     says_again_after: Path | None = None,
     stream: tuple[bytes, ...] = PARKED_AFTER_ONE_TEXT,
 ) -> Path:
-    """A fake that streams its texts and parks, saying one more once ``says_again_after`` is gone.
+    """A fake that streams its texts and parks, saying one more once ``says_again_after`` is fed.
 
     The socket client asks the default one-line turn; the HTTP rows ask the three-message one.
     """
     then = PARKED
     if says_again_after is not None:
         again = an_assistant_line("again").decode()
-        waits = f"while [ -e {says_again_after} ]; do sleep 0.05; done"
-        then = f"{waits}\ncat <<'EOF'\n{again}EOF\n{PARKED}"
+        then = f"read -r go < {says_again_after}\ncat <<'EOF'\n{again}EOF\n{PARKED}"
     if for_the_client_socket:
         return a_fake_claude(
             directory,
@@ -833,7 +833,7 @@ def test_every_stop_reaps_the_cli_once_before_the_record_ends(
     client_lost: ClientLoss | None,
 ) -> None:
     feed = tmp_path / "feed"
-    feed.touch()
+    os.mkfifo(feed)
     binary = a_parked_claude(
         tmp_path, for_the_client_socket=True, says_again_after=feed if later_activity else None
     )
@@ -849,7 +849,7 @@ def test_every_stop_reaps_the_cli_once_before_the_record_ends(
             )
             if later_activity:
                 await drive.run_to(20)
-                await asyncio.to_thread(feed.unlink)
+                await asyncio.to_thread(feed.write_text, "go\n")
                 await client.received(b"again")
             await drive.run_to_end()
             stopped = await stopped_run_held_then_released(
@@ -862,10 +862,7 @@ def test_every_stop_reaps_the_cli_once_before_the_record_ends(
             ) == (state, failure_code, client_lost)
             assert the_place_is_free_after_one_reap(stopped.afterwards)
 
-    try:
-        in_stepped_loop(child_cleanup, monkeypatch, scenario())
-    finally:
-        feed.unlink(missing_ok=True)
+    in_stepped_loop(child_cleanup, monkeypatch, scenario())
 
 
 def test_a_stop_at_a_yielded_event_closes_the_core_at_once(

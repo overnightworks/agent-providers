@@ -174,8 +174,10 @@ before the home is made; a file that is missing, open to group or others, over
 leaves no home behind. Every Claude child also gets the run switches
 (`DISABLE_AUTOUPDATER`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` and
 `DISABLE_TELEMETRY`, each `1`), and every `-p` run passes
-`--no-session-persistence`, so no Claude child stores a session or reports
-telemetry. A Codex or Grok turn's home on the bounded runner remains until its group is confirmed gone (below), including a delayed spawn or background reap. The synchronous `call_claude` turn's timeout kills only the direct child. The async Claude turns
+`--no-session-persistence`, so no Claude child keeps a session on disk and the CLI's own telemetry, error
+reporting and other nonessential traffic stay off. The model request itself still
+reaches the provider, and the switches do not override an export the host
+configures in Claude's managed settings. A Codex or Grok turn's home on the bounded runner remains until its group is confirmed gone (below), including a delayed spawn or background reap. The synchronous `call_claude` turn's timeout kills only the direct child. The async Claude turns
 on the CLI route (`acall_claude` without an `api_key`, which uses the API
 otherwise, `acall_claude_with_mcp` and `acall_claude_with_mcp_stream`) run on a
 `spawn.AnchoredChild`: when the turn ends, its reap sends SIGTERM to the leader's
@@ -417,7 +419,16 @@ The other host obligations arrive as arguments where they are needed:
 
 ## Migrating to 0.5.0
 
-A host migrates at its pin bump to 0.5.0.
+A host migrates at its pin bump to 0.5.0. The only row is the module move
+below; nothing else a host imports or configures changed shape.
+
+Two changes need no action. Every core Claude child (turns, the tool-surface
+probe, `auth status` and `-p /model`) now starts with the run switches
+(`constants.CLAUDE_RUN_SWITCHES`), and every core `-p` run passes
+`--no-session-persistence`; [The child environment is
+closed](#the-child-environment-is-closed) says what that switches off. The
+`image` extra now accepts `pillow>=12.3,<14`, so a host that pins Pillow 13
+resolves against it.
 
 | Before | Now |
 |---|---|

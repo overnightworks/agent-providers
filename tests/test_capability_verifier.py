@@ -287,6 +287,7 @@ def _segments(header: bytes) -> str:
             _segments(NESTED_AS_DEEP_AS_THE_LIMIT_ALLOWS),
             id="header nested as deep as the limit allows",
         ),
+        pytest.param(f"e31.{VALID_PAYLOAD}.{VALID_SIGNATURE}", id="non-canonical base64"),
         pytest.param("", id="empty"),
     ],
 )
@@ -445,7 +446,7 @@ def test_no_representation_of_a_refusal_the_key_or_the_claims_shows_a_token_segm
     ]
 
     assert not any(segment in text for segment in token.split(".") for text in shown)
-    assert "n=" not in repr(TRUSTED)
+    assert "RSAPublicKey" not in repr(TRUSTED)
 
 
 @pytest.mark.parametrize(

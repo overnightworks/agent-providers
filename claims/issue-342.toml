@@ -1,0 +1,7 @@
+claim_id = "94ef1c4ea811469a9bba63a5dc728ccc"
+agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
+role = "builder"
+base = "02304dbee910cccb76d8a85265b4ffb492a8df8a"
+branch = "claude/issue-342-one-guidance-text"
+scope = ["AGENTS.md", "CLAUDE.md"]
+opened_commit = "5aa462ea7ff6db38e1d75131d796886f812cc4ad"

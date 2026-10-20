@@ -1375,9 +1375,11 @@ def test_an_image_start_that_raises_leaves_one_owner(
 
     monkeypatch.setattr(codex_image, "run_reserved_codex_cli", run_reserved_codex_cli)
     child_may_exit = tmp_path / "child-may-exit"
-    os.mkfifo(child_may_exit)
-    child_may_exit_writer = os.open(child_may_exit, os.O_RDWR)
-    _the_child_plays(monkeypatch, f"read line < {shlex.quote(str(child_may_exit))}")
+    child_may_exit.touch()
+    _the_child_plays(
+        monkeypatch,
+        f"while [ -e {shlex.quote(str(child_may_exit))} ]; do sleep 0.05; done",
+    )
     gate = start_then_raise(
         monkeypatch, error, run_reserved_codex_cli, thread_claims_first=thread_claims_first,
     )
@@ -1387,11 +1389,11 @@ def test_an_image_start_that_raises_leaves_one_owner(
         _assert_one_owner_at_return(
             turn, image_turn, error, expected_error, thread_claims_first=thread_claims_first,
         )
-        os.write(child_may_exit_writer, b"go\n")
+        child_may_exit.unlink()
         gate.set()
         _join_the_new_start_threads(threads_of_earlier_tests)
     finally:
-        os.close(child_may_exit_writer)
+        child_may_exit.unlink(missing_ok=True)
     image_turn.assert_ended(turn)
     assert runner_calls == (["ran"] if thread_claims_first else [])
     assert releases.token_releases == 1

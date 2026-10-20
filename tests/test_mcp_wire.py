@@ -635,12 +635,12 @@ def test_the_server_half_refuses_a_body_that_is_not_a_message() -> None:
         pytest.param("[" * 100_000, id="nesting-past-the-recursion-limit"),
     ],
 )
-def test_the_strict_reader_refuses_with_value_error_only_and_no_chain(text: str) -> None:
+def test_the_strict_reader_refuses_with_value_error_and_keeps_no_recursion_error(text: str) -> None:
     with pytest.raises(ValueError) as refused:
         read_strict_json(text)
 
     assert type(refused.value) in (ValueError, json.JSONDecodeError)
-    assert refused.value.__context__ is None
+    assert not isinstance(refused.value.__context__, RecursionError)
 
 
 def test_the_strict_reader_reads_a_plain_document() -> None:

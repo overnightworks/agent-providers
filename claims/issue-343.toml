@@ -1,0 +1,7 @@
+claim_id = "1d2d6e0eb4654c67832ac68e7a8f1dce"
+agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
+role = "builder"
+base = "bdfa1b2274924dc3cca57bc153ce7ca68e7f4a2e"
+branch = "claude/issue-343-s4b1-the-claude-token-file-holds-no-json"
+scope = ["README.md", "src/agent_providers/secret_file.py", "tests/test_service_config.py"]
+opened_commit = "a21e3ea113523edf3031d6fa9c30e7019bfaae8a"

@@ -172,7 +172,10 @@ def test_initialize_negotiates_the_one_version_with_no_session_and_initialized_i
 def test_tools_list_gives_declared_tools_the_capability_allows_in_declaration_order(
     served: Fixture,
 ) -> None:
-    listed = served.post(rpc("tools/list")).json()["result"]["tools"]
+    reversed_capability = minted_capability(ORIGIN, tools=("edit_note", "read_note"))
+
+    reply = served.post(rpc("tools/list"), token=reversed_capability.token)
+    listed = reply.json()["result"]["tools"]
 
     assert [tool["name"] for tool in listed] == ["read_note", "edit_note"]
     assert set(listed[0]) == {"name", "description", "inputSchema"}
@@ -620,8 +623,9 @@ def test_an_outcome_that_cannot_be_written_is_treated_as_a_handler_failure(
     segment = served.token.rsplit(".", 1)[-1]
     served.handlers.outcome = outcome_of(segment)
 
+    message = rpc("tools/call", call_params("read_note"))
     with pytest.raises(HandlerFailureWithheld) as raised:
-        served.post(rpc("tools/call", call_params("read_note")))
+        served.post(message)
 
     assert (raised.value.__cause__, raised.value.__context__) == (None, None)
     assert segment not in "".join(traceback.format_exception(raised.value)) + caplog.text

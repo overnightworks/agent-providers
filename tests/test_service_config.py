@@ -839,6 +839,16 @@ REFUSED_TOKEN_FILES = [
         JSON_DOCUMENT_REASON,
         id="json-nested-past-the-decoder-depth",
     ),
+    pytest.param(
+        _holding(b" " + b"[" * 15000 + CANARY.encode()),
+        JSON_DOCUMENT_REASON,
+        id="json-nested-past-the-decoder-depth-after-a-space",
+    ),
+    pytest.param(
+        _holding(b" " + b"{" * 15000 + CANARY.encode()),
+        JSON_DOCUMENT_REASON,
+        id="json-object-nested-past-the-decoder-depth-after-a-space",
+    ),
     pytest.param(_holding(b"12345"), JSON_DOCUMENT_REASON, id="json-number"),
     pytest.param(
         _holding(f'{{"a":"{CANARY}"'.encode()), JSON_DOCUMENT_REASON, id="truncated-json-object"

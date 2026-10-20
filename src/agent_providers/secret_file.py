@@ -89,13 +89,16 @@ def _token_or_refusal(contents: bytes) -> str | _TokenRefusal:
     return token
 
 
+JSON_WHITESPACE = " \t\r\n"
+
+
 def _is_json_value(line: str) -> bool:
     """Whether the line opens a JSON object or array, or parses as a JSON scalar.
 
-    An opening bracket is refused unparsed: the parser recurses on nesting, and its
-    ``JSONDecodeError`` and ``RecursionError`` frames hold the text. A scalar parse neither
-    recurses nor leaves anything but the bool."""
-    if line.startswith(("{", "[")):
+    An opening bracket, after JSON's own leading whitespace, is refused unparsed: the parser
+    recurses on nesting, and its ``JSONDecodeError`` and ``RecursionError`` frames hold the
+    text. A scalar parse neither recurses nor leaves anything but the bool."""
+    if line.lstrip(JSON_WHITESPACE).startswith(("{", "[")):
         return True
     try:
         json.loads(line)

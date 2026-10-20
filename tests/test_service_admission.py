@@ -370,7 +370,7 @@ STALLING_RUNS = {
 ONE_PLACE = {"max_parallel_cli_runs": 1}
 
 
-class GatedRunner:
+class FirstRunHeldRunner:
     """A CLI runner whose first run never ends and whose close waits on a gate.
 
     Later runs hold until ``later_runs_proceed`` is set.
@@ -412,7 +412,7 @@ class _Asking:
         await within_the_bound(self.client.answering.wait())
         return self.client.messages[0]["status"]
 
-    async def finished(self, runner: GatedRunner) -> None:
+    async def finished(self, runner: FirstRunHeldRunner) -> None:
         runner.later_runs_proceed.set()
         self.client.leave()
         await within_the_bound(self.response)
@@ -427,7 +427,7 @@ async def _asked_until_admitted(app, attempts: int = 100) -> _Asking:
 
 
 def _gated_app(runs: dict[str, object] | None = None):
-    runner = GatedRunner()
+    runner = FirstRunHeldRunner()
     app = create_app(
         service_config(runs={**ONE_PLACE, **(runs or {})}),
         runners=Runners(cli=runner),

@@ -62,10 +62,6 @@ SIGNALS = (signal.SIGINT, signal.SIGTERM)
 HeadBuilder = Callable[[Relay], bytes]
 
 
-def standard(relay: Relay, content_length: int = 0) -> RequestHead:
-    return RequestHead.standard(relay, content_length)
-
-
 def host_of(relay: Relay) -> str:
     return f"{LOOPBACK_HOST}:{port_of(relay)}"
 
@@ -87,7 +83,7 @@ def mixed_case_names(head: RequestHead) -> RequestHead:
 
 def padded_values(relay: Relay) -> RequestHead:
     return (
-        standard(relay)
+        RequestHead.standard(relay)
         .with_field("Host", f" \t{host_of(relay)} \t")
         .with_field("Authorization", f"\t Bearer {relay.access.secret} ")
     )
@@ -105,7 +101,7 @@ def head_from_the_claude_run_file(relay: Relay) -> bytes:
     )
     server = json.loads(run.run_files()["relay-mcp.json"])["mcpServers"]["relay"]
     return (
-        standard(relay)
+        RequestHead.standard(relay)
         .replace_target(urlsplit(server["url"]).path)
         .with_field("Authorization", server["headers"]["Authorization"])
         .encode()
@@ -115,9 +111,9 @@ def head_from_the_claude_run_file(relay: Relay) -> bytes:
 ADMITTED_HEADS = [
     pytest.param(head_from_the_claude_run_file, id="5r"),
     pytest.param(lambda r: padded_values(r).encode(), id="C35"),
-    pytest.param(lambda r: mixed_case_names(standard(r)).encode(), id="C36"),
-    pytest.param(lambda r: padded_to(standard(r), HEAD_LIMIT_BYTES), id="C37"),
-    pytest.param(lambda r: padded_to(standard(r), ADMITTED_LONG_HEAD_BYTES), id="C38"),
+    pytest.param(lambda r: mixed_case_names(RequestHead.standard(r)).encode(), id="C36"),
+    pytest.param(lambda r: padded_to(RequestHead.standard(r), HEAD_LIMIT_BYTES), id="C37"),
+    pytest.param(lambda r: padded_to(RequestHead.standard(r), ADMITTED_LONG_HEAD_BYTES), id="C38"),
 ]
 
 
@@ -150,7 +146,7 @@ def test_binds_loopback_and_hands_an_authorised_post_to_the_owner() -> None:
         with pytest.raises(ConnectionRefusedError):
             await RawClient.connect(port, host="127.0.0.2")
         client = await RawClient.connect(port)
-        await client.send(standard(relay, content_length=10).encode() + b"helloworld")
+        await client.send(RequestHead.standard(relay, content_length=10).encode() + b"helloworld")
         answer = await client.answer()
         assert (answer.status, answer.body) == (HTTPStatus.OK, OWNER_BODY)
         assert owner.bodies == [b"helloworld"]
@@ -200,10 +196,10 @@ def test_close_ends_idle_and_mid_head_connections_and_refuses_the_old_port() -> 
     async def scenario(relay: Relay) -> None:
         port = port_of(relay)
         idle = await RawClient.connect(port)
-        await idle.send(standard(relay).replace_method("GET").encode())
+        await idle.send(RequestHead.standard(relay).replace_method("GET").encode())
         assert (await idle.answer()).status == HTTPStatus.METHOD_NOT_ALLOWED
         mid_head = await RawClient.connect(port)
-        get = standard(relay).replace_method("GET").encode()
+        get = RequestHead.standard(relay).replace_method("GET").encode()
         await mid_head.send(get + b"POST /mcp HTTP/1.1\r\nHost:")
         assert (await mid_head.answer()).status == HTTPStatus.METHOD_NOT_ALLOWED
         await yield_until(lambda: len(connection_numbers(relay_tasks())) == 2)
@@ -259,7 +255,7 @@ def test_a_client_leaving_mid_head_leaves_nothing_behind(
 
 
 def refusal(relay: Relay, content_length: int = 0, **changes: str) -> RequestHead:
-    head = standard(relay, content_length).adding("X-Canary", CANARY)
+    head = RequestHead.standard(relay, content_length).adding("X-Canary", CANARY)
     return replace(head, **changes) if changes else head
 
 
@@ -428,13 +424,15 @@ def own_port_url(relay: Relay) -> str:
 
 
 KEPT_REFUSALS = [
-    pytest.param(lambda r: standard(r).replace_target("/mcp/"), 404, id="C40"),
-    pytest.param(lambda r: standard(r).replace_target("/mcp?x=1"), 404, id="C41"),
-    pytest.param(lambda r: standard(r).replace_target(own_port_url(r)), 404, id="C42"),
-    pytest.param(lambda r: standard(r).replace_method("GET"), 405, id="C43"),
-    pytest.param(lambda r: standard(r).replace_method("DELETE"), 405, id="C44"),
+    pytest.param(lambda r: RequestHead.standard(r).replace_target("/mcp/"), 404, id="C40"),
+    pytest.param(lambda r: RequestHead.standard(r).replace_target("/mcp?x=1"), 404, id="C41"),
+    pytest.param(lambda r: RequestHead.standard(r).replace_target(own_port_url(r)), 404, id="C42"),
+    pytest.param(lambda r: RequestHead.standard(r).replace_method("GET"), 405, id="C43"),
+    pytest.param(lambda r: RequestHead.standard(r).replace_method("DELETE"), 405, id="C44"),
     pytest.param(
-        lambda r: standard(r).replace_method("GET").replace_target("/other"), 404, id="C45"
+        lambda r: RequestHead.standard(r).replace_method("GET").replace_target("/other"),
+        404,
+        id="C45",
     ),
 ]
 
@@ -455,7 +453,7 @@ def test_keeps_the_connection_after_a_bodyless_not_found_or_method_refusal(
         assert "connection" not in refused.headers
         assert "content-type" not in refused.headers
         assert (refused.headers.get("allow") == "POST") == (status == 405)
-        await client.send(standard(relay).encode())
+        await client.send(RequestHead.standard(relay).encode())
         followed = await client.answer()
         assert (followed.status, followed.body) == (HTTPStatus.OK, OWNER_BODY)
         assert owner.bodies == [b""]
@@ -472,7 +470,7 @@ def test_a_closed_relays_secret_is_refused_by_a_new_relay_of_the_same_run() -> N
         new = await Relay.start(RUN_ID, ScriptedOwner(), LoopClock())
         try:
             client = await RawClient.connect(port_of(new))
-            stale = standard(new).with_field("Authorization", f"Bearer {old_secret}")
+            stale = RequestHead.standard(new).with_field("Authorization", f"Bearer {old_secret}")
             await client.send(stale.encode())
             assert (await client.answer()).status == HTTPStatus.UNAUTHORIZED
             assert await client.at_eof()
@@ -490,12 +488,14 @@ def test_two_open_relays_each_refuse_the_other_secret_and_hand_their_own_to_thei
         try:
             for own, foreign in ((first, second), (second, first)):
                 client = await RawClient.connect(port_of(own))
-                crossed = standard(own).with_field("Authorization", relay_bearer(foreign))
+                crossed = RequestHead.standard(own).with_field(
+                    "Authorization", relay_bearer(foreign)
+                )
                 await client.send(crossed.encode())
                 assert (await client.answer()).status == HTTPStatus.UNAUTHORIZED
                 assert await client.at_eof()
                 client = await RawClient.connect(port_of(own))
-                await client.send(standard(own).encode())
+                await client.send(RequestHead.standard(own).encode())
                 assert (await client.answer()).status == HTTPStatus.OK
             assert [len(owner.requests) for owner in owners.values()] == [1, 1]
         finally:
@@ -526,7 +526,9 @@ def test_an_unexpected_connection_failure_logs_its_class_and_no_request_content(
 
         monkeypatch.setattr(asyncio.StreamWriter, "drain", drain_failing_on_the_relay_side)
         client = await RawClient.connect(port)
-        malformed = standard(relay).with_field("Authorization", f"Bearer {secret}\x00{CANARY}")
+        malformed = RequestHead.standard(relay).with_field(
+            "Authorization", f"Bearer {secret}\x00{CANARY}"
+        )
         await client.send(malformed.encode())
         assert await client.at_eof()
         await yield_until(lambda: relay_tasks() == [])
@@ -602,7 +604,7 @@ def test_the_owner_gets_the_protocol_version_field_as_received(
     owner = ScriptedOwner()
 
     async def scenario(relay: Relay) -> None:
-        head = standard(relay)
+        head = RequestHead.standard(relay)
         for name, value in fields:
             head = head.adding(name, value)
         client = await RawClient.connect(port_of(relay))
@@ -670,7 +672,7 @@ def test_the_measured_cli_sequence_is_answered_on_one_connection() -> None:
             post(relay, b"1"),
             post(relay, b"2"),
             post(relay, b"3"),
-            standard(relay).replace_method("GET").encode(),
+            RequestHead.standard(relay).replace_method("GET").encode(),
             post(relay, b"5"),
         ]
         statuses = []
@@ -699,8 +701,8 @@ def test_two_requests_in_one_write_are_answered_in_order() -> None:
 
 
 MUST_CLOSE_REQUESTS = [
-    pytest.param(lambda r: standard(r).adding("Connection", "close"), id="C13"),
-    pytest.param(lambda r: replace(standard(r), version="HTTP/1.0"), id="C14"),
+    pytest.param(lambda r: RequestHead.standard(r).adding("Connection", "close"), id="C13"),
+    pytest.param(lambda r: replace(RequestHead.standard(r), version="HTTP/1.0"), id="C14"),
 ]
 
 
@@ -725,7 +727,7 @@ def test_a_declared_size_over_the_bound_is_refused_before_a_body_byte() -> None:
 
     async def scenario(relay: Relay) -> None:
         client = await RawClient.connect(port_of(relay))
-        await client.send(standard(relay, MAX_EVENT_BYTES + 1).encode())
+        await client.send(RequestHead.standard(relay, MAX_EVENT_BYTES + 1).encode())
         await assert_refused_and_closed(client, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
         assert owner.requests == []
 
@@ -734,12 +736,16 @@ def test_a_declared_size_over_the_bound_is_refused_before_a_body_byte() -> None:
 
 OVERSIZED_DECLARATIONS = [
     pytest.param(
-        lambda r: standard(r, MAX_EVENT_BYTES + 1).with_field("Authorization", "Bearer wrong"),
+        lambda r: RequestHead.standard(r, MAX_EVENT_BYTES + 1).with_field(
+            "Authorization", "Bearer wrong"
+        ),
         401,
         id="C16",
     ),
     pytest.param(
-        lambda r: standard(r, MAX_EVENT_BYTES + 1).replace_target("/other"), 404, id="C17"
+        lambda r: RequestHead.standard(r, MAX_EVENT_BYTES + 1).replace_target("/other"),
+        404,
+        id="C17",
     ),
 ]
 
@@ -860,7 +866,7 @@ def test_an_owner_failure_on_a_closing_request_answers_500_and_closes(
 ) -> None:
     async def scenario(relay: Relay) -> None:
         client = await RawClient.connect(port_of(relay))
-        await client.send(standard(relay).adding("Connection", "close").encode())
+        await client.send(RequestHead.standard(relay).adding("Connection", "close").encode())
         await assert_refused_and_closed(client, HTTPStatus.INTERNAL_SERVER_ERROR)
 
     drive(scenario, owner=ScriptedOwner(failure=RuntimeError("failing owner")))
@@ -917,7 +923,7 @@ def test_a_chunked_only_request_keeps_its_connection() -> None:
 
 
 def oversized_declaration_with_canary(relay: Relay) -> bytes:
-    return standard(relay, MAX_EVENT_BYTES + 1).encode() + CANARY.encode()
+    return RequestHead.standard(relay, MAX_EVENT_BYTES + 1).encode() + CANARY.encode()
 
 
 def oversized_chunks_with_canary(relay: Relay) -> bytes:
@@ -972,7 +978,7 @@ def test_a_client_leaving_mid_body_never_reaches_the_owner(
 
     async def scenario(relay: Relay) -> None:
         client = await RawClient.connect(port_of(relay))
-        await client.send(standard(relay, 10).encode() + b"abc")
+        await client.send(RequestHead.standard(relay, 10).encode() + b"abc")
         await yield_until(lambda: len(relay_tasks()) == 1)
         client.disconnect()
         await yield_until(lambda: relay_tasks() == [])
@@ -1272,7 +1278,7 @@ def test_close_mid_body_never_reaches_the_owner_and_leaves_no_task() -> None:
 
     async def scenario(relay: Relay) -> None:
         client = await RawClient.connect(port_of(relay))
-        await client.send(post(relay, b"{}") + standard(relay, 10).encode() + b"abc")
+        await client.send(post(relay, b"{}") + RequestHead.standard(relay, 10).encode() + b"abc")
         assert (await client.answer()).status == HTTPStatus.OK
         await close_bounded(relay)
         assert await client.at_eof()

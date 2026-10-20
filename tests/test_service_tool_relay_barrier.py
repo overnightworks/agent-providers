@@ -30,6 +30,7 @@ from relay_support import (
     Delivery,
     HoldingSteppedLoop,
     RawClient,
+    RecordingApp,
     RelayReads,
     RelayWrites,
     close_bounded,
@@ -111,36 +112,6 @@ ANSWER_OF_CALL_1 = f"relay:{RUN_ID}:conn-1:answer"
 
 class UpstreamBroke(Exception):
     pass
-
-
-class GatedApp:
-    """An ``AppTools`` fake that records each call, holds it until released, then answers."""
-
-    def __init__(
-        self, failure: BaseException | None = None, outcome: ToolOutcome | None = None
-    ) -> None:
-        self.calls: list[tuple[str, dict[str, Any]]] = []
-        self.received: list[Mapping[str, Any]] = []
-        self._failure = failure
-        self._outcome = outcome
-        self._gate = asyncio.Event()
-
-    def forget_failure(self) -> None:
-        self._failure = None
-
-    def release(self) -> None:
-        self._gate.set()
-
-    async def call_tool(self, name: str, arguments: Mapping[str, Any]) -> ToolOutcome:
-        self.calls.append((name, dict(arguments)))
-        self.received.append(arguments)
-        await self._gate.wait()
-        if self._failure is not None:
-            raise self._failure
-        return self._outcome or ToolOutcome(f"ran {name}", is_error=False)
-
-    async def forwarded(self, count: int) -> None:
-        await yield_until(lambda: len(self.calls) == count)
 
 
 class EnteringCalls:
@@ -269,8 +240,8 @@ class Rig:
         return result
 
     @property
-    def fake(self) -> GatedApp:
-        assert isinstance(self.app, GatedApp)
+    def fake(self) -> RecordingApp:
+        assert isinstance(self.app, RecordingApp)
         return self.app
 
 
@@ -284,8 +255,8 @@ def offered(names: Sequence[str]) -> list[ToolDefinition]:
 @asynccontextmanager
 async def gated_app(
     failure: Callable[[], BaseException] | None = None, outcome: ToolOutcome | None = None
-) -> AsyncIterator[GatedApp]:
-    yield GatedApp(failure() if failure else None, outcome)
+) -> AsyncIterator[RecordingApp]:
+    yield RecordingApp(outcome, failure() if failure else None, gated=True)
 
 
 def drive_barrier(
@@ -308,7 +279,7 @@ def drive_barrier(
                     try:
                         barrier.stop()
                     finally:
-                        if isinstance(app, GatedApp):
+                        if isinstance(app, RecordingApp):
                             app.release()
                         release_held_wakeups()
                         async with asyncio.timeout(TEST_WAIT_SECONDS):
@@ -500,7 +471,7 @@ def test_a_call_over_the_budget_is_never_run_in_the_app(authority, caplog) -> No
 
 async def another_call_is_accepted(rig: Rig) -> None:
     app = rig.app
-    assert isinstance(app, GatedApp)
+    assert isinstance(app, RecordingApp)
     first_client = await rig.pending(1, "edit_song", {"text": "a"})
     await rig.pending(2, "edit_song", {"text": "b"})
     first = await rig.barrier.next_event()
@@ -1066,7 +1037,7 @@ def test_calls_are_handed_out_in_arrival_order_and_identical_ones_stay_distinct(
     ]
 
     async def scenario(rig: Rig) -> None:
-        assert isinstance(rig.app, GatedApp)
+        assert isinstance(rig.app, RecordingApp)
         rig.app.release()
         for request_id, (name, arguments) in enumerate(arrivals, start=1):
             await rig.pending(request_id, name, arguments)
@@ -1088,7 +1059,7 @@ def test_calls_are_handed_out_in_arrival_order_and_identical_ones_stay_distinct(
 
 def test_the_handed_out_input_is_a_copy_of_the_arguments_the_app_receives() -> None:  # A3
     async def scenario(rig: Rig) -> None:
-        assert isinstance(rig.app, GatedApp)
+        assert isinstance(rig.app, RecordingApp)
         rig.app.release()
         await rig.pending(1, "edit_song", {"nested": {"text": "a"}})
         event = await rig.barrier.next_event()
@@ -1104,7 +1075,7 @@ def test_the_handed_out_input_is_a_copy_of_the_arguments_the_app_receives() -> N
 
 def test_a_duplicate_pending_id_is_refused_and_mints_no_call() -> None:  # A4
     async def scenario(rig: Rig) -> None:
-        assert isinstance(rig.app, GatedApp)
+        assert isinstance(rig.app, RecordingApp)
         first = await rig.pending(7, "edit_song", {"text": "a"})
         duplicate = await rig.request(7, "edit_song", {"text": "b"})
 
@@ -1127,7 +1098,7 @@ def test_a_duplicate_pending_id_is_refused_and_mints_no_call() -> None:  # A4
 
 def test_a_reused_id_on_a_new_connection_after_initialize_is_a_new_call() -> None:  # A5
     async def scenario(rig: Rig) -> None:
-        assert isinstance(rig.app, GatedApp)
+        assert isinstance(rig.app, RecordingApp)
         rig.app.release()
         first = await rig.pending(2, "edit_song", {"text": "a"})
         await rig.hand_out_and_accept()
@@ -1153,7 +1124,7 @@ def test_a_reused_id_on_a_new_connection_after_initialize_is_a_new_call() -> Non
 
 def test_a_call_over_the_pending_bound_is_refused_and_never_forwarded() -> None:  # A6, P4
     async def scenario(rig: Rig) -> None:
-        assert isinstance(rig.app, GatedApp)
+        assert isinstance(rig.app, RecordingApp)
         assert MAX_PENDING_TOOL_CALLS == MAX_RELAY_CONNECTIONS - 1
         clients = [
             await rig.pending(request_id, "edit_song", {"n": request_id})
@@ -1192,7 +1163,7 @@ def test_a_name_never_offered_is_refused_and_ends_the_run_as_a_provider_error(
     name: str, caplog: pytest.LogCaptureFixture
 ) -> None:  # A7
     async def scenario(rig: Rig) -> None:
-        assert isinstance(rig.app, GatedApp)
+        assert isinstance(rig.app, RecordingApp)
         runner = BarrierRunner(rig.barrier)
         stream = streamed(runner)
         await yield_until(lambda: runner.asks == 1)
@@ -1213,7 +1184,7 @@ def test_a_name_never_offered_is_refused_and_ends_the_run_as_a_provider_error(
 
 
 async def calls_pending_when_stopped(rig: Rig) -> None:
-    assert isinstance(rig.app, GatedApp)
+    assert isinstance(rig.app, RecordingApp)
     forwarded = await rig.pending(1, "edit_song", {"n": 1})
     handed_out = await rig.pending(2, "edit_song", {"n": 2})
     waiting = await rig.pending(3, "edit_song", {"n": 3})
@@ -1296,7 +1267,7 @@ def test_the_relays_close_ends_a_pending_call_so_nothing_of_it_is_forwarded(
     closing: Callable[[Rig], Awaitable[None]],
 ) -> None:  # A8b
     async def scenario(rig: Rig) -> None:
-        assert isinstance(rig.app, GatedApp)
+        assert isinstance(rig.app, RecordingApp)
         client = await rig.pending(1, "edit_song", {"text": "a"})
 
         await closing(rig)
@@ -1383,7 +1354,7 @@ def test_a_cancelled_wait_for_the_next_event_loses_and_doubles_no_call(
     arrival_before_cancel: bool,
 ) -> None:  # A9
     async def scenario(rig: Rig) -> None:
-        assert isinstance(rig.app, GatedApp)
+        assert isinstance(rig.app, RecordingApp)
         params = CallToolParams(name="edit_song", arguments={"text": "a"})
         waiting = await waiting_next_event(rig.barrier)
         if arrival_before_cancel:

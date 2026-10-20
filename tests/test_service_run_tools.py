@@ -40,6 +40,7 @@ from mcp_app_fake import (
 from relay_support import (
     RUN_ID,
     RawClient,
+    RelayDoor,
     SuppressingOwner,
     json_rpc,
     parked_at,
@@ -57,7 +58,6 @@ from service_support import (
 )
 
 from agent_client.mcp_wire import CallToolParams
-from agent_providers.cli_run import RelayAccess
 from agent_providers.errors import ContainmentLost, RetainedGroup
 from agent_service.app_tools import AppToolsSession, UpstreamRefused, open_app_tools
 from agent_service.run_tools import (
@@ -371,13 +371,8 @@ def start_close(tools: RunTools, reap: Callable[[], Awaitable[None]]) -> asyncio
     return asyncio.get_running_loop().create_task(tools.close(reap), name="test:closer")
 
 
-@dataclass(frozen=True)
-class RelayDoor:
-    access: RelayAccess
-
-
-def door_of(tools: RunTools) -> Relay:
-    return cast(Relay, RelayDoor(tools.access))
+def door_of(tools: RunTools) -> RelayDoor:
+    return RelayDoor(tools.access)
 
 
 def cli_call(tools: RunTools, request_id: int) -> bytes:

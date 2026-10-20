@@ -40,7 +40,6 @@ from service_support import (
     ClockBreaksOnce,
     Drive,
     GatedRunner,
-    RunnerRaisingThisStray,
     ScriptedRunner,
     StepClock,
     StrayCancelledRunner,
@@ -1684,7 +1683,9 @@ async def test_a_runner_cancelled_unasked_is_made_inert_once_its_close_is_logged
     stray = asyncio.CancelledError(STRAY_CANCELLATION_CANARY)
     stray.__cause__ = RuntimeError("its cause")
     stray.__context__ = RuntimeError("its context")
-    async with driven(RunnerRaisingThisStray(stray), read=False) as drive:
+    runner = GatedRunner()
+    runner.release(stray)
+    async with driven(runner, read=False) as drive:
         closer = asyncio.create_task(_closed_while_it_waits(drive))
         await asyncio.wait({closer})
 

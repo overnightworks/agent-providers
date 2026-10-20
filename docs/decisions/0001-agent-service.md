@@ -3499,9 +3499,12 @@ is a supplied measurement token; its validity is unverified in every run. In par
 its validity during m5 on 20.10 is not shown. It reached the CLI only as
 `CLAUDE_CODE_OAUTH_TOKEN` in the child's environment (the A1b-0b1 route); no
 `ANTHROPIC_*` variable was set, and `<token>` stands for its value. Every stored output,
-except as the harness paragraph and m5 disclose and except the CLI's `result` error text of
-the rejected-token runs, which the cell quotes, was projected to field names, codes, sizes,
-timings, a hash prefix, counts and yes/no results and redacted (the token value and any `sk-ant-` string become `<token>`), and the
+except as the harness paragraph and m5 disclose, was projected to field names, codes, sizes,
+timings, a hash prefix, counts and yes/no results, plus the argument lists, the file names
+of the private home, and the addresses the CLI connected to. The stored outputs also hold
+the values this cell quotes: the `/model` labels, the model identifiers, the CLI version
+text, the cost field and the CLI's `result` error text of the rejected-token runs. Every
+stored output was redacted (the token value and any `sk-ant-` string become `<token>`), and the
 token-aware scan found the token and `sk-ant-` neither in the stored evidence nor in this
 section's diff. For m1–m4 and r1–r3 billing was not independently measured (the text
 formats carry no cost field); zero billed model calls there is inferred from m4b and r3

@@ -844,21 +844,6 @@ class StrayCancelledRunner(GatedRunner):
             await self._closed()
 
 
-class RunnerRaisingThisStray(GatedRunner):
-    """A runner whose first step raises the given ``CancelledError``, then closes as a gated one."""
-
-    def __init__(self, stray: asyncio.CancelledError) -> None:
-        super().__init__()
-        self._stray = stray
-
-    async def run(self, admitted: AdmittedRun) -> AsyncGenerator[StreamEvent, None]:
-        try:
-            raise self._stray
-            yield QUIET
-        finally:
-            await self._closed()
-
-
 class _SplitFailure(AsyncGenerator[StreamEvent, None]):
     """A runner's generator whose step and close fail independently of each other."""
 

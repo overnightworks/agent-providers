@@ -29,7 +29,6 @@ from service_support import (
     GatedRunner,
     QuarantineLineFails,
     RunnerCloseLineFails,
-    RunnerRaisingThisStray,
     ScriptedConfirmation,
     SplitFailureRunner,
     StepClock,
@@ -564,7 +563,9 @@ async def test_a_cancelled_close_is_made_inert_though_its_line_fails(
     stray = asyncio.CancelledError(STRAY_CANCELLATION_CANARY)
     stray.__cause__ = RuntimeError("its cause")
     stray.__context__ = RuntimeError("its context")
-    async with driven(RunnerRaisingThisStray(stray), read=False) as drive:
+    runner = GatedRunner()
+    runner.release(stray)
+    async with driven(runner, read=False) as drive:
         drive.took(await anext(drive.frames))
         await drive.clock.parked()
         await drive.frames.aclose()

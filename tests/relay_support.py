@@ -7,11 +7,11 @@ import re
 import socket
 import struct
 from collections import Counter
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
 from http import HTTPStatus
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import urlsplit
 
 import h11
@@ -27,8 +27,10 @@ from agent_client.mcp_wire import (
     JsonRpcResponse,
     Reply,
     RequestId,
+    ToolOutcome,
 )
 from agent_client.wire import JsonObject
+from agent_providers.cli_run import RelayAccess
 from agent_service.run_liveness import LoopClock, RunClock
 from agent_service.tool_relay import (
     LOOPBACK_HOST,
@@ -46,6 +48,47 @@ _CLIENT_REQUEST = h11.Request(method="POST", target="/mcp", headers=[("host", "x
 
 OWNER_BODY = b'{"owner":"answer"}'
 OWNER_ANSWER = HttpAnswer(HTTPStatus.OK, JSON_MEDIA_TYPE, OWNER_BODY)
+
+
+class RecordingApp:
+    """An ``AppTools`` fake that records each call, answers at once or once ``release`` opened
+    its gate, and raises a scripted failure instead of the outcome."""
+
+    def __init__(
+        self,
+        outcome: ToolOutcome | None = None,
+        failure: BaseException | None = None,
+        *,
+        gated: bool = False,
+    ) -> None:
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.received: list[Mapping[str, Any]] = []
+        self._outcome = outcome
+        self._failure = failure
+        self._gate = asyncio.Event()
+        if not gated:
+            self._gate.set()
+
+    @property
+    def called(self) -> list[str]:
+        return [name for name, _ in self.calls]
+
+    def forget_failure(self) -> None:
+        self._failure = None
+
+    def release(self) -> None:
+        self._gate.set()
+
+    async def call_tool(self, name: str, arguments: Mapping[str, Any]) -> ToolOutcome:
+        self.calls.append((name, dict(arguments)))
+        self.received.append(arguments)
+        await self._gate.wait()
+        if self._failure is not None:
+            raise self._failure
+        return self._outcome or ToolOutcome(f"ran {name}", is_error=False)
+
+    async def forwarded(self, count: int) -> None:
+        await yield_until(lambda: len(self.calls) == count)
 
 
 class ScriptedOwner:
@@ -186,6 +229,18 @@ class Answer:
     body: bytes
 
 
+class HasRelayAccess(Protocol):
+    @property
+    def access(self) -> RelayAccess: ...
+
+
+@dataclass(frozen=True)
+class RelayDoor:
+    """Where a client reaches a relay, known only by its access value."""
+
+    access: RelayAccess
+
+
 @dataclass(frozen=True)
 class RequestHead:
     method: str
@@ -194,10 +249,10 @@ class RequestHead:
     fields: tuple[tuple[str, str], ...]
 
     @classmethod
-    def standard(cls, relay: Relay, content_length: int = 0) -> "RequestHead":
+    def standard(cls, relay: HasRelayAccess, content_length: int = 0) -> "RequestHead":
         return cls(
             "POST",
-            "/mcp",
+            urlsplit(relay.access.url).path,
             "HTTP/1.1",
             (
                 ("Host", f"{LOOPBACK_HOST}:{port_of(relay)}"),
@@ -228,7 +283,7 @@ class RequestHead:
         return ("\r\n".join(lines) + "\r\n\r\n").encode()
 
 
-def port_of(relay: Relay) -> int:
+def port_of(relay: HasRelayAccess) -> int:
     port = urlsplit(relay.access.url).port
     assert port is not None
     return port
@@ -435,7 +490,7 @@ def blocking_connect(port: int) -> socket.socket:
     return socket.create_connection((LOOPBACK_HOST, port), timeout=TEST_WAIT_SECONDS)
 
 
-def post(relay: Relay, body: bytes = b"") -> bytes:
+def post(relay: HasRelayAccess, body: bytes = b"") -> bytes:
     return RequestHead.standard(relay, len(body)).encode() + body
 
 
@@ -450,14 +505,14 @@ def json_rpc(
     return json.dumps(message).encode()
 
 
-def post_message(relay: Relay, body: bytes, protocol_version: str | None = None) -> bytes:
+def post_message(relay: HasRelayAccess, body: bytes, protocol_version: str | None = None) -> bytes:
     head = RequestHead.standard(relay, len(body)).with_field("Content-Type", JSON_MEDIA_TYPE)
     if protocol_version is not None:
         head = head.with_field(PROTOCOL_VERSION_HEADER, protocol_version)
     return head.encode() + body
 
 
-def chunked_head(relay: Relay) -> RequestHead:
+def chunked_head(relay: HasRelayAccess) -> RequestHead:
     return (
         RequestHead.standard(relay).without("Content-Length").adding("Transfer-Encoding", "chunked")
     )

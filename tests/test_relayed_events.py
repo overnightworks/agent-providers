@@ -21,7 +21,7 @@ from urllib.parse import urlsplit
 import pytest
 from bounds import TEST_WAIT_SECONDS
 from capability_support import canary_token, capability_carrying
-from relay_support import RUN_ID, yield_until
+from relay_support import RUN_ID, RecordingApp, yield_until
 from service_support import alice_admitted_run, failure_lines, service_config
 
 import agent_service.cli_runner as cli_runner_module
@@ -55,26 +55,6 @@ GROUP = RetainedGroup(pgid=4242, generation=1)
 
 class UpstreamBroke(Exception):
     pass
-
-
-class RecordingApp:
-    """An ``AppTools`` fake that records the names it was called with and answers, at once or
-    once ``release`` opened its gate."""
-
-    def __init__(self, answer: str | None = None, *, gated: bool = False) -> None:
-        self.called: list[str] = []
-        self._answer = answer
-        self._gate = asyncio.Event()
-        if not gated:
-            self._gate.set()
-
-    def release(self) -> None:
-        self._gate.set()
-
-    async def call_tool(self, name: str, arguments: Mapping[str, Any]) -> ToolOutcome:
-        self.called.append(name)
-        await self._gate.wait()
-        return ToolOutcome(self._answer or f"ran {name}", is_error=False)
 
 
 class ScriptedCore:
@@ -369,7 +349,7 @@ def test_a_final_is_not_handed_on_while_a_reflected_result_is_pending(
     hops: tuple[int, int],
 ) -> None:
     async def scenario() -> None:
-        app, core = RecordingApp(CANARY, gated=True), ScriptedCore()
+        app, core = RecordingApp(ToolOutcome(CANARY, is_error=False), gated=True), ScriptedCore()
         barrier = a_barrier(app)
         Arrivals(barrier).arrive(1)
         events = RelayedEvents(core.stream(), barrier)
@@ -697,7 +677,7 @@ def test_a_barrier_failure_reaches_the_service_unchanged(
 ) -> None:
     async def scenario() -> None:
         core = ScriptedCore()
-        async with real_tools(app=RecordingApp(answer=CANARY)) as tools:
+        async with real_tools(app=RecordingApp(ToolOutcome(CANARY, is_error=False))) as tools:
             events, _port = a_runner_behind(monkeypatch, core, tools)
             await provoke(tools, events)
 

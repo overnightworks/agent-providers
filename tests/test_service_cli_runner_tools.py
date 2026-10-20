@@ -22,7 +22,6 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 
 import httpx
 import pytest
@@ -56,7 +55,15 @@ from provider_test_support import (
     held_claude_slots,
     line,
 )
-from relay_support import RawClient, RequestHead, json_rpc, parked_at, yield_until
+from relay_support import (
+    RawClient,
+    RelayDoor,
+    json_rpc,
+    parked_at,
+    port_of,
+    post_message,
+    yield_until,
+)
 from service_support import (
     PINNED_CLAUDE_VERSION,
     SteppedLoop,
@@ -94,9 +101,7 @@ from test_service_run_tools import Stall
 
 import agent_service.cli_runner as cli_runner_module
 from agent_client.mcp_wire import (
-    JSON_MEDIA_TYPE,
     LATEST_PROTOCOL_VERSION,
-    PROTOCOL_VERSION_HEADER,
     JsonRpcErrorCode,
 )
 from agent_client.sse import RunStreamDecoder
@@ -105,7 +110,6 @@ from agent_client.wire import (
     ClientLoss,
     Failed,
     FailureCode,
-    JsonObject,
     RejectionCode,
     RunEvent,
     RunState,
@@ -115,7 +119,7 @@ from agent_client.wire import (
     ToolResult,
 )
 from agent_providers import spawn
-from agent_providers.cli_run import CliRunAdapter
+from agent_providers.cli_run import CliRunAdapter, RelayAccess
 from agent_providers.config import PrivateWorkingRoot
 from agent_providers.events import FinalEvent, StreamEvent
 from agent_providers.procfs import GroupCensus
@@ -126,7 +130,7 @@ from agent_service.run_events import RUNNER_FAILED_MESSAGE
 from agent_service.run_liveness import LoopClock
 from agent_service.run_tools import UPSTREAM_ABORT_SECONDS, RunTools
 from agent_service.runners import Runners
-from agent_service.tool_relay import LOOPBACK_HOST, ToolCallBarrier
+from agent_service.tool_relay import ToolCallBarrier
 
 SAVE_NOTE = ClaudeCall("save_note", {"text": "la la"})
 READ_NOTE = ClaudeCall("read_note")
@@ -219,9 +223,7 @@ def a_tool_run(
             token_file=token_file,
         )
         runners = Runners(
-            cli=CliRunner(
-                config, tls_context=mcp_tls_context(authority.ca_file), clock=LoopClock()
-            )
+            cli=CliRunner(config, tls_context=mcp_tls_context(authority.ca_file), clock=LoopClock())
         )
 
         def play(base_url: str) -> tuple[list[RunEvent], RunStatus]:
@@ -450,9 +452,7 @@ def test_an_app_without_granted_tools_gets_the_tool_free_run(
         songmaker = {"tools": {}, "mcp_origin": app.origin if with_origin else None}
         config = a_config(tmp_path, binary, songmaker=songmaker or PLAIN_APP)
         runners = Runners(
-            cli=CliRunner(
-                config, tls_context=mcp_tls_context(authority.ca_file), clock=LoopClock()
-            )
+            cli=CliRunner(config, tls_context=mcp_tls_context(authority.ca_file), clock=LoopClock())
         )
 
         events = drive_over_http(child_cleanup, monkeypatch, config, post_a_run, runners)
@@ -1301,46 +1301,23 @@ def a_scripted_tool_run(tmp_path: Path, authority: TestAuthority, app: ToolApp) 
 
 
 @dataclass(frozen=True)
-class RelayDoor:
+class RelayDoorOfTheRun(RelayDoor):
     """Where the scripted child would have connected: the relay the run's tools opened."""
 
-    port: int
-    secret: str
-    path: str
-
     @classmethod
-    def in_the_run_of(cls, run: ScriptedRun) -> RelayDoor:
+    def in_the_run_of(cls, run: ScriptedRun) -> RelayDoorOfTheRun:
         [relay_file] = run.root.glob("**/relay-mcp.json")
         relay = json.loads(relay_file.read_text())["mcpServers"]["relay"]
-        address = urlsplit(relay["url"])
         secret = relay["headers"]["Authorization"].removeprefix("Bearer ")
-        return cls(address.port or 0, secret, address.path)
+        return cls(RelayAccess(relay["url"], secret))
 
     async def connect(self) -> RawClient:
-        return await RawClient.connect(self.port)
-
-    def post(
-        self, method: str, request_id: int | None = None, params: JsonObject | None = None
-    ) -> bytes:
-        body = json_rpc(method, request_id, params)
-        head = (
-            RequestHead(
-                "POST",
-                self.path,
-                "HTTP/1.1",
-                (
-                    ("Host", f"{LOOPBACK_HOST}:{self.port}"),
-                    ("Authorization", f"Bearer {self.secret}"),
-                    ("Content-Length", str(len(body))),
-                ),
-            )
-            .with_field("Content-Type", JSON_MEDIA_TYPE)
-            .with_field(PROTOCOL_VERSION_HEADER, LATEST_PROTOCOL_VERSION.value)
-        )
-        return head.encode() + body
+        return await RawClient.connect(port_of(self))
 
     def call(self, request_id: int, name: str = "read_note") -> bytes:
-        return self.post("tools/call", request_id, {"name": name, "arguments": {}})
+        params = {"name": name, "arguments": {}}
+        body = json_rpc("tools/call", request_id, params)
+        return post_message(self, body, LATEST_PROTOCOL_VERSION.value)
 
 
 async def error_code_of(client: RawClient) -> int:
@@ -1357,7 +1334,7 @@ def test_a_call_during_the_reap_is_refused_and_never_forwarded(
         async def scenario() -> None:
             await anext(run.frames)
             await anext(run.frames)
-            door = RelayDoor.in_the_run_of(run)
+            door = RelayDoorOfTheRun.in_the_run_of(run)
             idle = await door.connect()
             closing = asyncio.create_task(run.frames.aclose())
             try:
@@ -1444,7 +1421,7 @@ def test_a_natural_exit_reaps_before_the_final_and_the_relay_closes_after_the_te
             async with reap_released_and_reading_settled(child, reading):
                 async with asyncio.timeout(TEST_WAIT_SECONDS):
                     await child.reap_reached.wait()
-                door = RelayDoor.in_the_run_of(run)
+                door = RelayDoorOfTheRun.in_the_run_of(run)
                 await loop_settled()
                 final_before_the_reap = [event for event in seen if isinstance(event, FinalEvent)]
                 (await door.connect()).disconnect()
@@ -1477,7 +1454,7 @@ class RunWithAForwardInFlight:
     """A scripted run read by its own task, one call held inside the app, its caller waiting."""
 
     reading: asyncio.Task[list[bytes]]
-    door: RelayDoor
+    door: RelayDoorOfTheRun
     caller: RawClient
     forward: HeldRequest
 
@@ -1487,7 +1464,7 @@ async def run_with_a_forward_in_flight(
 ) -> RunWithAForwardInFlight:
     reading = asyncio.create_task(collected(run.frames), name="test:reading")
     await yield_until(lambda: any(run.root.glob("**/relay-mcp.json")))
-    door = RelayDoor.in_the_run_of(run)
+    door = RelayDoorOfTheRun.in_the_run_of(run)
     caller = await door.connect()
     await caller.send(door.call(1))
     [forward] = await asyncio.to_thread(held.wait_for, 1)

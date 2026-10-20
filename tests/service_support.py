@@ -184,6 +184,7 @@ def _service_config_document(
     runs: Mapping[str, object] | None,
     songmaker: Mapping[str, object] | None,
     claude_binary: Path | None = None,
+    token_file: Path | None = None,
 ) -> dict[str, Any]:
     return {
         **({} if runs is None else {"runs": runs}),
@@ -203,7 +204,12 @@ def _service_config_document(
         },
         "mcp": {"ca_file": "/etc/agent-service/mcp-ca.pem"},
         "signing": {"key_file": str(process_signing_key_file())},
-        "profiles": {CLI_PROFILE: {"provider": "claude", "token_file": str(process_token_file())}},
+        "profiles": {
+            CLI_PROFILE: {
+                "provider": "claude",
+                "token_file": str(token_file or process_token_file()),
+            }
+        },
         "purposes": {
             COWRITER: {"cli_provider": "claude", "api_alias": COWRITER_ALIAS},
             PRESENTER: {"api_alias": "copresenter"},
@@ -227,9 +233,11 @@ def service_config(
     *,
     songmaker: Mapping[str, object] | None = None,
     claude_binary: Path | None = None,
+    token_file: Path | None = None,
 ) -> ServiceConfig:
+    """The test configuration; its profile logs in from ``token_file``, by default the process's."""
     return ServiceConfig.model_validate(
-        _service_config_document(issuer, runs, songmaker, claude_binary)
+        _service_config_document(issuer, runs, songmaker, claude_binary, token_file)
     )
 
 

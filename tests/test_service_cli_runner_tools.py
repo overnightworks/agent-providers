@@ -69,17 +69,24 @@ from service_support import (
     run_body,
 )
 from test_service_cli_runner import (
+    FIRST_LOGIN,
+    LOGIN_FILES_GONE_BAD,
     PLAIN_APP,
+    SECOND_LOGIN,
     ScriptedRun,
     a_config,
+    a_login_file,
     a_scripted_run,
     all_children_gone,
+    assert_only_the_class_was_logged,
     drive_over_http,
     eventually,
     headers,
+    login_the_child_saw,
     post_a_run,
     private_root_of,
     status_of,
+    swap_login,
     through_the_service_entry,
     trusting,
 )
@@ -181,6 +188,7 @@ def a_tool_run(
     app_stays_up: bool = True,
     scenario: Callable[[str], list[RunEvent]] = post_a_run,
     before_stop: Callable[[ServiceConfig], None] = lambda _config: None,
+    token_file: Path | None = None,
     **claude_options: Any,
 ) -> ToolRun:
     """One run of the real runner with its tools on, against a TLS fake app, over HTTP.
@@ -204,6 +212,7 @@ def a_tool_run(
             binary,
             runs=runs,
             songmaker={"tools": dict(tools), "mcp_origin": app.origin},
+            token_file=token_file,
         )
         runners = Runners(
             cli=CliRunner(
@@ -465,6 +474,68 @@ def test_an_app_that_cannot_be_opened_ends_the_run_before_any_child(
 
     assert (ended_as(run), run.capture.started, held_claude_slots()) == (PROVIDER_ERROR, False, 0)
     assert list(private_root_of(run.config).iterdir()) == []
+
+
+def test_a_login_file_swapped_between_two_tool_runs_serves_the_next_run_without_a_restart(
+    tmp_path, authority, child_cleanup, monkeypatch
+):
+    login_file = a_login_file(tmp_path, FIRST_LOGIN)
+    capture = tmp_path / "capture"
+    first_runs: list[tuple[tuple[RunState, FailureCode | None], str]] = []
+
+    def two_runs_with_a_swap_between(base_url: str) -> list[RunEvent]:
+        first = post_a_run(base_url)
+        first_runs.append(
+            (ending_of(settled_status(base_url, first)), login_the_child_saw(capture))
+        )
+        swap_login(login_file, SECOND_LOGIN)
+        return post_a_run(base_url)
+
+    run = a_tool_run(
+        tmp_path,
+        authority,
+        child_cleanup,
+        monkeypatch,
+        calls=[SAVE_NOTE],
+        token_file=login_file,
+        scenario=two_runs_with_a_swap_between,
+    )
+
+    assert [*first_runs, (ended_as(run), login_the_child_saw(capture))] == [
+        (SUCCEEDED, FIRST_LOGIN),
+        (SUCCEEDED, SECOND_LOGIN),
+    ]
+    assert len(run.app.calls) == 2
+
+
+@pytest.mark.parametrize("spoil", LOGIN_FILES_GONE_BAD)
+def test_a_login_file_gone_bad_fails_the_tool_run_before_any_tool_connection_or_child(
+    tmp_path, authority, child_cleanup, monkeypatch, caplog, spoil
+):
+    login_file = a_login_file(tmp_path, FIRST_LOGIN)
+
+    def spoiled_then_run(base_url: str) -> list[RunEvent]:
+        spoil(login_file)
+        return post_a_run(base_url)
+
+    run = a_tool_run(
+        tmp_path,
+        authority,
+        child_cleanup,
+        monkeypatch,
+        calls=[SAVE_NOTE],
+        token_file=login_file,
+        scenario=spoiled_then_run,
+    )
+
+    assert (
+        ended_as(run),
+        run.capture.started,
+        run.app.fake.accepted_connections,
+        held_claude_slots(),
+        list(private_root_of(run.config).iterdir()),
+    ) == (PROVIDER_ERROR, False, 0, 0, [])
+    assert_only_the_class_was_logged(caplog, run.events, tmp_path)
 
 
 def test_a_cli_that_never_connects_the_relay_ends_at_the_start_check(

@@ -141,9 +141,13 @@ def a_config(
     *,
     runs: dict[str, object] | None = None,
     songmaker: dict[str, object] | None = None,
+    token_file: Path | None = None,
 ) -> ServiceConfig:
     config = service_config(
-        runs=runs, songmaker=PLAIN_APP if songmaker is None else songmaker, claude_binary=binary
+        runs=runs,
+        songmaker=PLAIN_APP if songmaker is None else songmaker,
+        claude_binary=binary,
+        token_file=token_file,
     )
     assert config.cli is not None
     private_root = PrivateWorkingRoot(a_private_root(tmp_path))
@@ -462,6 +466,114 @@ def test_a_run_whose_directories_cannot_be_made_fails_after_it_started(
         (),
     )
     assert [kind for _, kind, _ in failure_lines(caplog)] == ["CliEnvironmentUnavailableError"]
+
+
+LOGIN_FILE_NAME = "claude-login.token"
+FIRST_LOGIN = "first-login-" + uuid.uuid4().hex
+SECOND_LOGIN = "second-login-" + uuid.uuid4().hex
+
+
+def swap_login(login_file: Path, token: str) -> None:
+    """Write the login beside the file and move it over the file, as ``mv -T`` does."""
+    beside = login_file.with_name(login_file.name + ".new")
+    beside.write_text(token + "\n", encoding="utf-8")
+    beside.chmod(0o600)
+    beside.replace(login_file)
+
+
+def a_login_file(tmp_path: Path, token: str) -> Path:
+    login_file = tmp_path / LOGIN_FILE_NAME
+    swap_login(login_file, token)
+    return login_file
+
+
+def login_the_child_saw(capture: Path) -> str:
+    environment = (capture / "environment").read_text()
+    found = re.search(r"^CLAUDE_CODE_OAUTH_TOKEN=(.*)$", environment, re.MULTILINE)
+    assert found is not None
+    return found[1]
+
+
+def gone(login_file: Path) -> None:
+    login_file.unlink()
+
+
+def open_to_everyone(login_file: Path) -> None:
+    login_file.chmod(0o644)
+
+
+def holding_json(login_file: Path) -> None:
+    swap_login(login_file, json.dumps({"token": CANARY}))
+
+
+LOGIN_FILES_GONE_BAD = [
+    pytest.param(gone, id="missing"),
+    pytest.param(open_to_everyone, id="mode-0644"),
+    pytest.param(holding_json, id="json"),
+]
+
+
+def assert_only_the_class_was_logged(
+    caplog: pytest.LogCaptureFixture, failed: list[RunEvent], tmp_path: Path
+) -> None:
+    assert [(event, kind) for event, kind, _ in failure_lines(caplog)] == [
+        (f"The runner of run {failed[0].run_id} failed", "UnsoundSecretFile")
+    ]
+    assert [leak for leak in (LOGIN_FILE_NAME, str(tmp_path), CANARY) if leak in caplog.text] == []
+
+
+def test_a_login_file_swapped_between_two_runs_serves_the_next_run_without_a_restart(
+    tmp_path: Path, child_cleanup: ChildCleanup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    capture = tmp_path / "capture"
+    login_file = a_login_file(tmp_path, FIRST_LOGIN)
+    config = a_config(tmp_path, a_fake_claude(tmp_path, capture=capture), token_file=login_file)
+
+    def scenario(base_url: str) -> list[tuple[str | None, str]]:
+        first = post_a_run(base_url)
+        seen = [(shown(first)[-1][0], login_the_child_saw(capture))]
+        swap_login(login_file, SECOND_LOGIN)
+        second = post_a_run(base_url)
+        return [*seen, (shown(second)[-1][0], login_the_child_saw(capture))]
+
+    assert drive_over_http(child_cleanup, monkeypatch, config, scenario) == [
+        ("succeeded", FIRST_LOGIN),
+        ("succeeded", SECOND_LOGIN),
+    ]
+
+
+@pytest.mark.parametrize("spoil", LOGIN_FILES_GONE_BAD)
+def test_a_login_file_gone_bad_fails_its_run_before_a_child_and_the_repaired_file_serves_the_next(
+    tmp_path: Path,
+    child_cleanup: ChildCleanup,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    spoil: Callable[[Path], None],
+) -> None:
+    login_file = a_login_file(tmp_path, FIRST_LOGIN)
+    binary = a_fake_claude(tmp_path, token=SECOND_LOGIN)
+    config = a_config(tmp_path, binary, runs={"max_parallel_cli_runs": 1}, token_file=login_file)
+    spoil(login_file)
+
+    def scenario(base_url: str) -> tuple[list[RunEvent], tuple[object, ...], list[RunEvent]]:
+        failed = post_a_run(base_url)
+        left_behind = (
+            status_of(base_url, failed).failure_code,
+            child_cleanup.listed(),
+            held_claude_slots(),
+            list(private_root_of(config).iterdir()),
+        )
+        swap_login(login_file, SECOND_LOGIN)
+        return failed, left_behind, post_a_run(base_url)
+
+    failed, left_behind, repaired = drive_over_http(child_cleanup, monkeypatch, config, scenario)
+
+    assert (shown(failed), left_behind, shown(repaired)[-1]) == (
+        [("failed", RUNNER_FAILED_MESSAGE)],
+        (FailureCode.PROVIDER_ERROR, (), 0, []),
+        ("succeeded", "done"),
+    )
+    assert_only_the_class_was_logged(caplog, failed, tmp_path)
 
 
 class HeldReap:

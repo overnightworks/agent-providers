@@ -51,6 +51,7 @@ from agent_providers.constants import (
     CLAUDE_CLI_AUTH_METHOD_FIELD,
     CLAUDE_CLI_LOGGED_IN_FIELD,
     CLAUDE_CLI_STATUS_ARGS,
+    CLAUDE_OAUTH_TOKEN_VARIABLE,
     CLI_GROUP_CONFIRMATION_SECONDS,
     CLI_LOGIN_STATUS_CACHE_SECONDS,
     CLI_OUTPUT_READ_LIMIT_BYTES,
@@ -67,6 +68,7 @@ from agent_providers.constants import (
     PROBE_TIMEOUT_SECONDS,
 )
 from agent_providers.errors import raise_without_chain
+from agent_providers.secret_file import UnsoundSecretFile, read_token_file
 from agent_providers.spawn import (
     BlockingAnchoredChild,
     ChildProcess,
@@ -1860,6 +1862,24 @@ def _catalog_credential_home(
         yield owner
     finally:
         owner.close()
+
+
+def claude_token_environment() -> dict[str, str]:
+    """The environment that hands a Claude child its login: the setup token, read now.
+
+    The token comes from ``claude.token_file`` through ``secret_file`` on every call,
+    so a replaced file reaches the next child. A refused file raises
+    ``CliLoginUnusableError`` in ``secret_file``'s words, never with the file's content.
+    """
+    return _run_without_credential_remains(_read_claude_token_environment)
+
+
+def _read_claude_token_environment() -> dict[str, str]:
+    try:
+        token = read_token_file(current_claude_runtime().token_file)
+    except UnsoundSecretFile as refusal:
+        raise_without_chain(CliLoginUnusableError(str(refusal)))
+    return {CLAUDE_OAUTH_TOKEN_VARIABLE: token}
 
 
 def install_credential_file(

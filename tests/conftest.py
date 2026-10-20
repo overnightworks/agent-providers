@@ -34,7 +34,7 @@ from anchored_leaders import (
 )
 from anchored_support import ChildCleanup, ZombieAnchor, child_cleanup_scope, zombie_anchor_session
 from descendant_support import Handshake, open_handshake
-from provider_test_support import MCP_TOOL_NAMES, close_fake_cli_pipes
+from provider_test_support import MCP_TOOL_NAMES, close_fake_cli_pipes, write_claude_token_file
 
 from agent_providers import procfs
 from agent_providers.config import (
@@ -96,10 +96,10 @@ def _configure_agent_provider_runtime(tmp_path: Path):
     """Install the library's own sample runtime for every test, then drop it."""
     credentials = tmp_path / "credentials"
     credentials.mkdir()
-    claude_auth = credentials / "claude.json"
+    claude_auth = write_claude_token_file(credentials / "claude-token")
     grok_auth = credentials / "grok.json"
     codex_auth = credentials / "codex.json"
-    for auth_file in (claude_auth, grok_auth, codex_auth):
+    for auth_file in (grok_auth, codex_auth):
         auth_file.write_text("{}")
     configure(
         _SAMPLE_RUNTIME.model_copy(

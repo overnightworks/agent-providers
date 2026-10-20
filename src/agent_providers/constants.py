@@ -98,6 +98,7 @@ CLAUDE_MODEL_PREFIX = "claude-"
 CLAUDE_CLI_MODEL_LIST_MARKER = "Available: "
 CLAUDE_CLI_CURRENT_MODEL_MARKER = "Current model: "
 
+CLAUDE_OAUTH_TOKEN_VARIABLE: Final[str] = "CLAUDE_CODE_OAUTH_TOKEN"
 CLAUDE_CLI_STATUS_ARGS: Final[tuple[str, ...]] = ("auth", "status")
 CLAUDE_CLI_LOGGED_IN_FIELD: Final[str] = "loggedIn"
 CLAUDE_CLI_AUTH_METHOD_FIELD: Final[str] = "authMethod"

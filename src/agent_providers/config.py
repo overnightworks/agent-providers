@@ -110,8 +110,11 @@ class CodexTurnRuntime(BaseModel):
 class TurnRuntimeConfig(BaseModel):
     """The deployment facts a turn needs and a catalog never reads.
 
-    Claude and Grok turns receive a fresh private credential home beneath
-    ``cli_working_directory_root``. Codex does the same for its own turn paths.
+    Every turn receives a fresh private home beneath ``cli_working_directory_root``.
+    A Claude turn's home holds no login file: its setup token, read from
+    ``claude.token_file`` at each start, reaches the child only as
+    ``CLAUDE_CODE_OAUTH_TOKEN`` in its environment. Grok and Codex turns get a
+    private copy of their credential file in theirs.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
@@ -125,7 +128,8 @@ class TurnRuntimeConfig(BaseModel):
 class ClaudeCliRuntime(BaseModel):
     """The deployment facts of the Claude CLI, present only on a host that runs it.
 
-    ``token_file`` is the provider's login source; Claude defines its format.
+    ``token_file`` is the provider's login source: one line, the token
+    ``claude setup-token`` prints, in a file that grants group and others nothing.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")

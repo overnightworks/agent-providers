@@ -1,7 +1,0 @@
-claim_id = "79a0deb40dba47119b877df45a41ab59"
-agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
-role = "builder"
-base = "6da869876f8c1a7c99d48e8b76564344cfca1b8c"
-branch = "claude/issue-334-s0-claude-env-token-measured-for-catalog"
-scope = ["docs/decisions/0001-agent-service.md"]
-opened_commit = "815bda384313c90b3b746be7e5d86b776333157a"

@@ -417,7 +417,16 @@ The other host obligations arrive as arguments where they are needed:
 
 ## Migrating to 0.5.0
 
-A host migrates at its pin bump to 0.5.0.
+A host migrates at its pin bump to 0.5.0. The only row is the module move
+below; nothing else a host imports or configures changed shape.
+
+Two changes need no action. Every core Claude child (turns, the tool-surface
+probe, `auth status` and `-p /model`) now starts with the run switches
+`DISABLE_AUTOUPDATER=1`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and
+`DISABLE_TELEMETRY=1` (`constants.CLAUDE_RUN_SWITCHES`), and every core `-p` run
+passes `--no-session-persistence`, so a core Claude run stores no session and
+sends no telemetry. The `image` extra now accepts `pillow>=12.3,<14`, so a host
+that pins Pillow 13 resolves against it.
 
 | Before | Now |
 |---|---|

@@ -3,8 +3,8 @@
 The signing key and a profile's login token follow the same rules (decision record
 0001, A1a4 ruling): the file is opened once, type, mode and size come from that
 descriptor, and no message carries the file's content.
-A token file holding a JSON document, such as a credentials file, is refused: it must hold
-one setup token.
+A token file holding JSON, such as a credentials file, is refused: a line opening an object
+or array, or parsing as a JSON scalar. It must hold one setup token.
 """
 
 from __future__ import annotations
@@ -80,7 +80,7 @@ def _token_or_refusal(contents: bytes) -> str | _TokenRefusal:
         return _TokenRefusal("holds more than one line; it must hold one token")
     if not token.isprintable():
         return _TokenRefusal("contains a control or non-printing character; a token must not")
-    if _is_json_document(token):
+    if _is_json_value(token):
         return _TokenRefusal("holds a JSON document; it must hold one setup token")
     if any(character.isspace() for character in token):
         return _TokenRefusal("holds whitespace; a setup token holds none")
@@ -89,9 +89,14 @@ def _token_or_refusal(contents: bytes) -> str | _TokenRefusal:
     return token
 
 
-def _is_json_document(line: str) -> bool:
-    """Whether the line parses as any JSON value; the ``JSONDecodeError`` holds the text,
-    so it is caught here and only a bool leaves."""
+def _is_json_value(line: str) -> bool:
+    """Whether the line opens a JSON object or array, or parses as a JSON scalar.
+
+    An opening bracket is refused unparsed: the parser recurses on nesting, and its
+    ``JSONDecodeError`` and ``RecursionError`` frames hold the text. A scalar parse neither
+    recurses nor leaves anything but the bool."""
+    if line.startswith(("{", "[")):
+        return True
     try:
         json.loads(line)
     except ValueError:

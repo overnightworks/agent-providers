@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import base64
 import binascii
-import json
 import re
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -31,8 +30,7 @@ from agent_client.capability import (
     CapabilityClaims,
 )
 from agent_client.errors import raise_without_chain
-from agent_client.mcp_wire import object_without_duplicate_members
-from agent_client.wire import refuse_non_json_constant
+from agent_client.mcp_wire import read_strict_json
 
 _ALGORITHM: Final = "RS256"
 _HEADER_MEMBERS: Final = frozenset({"alg", "kid", "typ"})
@@ -162,12 +160,8 @@ def _canonical_base64url(text: str) -> bytes | None:
 
 def _strict_json(text: bytes) -> Any:
     try:
-        return json.loads(
-            text.decode("utf-8"),
-            parse_constant=refuse_non_json_constant,
-            object_pairs_hook=object_without_duplicate_members,
-        )
-    except (ValueError, RecursionError):
+        return read_strict_json(text.decode("utf-8"))
+    except ValueError:
         return None
 
 

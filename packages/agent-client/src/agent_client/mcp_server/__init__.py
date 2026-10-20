@@ -3,6 +3,7 @@
 No base module of ``agent_client`` imports this package, so the base stays pydantic only.
 """
 
+from agent_client.mcp_server.app import HandlerFailureWithheld, McpServer, McpTool
 from agent_client.mcp_server.verification import (
     CapabilityRefusal,
     CapabilityVerificationKey,
@@ -11,6 +12,9 @@ from agent_client.mcp_server.verification import (
 )
 
 __all__ = [
+    "HandlerFailureWithheld",
+    "McpServer",
+    "McpTool",
     "CapabilityRefusal",
     "CapabilityVerificationKey",
     "UnsoundVerificationKey",

@@ -408,18 +408,18 @@ def test_a_handler_failure_without_the_token_leaves_the_app_before_any_response(
 
         await served.server(scope, receive, send)
 
+    running = scenario()
     with pytest.raises(RuntimeError, match="boom"):
-        asyncio.run(scenario())
+        asyncio.run(running)
     assert sent == []
 
 
 def test_a_repeated_tool_name_or_a_non_canonical_origin_is_refused_at_construction(
     handlers: RecordingHandlers,
 ) -> None:
+    repeated = [handlers.tool("read_note"), handlers.tool("read_note")]
     with pytest.raises(ValueError):
-        McpServer(
-            ORIGIN, VERIFICATION_KEY, [handlers.tool("read_note"), handlers.tool("read_note")]
-        )
+        McpServer(ORIGIN, VERIFICATION_KEY, repeated)
     with pytest.raises(ValueError):
         McpServer("https://Notes.internal/", VERIFICATION_KEY, [])
 
@@ -430,8 +430,9 @@ def test_lifespan_is_a_type_error_on_the_bare_server_and_the_hosts_through_the_h
     async def lifespan(app: Any) -> None:
         await app({"type": "lifespan"}, None, None)
 
+    bare = lifespan(served.server)
     with pytest.raises(TypeError):
-        asyncio.run(lifespan(served.server))
+        asyncio.run(bare)
     asyncio.run(lifespan(served.front()))
 
     assert served.host_calls == ["lifespan"]
@@ -550,8 +551,9 @@ def test_a_handler_failure_carrying_the_signature_is_withheld_without_a_chain(
     segment = served.token.rsplit(".", 1)[-1]
     served.handlers.failure = failures_carrying(segment)[which]
 
+    call = rpc("tools/call", call_params("read_note"))
     with pytest.raises(HandlerFailureWithheld) as raised:
-        served.post(rpc("tools/call", call_params("read_note")))
+        served.post(call)
 
     withheld = raised.value
     assert withheld.tool_name == "read_note"

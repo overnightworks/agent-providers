@@ -101,8 +101,9 @@ def test_a_tool_off_the_allowlist_is_an_invalid_params_error_the_client_reads(
     async def call_other(session: AppToolsSession) -> None:
         await session.call_tool("other_tool", {})
 
+    capability = app.capability()
     with pytest.raises(UpstreamProtocolError) as raised:
-        app.with_session(app.capability(), call_other)
+        app.with_session(capability, call_other)
 
     assert raised.value.reason is ProtocolFailure.JSON_RPC_ERROR
     assert raised.value.rpc_error_code == -32602
@@ -113,7 +114,8 @@ def test_a_capability_for_another_origin_is_refused_with_401(app: RunningApp) ->
     async def never(session: AppToolsSession) -> None:
         raise AssertionError("the handshake must be refused")
 
+    capability = app.capability("https://other.internal")
     with pytest.raises(UpstreamRefused) as raised:
-        app.with_session(app.capability("https://other.internal"), never)
+        app.with_session(capability, never)
 
     assert raised.value.status == 401

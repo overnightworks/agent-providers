@@ -3,6 +3,8 @@
 The signing key and a profile's login token follow the same rules (decision record
 0001, A1a4 ruling): the file is opened once, type, mode and size come from that
 descriptor, and no message carries the file's content.
+A token file holding a JSON document, such as a credentials file, is refused: it must hold
+one setup token.
 """
 
 from __future__ import annotations
@@ -79,6 +81,8 @@ def _token_or_refusal(contents: bytes) -> str | _TokenRefusal:
         return _TokenRefusal("contains a control or non-printing character; a token must not")
     if any(character.isspace() for character in token):
         return _TokenRefusal("holds whitespace; a setup token holds none")
+    if token.startswith("{"):
+        return _TokenRefusal("holds a JSON document; it must hold one setup token")
     if token.startswith(API_KEY_PREFIX):
         return _TokenRefusal("holds an API key; it must hold a subscription token from setup-token")
     return token

@@ -199,8 +199,6 @@ def test_interleaved_calls_of_two_runs_each_get_the_claims_of_their_own_request(
         seen.append((arguments["tag"], claims.sub))
         return ToolOutcome("ok", is_error=False)
 
-
-
     server = McpServer(
         ORIGIN,
         VERIFICATION_KEY,
@@ -446,7 +444,13 @@ def test_lifespan_is_a_type_error_on_the_bare_server_and_the_hosts_through_the_h
             {"host": []}, [(b"origin", b"x")], "/mcp", "POST", 0, 403, id="host-then-origin"
         ),
         pytest.param(
-            {}, [(b"origin", b"x")], "/mcp", "POST", 0, 403, id="origin-then-authorization"
+            {"token": None},
+            [(b"origin", b"x")],
+            "/mcp",
+            "POST",
+            0,
+            403,
+            id="origin-then-authorization",
         ),
         pytest.param({"token": None}, [], "/nowhere", "POST", 0, 401, id="authorization-then-path"),
         pytest.param({}, [], "/nowhere", "GET", 0, 404, id="path-then-method"),

@@ -157,3 +157,16 @@ class CapabilityClaims(_StrictClaims):
     def from_claims(cls, claims: Mapping[str, Any]) -> Self:
         """Reads a decoded mapping; strict pydantic refuses a read-only proxy, so it is copied."""
         return cls.model_validate(dict(claims))
+
+
+def carries_signature_of(token: str, data: bytes) -> bool:
+    """Whether ``data`` carries ``token``, whole or as its signature segment.
+
+    One needle is enough: every whole token contains its signature segment, the part
+    after the last ``.``. Bodies the relay writes are ``json.dumps`` output, which
+    writes base64url characters and ``.`` verbatim, and tool results are asked after
+    decoding. A token split across strings, base64-encoded or reversed is not
+    detected: this stops reflection, not an app that encodes its own capability.
+    """
+    signature_segment = token.rsplit(".", 1)[-1]
+    return signature_segment.encode("ascii") in data

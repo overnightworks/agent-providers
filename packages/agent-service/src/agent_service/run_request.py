@@ -10,31 +10,22 @@ the transport's to enforce before it buffers the body.
 
 from __future__ import annotations
 
-import json
-from typing import Any, Final
+from typing import Final
 
 from pydantic import TypeAdapter, ValidationError
 
-from agent_client.mcp_wire import object_without_duplicate_members
-from agent_client.wire import ProtocolVersion, RejectionCode, RunRequest, refuse_non_json_constant
+from agent_client.mcp_wire import read_strict_json
+from agent_client.wire import ProtocolVersion, RejectionCode, RunRequest
 
 MAX_REQUEST_BYTES: Final = 256 * 1024
 
 _PROTOCOL_VERSION: Final[TypeAdapter[ProtocolVersion]] = TypeAdapter(ProtocolVersion)
 
 
-class _NotStrictJson(ValueError):
-    pass
-
-
 def parse_run_request(body: bytes) -> RunRequest | RejectionCode:
     try:
-        document = json.loads(
-            body.decode("utf-8-sig"),
-            object_pairs_hook=_refuse_duplicate_members,
-            parse_constant=refuse_non_json_constant,
-        )
-    except (ValueError, RecursionError):
+        document = read_strict_json(body.decode("utf-8-sig"))
+    except ValueError:
         return RejectionCode.INVALID_REQUEST
     if not isinstance(document, dict):
         return RejectionCode.INVALID_REQUEST
@@ -46,10 +37,3 @@ def parse_run_request(body: bytes) -> RunRequest | RejectionCode:
         return RunRequest.model_validate(document)
     except ValidationError:
         return RejectionCode.INVALID_REQUEST
-
-
-def _refuse_duplicate_members(members: list[tuple[str, Any]]) -> dict[str, Any]:
-    try:
-        return object_without_duplicate_members(members)
-    except ValueError:
-        raise _NotStrictJson("a member is named twice") from None

@@ -21,6 +21,7 @@ from agent_client.capability import (
     MAX_CAPABILITY_CHARACTERS,
     CapabilityClaims,
     CapabilityPrincipal,
+    carries_signature_of,
 )
 from agent_service.signing import SigningKey
 
@@ -52,16 +53,8 @@ class Capability:
     token: str = field(repr=False)
 
     def appears_in(self, data: bytes) -> bool:
-        """Whether ``data`` carries this capability, whole or as its signature segment.
-
-        One needle is enough: every whole token contains its signature segment, the part
-        after the last ``.``. Bodies the relay writes are ``json.dumps`` output, which
-        writes base64url characters and ``.`` verbatim, and tool results are asked after
-        decoding. A token split across strings, base64-encoded or reversed is not
-        detected: this stops reflection, not an app that encodes its own capability.
-        """
-        signature_segment = self.token.rsplit(".", 1)[-1]
-        return signature_segment.encode("ascii") in data
+        """Whether ``data`` carries this capability, whole or as its signature segment."""
+        return carries_signature_of(self.token, data)
 
 
 def capability_claims(

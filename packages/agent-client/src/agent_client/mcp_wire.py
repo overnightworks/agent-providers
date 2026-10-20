@@ -148,11 +148,27 @@ _JsonArray = Annotated[tuple[_Item, ...], Field(strict=False)]
 type Reply = JsonRpcResponse | JsonRpcError
 
 
-def object_without_duplicate_members(members: list[tuple[str, Any]]) -> dict[str, Any]:
+def _object_without_duplicate_members(members: list[tuple[str, Any]]) -> dict[str, Any]:
     document = dict(members)
     if len(document) != len(members):
         raise ValueError("an object repeats a member")
     return document
+
+
+def read_strict_json(text: str) -> Any:
+    """The one strict JSON reader: no repeated member, no ``NaN`` or infinity.
+
+    The only exception that leaves is ``ValueError``; nesting past the recursion limit is
+    converted without chain. The caller owns decoding and any size rule.
+    """
+    try:
+        return json.loads(
+            text,
+            parse_constant=refuse_non_json_constant,
+            object_pairs_hook=_object_without_duplicate_members,
+        )
+    except RecursionError:
+        raise_without_chain(ValueError("the document nests too deeply"))
 
 
 def _model_of(document: dict[str, Any]) -> type[JsonRpcMessage]:
@@ -169,12 +185,8 @@ def parse_message(body: bytes) -> JsonRpcMessage:
     if len(body) > MAX_EVENT_BYTES:
         _refuse(WireRefusal.TOO_LARGE)
     try:
-        document = json.loads(
-            body.decode("utf-8"),
-            parse_constant=refuse_non_json_constant,
-            object_pairs_hook=object_without_duplicate_members,
-        )
-    except (ValueError, RecursionError):
+        document = read_strict_json(body.decode("utf-8"))
+    except ValueError:
         _refuse(WireRefusal.MALFORMED_JSON)
     if isinstance(document, list):
         _refuse(WireRefusal.BATCH)

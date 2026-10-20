@@ -48,7 +48,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import FastAPI
 from jwt.algorithms import RSAAlgorithm
-from mcp_app_fake import TestAuthority
+from mcp_app_fake import TestAuthority, TlsCredentials
 from provider_test_support import fake_cli_executable
 from pydantic import ValidationError
 
@@ -628,24 +628,69 @@ class ScriptedRunner:
             yield event
 
 
-@contextmanager
-def served(app: FastAPI) -> Iterator[str]:
-    """Serve ``app`` with uvicorn on a real loopback socket; yield its base URL.
+class _ReadyServer(uvicorn.Server):
+    """A uvicorn server that says when its startup ended, or how the thread running it failed."""
 
-    The socket is bound and listening before the server thread starts, so a
-    request made at once waits in the backlog instead of racing the startup.
-    """
+    def __init__(self, config: uvicorn.Config) -> None:
+        super().__init__(config)
+        self.ready = threading.Event()
+        self.failure: BaseException | None = None
+
+    async def startup(self, sockets: list[socket.socket] | None = None) -> None:
+        await super().startup(sockets=sockets)
+        self.ready.set()
+
+    def run_recording_failure(self, sockets: list[socket.socket]) -> None:
+        try:
+            self.run(sockets=sockets)
+        except BaseException as failure:
+            self.failure = failure
+        finally:
+            self.ready.set()
+
+
+def listening_loopback_socket() -> socket.socket:
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.bind(("127.0.0.1", 0))
     listener.listen()
-    server = uvicorn.Server(uvicorn.Config(app, log_level="warning", lifespan="off"))
-    thread = threading.Thread(target=server.run, kwargs={"sockets": [listener]}, daemon=True)
+    return listener
+
+
+@contextmanager
+def served(
+    app: Any,
+    *,
+    tls: TlsCredentials | None = None,
+    listener: socket.socket | None = None,
+) -> Iterator[str]:
+    """Serve an ASGI ``app`` with uvicorn on a real loopback socket; yield its base URL.
+
+    The socket is bound and listening before the server thread starts, so a request made at
+    once waits in the backlog, and the URL is yielded only after startup ended. A ``listener``
+    passed in is the caller's choice of port (an origin needs it before the app exists) and
+    is closed with the server. With ``tls`` the URL is ``https://localhost:<port>``.
+    """
+    listener = listener or listening_loopback_socket()
+    config = uvicorn.Config(
+        app,
+        log_level="warning",
+        lifespan="off",
+        ssl_certfile=None if tls is None else str(tls.certificate_file),
+        ssl_keyfile=None if tls is None else str(tls.key_file),
+    )
+    server = _ReadyServer(config)
+    thread = threading.Thread(target=server.run_recording_failure, args=([listener],), daemon=True)
     thread.start()
     try:
-        yield f"http://127.0.0.1:{listener.getsockname()[1]}"
+        assert server.ready.wait(TEST_WAIT_SECONDS), "the test server did not start in time"
+        if server.failure is not None:
+            raise server.failure
+        assert server.started, "the test server ended its startup without starting"
+        port = listener.getsockname()[1]
+        yield f"https://localhost:{port}" if tls else f"http://127.0.0.1:{port}"
     finally:
         server.should_exit = True
-        thread.join(timeout=10)
+        thread.join(timeout=TEST_WAIT_SECONDS)
         listener.close()
         assert not thread.is_alive(), "the test server did not stop"
 

@@ -268,7 +268,7 @@ a request that names its own tools or MCP endpoint could reach anything.
   loopback owns the run's tool events, the run's MCP config names only the relay, and
   the capability reaches only the app (A1b ruling, Q1 a). The API-route tool loop
   sends the same capability to the app. The app's MCP server
-  checks it on every request, opens a fresh DB session and re-checks ownership.
+  checks it on every request (`agent_client.mcp_server`), opens a fresh DB session and re-checks ownership.
 - Hardening: redirects are denied, egress is limited to the registered origins,
   Host and Origin are validated, and the service sits on an internal Docker
   network only, with no tunnel line and no Traefik route. The listener stays
@@ -326,7 +326,7 @@ The `kid` changes with the key. Restarting stops the service's runs but does not
 revoke their capabilities: previously issued tokens remain acceptable until expiry
 wherever the old public key remains trusted. Compromise recovery also requires
 removing that public key from every verifier and invalidating its cached trust, with
-the executable procedure owned by A1m/A1d before live use. webauth, for one, keeps a
+the executable procedure in the A1m section; A1d owns where each app's file lives. webauth, for one, keeps a
 fetched key set for an hour. The holder of a compromised private key can mint new
 tokens, so waiting until issued capabilities expire is not recovery. No previous
 private signing key is kept. This item keeps and publishes no previous public
@@ -344,7 +344,7 @@ compromise.
 - **D3 the `kid`.** The RFC 7638 SHA-256 thumbprint of the public key; never configurable.
 - **D4 direct dependencies.** `agent_service.signing` imports PyJWT and
   `cryptography`, so the service declares both rather than relying on webauth's extra.
-- **D5 publishing.** Nothing is published in A1a4; A1m and A1a5 choose an endpoint or a file.
+- **D5 publishing.** Nothing is published in A1a4; A1m and A1a5 choose an endpoint or a file. A1m publishes by file (A1m D7).
 - **D15 explicit token types.** `SigningKey.sign(claims, token_type)` has no default
   type (RFC 8725 section 3.11). The capability uses `agent-capability+jwt`; A1a5 picks
   its own. webauth and PyJWT do not check `typ`, so a verifier must check it itself.
@@ -739,7 +739,49 @@ with no MCP SDK dependency.
   it ends (A1b-11b2, D5).
 - *H9.* Its import contract says "client → stdlib, pydantic, HTTP and the MCP SDK
   only". That sentence is about `agent-client` and is untouched; HD1 adds no
-  MCP SDK to any package, so it stays true.
+  MCP SDK to any package; A1m D2 keeps it so.
+
+### A1m MCP helper (head, 20.10.2026)
+
+The app side of the profile is `agent_client.mcp_server` (`McpServer`, `McpTool`,
+`HandlerFailureWithheld`, `verify_capability`). The rulings below are the head's of
+20.10.2026; the independent plan review confirmed D4, D5, D7 and D9.
+
+- **D2 No MCP SDK.** HD1's reasons hold for a server too: SSE, sessions, logging and four
+  unlocked dependencies.
+- **D3 The profile lives in the client.** `agent_client.mcp_wire` is the one owner; no alias
+  remains in the service.
+- **D4 One server half.** `decide_server_message` decides what a server does with a body, for
+  the relay and for the helper; the head checks stay per server, in the same order.
+- **D5 Dependencies.** The `[mcp-server]` extra holds PyJWT with cryptography; the base stays
+  pydantic only.
+- **D6 The helper in front.** `server.in_front_of(host_app)` owns `/mcp` and `/mcp/...`, so no
+  router of the host redirects there and its middleware never sees an MCP request.
+- **D7 Trust by file.** Each app trusts one PEM public key exported from the active signing
+  key. Recovery is complete only once every verifier process trusting the old key has stopped
+  and the replacement trust is verified; restarting the service alone is not recovery.
+- **D8 What PyJWT decides.** Only the RS256 signature, after the exact-header check; every
+  other check runs on the injected clock without leeway.
+- **D9 Stateless.** The helper issues no session and hands each handler exactly the claims of
+  its own request's token; it cannot tell the intended run from another live run of the same
+  app, so the handler's ownership check stays mandatory (O4, H3).
+- **D10 Exact Host bytes.** `McpOrigin` is canonical and lower-case, so Host must equal its
+  authority byte for byte.
+- **D11 Refusals.** Empty HTTP bodies; a handler failure propagates, and only one carrying the
+  capability's signature becomes `HandlerFailureWithheld`.
+- **D12 Two-sided narrowing.** The app lists and runs only tools the capability allows.
+
+Procedure to publish the key (O2 step 2). Run it after every key change for every app with an
+MCP origin, then restart the service and those apps together. Tool calls of runs admitted
+between the restarts fail with 401, because there is no grace period. A compromise takes the
+same steps and ends at D7's completion condition.
+
+```bash
+( set -eu; umask 022
+  out="<app config dir>/agent-service-capability.pub.pem"
+  openssl pkey -in "$HOME/.secrets/agent-service/signing-key.pem" -pubout -out "$out.new"
+  mv -T "$out.new" "$out" )
+```
 
 ## H4 MCP is optional per app
 
@@ -3819,9 +3861,9 @@ settles the open points named here.
 | A1a4 Signing key and capability | agent-providers | An RS256 capability is minted at admission and handed to the runner, with one key, its `kid` and a documented rotation. The registry gains the MCP origin. | — | A1a1 |
 | A1a5 Job tickets | agent-providers | `POST /job-tickets` (own audience, at most 24 h), ticket runs and the `background` flag. The ticket binds `/ki-abo` and the app group (H12). | — | A1a4 |
 | A1b CLI runner | agent-providers | H7 isolation, and only the selected profile's login is visible to its run. The service-wide limit of parallel subscription runs (default 5) is taken, and a request beyond it gets 429 `busy` with `Retry-After`. Cancel and disconnect kill and reap the process group. The run's MCP config names only the relay, which owns the run's tool events; the capability reaches only the app, and no token appears in argv or logs. | — | A1a1 |
-| A1m MCP helper | agent-providers | The `agent-client` Streamable HTTP MCP server helper verifies the capability (format from A1a4), denies redirects, validates Host/Origin, and refuses a bad audience, an expired capability, a wrong run or a tool off the allowlist. | — | A0b, A1a4 |
-| A1d Deployment | edge | A tagged service image is built from the agent-providers release. It runs in edge compose on an internal network with egress limited to the registered origins and LiteLLM. The profile config is code, each profile's login sits in its own volume from `~/.secrets`, and Keycloak has the `agent-service` audience plus the workload clients. A live smoke test with the operator's account reaches a terminal event. The container runs the service under an init (`init: true`, so the service is not PID 1), sets `no-new-privileges`, mounts nothing over `/proc` or its numeric directories, and gives the service credentials and an LSM policy that let it SIGKILL its own same-uid descendants (A1b-3 conditions, line 20). | — | A1b, A1m, edge#12 live |
-| A1s Songmaker co-writer moves | songmaker | The co-writer runs through the service with the operator's real login, and its tools work over MCP with ownership checks. The in-process co-writer route is removed, along with the local provider/model/route choice. | — | A1d, Songmaker on Keycloak (K12) |
+| A1m MCP helper | agent-providers | The `agent-client` Streamable HTTP MCP server helper verifies the capability (format from A1a4), denies redirects, validates Host/Origin, and refuses a bad audience, an expired capability, a capability whose signed run id is malformed, or a tool off the allowlist, and hands each handler the verified claims of its own request. | — | A0b, A1a4 |
+| A1d Deployment | edge | A tagged service image is built from the agent-providers release. It runs in edge compose on an internal network with egress limited to the registered origins, LiteLLM, the CLI route's provider endpoint (Anthropic for the Claude CLI; A1b refinement, 17.10.2026) and the identity issuer's https JWKS host (`[identity] jwks_url`; edge#184, 20.10.2026). The profile config is code; each profile's login is a read-only **directory** bind from `~/.secrets` (for example `~/.secrets/agent-service/claude/`; a file bind pins the inode, so a swap would never reach the container; the service re-reads the token path on every run, #347), and Keycloak has the `agent-service` audience plus the workload clients. A live smoke test with the operator's account reaches a terminal event. **MCP origins are https only (operator ruling O3, 16.10.2026):** edge runs **step-ca** as a container in compose.yaml (operator ruling 16.10.2026). Traefik fetches short-lived certificates for its internal TLS entrypoint from it via ACME. The root key lives in `~/.secrets` and is part of the backup. Every app's MCP server gets a certificate for its own internal name, and the service trusts that CA's root. **A1b's container conditions** (pinned CLI, one replica, init with the service as its only child, egress, and under Q3 (d) the bubblewrap profiles) stand in #115, section "A1d conditions". With a token the CLI contacts a Datadog log intake (`http-intake.logs.us5.datadoghq.com`) unless the telemetry switches are set (agent-providers A1b-0b1, PR #148); the run's child environment sets them (agent-providers A1b-4a, PR #210), because the closed child environment never inherits a switch set in the image. The container sets `no-new-privileges`: the group reap (agent-providers #115 A1b-3) can only signal members that keep the service uid. The service runs under an init (`init: true`), not as PID 1, so orphaned leavers are reaped by init; the container mounts nothing over `/proc`, and its credentials and LSM policy let the service SIGKILL its own same-uid descendants (agent-providers A1b-3 preconditions). | — | A1b, edge#12 live; built as overnightworks/edge#184 |
+| A1s Songmaker co-writer moves | songmaker | The co-writer runs through the service with the operator's real login, and its tools work over MCP with ownership checks. The in-process co-writer route is removed, along with the local provider/model/route choice. | — | A1d, A1m (#354), Songmaker on Keycloak (K12) |
 | A1r1 Judge moves | songmaker | The judge runs with job tickets (H12). | — | A1s |
 | A1r2 Probes | songmaker | Decided at its pull: move or retire. | move/retire | A1s |
 | A1r3 Cover image | songmaker, agent-providers | The service gains a Codex image route (the first non-Claude provider), and covers run through it. | — | A1s |

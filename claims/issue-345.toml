@@ -1,8 +1,0 @@
-claim_id = "b61e7c4b99144c83aef82191dc8ec038"
-agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
-role = "builder"
-base = "26eead745b6e44f72af6f8423d4d3f137d1f8c59"
-branch = "claude/issue-345-s4b2-claude-turns-get-the-setup-token-on"
-scope = ["README.md", "src/agent_providers/claude/provider.py", "src/agent_providers/config.py", "src/agent_providers/constants.py", "src/agent_providers/process.py", "src/agent_providers/secret_file.py", "tests/conftest.py", "tests/provider_test_support.py", "tests/test_claude_adapter.py", "tests/test_claude_provider.py", "tests/test_service_config.py"]
-opened_commit = "75688ffac6098075a9a7e988d34fd26162a270cb"
-whole_reason = "The env-token switch changes one child-start owner and every test source that hands a Claude login to it; a half switch would leave turns copying a renewable file."

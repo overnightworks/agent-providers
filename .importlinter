@@ -3,7 +3,8 @@
 # the ports a host supplies. The agent service builds on both and nothing builds
 # on it; the core builds on the client and never the other way round, so the
 # client stays installable without the provider machinery. Only the service
-# verifies tokens, so only the service may import webauth.
+# verifies user and workload tokens, so only the service may import webauth; an
+# app verifies run capabilities through agent_client.mcp_server.
 # CI runs `lint-imports` over the real import graph, so an indirect chain is
 # caught as well as a direct import.
 [importlinter]

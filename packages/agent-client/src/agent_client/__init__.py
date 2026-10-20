@@ -8,6 +8,7 @@ framing in ``agent_client.sse``), and the format of the run capability the
 service mints and an app's MCP server verifies (``agent_client.capability``),
 and the JSON-only MCP wire profile the service and an app speak
 (``agent_client.mcp_wire``).
-It depends on pydantic only, so an app
-installs it without the provider machinery.
+Its base depends on pydantic only, so an app
+installs it without the provider machinery; the ``mcp-server`` extra adds PyJWT with
+cryptography for ``agent_client.mcp_server``, which no base module imports.
 """

@@ -104,9 +104,28 @@ jobs:
           import agent_client
 
           assert importlib.util.find_spec("agent_providers") is None, "core leaked in"
+          assert importlib.util.find_spec("jwt") is None, "the mcp-server extra leaked in"
           for module in pkgutil.walk_packages(agent_client.__path__, "agent_client."):
+              if module.name.startswith("agent_client.mcp_server"):
+                  continue
               importlib.import_module(module.name)
               print("imported", module.name)
+          '
+
+      - name: The client wheel with the mcp-server extra imports its server half
+        run: |
+          proof="$(mktemp -d "$RUNNER_TEMP/client-mcp-server.XXXXXX")"
+          uv venv "$proof/venv"
+          client_wheel="$(ls "$GITHUB_WORKSPACE"/dist/overnightworks_agent_client-*-py3-none-any.whl)"
+          uv pip install --python "$proof/venv/bin/python" "$client_wheel[mcp-server]"
+          cd "$proof"
+          "$proof/venv/bin/python" -I -c '
+          import importlib.util
+
+          import agent_client.mcp_server
+
+          assert importlib.util.find_spec("agent_providers") is None, "core leaked in"
+          print("imported", agent_client.mcp_server.__name__)
           '
 
       - name: Both wheels install together and the core imports dispatch

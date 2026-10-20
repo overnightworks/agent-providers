@@ -2,12 +2,12 @@
 
 The service mints one capability per run (decision record 0001, H3 and the A1a4
 ruling) and hands it to the runner as a bearer token of type
-``agent-capability+jwt``. The MCP helper of A1m verifies against this module:
+``agent-capability+jwt``. ``agent_client.mcp_server`` verifies against this module:
 it pins RS256 itself, trusts only configured keys, checks the token type, the
 issuer, the audience (its own ``McpOrigin``), the length bound and these claims,
 refuses a token issued in the future, and checks each call's tool against
 ``tools``. This module owns the claim names and the one decider of an origin;
-it signs and verifies nothing. A changed claim set gets a new token type.
+it signs and verifies nothing itself. A changed claim set gets a new token type.
 """
 
 from __future__ import annotations

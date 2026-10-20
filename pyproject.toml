@@ -16,7 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 api = ["anthropic>=0.26,<2"]
-image = ["pillow>=12.3,<13"]
+image = ["pillow>=12.3,<14"]
 dev = [
     "pytest>=9.1,<10",
     "pytest-cov>=7.1,<8",

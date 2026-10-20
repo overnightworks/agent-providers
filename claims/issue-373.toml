@@ -1,0 +1,8 @@
+claim_id = "6060e17515a24abd99e37055224644ab"
+agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
+role = "builder"
+base = "cae8818a41fd10a13af3f3a0babe724f1a6f9183"
+branch = "claude/issue-373-service-test-support-dedup"
+scope = ["tests/relay_support.py", "tests/service_support.py", "tests/test_relayed_events.py", "tests/test_service_admission.py", "tests/test_service_cli_runner_tools.py", "tests/test_service_run_tools.py", "tests/test_service_tool_relay.py", "tests/test_service_tool_relay_barrier.py"]
+opened_commit = "df77e89f237bd5842858861f0255a45b41ae5017"
+whole_reason = "Three shared test helpers and every module that holds a copy of them change together; split, a copy would stay behind."

@@ -37,6 +37,7 @@ from service_support import (
 )
 
 from agent_client.tools import ToolEffect
+from agent_providers.secret_file import UnsoundSecretFile, read_token_file
 from agent_service import app as app_module
 from agent_service.cli import EXIT_BAD_CONFIG, main
 from agent_service.config import (
@@ -916,6 +917,19 @@ def test_a_sound_token_file_is_read_with_its_trailing_newline_dropped(tmp_path, 
     config = load_config(_written(tmp_path, _token_config(str(token_file))))
 
     assert config.profiles["claude-main"].token.get_secret_value() == CANARY
+
+
+@pytest.mark.parametrize("flag", ["O_NONBLOCK", "O_CLOEXEC"])
+def test_a_token_file_is_refused_without_content_where_os_lacks_an_open_flag(
+    tmp_path, monkeypatch, flag
+):
+    token_file = _token_file_with(tmp_path, CANARY.encode())
+    monkeypatch.delattr(os, flag)
+
+    with pytest.raises(UnsoundSecretFile, match=flag) as refusal:
+        read_token_file(token_file)
+
+    assert CANARY not in f"{refusal.value}{refusal.value.__cause__}"
 
 
 def test_a_loaded_token_never_shows_in_the_repr_or_text_of_the_configuration(tmp_path):

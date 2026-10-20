@@ -35,6 +35,9 @@ from provider_test_support import (
     SAMPLE_CLAUDE_SETUP_TOKEN,
     SAMPLE_TOOL_CATALOG,
     SECRET_ENV_KEYS,
+    SOUND_TOKEN_FILES,
+    TOKEN_CANARY,
+    UNSOUND_TOKEN_FILES,
     ClaudeCliSpawns,
     EventGate,
     Hold,
@@ -126,7 +129,6 @@ from agent_providers.events import AssistantTextEvent, FinalEvent, StreamEvent
 from agent_providers.grok import transport as grok_transport
 from agent_providers.process import CliRun, CliRunOutcome, CliRunReason
 from agent_providers.procfs import GroupCensus
-from agent_providers.secret_file import MAX_SECRET_FILE_BYTES
 from agent_providers.spawn import (
     AnchorStateError,
     ChildIdentityLost,
@@ -1337,7 +1339,6 @@ def test_a_claude_child_gets_a_private_home_not_the_operators(
 
 # ── the setup token a Claude child starts with ──────────────────────
 
-_TOKEN_CANARY = "sk-ant-oat01-token-canary-5e2b81"
 _VERIFIED_CLAUDE_BINARY = Path("/usr/bin/claude")
 _AN_EMPTY_TOOL_SURFACE = CliRunOutcome(
     started=True,
@@ -1352,51 +1353,6 @@ _AN_EMPTY_TOOL_SURFACE = CliRunOutcome(
 )
 
 type _OnSpawn = Callable[[ChildProcess], None]
-
-
-def _a_sound_token_file(source: Path, _tmp_path: Path) -> None:
-    write_claude_token_file(source, _TOKEN_CANARY)
-
-
-def _no_token_file(source: Path, _tmp_path: Path) -> None:
-    source.unlink()
-
-
-def _a_token_file_open_to_others(source: Path, _tmp_path: Path) -> None:
-    write_claude_token_file(source, _TOKEN_CANARY, mode=0o644)
-
-
-def _a_link_to_a_token_file_of_mode(mode: int) -> Callable[[Path, Path], None]:
-    def link(source: Path, tmp_path: Path) -> None:
-        target = write_claude_token_file(tmp_path / "linked-token", _TOKEN_CANARY, mode=mode)
-        source.unlink()
-        source.symlink_to(target)
-
-    return link
-
-
-def _a_token_file_over_the_bound(source: Path, _tmp_path: Path) -> None:
-    write_claude_token_file(
-        source, _TOKEN_CANARY * (MAX_SECRET_FILE_BYTES // len(_TOKEN_CANARY) + 1),
-    )
-
-
-def _a_credentials_document(source: Path, _tmp_path: Path) -> None:
-    login = {"accessToken": _TOKEN_CANARY, "refreshToken": _TOKEN_CANARY}
-    write_claude_token_file(source, json.dumps({"claudeAiOauth": login}))
-
-
-SOUND_TOKEN_FILES = (
-    pytest.param(_a_sound_token_file, id="0600-token"),
-    pytest.param(_a_link_to_a_token_file_of_mode(0o600), id="link-to-0600"),
-)
-UNSOUND_TOKEN_FILES = (
-    pytest.param(_no_token_file, id="missing"),
-    pytest.param(_a_token_file_open_to_others, id="0644-token"),
-    pytest.param(_a_link_to_a_token_file_of_mode(0o644), id="link-to-0644"),
-    pytest.param(_a_token_file_over_the_bound, id="over-16KiB"),
-    pytest.param(_a_credentials_document, id="json"),
-)
 
 
 def _async_claude_children_answering(
@@ -1483,14 +1439,14 @@ def test_a_claude_child_gets_the_setup_token_only_in_its_environment_never_a_log
     start_child(
         monkeypatch,
         lambda child: homes.append(
-            assert_claude_token_child(child, root=tmp_path, token=_TOKEN_CANARY),
+            assert_claude_token_child(child, root=tmp_path, token=TOKEN_CANARY),
         ),
     )
 
     [home] = homes
     assert not home.exists()
-    assert _TOKEN_CANARY not in caplog.text
-    assert source.read_text() == f"{_TOKEN_CANARY}\n"
+    assert TOKEN_CANARY not in caplog.text
+    assert source.read_text() == f"{TOKEN_CANARY}\n"
 
 
 @pytest.mark.parametrize("token_file", UNSOUND_TOKEN_FILES)
@@ -1509,9 +1465,9 @@ def test_a_claude_child_with_an_unsound_token_file_is_refused_before_any_home(
     assert (homes, spawned) == ([], [])
     assert str(refusal.value) == CLAUDE_CLI_LOGIN_NOT_CONFIGURED_DETAIL
     assert type(refusal.value.__cause__) is process.CliLoginUnusableError
-    assert not any(_TOKEN_CANARY in f"{link}{link!r}" for link in exception_chain(refusal.value))
-    assert not traceback_frames_hold(refusal.value, _TOKEN_CANARY)
-    assert _TOKEN_CANARY not in caplog.text
+    assert not any(TOKEN_CANARY in f"{link}{link!r}" for link in exception_chain(refusal.value))
+    assert not traceback_frames_hold(refusal.value, TOKEN_CANARY)
+    assert TOKEN_CANARY not in caplog.text
 
 
 @pytest.mark.parametrize("start_child", CLAUDE_CHILD_STARTS)

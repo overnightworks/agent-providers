@@ -86,6 +86,7 @@ from agent_providers.errors import (
 from agent_providers.events import AssistantTextEvent, FinalEvent, StreamEvent
 from agent_providers.process import CliRunOutcome, CliRunReason
 from agent_providers.procfs import GroupCensus
+from agent_providers.secret_file import MAX_SECRET_FILE_BYTES
 from agent_providers.spawn import (
     AnchorStateError,
     BlockingAnchoredChild,
@@ -292,6 +293,54 @@ def write_claude_token_file(
     path.write_text(f"{token}\n")
     path.chmod(mode)
     return path
+
+
+TOKEN_CANARY = "sk-ant-oat01-token-canary-5e2b81"
+
+
+def a_sound_token_file(source: Path, _tmp_path: Path) -> None:
+    write_claude_token_file(source, TOKEN_CANARY)
+
+
+def no_token_file(source: Path, _tmp_path: Path) -> None:
+    source.unlink()
+
+
+def a_token_file_open_to_others(source: Path, _tmp_path: Path) -> None:
+    write_claude_token_file(source, TOKEN_CANARY, mode=0o644)
+
+
+def a_link_to_a_token_file_of_mode(mode: int) -> Callable[[Path, Path], None]:
+    def link(source: Path, tmp_path: Path) -> None:
+        target = write_claude_token_file(tmp_path / "linked-token", TOKEN_CANARY, mode=mode)
+        source.unlink()
+        source.symlink_to(target)
+
+    return link
+
+
+def a_token_file_over_the_bound(source: Path, _tmp_path: Path) -> None:
+    write_claude_token_file(
+        source, TOKEN_CANARY * (MAX_SECRET_FILE_BYTES // len(TOKEN_CANARY) + 1),
+    )
+
+
+def a_credentials_document(source: Path, _tmp_path: Path) -> None:
+    login = {"accessToken": TOKEN_CANARY, "refreshToken": TOKEN_CANARY}
+    write_claude_token_file(source, json.dumps({"claudeAiOauth": login}))
+
+
+SOUND_TOKEN_FILES = (
+    pytest.param(a_sound_token_file, id="0600-token"),
+    pytest.param(a_link_to_a_token_file_of_mode(0o600), id="link-to-0600"),
+)
+UNSOUND_TOKEN_FILES = (
+    pytest.param(no_token_file, id="missing"),
+    pytest.param(a_token_file_open_to_others, id="0644-token"),
+    pytest.param(a_link_to_a_token_file_of_mode(0o644), id="link-to-0644"),
+    pytest.param(a_token_file_over_the_bound, id="over-16KiB"),
+    pytest.param(a_credentials_document, id="json"),
+)
 
 
 def assert_claude_token_child(child: ChildProcess, *, root: Path, token: str) -> Path:

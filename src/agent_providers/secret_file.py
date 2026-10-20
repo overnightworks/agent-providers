@@ -9,7 +9,10 @@ or array, or parsing as a JSON scalar. It must hold one setup token.
 
 from __future__ import annotations
 
+import errno
+import functools
 import json
+import operator
 import os
 import stat
 from dataclasses import dataclass
@@ -18,7 +21,7 @@ from typing import Final
 
 MAX_SECRET_FILE_BYTES: Final = 16 * 1024
 API_KEY_PREFIX: Final = "sk-ant-api"
-_OPEN_FLAGS: Final = os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC
+_OPEN_FLAG_NAMES: Final = ("O_NONBLOCK", "O_CLOEXEC")
 UNSHOWABLE_PATH: Final = "contains a control or non-printing character; a path must not"
 _JSON_WHITESPACE: Final = " \t\r\n"
 
@@ -112,8 +115,16 @@ class _ReadRefusal:
     reason: str
 
 
+def _open_flags() -> int:
+    missing = [name for name in _OPEN_FLAG_NAMES if not hasattr(os, name)]
+    if missing:
+        raise OSError(errno.ENOTSUP, f"reading a secret file needs {', '.join(missing)}")
+    flags = (getattr(os, name) for name in _OPEN_FLAG_NAMES)
+    return functools.reduce(operator.or_, flags, os.O_RDONLY)
+
+
 def _read_through_one_descriptor(path: Path, subject: str) -> bytes | _ReadRefusal:
-    descriptor = os.open(path, _OPEN_FLAGS)
+    descriptor = os.open(path, _open_flags())
     try:
         status = os.fstat(descriptor)
         if not stat.S_ISREG(status.st_mode):

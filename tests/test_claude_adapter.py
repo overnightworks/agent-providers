@@ -14,6 +14,7 @@ import pytest
 from provider_test_support import (
     A_STREAMED_LINE,
     SAMPLE_CLAUDE_SETUP_TOKEN,
+    UNSOUND_TOKEN_FILES,
     a_child_that_outlives_sigkill,
     a_claude_cli_child,
     confirm_the_retained_group_gone,
@@ -44,7 +45,6 @@ from agent_providers.constants import CLAUDE_OAUTH_TOKEN_VARIABLE
 from agent_providers.errors import ContainmentLost, ProviderUnavailableError, SafeRouteReasonCode
 from agent_providers.events import AssistantTextEvent, StreamEvent
 from agent_providers.process import CliEnvironmentUnavailableError, CliLoginUnusableError
-from agent_providers.secret_file import MAX_SECRET_FILE_BYTES
 from agent_providers.tool_loop import ToolOutcome
 
 
@@ -305,25 +305,11 @@ def _the_token_file_replaced_by_a_link_to(target: Path) -> None:
     source.symlink_to(target)
 
 
-def _a_token_file_that(fault: str, tmp_path: Path) -> None:
-    source = current_claude_runtime().token_file
-    if fault == "missing":
-        source.unlink()
-    if fault == "linked-to-0644":
-        _the_token_file_replaced_by_a_link_to(
-            write_claude_token_file(tmp_path / "elsewhere", mode=0o644),
-        )
-    if fault == "oversize":
-        write_claude_token_file(source, "x" * (MAX_SECRET_FILE_BYTES + 1))
-    if fault == "json":
-        write_claude_token_file(source, "{}")
-
-
-@pytest.mark.parametrize("fault", ("missing", "linked-to-0644", "oversize", "json"))
+@pytest.mark.parametrize("token_file", UNSOUND_TOKEN_FILES)
 def test_claude_cli_turn_with_an_unusable_token_file_reports_it_as_not_signed_in(
-    fault: str, tmp_path
+    token_file, tmp_path
 ) -> None:
-    _a_token_file_that(fault, tmp_path)
+    token_file(current_claude_runtime().token_file, tmp_path)
 
     driving = _drive_real_claude_turn()
 

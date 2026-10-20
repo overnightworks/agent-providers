@@ -191,8 +191,8 @@ class UnavailableError(Exception):
 
 
 class CliUnavailableError(UnavailableError):
-    """Raised when the Claude CLI cannot run here: its binary is missing, or
-    its private home cannot be made."""
+    """Raised when the Claude CLI cannot run here: its binary is missing, its
+    private home cannot be made, or the catalog's credential copy cannot be written."""
 
 
 class CliLoginNotConfiguredError(UnavailableError):

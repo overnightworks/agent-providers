@@ -25,8 +25,8 @@ from typing import Annotated, Any, Final, Literal, NoReturn, Self, TypeVar
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, ValidationError
 from pydantic.alias_generators import to_camel
 
+from agent_client.errors import raise_without_chain
 from agent_client.wire import MAX_EVENT_BYTES, JsonObject, UnicodeText, refuse_non_json_constant
-from agent_providers.errors import raise_without_chain
 
 JSON_MEDIA_TYPE: Final = "application/json"
 EVENT_STREAM_MEDIA_TYPE: Final = "text/event-stream"
@@ -148,7 +148,7 @@ _JsonArray = Annotated[tuple[_Item, ...], Field(strict=False)]
 type Reply = JsonRpcResponse | JsonRpcError
 
 
-def _object_without_duplicate_members(members: list[tuple[str, Any]]) -> dict[str, Any]:
+def object_without_duplicate_members(members: list[tuple[str, Any]]) -> dict[str, Any]:
     document = dict(members)
     if len(document) != len(members):
         raise ValueError("an object repeats a member")
@@ -172,7 +172,7 @@ def parse_message(body: bytes) -> JsonRpcMessage:
         document = json.loads(
             body.decode("utf-8"),
             parse_constant=refuse_non_json_constant,
-            object_pairs_hook=_object_without_duplicate_members,
+            object_pairs_hook=object_without_duplicate_members,
         )
     except (ValueError, RecursionError):
         _refuse(WireRefusal.MALFORMED_JSON)

@@ -52,6 +52,15 @@ from service_support import (
     quarantine_on,
 )
 
+from agent_client.mcp_wire import (
+    CallToolParams,
+    JsonRpcError,
+    Reply,
+    RequestId,
+    ToolDefinition,
+    ToolOutcome,
+    tool_result_response,
+)
 from agent_client.tools import ToolEffect
 from agent_client.wire import (
     Failed,
@@ -64,15 +73,6 @@ from agent_client.wire import (
 from agent_providers.events import FinalEvent, ToolCallEvent, ToolResultEvent
 from agent_service.app_tools import UpstreamCallLost, open_app_tools
 from agent_service.config import RunConfig
-from agent_service.mcp_wire import (
-    CallToolParams,
-    JsonRpcError,
-    Reply,
-    RequestId,
-    ToolDefinition,
-    ToolOutcome,
-    tool_result_response,
-)
 from agent_service.run_events import (
     RUNNER_FAILED_MESSAGE,
     TOO_MANY_TOOL_CALLS_MESSAGE,

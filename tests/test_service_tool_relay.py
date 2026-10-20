@@ -37,10 +37,10 @@ from relay_support import (
     yield_until,
 )
 
+from agent_client.mcp_wire import ACKNOWLEDGEMENT, JSON_MEDIA_TYPE, HttpAnswer
 from agent_client.wire import MAX_EVENT_BYTES, TurnMessage, TurnRole
 from agent_providers.claude.provider import ClaudeRun
 from agent_providers.cli_run import RelayAccess as CoreRelayAccess
-from agent_service.mcp_wire import ACKNOWLEDGEMENT, JSON_MEDIA_TYPE, HttpAnswer
 from agent_service.run_liveness import LoopClock
 from agent_service.tool_relay import (
     LOOPBACK_HOST,

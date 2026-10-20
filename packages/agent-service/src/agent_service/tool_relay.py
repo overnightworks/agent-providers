@@ -17,13 +17,7 @@ from typing import Any, Final, Protocol
 import h11
 
 from agent_client.capability import MCP_ENDPOINT_PATH
-from agent_client.wire import MAX_EVENT_BYTES
-from agent_providers.cli_run import RelayAccess as RelayAccess
-from agent_providers.cli_run import relay_authorization
-from agent_providers.errors import raise_without_chain
-from agent_providers.events import ToolCallEvent, ToolResultEvent
-from agent_service.capability import Capability
-from agent_service.mcp_wire import (
+from agent_client.mcp_wire import (
     ACKNOWLEDGEMENT,
     CallToolParams,
     CancelledParams,
@@ -49,6 +43,12 @@ from agent_service.mcp_wire import (
     tool_result_response,
     tools_list_response,
 )
+from agent_client.wire import MAX_EVENT_BYTES
+from agent_providers.cli_run import RelayAccess as RelayAccess
+from agent_providers.cli_run import relay_authorization
+from agent_providers.errors import raise_without_chain
+from agent_providers.events import ToolCallEvent, ToolResultEvent
+from agent_service.capability import Capability
 from agent_service.run_liveness import RunClock, log_failure, unfinished_by
 
 log = logging.getLogger(__name__)

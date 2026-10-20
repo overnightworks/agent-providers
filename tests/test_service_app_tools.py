@@ -39,6 +39,7 @@ from mcp_app_fake import (
 )
 from service_support import fake_app_authority  # noqa: F401 - a fixture, requested by name
 
+from agent_client.mcp_wire import NON_TEXT_BLOCK_MESSAGE, WireRefusal
 from agent_client.wire import MAX_EVENT_BYTES
 from agent_service import app_tools
 from agent_service.app_tools import (
@@ -52,7 +53,6 @@ from agent_service.app_tools import (
     UpstreamUnreachable,
     open_app_tools,
 )
-from agent_service.mcp_wire import NON_TEXT_BLOCK_MESSAGE, WireRefusal
 
 CAPABILITY = capability_carrying("capability-for-this-run")
 CANARY_TOKEN = CAPABILITY.token

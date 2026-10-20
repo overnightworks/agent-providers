@@ -25,6 +25,7 @@ from relay_support import RUN_ID, yield_until
 from service_support import alice_admitted_run, failure_lines, service_config
 
 import agent_service.cli_runner as cli_runner_module
+from agent_client.mcp_wire import CallToolParams, ToolDefinition, ToolOutcome
 from agent_providers.errors import ContainmentLost, RetainedGroup
 from agent_providers.events import (
     AssistantTextEvent,
@@ -34,7 +35,6 @@ from agent_providers.events import (
     ToolResultEvent,
 )
 from agent_service.cli_runner import CliRunner
-from agent_service.mcp_wire import CallToolParams, ToolDefinition, ToolOutcome
 from agent_service.relayed_events import RelayedEvents
 from agent_service.run_liveness import LoopClock
 from agent_service.run_tools import RunTools

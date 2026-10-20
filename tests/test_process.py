@@ -82,6 +82,7 @@ from provider_test_support import (
     write_claude_token_file,
 )
 
+import agent_client
 from agent_providers import lost_groups, process
 from agent_providers.codex.pool import CodexProcessKind, CodexProcessPool
 from agent_providers.codex.protocol import codex_child_process, create_codex_turn_home
@@ -2281,12 +2282,13 @@ def test_private_credential_home_repair_passes_a_link_in_a_read_only_directory_u
 @pytest.mark.parametrize("flag", ["O_PATH", "O_NOFOLLOW", "O_DIRECTORY", "O_CLOEXEC"])
 def test_process_module_imports_where_os_lacks_a_repair_flag(flag: str) -> None:
     source_root = Path(process.__file__).parents[1]
+    client_source_root = Path(agent_client.__file__).parents[1]
     subprocess.run(
         [
             sys.executable, "-I", "-c",
-            "import os, sys; sys.path.insert(0, sys.argv[1]); delattr(os, sys.argv[2]);"
+            "import os, sys; sys.path[:0] = sys.argv[1:3]; delattr(os, sys.argv[3]);"
             " import agent_providers.process",
-            str(source_root), flag,
+            str(source_root), str(client_source_root), flag,
         ],
         check=True,
     )

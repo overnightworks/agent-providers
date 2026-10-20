@@ -5,8 +5,10 @@ from __future__ import annotations
 import tomllib
 from pathlib import Path
 
+import agent_client.errors
 import agent_client.tools
 import agent_providers
+import agent_providers.errors
 import agent_providers.tools
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -48,3 +50,9 @@ def test_core_client_service_and_pins_carry_one_lockstep_version() -> None:
 
 def test_core_re_exports_the_client_tool_declaration_itself() -> None:
     assert agent_providers.tools.ToolDeclaration is agent_client.tools.ToolDeclaration
+
+
+def test_core_re_exports_the_client_raise_without_chain_itself() -> None:
+    assert (
+        agent_providers.errors.raise_without_chain is agent_client.errors.raise_without_chain
+    )

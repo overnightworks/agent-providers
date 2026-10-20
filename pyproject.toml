@@ -1,6 +1,6 @@
 [project]
 name = "overnightworks-agent-providers"
-version = "0.3.0"
+version = "0.4.0"
 description = "Reusable agent provider layer: Claude, Grok and Codex routing, live catalogs, turn streams, tool loop, bounded process runner, status probes, and sandbox building blocks"
 authors = [{ name = "Flex0r (Felix Hummert)", email = "felix.hummert@gmail.com" }]
 readme = "README.md"
@@ -8,7 +8,7 @@ license = { text = "MIT" }
 requires-python = ">=3.12"
 
 dependencies = [
-    "overnightworks-agent-client==0.3.0",
+    "overnightworks-agent-client==0.4.0",
     "pydantic>=2.7,<3",
     "httpx>=0.27,<1",
     "anyio>=4.12,<5",

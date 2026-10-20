@@ -73,7 +73,7 @@ from agent_providers.config import (
     current_config,
     reset_config,
 )
-from agent_providers.constants import CLAUDE_OAUTH_TOKEN_VARIABLE
+from agent_providers.constants import CLAUDE_OAUTH_TOKEN_VARIABLE, CLAUDE_RUN_SWITCHES
 from agent_providers.dispatch import stream_turn
 from agent_providers.errors import (
     ProviderUnavailableError,
@@ -343,6 +343,13 @@ UNSOUND_TOKEN_FILES = (
 )
 
 
+def assert_claude_run_switches(child: ChildProcess) -> None:
+    """Assert a Claude child runs without an updater, telemetry or nonessential traffic."""
+    assert {name: child.environment.get(name) for name in CLAUDE_RUN_SWITCHES} == dict(
+        CLAUDE_RUN_SWITCHES,
+    )
+
+
 def assert_claude_token_child(child: ChildProcess, *, root: Path, token: str) -> Path:
     """Assert a Claude child at its spawn boundary: an empty private home, the token in
     its environment as ``CLAUDE_CODE_OAUTH_TOKEN`` and nowhere in its command line."""
@@ -353,6 +360,7 @@ def assert_claude_token_child(child: ChildProcess, *, root: Path, token: str) ->
     assert not (home / CLAUDE_LOGIN_FILE).exists()
     assert list(home.iterdir()) == []
     assert child.environment[CLAUDE_OAUTH_TOKEN_VARIABLE] == token
+    assert_claude_run_switches(child)
     assert not any(token in part for part in child.command)
     return home
 

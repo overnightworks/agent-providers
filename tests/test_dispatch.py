@@ -44,6 +44,7 @@ from agent_providers.config import (
     current_config,
     reset_config,
 )
+from agent_providers.constants import CLAUDE_NO_SESSION_PERSISTENCE_FLAG
 from agent_providers.dispatch import ImageCapability, call_provider_once, image_capability
 from agent_providers.errors import (
     ProviderUnavailableError,
@@ -318,7 +319,7 @@ def claude_only_host(tmp_path: Path) -> Path:
     )
     fake_cli_executable(tmp_path, {
         ("auth", "status"): json.dumps({"loggedIn": True, "authMethod": "claude.ai"}),
-        ("-p", "/model"): CLAUDE_MODEL_CATALOG_STDOUT,
+        ("-p", "/model", CLAUDE_NO_SESSION_PERSISTENCE_FLAG): CLAUDE_MODEL_CATALOG_STDOUT,
     })
     override_provider_runtime(**claude_only.model_dump())
     return tmp_path

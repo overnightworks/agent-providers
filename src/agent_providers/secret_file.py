@@ -9,6 +9,7 @@ one setup token.
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 from dataclasses import dataclass
@@ -79,13 +80,23 @@ def _token_or_refusal(contents: bytes) -> str | _TokenRefusal:
         return _TokenRefusal("holds more than one line; it must hold one token")
     if not token.isprintable():
         return _TokenRefusal("contains a control or non-printing character; a token must not")
+    if _is_json_document(token):
+        return _TokenRefusal("holds a JSON document; it must hold one setup token")
     if any(character.isspace() for character in token):
         return _TokenRefusal("holds whitespace; a setup token holds none")
-    if token.startswith("{"):
-        return _TokenRefusal("holds a JSON document; it must hold one setup token")
     if token.startswith(API_KEY_PREFIX):
         return _TokenRefusal("holds an API key; it must hold a subscription token from setup-token")
     return token
+
+
+def _is_json_document(line: str) -> bool:
+    """Whether the line parses as any JSON value; the ``JSONDecodeError`` holds the text,
+    so it is caught here and only a bool leaves."""
+    try:
+        json.loads(line)
+    except ValueError:
+        return False
+    return True
 
 
 @dataclass(frozen=True)

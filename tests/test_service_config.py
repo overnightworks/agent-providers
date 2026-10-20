@@ -828,6 +828,13 @@ REFUSED_TOKEN_FILES = [
     ),
     pytest.param(_holding(b"{}"), JSON_DOCUMENT_REASON, id="empty-json-object"),
     pytest.param(
+        _holding(f'{{"claudeAiOauth": {{"accessToken": "{CANARY}"}}}}'.encode()),
+        JSON_DOCUMENT_REASON,
+        id="spaced-one-line-json",
+    ),
+    pytest.param(_holding(f'["{CANARY}"]'.encode()), JSON_DOCUMENT_REASON, id="json-array"),
+    pytest.param(_holding(f'"{CANARY}"'.encode()), JSON_DOCUMENT_REASON, id="json-string"),
+    pytest.param(
         _holding(f'{{\n  "claudeAiOauth": {{"accessToken": "{CANARY}"}}\n}}\n'.encode()),
         "holds more than one line; it must hold one token",
         id="multi-line-json-object",

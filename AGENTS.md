@@ -2,6 +2,10 @@
 
 `agent-providers` is a library and the agent service built on it: host
 applications install the library, and apps reach the service over HTTP. The
+core routes a turn to Claude, Grok or Codex over each provider's CLI or HTTP
+API, with live model catalogs, readiness probes, a streaming turn transport,
+the tool loop, a bounded subprocess runner, and the sandbox directory-name
+constants. The
 service's deployment lives in edge, not here. Every change here is a change to
 a public contract that a tag has already frozen somewhere else.
 
@@ -13,7 +17,9 @@ Python 3.12+, managed with uv. Extracted from
 
 The repository is a uv workspace. Its root holds only what a tool must find
 there — the core's package manifest, which also declares the workspace, the
-one lockfile, the import-boundary configuration, the licence — and the entry
+one lockfile, the import-boundary configuration, `.gitignore`,
+`.python-version`, `sonar-project.properties`, the licence, and the tool
+configuration directories `.aco/`, `.github/` and `quality/` — and the entry
 documents `README.md`, `AGENTS.md` and `CLAUDE.md`. Everything else lives in
 the directory of its owner: the provider core (distribution
 `overnightworks-agent-providers`) under `src/agent_providers/`, the light
@@ -29,20 +35,18 @@ its packages ship.
 - The library reaches back into no host. The core depends on the agent
   client, `pydantic`, `httpx` and `anyio` at runtime, and on nothing else — no
   host application, no web framework, no database. Everything host-specific
-  arrives from the host: through the
-  `ProviderRuntimeConfig` it installs with `configure()`, through the ports it
-  supplies, or, for the subscription run the agent service drives without a
-  core runtime, as explicit arguments validated at construction.
+  arrives from the host, as the first two Code patterns say.
 - The agent client is light: its base depends on `pydantic` only and owns the tool
-  contract `ToolDeclaration` in `agent_client.tools`; its `[mcp-server]` extra adds
-  PyJWT with cryptography for `agent_client.mcp_server`, which no base module imports. The core builds on it and
+  contract `ToolDeclaration` in `agent_client.tools`. The core builds on it and
   re-exports the identical class from `agent_providers.tools`; the client never
   imports the core.
-- The agent service's wire has one owner, `agent_client.wire`, with its stream
+- The agent service's wire has one owner, `agent_client.wire` (the `RunRequest`
+  body and the streamed run events), with its stream
   rules in `agent_client.run_stream`. `agent_providers.events` is the core's
   in-process turn event and never a second wire; `agent_service.run_events`
   maps it onto the wire.
-- The service builds on the core and the client, and nothing imports it. It
+- The service, started as `agent-service --config PATH`, builds on the core and
+  the client, and nothing imports it. It
   alone verifies user and workload tokens, through webauth's `JwtVerifier`; an app
   verifies its run capabilities through `agent_client.mcp_server`. It alone depends
   on a web framework (FastAPI, uvicorn).
@@ -52,8 +56,8 @@ its packages ship.
 - Three optional extras exist: `agent-providers[api]` for the Anthropic SDK
   the Claude HTTP-API route uses, `agent-providers[image]` for the Pillow the
   Codex image path uses, and `agent-client[mcp-server]` for the PyJWT with
-  cryptography that `agent_client.mcp_server` verifies run capabilities with.
-  Neither package installs them by default.
+  cryptography that `agent_client.mcp_server` verifies run capabilities with;
+  no base module imports that module. Neither package installs them by default.
 - Application concerns — the MCP tool set and its execution, prompts, settings
   storage, and domain ownership — belong to the host, not here.
 
@@ -95,7 +99,7 @@ uv build --all-packages
 CI's "Host vocabulary" step greps `src packages tests docs` for host words; `.github/host-vocabulary-allowed.txt` is the one owner of the allowed hits.
 
 The suite is fast and needs no live provider: the CLI processes are faked and
-the tool-surface probe is patched. Run it whole. `[image]` is required at
+the tool-surface probe is patched. `[image]` is required at
 collection because one test imports Pillow at module load.
 
 CI also runs the `quality` gate (`overnightworks/quality`, pinned by commit in
@@ -119,10 +123,12 @@ tokens; elsewhere that suite skips.
 
 ## Releasing
 
+`main` is protected.
+
 A release is a tag, and the three distributions move in lockstep. On a `v*`
 tag `.github/workflows/release.yml` builds the three wheels, checks that their
 names carry the tag's version, and attaches exactly those three wheels to the
-GitHub release; host applications pin the asset URLs. A release whose README
+GitHub release; hosts pin those wheel URLs and never install by name from PyPI. A release whose README
 holds `## Migrating to <version>` gets a release page that opens with a link to
 that section, so a breaking release writes that section before the tag. A tag
 is never moved — a broken release gets the next patch tag — so the pull

@@ -3019,7 +3019,7 @@ def test_a_saturated_pool_returns_the_turns_home_token(
 def test_a_refused_home_reservation_reserves_no_slot(
     monkeypatch, image_turn, run_the_turn, home_waits_for_close,
 ) -> None:
-    refusal = RuntimeError("private credential home is closing")
+    refusal = RuntimeError("private CLI home is closing")
     monkeypatch.setattr(process.PrivateCredentialHome, "reserve", Mock(side_effect=refusal))
     runner = Mock()
     monkeypatch.setattr(codex_protocol, "run_cli_bounded", runner)

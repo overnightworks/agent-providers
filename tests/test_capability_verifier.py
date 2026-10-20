@@ -504,8 +504,10 @@ def test_a_document_nested_past_the_interpreters_recursion_limit_is_refused_not_
     ],
 )
 def test_the_constructor_refuses_anything_but_a_sound_rsa_public_key(unsound):
+    unsound_key = unsound()
+
     with pytest.raises(UnsoundVerificationKey) as refusal:
-        CapabilityVerificationKey(unsound())
+        CapabilityVerificationKey(unsound_key)
 
     assert refusal.value.__cause__ is None
     assert refusal.value.__context__ is None

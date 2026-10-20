@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from enum import IntEnum, StrEnum
 from http import HTTPStatus
@@ -384,3 +384,94 @@ def tool_result_response(request_id: RequestId, outcome: ToolOutcome) -> JsonRpc
         {"content": [{"type": "text", "text": outcome.content}], "isError": outcome.is_error}
     )
     return JsonRpcResponse(id=request_id, result=written.model_dump(mode="json", by_alias=True))
+
+
+@dataclass(frozen=True)
+class Answered:
+    answer: HttpAnswer
+
+
+@dataclass(frozen=True)
+class Notified:
+    """A notification, which gets no body; ``cancelled`` is the id a well-formed cancel names."""
+
+    cancelled: RequestId | None = None
+
+
+@dataclass(frozen=True)
+class Listing:
+    request_id: RequestId
+
+
+@dataclass(frozen=True)
+class Call:
+    request_id: RequestId
+    params: CallToolParams
+
+
+@dataclass(frozen=True)
+class Unoffered:
+    request_id: RequestId
+
+
+type ServerDecision = Answered | Notified | Listing | Call | Unoffered
+
+_BAD_REQUEST: Final = HttpAnswer(HTTPStatus.BAD_REQUEST, None, b"")
+
+
+def _cancelled_id(notification: JsonRpcNotification) -> RequestId | None:
+    if notification.method != McpMethod.CANCELLED:
+        return None
+    try:
+        return read_payload(CancelledParams, notification.params).request_id
+    except McpWireError:
+        return None
+
+
+def _initialized(request: JsonRpcRequest) -> Reply:
+    try:
+        params = read_payload(InitializeParams, request.params)
+    except McpWireError:
+        return error_response(request.id, JsonRpcErrorCode.INVALID_PARAMS)
+    return initialize_response(request.id, params.protocol_version)
+
+
+def _called(request: JsonRpcRequest, offered_names: Collection[str]) -> ServerDecision:
+    try:
+        params = read_payload(CallToolParams, request.params)
+    except McpWireError:
+        return Answered(answer_for(error_response(request.id, JsonRpcErrorCode.INVALID_PARAMS)))
+    if params.name not in offered_names:
+        return Unoffered(request.id)
+    return Call(request.id, params)
+
+
+def decide_server_message(
+    body: bytes, protocol_version: str | None, offered_names: Collection[str]
+) -> ServerDecision:
+    """What a server half does with one request body, before any state or I/O."""
+    try:
+        message = parse_message(body)
+    except McpWireError:
+        return Answered(_BAD_REQUEST)
+    if isinstance(message, JsonRpcResponse | JsonRpcError):
+        return Answered(_BAD_REQUEST)
+    if message.method != McpMethod.INITIALIZE and (
+        protocol_header_status(protocol_version) is not HTTPStatus.OK
+    ):
+        return Answered(_BAD_REQUEST)
+    if isinstance(message, JsonRpcNotification):
+        return Notified(_cancelled_id(message))
+    match message.method:
+        case McpMethod.INITIALIZE:
+            return Answered(answer_for(_initialized(message)))
+        case McpMethod.PING:
+            return Answered(answer_for(JsonRpcResponse(id=message.id, result={})))
+        case McpMethod.TOOLS_LIST:
+            return Listing(message.id)
+        case McpMethod.TOOLS_CALL:
+            return _called(message, offered_names)
+        case _:
+            return Answered(
+                answer_for(error_response(message.id, JsonRpcErrorCode.METHOD_NOT_FOUND))
+            )

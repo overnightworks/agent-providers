@@ -19,27 +19,21 @@ import h11
 from agent_client.capability import MCP_ENDPOINT_PATH
 from agent_client.mcp_wire import (
     ACKNOWLEDGEMENT,
+    Answered,
+    Call,
     CallToolParams,
-    CancelledParams,
     HttpAnswer,
-    InitializeParams,
-    JsonRpcError,
     JsonRpcErrorCode,
-    JsonRpcNotification,
-    JsonRpcRequest,
-    JsonRpcResponse,
-    McpMethod,
-    McpWireError,
+    Listing,
+    Notified,
     Reply,
     RequestId,
     ToolDefinition,
     ToolOutcome,
+    Unoffered,
     answer_for,
+    decide_server_message,
     error_response,
-    initialize_response,
-    parse_message,
-    protocol_header_status,
-    read_payload,
     tool_result_response,
     tools_list_response,
 )
@@ -915,58 +909,21 @@ class McpRelayOwner:
         return answer
 
     async def _respond(self, request: RelayRequest) -> HttpAnswer | Unanswered:
-        try:
-            message = parse_message(request.body)
-        except McpWireError:
-            return _empty(HTTPStatus.BAD_REQUEST)
-        if isinstance(message, JsonRpcResponse | JsonRpcError):
-            return _empty(HTTPStatus.BAD_REQUEST)
-        if message.method != McpMethod.INITIALIZE and (
-            protocol_header_status(request.protocol_version) is not HTTPStatus.OK
-        ):
-            return _empty(HTTPStatus.BAD_REQUEST)
-        if isinstance(message, JsonRpcNotification):
-            self._route(message)
-            return ACKNOWLEDGEMENT
-        reply = await self._reply_to(message)
-        return reply if reply is UNANSWERED else answer_for(reply)
-
-    def _route(self, notification: JsonRpcNotification) -> None:
-        if notification.method != McpMethod.CANCELLED:
-            return
-        try:
-            params = read_payload(CancelledParams, notification.params)
-        except McpWireError:
-            return
-        self._calls.cancel(params.request_id)
-
-    async def _reply_to(self, request: JsonRpcRequest) -> Reply | Unanswered:
-        match request.method:
-            case McpMethod.INITIALIZE:
-                return self._initialized(request)
-            case McpMethod.PING:
-                return JsonRpcResponse(id=request.id, result={})
-            case McpMethod.TOOLS_LIST:
-                return tools_list_response(request.id, self._narrowed)
-            case McpMethod.TOOLS_CALL:
-                return await self._called(request)
-            case _:
-                return error_response(request.id, JsonRpcErrorCode.METHOD_NOT_FOUND)
-
-    @staticmethod
-    def _initialized(request: JsonRpcRequest) -> Reply:
-        try:
-            params = read_payload(InitializeParams, request.params)
-        except McpWireError:
-            return error_response(request.id, JsonRpcErrorCode.INVALID_PARAMS)
-        return initialize_response(request.id, params.protocol_version)
-
-    async def _called(self, request: JsonRpcRequest) -> Reply | Unanswered:
-        try:
-            params = read_payload(CallToolParams, request.params)
-        except McpWireError:
-            return error_response(request.id, JsonRpcErrorCode.INVALID_PARAMS)
-        if params.name not in self._narrowed_names:
-            self._calls.unoffered()
-            return error_response(request.id, JsonRpcErrorCode.INVALID_PARAMS)
-        return await self._calls.call(request.id, params)
+        decision = decide_server_message(
+            request.body, request.protocol_version, self._narrowed_names
+        )
+        match decision:
+            case Answered(answer):
+                return answer
+            case Notified(cancelled):
+                if cancelled is not None:
+                    self._calls.cancel(cancelled)
+                return ACKNOWLEDGEMENT
+            case Listing(request_id):
+                return answer_for(tools_list_response(request_id, self._narrowed))
+            case Unoffered(request_id):
+                self._calls.unoffered()
+                return answer_for(error_response(request_id, JsonRpcErrorCode.INVALID_PARAMS))
+            case Call(request_id, params):
+                reply = await self._calls.call(request_id, params)
+                return reply if reply is UNANSWERED else answer_for(reply)

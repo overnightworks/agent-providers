@@ -15,6 +15,7 @@ from typing import Any, Final
 
 from pydantic import TypeAdapter, ValidationError
 
+from agent_client.mcp_wire import object_without_duplicate_members
 from agent_client.wire import ProtocolVersion, RejectionCode, RunRequest, refuse_non_json_constant
 
 MAX_REQUEST_BYTES: Final = 256 * 1024
@@ -48,7 +49,7 @@ def parse_run_request(body: bytes) -> RunRequest | RejectionCode:
 
 
 def _refuse_duplicate_members(members: list[tuple[str, Any]]) -> dict[str, Any]:
-    document = dict(members)
-    if len(document) != len(members):
-        raise _NotStrictJson("a member is named twice")
-    return document
+    try:
+        return object_without_duplicate_members(members)
+    except ValueError:
+        raise _NotStrictJson("a member is named twice") from None

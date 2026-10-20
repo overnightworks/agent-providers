@@ -13,7 +13,10 @@ from agent_client.mcp_wire import (
     ACKNOWLEDGEMENT,
     NON_TEXT_BLOCK_MESSAGE,
     SUPPORTED_PROTOCOL_VERSIONS,
+    Answered,
+    Call,
     CallToolParams,
+    HttpAnswer,
     InitializeParams,
     JsonRpcError,
     JsonRpcErrorBody,
@@ -21,14 +24,18 @@ from agent_client.mcp_wire import (
     JsonRpcNotification,
     JsonRpcRequest,
     JsonRpcResponse,
+    Listing,
     ListToolsParams,
     ListToolsResult,
     McpWireError,
+    Notified,
     ProtocolVersion,
     ToolDefinition,
     ToolOutcome,
+    Unoffered,
     WireRefusal,
     answer_for,
+    decide_server_message,
     encode_message,
     error_response,
     initialize_response,
@@ -524,3 +531,83 @@ def test_a_tools_list_response_writes_kept_definitions_by_alias_without_a_null_d
     }
 
     assert encode_message(tools_list_response(3, tools)) == json.dumps(expected).encode()
+
+
+OFFERED = frozenset({"echo"})
+
+
+def _decide(message: dict[str, Any], version: str | None = "2025-11-25") -> Any:
+    return decide_server_message(json.dumps(message).encode(), version, OFFERED)
+
+
+def _request(method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    members = {} if params is None else {"params": params}
+    return {"jsonrpc": "2.0", "id": 5, "method": method, **members}
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        (_request("tools/list"), Listing(5)),
+        (
+            _request("tools/call", {"name": "echo"}),
+            Call(5, CallToolParams(name="echo")),
+        ),
+        (_request("tools/call", {"name": "other"}), Unoffered(5)),
+        (
+            {"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 3}},
+            Notified(cancelled=3),
+        ),
+        ({"jsonrpc": "2.0", "method": "notifications/initialized"}, Notified()),
+        (
+            {"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": []}},
+            Notified(),
+        ),
+    ],
+)
+def test_the_server_half_hands_state_bound_messages_to_its_caller(
+    message: dict[str, Any], expected: Any
+) -> None:
+    assert _decide(message) == expected
+
+
+@pytest.mark.parametrize(
+    ("message", "reply"),
+    [
+        (_request("ping"), JsonRpcResponse(id=5, result={})),
+        (
+            _request("initialize", {"protocolVersion": "2025-11-25"}),
+            initialize_response(5, "2025-11-25"),
+        ),
+        (_request("initialize", {}), error_response(5, JsonRpcErrorCode.INVALID_PARAMS)),
+        (_request("tools/call", {}), error_response(5, JsonRpcErrorCode.INVALID_PARAMS)),
+        (_request("resources/list"), error_response(5, JsonRpcErrorCode.METHOD_NOT_FOUND)),
+    ],
+)
+def test_the_server_half_answers_what_needs_no_state_itself(
+    message: dict[str, Any], reply: JsonRpcResponse | JsonRpcError
+) -> None:
+    assert _decide(message) == Answered(answer_for(reply))
+
+
+@pytest.mark.parametrize("version", [None, "2024-11-05"])
+def test_the_server_half_refuses_a_request_after_initialize_without_a_supported_version(
+    version: str | None,
+) -> None:
+    refused = _decide(_request("tools/list"), version)
+    assert refused == Answered(HttpAnswer(HTTPStatus.BAD_REQUEST, None, b""))
+
+
+def test_the_server_half_lets_initialize_through_without_a_version_header() -> None:
+    decision = _decide(_request("initialize", {"protocolVersion": "2025-11-25"}), None)
+    assert decision == Answered(answer_for(initialize_response(5, "2025-11-25")))
+
+
+@pytest.mark.parametrize("message", [RESPONSE, ERROR])
+def test_the_server_half_refuses_a_message_that_is_an_answer(message: dict[str, Any]) -> None:
+    assert _decide(message) == Answered(HttpAnswer(HTTPStatus.BAD_REQUEST, None, b""))
+
+
+def test_the_server_half_refuses_a_body_that_is_not_a_message() -> None:
+    decision = decide_server_message(b"not json", "2025-11-25", OFFERED)
+    assert decision == Answered(HttpAnswer(HTTPStatus.BAD_REQUEST, None, b""))

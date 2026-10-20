@@ -1,8 +1,0 @@
-claim_id = "ebf1b64d4ecb4814b040342c545ac7b1"
-agent = "Claude e1606f00-9f9f-45ac-9386-0530e7a84059"
-role = "builder"
-base = "786774f11b0413a56a4c8adb3d1734453640ee16"
-branch = "claude/issue-370-a1m-s4-asgi-mcp-server"
-scope = ["README.md", "docs/decisions/0001-agent-service.md", "packages/agent-client/src/agent_client/capability.py", "packages/agent-client/src/agent_client/mcp_server/__init__.py", "packages/agent-client/src/agent_client/mcp_server/app.py", "packages/agent-client/src/agent_client/mcp_server/verification.py", "packages/agent-client/src/agent_client/mcp_wire.py", "packages/agent-service/src/agent_service/capability.py", "packages/agent-service/src/agent_service/run_request.py", "tests/service_support.py", "tests/test_mcp_server.py", "tests/test_mcp_server_interop.py", "tests/test_mcp_wire.py"]
-opened_commit = "3f4a2e62f72545114a0c497a67ef281413c6dd73"
-whole_reason = "The server, its exit check, the moved needle and the one strict reader change together."

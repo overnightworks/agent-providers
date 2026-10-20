@@ -96,7 +96,6 @@ OPENAI_NON_CHAT_MARKERS: Final[tuple[str, ...]] = (
 )
 CLAUDE_MODEL_PREFIX = "claude-"
 CLAUDE_CLI_MODEL_LIST_MARKER = "Available: "
-CLAUDE_CLI_CURRENT_MODEL_MARKER = "Current model: "
 
 CLAUDE_OAUTH_TOKEN_VARIABLE: Final[str] = "CLAUDE_CODE_OAUTH_TOKEN"
 CLAUDE_CLI_STATUS_ARGS: Final[tuple[str, ...]] = ("auth", "status")

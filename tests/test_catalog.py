@@ -11,6 +11,7 @@ import contextlib
 import dataclasses
 import enum
 import json
+import logging
 import threading
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -22,12 +23,15 @@ from provider_test_support import (
     CLAUDE_MODEL_CATALOG_STDOUT,
     CLI_RUNTIME_OVERRIDES,
     GROK_LOGGED_IN,
+    SOUND_TOKEN_FILES,
+    TOKEN_CANARY,
+    UNSOUND_TOKEN_FILES,
     a_codex_login,
-    a_credential_destination_that_fails,
     a_fifo,
-    a_symlink_to_a_login,
     call_within_deadline,
     fake_cli_executable,
+    fake_cli_process,
+    install_cli_door,
     override_claude_runtime,
     override_codex_runtime,
     override_provider_runtime,
@@ -42,14 +46,13 @@ from agent_providers.catalog import (
     ProviderReady,
     ProviderRoute,
     ProviderRouteReadinessState,
-    ProviderRouteSnapshot,
     ProviderSetupMethod,
     list_provider_models,
     probe_provider_route,
     provider_configuration,
 )
-from agent_providers.config import ProviderNotConfiguredError
-from agent_providers.constants import ProviderName
+from agent_providers.config import ProviderNotConfiguredError, current_claude_runtime
+from agent_providers.constants import CLAUDE_OAUTH_TOKEN_VARIABLE, ProviderName
 from agent_providers.errors import (
     ProviderModelCatalogUnavailableError,
     ProviderUnavailableError,
@@ -66,6 +69,7 @@ from agent_providers.process import (
     codex_cli_model_catalog,
     grok_cli_status,
 )
+from agent_providers.spawn import ChildProcess
 
 CLAUDE_MODEL_CATALOG_ALIASES = sorted([
     "sonnet", "opus", "haiku", "fable", "best", "sonnet[1m]", "opus[1m]",
@@ -173,11 +177,7 @@ def test_a_cli_that_offers_no_usable_name_is_a_catalogue_failure(
     assert failure.value.reason.code is SafeRouteReasonCode.CATALOGUE_PROTOCOL_ERROR
 
 
-CLAUDE_DEFAULT_LABEL = "Opus 5 (1M context)"
-CLAUDE_AVAILABLE_LINE = "Usage: /model <name>. Available: sonnet, opus.\n"
-
-
-def test_a_ready_claude_cli_route_names_its_default_from_one_model_start(
+def test_a_ready_claude_cli_route_names_no_default_though_the_cli_states_one(
     tmp_path: Path,
 ) -> None:
     calls = tmp_path / "calls"
@@ -191,44 +191,34 @@ def test_a_ready_claude_cli_route_names_its_default_from_one_model_start(
     assert snapshot.readiness is ProviderRouteReadinessState.READY
     assert list(snapshot.models) == CLAUDE_MODEL_CATALOG_ALIASES
     assert snapshot.catalogue_failure is None
-    assert snapshot.default_model_label == CLAUDE_DEFAULT_LABEL
+    assert snapshot.default_model_label is None
     assert calls.read_text().splitlines() == ["auth status", "-p /model"]
 
 
-@pytest.mark.parametrize("unreadable_label_text", [
-    "",
-    "Current model: `Opus 5`\nCurrent model: `Sonnet 5`\n",
-], ids=("no-current-model-line", "two-current-model-lines"))
-def test_a_ready_claude_cli_route_with_an_unreadable_label_names_none(
-    unreadable_label_text: str, tmp_path: Path,
+@pytest.mark.parametrize("token_file", (*SOUND_TOKEN_FILES, *UNSOUND_TOKEN_FILES))
+def test_the_claude_cli_listing_gets_no_login_and_comes_whatever_the_token_file_holds(
+    token_file, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog,
 ) -> None:
-    _configure_cli(tmp_path, "claude", {
-        CLAUDE_STATUS_COMMAND: CLAUDE_LOGGED_IN,
-        CLAUDE_MODEL_COMMAND: unreadable_label_text + CLAUDE_AVAILABLE_LINE,
-    })
+    source = current_claude_runtime().token_file
+    token_file(source, tmp_path)
+    _configure_cli(tmp_path, "claude", {})
+    caplog.set_level(logging.DEBUG)
+    started: list[tuple[ChildProcess, list[Path]]] = []
 
-    snapshot = probe_provider_route("claude", ProviderRoute.CLI)
+    def door(child: ChildProcess, *, stderr):
+        started.append((child, list(Path(child.environment["HOME"]).iterdir())))
+        return fake_cli_process(CLAUDE_MODEL_CATALOG_STDOUT.encode())
 
-    assert snapshot.readiness is ProviderRouteReadinessState.READY
-    assert snapshot.models == ("opus", "sonnet")
-    assert snapshot.catalogue_failure is None
-    assert snapshot.default_model_label is None
+    install_cli_door(monkeypatch, door)
 
+    listed = list_provider_models("claude", ProviderRoute.CLI)
 
-def test_the_claude_default_follows_the_cli_at_the_next_probe(tmp_path: Path) -> None:
-    def probe_after_the_cli_states(label: str) -> ProviderRouteSnapshot:
-        _configure_cli(tmp_path, "claude", {
-            CLAUDE_STATUS_COMMAND: CLAUDE_LOGGED_IN,
-            CLAUDE_MODEL_COMMAND: f"Current model: `{label}`\n" + CLAUDE_AVAILABLE_LINE,
-        })
-        return probe_provider_route("claude", ProviderRoute.CLI)
-
-    first = probe_after_the_cli_states("Opus 5.5 (default)")
-    second = probe_after_the_cli_states("Sonnet 5.5 (default)")
-
-    assert (first.default_model_label, second.default_model_label) == (
-        "Opus 5.5 (default)", "Sonnet 5.5 (default)",
-    )
+    [(child, entries_at_the_start)] = started
+    assert listed == CLAUDE_MODEL_CATALOG_ALIASES
+    assert child.arguments == CLAUDE_MODEL_COMMAND
+    assert CLAUDE_OAUTH_TOKEN_VARIABLE not in child.environment
+    assert entries_at_the_start == []
+    assert TOKEN_CANARY not in caplog.text
 
 
 def _stub_a_ready_api_listing(
@@ -679,10 +669,6 @@ def _cli_root_removed(tmp_path: Path) -> None:
     removed_root.rmdir()
 
 
-def _claude_credential_replaced_by_a_link(tmp_path: Path) -> None:
-    override_claude_runtime(token_file=a_symlink_to_a_login(tmp_path))
-
-
 def _claude_binary_removed(tmp_path: Path) -> None:
     override_provider_runtime(cli_binary_search_path=(tmp_path,))
     override_claude_runtime(binary="absent-claude-cli")
@@ -692,10 +678,6 @@ CLAUDE_LISTING_FAULTS = [
     pytest.param(
         _cli_root_removed, SafeRouteReasonCode.CLI_UNAVAILABLE,
         ProviderRouteReadinessState.DISTURBED, id="home-not-made",
-    ),
-    pytest.param(
-        _claude_credential_replaced_by_a_link, SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED,
-        ProviderRouteReadinessState.NOT_CONFIGURED, id="credential-source-a-link",
     ),
 ]
 
@@ -972,13 +954,6 @@ def _claude_cli_root_removed(tmp_path: Path) -> Iterator[None]:
     yield
 
 
-@contextlib.contextmanager
-def _claude_credential_copy_not_written(tmp_path: Path) -> Iterator[None]:
-    _configure_cli(tmp_path, "claude", {CLAUDE_STATUS_COMMAND: CLAUDE_LOGGED_IN})
-    with a_credential_destination_that_fails("write"):
-        yield
-
-
 CLAUDE_ENVIRONMENT_FAULTS = [
     pytest.param(
         _claude_binary_missing, CliEnvironmentCause.BINARY_MISSING,
@@ -987,10 +962,6 @@ CLAUDE_ENVIRONMENT_FAULTS = [
     pytest.param(
         _claude_cli_root_removed, CliEnvironmentCause.HOME_NOT_CREATED,
         "CliEnvironmentUnavailableError", id="root-removed",
-    ),
-    pytest.param(
-        _claude_credential_copy_not_written, CliEnvironmentCause.CREDENTIAL_COPY_NOT_WRITTEN,
-        "CliEnvironmentUnavailableError", id="copy-not-written",
     ),
 ]
 

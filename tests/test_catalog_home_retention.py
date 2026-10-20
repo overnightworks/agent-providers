@@ -44,7 +44,7 @@ _A_SHORT_REAP_BOUND_SECONDS = 0.2
 @dataclass(frozen=True)
 class CatalogEntry:
     call: Callable[[Path], CliRun | None]
-    credential_copy: Path
+    home_files: frozenset[Path]
 
 
 def _claude_entry(binary: Path) -> CliRun | None:
@@ -64,14 +64,14 @@ def _credentialed_entry(variable: str, token_file: Callable[[], Path]):
 
 
 _ENTRIES = {
-    "claude": CatalogEntry(_claude_entry, process._CLAUDE_CATALOG_CREDENTIAL_PATH),
+    "claude": CatalogEntry(_claude_entry, frozenset()),
     "codex": CatalogEntry(
         _credentialed_entry("CODEX_HOME", lambda: current_config().codex.token_file),
-        process._CATALOG_AUTH_FILE_PATH,
+        frozenset({process._CATALOG_AUTH_FILE_PATH}),
     ),
     "grok": CatalogEntry(
         _credentialed_entry("GROK_HOME", lambda: current_config().grok.token_file),
-        process._CATALOG_AUTH_FILE_PATH,
+        frozenset({process._CATALOG_AUTH_FILE_PATH}),
     ),
 }
 
@@ -91,7 +91,7 @@ def _run_directories_entry(root: PrivateWorkingRoot) -> CatalogEntry:
             )
             return run_catalog_cli(child, home=directories)
 
-    return CatalogEntry(call, Path("..") / process.RUN_HOME_DIRECTORY_NAME / _RUN_FILE_NAME)
+    return CatalogEntry(call, frozenset({Path(_RUN_FILE_NAME)}))
 
 
 @pytest.fixture(params=(*_ENTRIES, _RUN_DIRECTORIES))
@@ -125,22 +125,22 @@ class RunnerRecorder:
 
     def __init__(
         self,
-        copy_path: Path,
         outcome: CliRunOutcome,
         *,
         before_returning: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
-        self._copy_path = copy_path
         self._outcome = outcome
         self._before_returning = before_returning
         self.keywords: dict[str, Any] = {}
         self.home: Path | None = None
-        self.credential_copy_existed_during_the_call = False
+        self._child_home: Path | None = None
+        self.files_during_the_call: frozenset[Path] = frozenset()
 
     def __call__(self, child, **keywords: Any) -> CliRunOutcome:
         self.keywords = keywords
         self.home = child.working_directory
-        self.credential_copy_existed_during_the_call = (self.home / self._copy_path).is_file()
+        self._child_home = Path(child.environment["HOME"])
+        self.files_during_the_call = self.files_now()
         if self._before_returning is not None:
             self._before_returning(keywords)
         return self._outcome
@@ -148,9 +148,17 @@ class RunnerRecorder:
     def callback(self, name: str, *arguments: Any) -> None:
         self.keywords[name](*arguments)
 
+    def files_now(self) -> frozenset[Path]:
+        """The files below the child's ``HOME``, relative to it."""
+        return frozenset(
+            path.relative_to(self._child_home)
+            for path in self._child_home.rglob("*")
+            if path.is_file()
+        )
+
 
 def _install_recorder(monkeypatch, entry: CatalogEntry, outcome, **options) -> RunnerRecorder:
-    recorder = RunnerRecorder(entry.credential_copy, outcome, **options)
+    recorder = RunnerRecorder(outcome, **options)
     monkeypatch.setattr(process, "run_cli_bounded", recorder)
     return recorder
 
@@ -170,7 +178,7 @@ def test_a_confirmed_probe_removes_its_home_when_the_call_returns(
 
     entry.call(_BINARY)
 
-    assert recorder.credential_copy_existed_during_the_call is True
+    assert recorder.files_during_the_call == entry.home_files
     assert recorder.home.exists() is False
 
 
@@ -180,13 +188,10 @@ def test_an_unconfirmed_probe_keeps_its_home_until_the_background_confirms(
     recorder = _install_recorder(monkeypatch, entry, _outcome(became_zombie=True))
 
     entry.call(_BINARY)
-    present_after_the_return = (
-        recorder.home.exists(),
-        (recorder.home / entry.credential_copy).is_file(),
-    )
+    present_after_the_return = (recorder.home.exists(), recorder.files_now())
     recorder.callback("on_reaped", _A_PROCESS_ID, True)
 
-    assert present_after_the_return == (True, True)
+    assert present_after_the_return == (True, entry.home_files)
     assert recorder.home.exists() is False
 
 
@@ -286,9 +291,6 @@ def test_a_probe_home_stays_when_the_background_never_confirms_the_group(
     gc.collect()
     [home] = homes
 
-    assert (home.exists(), (home / process._CLAUDE_CATALOG_CREDENTIAL_PATH).is_file()) == (
-        True,
-        True,
-    )
+    assert (home.exists(), list(home.iterdir())) == (True, [])
     assert [group.process for group in held_bounded_groups] == [child]
     assert held_bounded_groups[0].on_reaped is not None

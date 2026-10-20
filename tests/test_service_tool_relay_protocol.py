@@ -25,7 +25,7 @@ from relay_support import (
 )
 from service_support import failure_lines
 
-from agent_service.mcp_wire import (
+from agent_client.mcp_wire import (
     ACKNOWLEDGEMENT,
     CallToolParams,
     HttpAnswer,

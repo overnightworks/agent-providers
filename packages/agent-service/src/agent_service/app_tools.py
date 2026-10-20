@@ -31,10 +31,7 @@ from typing import Any, Final, NoReturn
 import httpx
 
 from agent_client.capability import MCP_ENDPOINT_PATH, McpOrigin
-from agent_client.wire import MAX_EVENT_BYTES, JsonObject
-from agent_providers.errors import raise_without_chain
-from agent_service.capability import Capability
-from agent_service.mcp_wire import (
+from agent_client.mcp_wire import (
     LATEST_PROTOCOL_VERSION,
     SESSION_ID_HEADER,
     InitializeParams,
@@ -58,6 +55,9 @@ from agent_service.mcp_wire import (
     require_session_id,
     require_supported_version,
 )
+from agent_client.wire import MAX_EVENT_BYTES, JsonObject
+from agent_providers.errors import raise_without_chain
+from agent_service.capability import Capability
 
 UPSTREAM_IO_SECONDS: Final = 10.0
 MAX_TOOL_LIST_PAGES: Final = 10

@@ -31,7 +31,7 @@ from relay_support import (
 )
 from service_support import StepClock
 
-from agent_service.mcp_wire import JSON_MEDIA_TYPE, HttpAnswer
+from agent_client.mcp_wire import JSON_MEDIA_TYPE, HttpAnswer
 from agent_service.tool_relay import (
     BODY_RECEIVE_SECONDS,
     HEAD_RECEIVE_SECONDS,

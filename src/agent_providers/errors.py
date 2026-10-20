@@ -5,9 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 from functools import partial
-from typing import TYPE_CHECKING, Any, NoReturn
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
+
+from agent_client.errors import raise_without_chain as raise_without_chain
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -125,20 +127,6 @@ def refuse_empty_model(provider: str, route: str, model: str | None) -> None:
             route,
             normalize_route_failure(SafeRouteReasonCode.ROUTE_FAILED),
         )
-
-
-def raise_without_chain(error: BaseException) -> NoReturn:
-    """Raise ``error`` with no ``__context__`` or ``__cause__``, even from a handler.
-
-    An exception raised while the caller handles another one is chained to it
-    implicitly, and a chain can carry the very text the error must not.
-    """
-    try:
-        raise error
-    except BaseException:
-        error.__context__ = None
-        error.__cause__ = None
-        raise
 
 
 class ProviderModelCatalogUnavailableError(ProviderError):

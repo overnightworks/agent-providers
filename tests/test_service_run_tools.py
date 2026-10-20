@@ -56,10 +56,10 @@ from service_support import (
     fake_app_authority,  # noqa: F401 - a fixture, requested by name
 )
 
+from agent_client.mcp_wire import CallToolParams
 from agent_providers.cli_run import RelayAccess
 from agent_providers.errors import ContainmentLost, RetainedGroup
 from agent_service.app_tools import AppToolsSession, UpstreamRefused, open_app_tools
-from agent_service.mcp_wire import CallToolParams
 from agent_service.run_tools import (
     UPSTREAM_ABORT_SECONDS,
     UPSTREAM_CLOSE_SECONDS,

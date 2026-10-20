@@ -1,0 +1,7 @@
+claim_id = "6c47f43a724a4c1fa7ac2d8dba6083a2"
+agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
+role = "builder"
+base = "fd108fcbae7342ce22a08386ed616e105c60a25d"
+branch = "claude/issue-352-s4d-the-readme-documents-each-provider-s"
+scope = ["README.md"]
+opened_commit = "808c8e023b19efe6dbbff66595f5a9a0c4c88013"

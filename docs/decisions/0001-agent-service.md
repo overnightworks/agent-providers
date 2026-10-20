@@ -3503,12 +3503,11 @@ was projected to field names, codes and yes/no results and redacted (the token v
 token-aware scan found the token and `sk-ant-` neither in the stored evidence nor in this
 section's diff. For m1–m4 and r1–r3 billing was not independently measured (the text
 formats carry no cost field); zero billed model calls there is inferred from m4b and r3
-(m2 below says why). The one call in the cell that could bill is m5's turn t1 (cap 1, not
-retried). It returned an empty `modelUsage` and its cost was not recorded, so zero billing
-there is an inference, not a measurement: #75 reads an empty `modelUsage` as billing no
-model only of a successful statement B result, and t1 is a failed turn. s3 was not a
-second billed call: it is statement B, `-p /model`, which returned an empty `modelUsage`
-too.
+(m2 below says why). The one call in the cell authorized to bill is m5's turn t1 (cap 1,
+not retried). Whether t1 or s3 billed was not measured, and t1's cost was not recorded;
+zero billing for both is inferred from a `usage_state` recorded empty by the unseparated
+reading described in m5. #75 reads an empty `modelUsage` as billing no model only of a
+successful statement B result, and t1 is a failed turn. s3 is statement B, `-p /model`.
 
 **Harness.** A1b-0b1's harness: network not unshared, `/run/systemd/resolve` bound
 read-only, a fresh private home (mode 700, holding only the empty `tmp`) and an empty
@@ -3517,7 +3516,9 @@ working directory per run, both deleted after it, `--die-with-parent`. The envir
 where a run says so, `CLAUDE_CODE_OAUTH_TOKEN` with the real or the rejected token.
 Inside the sandbox the CLI runs under `strace -f -qq -e trace=connect`. The m5 runs were traced too:
 their connection addresses went to a temporary file that was deleted after each run and
-none was retained, which still deviates from the m5 allowlist (no addresses). The driver
+nothing from it was retained; that, and the numeric `init_count` and `non_json`
+diagnostics the as-run projection stored (re-projected to yes/no in scratch afterwards),
+deviated from the m5 allowlist. The driver
 now runs m5 untraced and writes no address anywhere; that corrected path has not been
 driven. The scratch
 driver lists the home (names and sizes) and scans every file's bytes for the token,
@@ -3611,8 +3612,11 @@ including `Sonnet 5.5 (default)`.
 (Claude Code)`, checked without the token in the same sandbox) with the real token, under
 the operator's rulings of 19.10.2026 ("Ja, ein Turn" for t1, "Ja, s3 laufen lassen" for
 s3), in one driver start, each run once and none repeated. The driver read each output
-whole in memory and stored only L, the `stated_id`s, K, exit codes, `terminal`,
-`usage_state`, `result.subtype`, `is_error` and yes/no results.
+whole in memory and stored L, the `stated_id`s, K, exit codes, `terminal`,
+`usage_state`, `result.subtype`, `is_error` and yes/no results. The as-run projection
+deviated from the allowlist twice: it also stored `init_count` and `non_json` as numbers
+(the scratch m5 files were re-projected to yes/no afterward), and the strace address file
+was temporary, deleted after each run, with nothing retained.
 - **s1** statement A, `-p /model`: exit 0, L `Sonnet 5.5 (default)`.
 - **s2** statement B, `-p /model --output-format stream-json --verbose`: exit 0,
   `terminal` success, `usage_state` empty, `stated_id` (`system/init.model`)
@@ -3627,7 +3631,7 @@ whole in memory and stored only L, the `stated_id`s, K, exit codes, `terminal`,
   exit 1, `result.subtype` `"success"`, `is_error` true, `terminal` failure,
   `usage_state` empty (the same unseparated reading). `result.modelUsage` held no key, so
   there is no K.
-- **s3** statement B again, after t1 (not a second billed call): exit 0, `terminal` success, `usage_state` empty,
+- **s3** statement B again, after t1: exit 0, `terminal` success, `usage_state` empty,
   `stated_id` `claude-sonnet-5-5`.
 
 No run left a `.credentials*` file or token, `sk-ant-` or `oat01` bytes in its home.

@@ -236,7 +236,7 @@ provider = "claude"
 token_file = "/run/secrets/claude-token"
 ```
 
-An app that still uses the core directly names the same kind of file in the
+An app that still uses the core directly names the service's login file in the
 provider's block of its `ProviderRuntimeConfig` (`claude.token_file`,
 `codex.token_file`, `grok.token_file`). This is the interim path. It has the
 gaps listed at the end of this section, and #18 A1r5 removes it.
@@ -254,33 +254,35 @@ gaps listed at the end of this section, and #18 A1r5 removes it.
   next turn or run reads the file again, so no restart is needed. The token
   reaches the child only as `CLAUDE_CODE_OAUTH_TOKEN`, never as a file and
   never in its arguments.
-- **On expiry.** A streaming turn ends with the safe code `CLI_AUTH_REJECTED`,
+- **On expiry.** A streaming turn ends with the safe code `cli_auth_rejected`,
   whose text is "CLI login was rejected or has expired." A turn without a
   stream says "Claude CLI is unavailable. Check server logs for details."
-  (gap L6). A service run fails with `provider_error`. A missing or refused
-  file fails with `CLI_LOGIN_NOT_CONFIGURED` before any child starts. The model
-  list asks the CLI without a login and names no default.
+  (gap L6). A service run fails with `provider_error`. On core turns, a missing
+  or refused file raises `CliLoginNotConfiguredError`, mapped by the adapter to
+  `cli_login_not_configured`. In the service, it prevents startup or fails a
+  later run with `provider_error`, before any child starts. The model list asks
+  the CLI without a login and names no default.
 
 ### Codex
 
-- **What goes into the file.** The `auth.json` that `codex login` writes, for
-  example your own `~/.codex/auth.json`.
-- **How it is made.** Run `codex login` and copy the file to the host.
-- **Who keeps it fresh.** Whoever uses that Codex CLI keeps it fresh. A child
-  gets a copy with an empty `refresh_token`, so it cannot rotate your real one.
-- **On expiry.** The access token in the copy runs out, and Codex turns are
-  refused until someone puts in a renewed file. Renewal on a server is not yet
-  decided (#115 HQ2). The service has no Codex profile yet.
+- **What goes into the file.** The `auth.json` that `codex login` writes. The
+  interim core path accepts it. How the shared service login is created remains
+  undecided (#115 HQ2).
+- **Who keeps it fresh.** Not decided for the service (#115 HQ2).
+- **On expiry.** The child's copy has an empty `refresh_token`. Token lifetime
+  and expired-login behavior remain unmeasured; server renewal is undecided
+  (#115 HQ2). The service has no Codex profile yet.
 
 ### Grok
 
-- **What goes into the file.** The `auth.json` that `grok login` writes.
-- **How it is made.** Run `grok login` and copy the file to the host.
-- **Who keeps it fresh.** Whoever uses that Grok CLI keeps it fresh. A child
-  gets the full copy, `refresh_token` included. Whether a child can renew or
-  rotate your login with it is not measured yet (G0b; #255 S4g decides).
-- **On expiry.** Grok turns are refused until someone puts in a renewed file.
-  The service has no Grok profile yet.
+- **What goes into the file.** The `auth.json` that `grok login` writes. The
+  interim core path accepts it. How the shared service login is created remains
+  undecided (#115 HQ2).
+- **Who keeps it fresh.** Not decided for the service. A child gets the full
+  copy, `refresh_token` included. Whether a child can renew or rotate the login
+  with it is not measured yet (G0b; #255 S4g decides).
+- **On expiry.** Expiry and renewal behavior remain unmeasured (G0b). The
+  service has no Grok profile yet.
 
 ### What does not yet hold on the interim core path
 

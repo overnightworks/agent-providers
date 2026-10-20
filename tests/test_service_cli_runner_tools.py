@@ -174,6 +174,10 @@ def settled_status(base_url: str, events: Sequence[RunEvent]) -> RunStatus:
     return status_of(base_url, list(events))
 
 
+def a_plain_run(base_url: str, _app: ToolApp) -> list[RunEvent]:
+    return post_a_run(base_url)
+
+
 def a_tool_run(
     tmp_path: Path,
     authority: TestAuthority,
@@ -186,7 +190,7 @@ def a_tool_run(
     overrides: Mapping[str, Responder] | None = None,
     serving_authority: TestAuthority | None = None,
     app_stays_up: bool = True,
-    scenario: Callable[[str], list[RunEvent]] = post_a_run,
+    scenario: Callable[[str, ToolApp], list[RunEvent]] = a_plain_run,
     before_stop: Callable[[ServiceConfig], None] = lambda _config: None,
     token_file: Path | None = None,
     **claude_options: Any,
@@ -221,7 +225,7 @@ def a_tool_run(
         )
 
         def play(base_url: str) -> tuple[list[RunEvent], RunStatus]:
-            events = scenario(base_url)
+            events = scenario(base_url, app)
             status = settled_status(base_url, events)
             before_stop(config)
             return events, status
@@ -483,7 +487,7 @@ def test_a_login_file_swapped_between_two_tool_runs_serves_the_next_run_without_
     capture = tmp_path / "capture"
     first_runs: list[tuple[tuple[RunState, FailureCode | None], str]] = []
 
-    def two_runs_with_a_swap_between(base_url: str) -> list[RunEvent]:
+    def two_runs_with_a_swap_between(base_url: str, _app: ToolApp) -> list[RunEvent]:
         first = post_a_run(base_url)
         first_runs.append(
             (ending_of(settled_status(base_url, first)), login_the_child_saw(capture))
@@ -514,9 +518,11 @@ def test_a_login_file_gone_bad_fails_the_tool_run_before_any_tool_connection_or_
 ):
     login_file = a_login_file(tmp_path, FIRST_LOGIN)
     capture = tmp_path / "capture"
-    failed_run: list[tuple[list[RunEvent], tuple[RunState, FailureCode | None], bool, int]] = []
+    failed_run: list[
+        tuple[list[RunEvent], tuple[RunState, FailureCode | None], bool, int, int]
+    ] = []
 
-    def spoiled_then_repaired(base_url: str) -> list[RunEvent]:
+    def spoiled_then_repaired(base_url: str, app: ToolApp) -> list[RunEvent]:
         spoil(login_file)
         failed = post_a_run(base_url)
         failed_run.append(
@@ -525,6 +531,7 @@ def test_a_login_file_gone_bad_fails_the_tool_run_before_any_tool_connection_or_
                 ending_of(settled_status(base_url, failed)),
                 (capture / "argv").exists(),
                 held_claude_slots(),
+                app.fake.accepted_connections,
             )
         )
         swap_login(login_file, SECOND_LOGIN)
@@ -541,17 +548,18 @@ def test_a_login_file_gone_bad_fails_the_tool_run_before_any_tool_connection_or_
         scenario=spoiled_then_repaired,
     )
 
-    [(failed_events, failed_ending, child_started, slots_held)] = failed_run
+    [(failed_events, failed_ending, child_started, slots_held, connections_accepted)] = failed_run
     assert (
         failed_ending,
         [event.message for event in failed_events if isinstance(event, Failed)],
         child_started,
         slots_held,
+        connections_accepted,
         ended_as(run),
         login_the_child_saw(capture),
         len(run.app.calls),
         held_claude_slots(),
-    ) == (PROVIDER_ERROR, [RUNNER_FAILED_MESSAGE], False, 0, SUCCEEDED, SECOND_LOGIN, 1, 0)
+    ) == (PROVIDER_ERROR, [RUNNER_FAILED_MESSAGE], False, 0, 0, SUCCEEDED, SECOND_LOGIN, 1, 0)
     assert list(private_root_of(run.config).iterdir()) == []
     assert_only_the_class_was_logged(caplog, failed_events, tmp_path)
 
@@ -607,7 +615,7 @@ def leave_when(
     return seen
 
 
-def leave_after_the_first_tool_call(base_url: str) -> list[RunEvent]:
+def leave_after_the_first_tool_call(base_url: str, _app: ToolApp) -> list[RunEvent]:
     return leave_when(base_url, "tool_call")
 
 
@@ -790,8 +798,8 @@ def test_a_final_after_a_cancelled_call_follows_its_result(
 
 def settling_before_the_app_is_released(
     release: threading.Event, scenario: Callable[[str], list[RunEvent]]
-) -> Callable[[str], list[RunEvent]]:
-    def play(base_url: str) -> list[RunEvent]:
+) -> Callable[[str, ToolApp], list[RunEvent]]:
+    def play(base_url: str, _app: ToolApp) -> list[RunEvent]:
         try:
             events = scenario(base_url)
             settled_status(base_url, events)
@@ -891,8 +899,8 @@ def nothing_left_running(
 
 def leaving_beside_the_held_request(
     held: HeldRequests, event_type: str, also_ready: Callable[[], None] = lambda: None
-) -> Callable[[str], list[RunEvent]]:
-    def play(base_url: str) -> list[RunEvent]:
+) -> Callable[[str, ToolApp], list[RunEvent]]:
+    def play(base_url: str, _app: ToolApp) -> list[RunEvent]:
         holding: list[HeldRequest] = []
 
         def ready() -> None:
@@ -1009,8 +1017,8 @@ def post_a_run_marked(base_url: str, marker: str) -> list[RunEvent]:
 
 def five_runs_held_inside_their_calls_at_once(
     held: HeldRequests, outcomes: dict[str, tuple[list[RunEvent], RunStatus]]
-) -> Callable[[str], list[RunEvent]]:
-    def play(base_url: str) -> list[RunEvent]:
+) -> Callable[[str, ToolApp], list[RunEvent]]:
+    def play(base_url: str, _app: ToolApp) -> list[RunEvent]:
         with ThreadPoolExecutor(len(PARALLEL_MARKERS)) as clients:
             try:
                 posted = {
@@ -1079,11 +1087,11 @@ def owning_the_descendant(row: DescendantRow) -> Iterator[None]:
 
 
 def in_the_descendants_company(
-    row: DescendantRow, scenario: Callable[[str], list[RunEvent]]
-) -> Callable[[str], list[RunEvent]]:
-    def play(base_url: str) -> list[RunEvent]:
+    row: DescendantRow, scenario: Callable[[str, ToolApp], list[RunEvent]]
+) -> Callable[[str, ToolApp], list[RunEvent]]:
+    def play(base_url: str, app: ToolApp) -> list[RunEvent]:
         with owning_the_descendant(row):
-            return scenario(base_url)
+            return scenario(base_url, app)
 
     return play
 
@@ -1091,7 +1099,7 @@ def in_the_descendants_company(
 @pytest.mark.parametrize(
     ("options", "ending"),
     [
-        pytest.param({"scenario": post_a_run}, SUCCEEDED, id="success"),
+        pytest.param({"scenario": a_plain_run}, SUCCEEDED, id="success"),
         pytest.param(
             {"scenario": leave_after_the_first_tool_call, "linger_seconds": 60.0},
             (RunState.CANCELLED, None),

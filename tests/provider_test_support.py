@@ -73,6 +73,7 @@ from agent_providers.config import (
     current_config,
     reset_config,
 )
+from agent_providers.constants import CLAUDE_OAUTH_TOKEN_VARIABLE
 from agent_providers.dispatch import stream_turn
 from agent_providers.errors import (
     ProviderUnavailableError,
@@ -85,6 +86,7 @@ from agent_providers.errors import (
 from agent_providers.events import AssistantTextEvent, FinalEvent, StreamEvent
 from agent_providers.process import CliRunOutcome, CliRunReason
 from agent_providers.procfs import GroupCensus
+from agent_providers.secret_file import MAX_SECRET_FILE_BYTES
 from agent_providers.spawn import (
     AnchorStateError,
     BlockingAnchoredChild,
@@ -278,6 +280,81 @@ def fake_cli_executable(
     executable.write_text(f'#!/bin/sh\n{log_line}case "$*" in\n{cases}  *) exit 1 ;;\nesac\n')
     executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
     return executable
+
+
+SAMPLE_CLAUDE_SETUP_TOKEN: Final = "sk-ant-oat01-sample-setup-token"
+CLAUDE_LOGIN_FILE: Final = Path(".claude/.credentials.json")
+
+
+def write_claude_token_file(
+    path: Path, token: str = SAMPLE_CLAUDE_SETUP_TOKEN, *, mode: int = 0o600,
+) -> Path:
+    """A Claude ``token_file`` as ``claude setup-token`` leaves it: one line, mode 0600."""
+    path.write_text(f"{token}\n")
+    path.chmod(mode)
+    return path
+
+
+TOKEN_CANARY = "sk-ant-oat01-token-canary-5e2b81"
+
+
+def a_sound_token_file(source: Path, _tmp_path: Path) -> None:
+    write_claude_token_file(source, TOKEN_CANARY)
+
+
+def no_token_file(source: Path, _tmp_path: Path) -> None:
+    source.unlink()
+
+
+def a_token_file_open_to_others(source: Path, _tmp_path: Path) -> None:
+    write_claude_token_file(source, TOKEN_CANARY, mode=0o644)
+
+
+def a_link_to_a_token_file_of_mode(mode: int) -> Callable[[Path, Path], None]:
+    def link(source: Path, tmp_path: Path) -> None:
+        target = write_claude_token_file(tmp_path / "linked-token", TOKEN_CANARY, mode=mode)
+        source.unlink()
+        source.symlink_to(target)
+
+    return link
+
+
+def a_token_file_over_the_bound(source: Path, _tmp_path: Path) -> None:
+    write_claude_token_file(
+        source, TOKEN_CANARY * (MAX_SECRET_FILE_BYTES // len(TOKEN_CANARY) + 1),
+    )
+
+
+def a_credentials_document(source: Path, _tmp_path: Path) -> None:
+    login = {"accessToken": TOKEN_CANARY, "refreshToken": TOKEN_CANARY}
+    write_claude_token_file(source, json.dumps({"claudeAiOauth": login}))
+
+
+SOUND_TOKEN_FILES = (
+    pytest.param(a_sound_token_file, id="0600-token"),
+    pytest.param(a_link_to_a_token_file_of_mode(0o600), id="link-to-0600"),
+)
+UNSOUND_TOKEN_FILES = (
+    pytest.param(no_token_file, id="missing"),
+    pytest.param(a_token_file_open_to_others, id="0644-token"),
+    pytest.param(a_link_to_a_token_file_of_mode(0o644), id="link-to-0644"),
+    pytest.param(a_token_file_over_the_bound, id="over-16KiB"),
+    pytest.param(a_credentials_document, id="json"),
+)
+
+
+def assert_claude_token_child(child: ChildProcess, *, root: Path, token: str) -> Path:
+    """Assert a Claude child at its spawn boundary: an empty private home, the token in
+    its environment as ``CLAUDE_CODE_OAUTH_TOKEN`` and nowhere in its command line."""
+    home = Path(child.environment["HOME"])
+    assert child.working_directory == home
+    assert home.parent == root
+    assert stat.S_IMODE(home.stat().st_mode) == 0o700
+    assert not (home / CLAUDE_LOGIN_FILE).exists()
+    assert list(home.iterdir()) == []
+    assert child.environment[CLAUDE_OAUTH_TOKEN_VARIABLE] == token
+    assert not any(token in part for part in child.command)
+    return home
 
 
 def assert_private_credential_child(

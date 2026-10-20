@@ -163,7 +163,13 @@ The host names each provider credential *file*. Catalog probes copy the needed
 file into a private home for their bounded run. Every Claude or Grok turn uses
 a fresh private home below
 `cli_working_directory_root`: directories are mode 0700 and credential copies
-are mode 0400. The source is opened only for reading. A Codex or Grok turn's home on the bounded runner remains until its group is confirmed gone (below), including a delayed spawn or background reap. The synchronous `call_claude` turn's timeout kills only the direct child. The async Claude turns
+are mode 0400. The source is opened only for reading. A Claude turn gets no
+copy: its home holds no login file, and the setup token in `claude.token_file`
+reaches the child only as `CLAUDE_CODE_OAUTH_TOKEN` in its environment, never
+in its arguments. The token is read through `secret_file` at every child start,
+before the home is made; a file that is missing, open to group or others, over
+16 KiB, or holding JSON fails the turn with `CLI_LOGIN_NOT_CONFIGURED` and
+leaves no home behind. A Codex or Grok turn's home on the bounded runner remains until its group is confirmed gone (below), including a delayed spawn or background reap. The synchronous `call_claude` turn's timeout kills only the direct child. The async Claude turns
 on the CLI route (`acall_claude` without an `api_key`, which uses the API
 otherwise, `acall_claude_with_mcp` and `acall_claude_with_mcp_stream`) run on a
 `spawn.AnchoredChild`: when the turn ends, its reap sends SIGTERM to the leader's
@@ -248,8 +254,9 @@ the host runs through its CLI has its own block: `claude` holds
 `GrokCliRuntime(binary, token_file)`, and `codex` holds
 `CodexCliRuntime(binary, token_file)`; a host that does not run a provider
 leaves its block `None`. `token_file` is the provider's login
-source; the provider decides its format (Grok copies its `auth.json` whole, Codex
-copies its `auth.json` blanked).
+source; the provider decides its format (Claude turns read the one line
+`claude setup-token` prints, Grok copies its `auth.json` whole, Codex copies its
+`auth.json` blanked).
 A Claude, Grok or Codex call under a configuration without its block raises `ProviderNotConfiguredError(provider, block)` naming
 the provider, in turns and in the catalog alike; the catalog never reports it as
 not logged in. A provider with an API key is ready without its block, and its
@@ -331,7 +338,8 @@ the error names the field.
 |---|---|
 | `claude_cli_binary` | `claude.binary` |
 | `claude_cli_binary_search_globs` | `claude.binary_search_globs` |
-| `claude_cli_auth_file` | `claude.token_file`, still the credentials file until the setup-token contract lands |
+| `claude_cli_auth_file` | `claude.token_file` |
+| every core Claude turn copied `claude.token_file` into its home as `.claude/.credentials.json` | `claude.token_file` holds one line, the token `claude setup-token` prints, mode 0600 or 0400; a turn gets it only as `CLAUDE_CODE_OAUTH_TOKEN` and fails with `CLI_LOGIN_NOT_CONFIGURED` for a credentials file or any other JSON. Write the token into the file before the pin bump |
 | `grok_cli_binary` | `grok.binary` |
 | `grok_cli_auth_file` | `grok.token_file`, still a full `auth.json` copy |
 | `turns.cli_prompt_file_prefix` | `turns.grok.prompt_file_prefix` |

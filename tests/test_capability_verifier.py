@@ -255,7 +255,7 @@ class _PlaceholderSigner:
 
 
 def _token_padded_to_the_limit() -> tuple[str, str]:
-    """Base64 skips every third length, so a purpose that lands on the limit is searched for."""
+    """Base64 cannot represent every output length, so a purpose that lands on the limit is searched for."""
     for purpose_length in range(MAX_CAPABILITY_CHARACTERS // 2, MAX_CAPABILITY_CHARACTERS):
         purpose = "p" * purpose_length
         payload = _claims_with(purpose=purpose)

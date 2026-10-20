@@ -513,9 +513,21 @@ def test_a_login_file_gone_bad_fails_the_tool_run_before_any_tool_connection_or_
     tmp_path, authority, child_cleanup, monkeypatch, caplog, spoil
 ):
     login_file = a_login_file(tmp_path, FIRST_LOGIN)
+    capture = tmp_path / "capture"
+    failed_run: list[tuple[list[RunEvent], tuple[RunState, FailureCode | None], bool, int]] = []
 
-    def spoiled_then_run(base_url: str) -> list[RunEvent]:
+    def spoiled_then_repaired(base_url: str) -> list[RunEvent]:
         spoil(login_file)
+        failed = post_a_run(base_url)
+        failed_run.append(
+            (
+                failed,
+                ending_of(settled_status(base_url, failed)),
+                (capture / "argv").exists(),
+                held_claude_slots(),
+            )
+        )
+        swap_login(login_file, SECOND_LOGIN)
         return post_a_run(base_url)
 
     run = a_tool_run(
@@ -524,18 +536,24 @@ def test_a_login_file_gone_bad_fails_the_tool_run_before_any_tool_connection_or_
         child_cleanup,
         monkeypatch,
         calls=[SAVE_NOTE],
+        runs={"max_parallel_cli_runs": 1},
         token_file=login_file,
-        scenario=spoiled_then_run,
+        scenario=spoiled_then_repaired,
     )
 
+    [(failed_events, failed_ending, child_started, slots_held)] = failed_run
     assert (
+        failed_ending,
+        [event.message for event in failed_events if isinstance(event, Failed)],
+        child_started,
+        slots_held,
         ended_as(run),
-        run.capture.started,
-        run.app.fake.accepted_connections,
+        login_the_child_saw(capture),
+        len(run.app.calls),
         held_claude_slots(),
-        list(private_root_of(run.config).iterdir()),
-    ) == (PROVIDER_ERROR, False, 0, 0, [])
-    assert_only_the_class_was_logged(caplog, run.events, tmp_path)
+    ) == (PROVIDER_ERROR, [RUNNER_FAILED_MESSAGE], False, 0, SUCCEEDED, SECOND_LOGIN, 1, 0)
+    assert list(private_root_of(run.config).iterdir()) == []
+    assert_only_the_class_was_logged(caplog, failed_events, tmp_path)
 
 
 def test_a_cli_that_never_connects_the_relay_ends_at_the_start_check(

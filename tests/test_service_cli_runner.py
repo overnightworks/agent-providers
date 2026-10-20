@@ -519,7 +519,8 @@ def assert_only_the_class_was_logged(
     assert [(event, kind) for event, kind, _ in failure_lines(caplog)] == [
         (f"The runner of run {failed[0].run_id} failed", "UnsoundSecretFile")
     ]
-    assert [leak for leak in (LOGIN_FILE_NAME, str(tmp_path), CANARY) if leak in caplog.text] == []
+    leaks = (LOGIN_FILE_NAME, str(tmp_path), CANARY, FIRST_LOGIN, SECOND_LOGIN)
+    assert [leak for leak in leaks if leak in caplog.text] == []
 
 
 def test_a_login_file_swapped_between_two_runs_serves_the_next_run_without_a_restart(

@@ -1,0 +1,8 @@
+claim_id = "af91c6276cce408b959a063d52eabd98"
+agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
+role = "builder"
+base = "b62d5814cc8de345006e8f5a222fb651dc222ea7"
+branch = "claude/issue-337-claude-runs-without-sessions-telemetry"
+scope = ["README.md", "src/agent_providers/claude/provider.py", "src/agent_providers/constants.py", "src/agent_providers/process.py", "tests/provider_test_support.py", "tests/test_claude_provider.py", "tests/test_claude_run.py", "tests/test_process.py"]
+opened_commit = "afb50c1c758451370d3b211acb5d7b44291ccf03"
+whole_reason = "The switches get one owner that the service run, the core turns and the catalog all read; moving it piecewise leaves two copies."

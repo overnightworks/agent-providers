@@ -53,7 +53,11 @@ from agent_providers.catalog import (
     provider_configuration,
 )
 from agent_providers.config import ProviderNotConfiguredError, current_claude_runtime
-from agent_providers.constants import CLAUDE_OAUTH_TOKEN_VARIABLE, ProviderName
+from agent_providers.constants import (
+    CLAUDE_NO_SESSION_PERSISTENCE_FLAG,
+    CLAUDE_OAUTH_TOKEN_VARIABLE,
+    ProviderName,
+)
 from agent_providers.errors import (
     ProviderModelCatalogUnavailableError,
     ProviderUnavailableError,
@@ -79,7 +83,7 @@ CLAUDE_MODEL_CATALOG_ALIASES = sorted([
 CLAUDE_LOGGED_IN = json.dumps({"loggedIn": True, "authMethod": "claude.ai"})
 CODEX_LOGGED_IN = "Logged in using ChatGPT"
 CLAUDE_LOGGED_OUT = json.dumps({"loggedIn": False})
-CLAUDE_MODEL_COMMAND = ("-p", "/model", "--no-session-persistence")
+CLAUDE_MODEL_COMMAND = ("-p", "/model", CLAUDE_NO_SESSION_PERSISTENCE_FLAG)
 CLAUDE_MODEL_CATALOG_NAMING_NO_MODEL = "Usage: /model <name>. Available: or a full model ID.\n"
 CLAUDE_STATUS_COMMAND = ("auth", "status")
 CODEX_MODEL_COMMAND = ("debug", "models")

@@ -90,6 +90,7 @@ from agent_providers.claude.provider import (
     _find_claude_binary,
     _mcp_cli_arguments,
     _parse_announced_surface,
+    _tool_surface_probe_arguments,
     acall_claude,
     acall_claude_with_mcp_stream,
     averify_no_builtin_cli_tools,
@@ -114,6 +115,7 @@ from agent_providers.config import (
 )
 from agent_providers.constants import (
     CLAUDE_CLI_COMPLETION_TIMEOUT_SECONDS,
+    CLAUDE_NO_SESSION_PERSISTENCE_FLAG,
     CLAUDE_OAUTH_TOKEN_VARIABLE,
 )
 from agent_providers.dispatch import call_provider_once
@@ -1939,11 +1941,12 @@ def test_mcp_turn_command_disables_slash_commands() -> None:
         lambda: _mcp_cli_arguments(
             "opus", "/tmp/mcp.json", _configured_mcp_server(), stream=True,
         ),
+        lambda: _tool_surface_probe_arguments(mcp=None),
     ],
-    ids=["tool-free", "tool-free-stream", "mcp", "mcp-stream"],
+    ids=["tool-free", "tool-free-stream", "mcp", "mcp-stream", "tool-surface-probe"],
 )
 def test_every_turn_command_stores_no_session(command) -> None:
-    assert "--no-session-persistence" in command()
+    assert CLAUDE_NO_SESSION_PERSISTENCE_FLAG in command()
 
 
 def test_tool_free_command_offers_no_tool_at_all() -> None:

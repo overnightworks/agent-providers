@@ -220,6 +220,85 @@ that needs no repair do not.
 
 A subscription run's directories come from `process.run_directories(root, files)`, a context manager that reads no installed configuration. `root` is a `config.PrivateWorkingRoot`, whose privacy is checked when it is constructed; the names in `files` are checked when the context is entered, before anything is created. Below the root the run gets one tree, `agent-run-XXXXXXXX/`, holding `home/` (the child's `HOME` and `TMPDIR`) and a separate, empty `work/` (its working directory), each mode 0700 whatever the umask. Each entry of `files`, a single-component name and its bytes, is written exclusively and whole into `home/` at mode 0600. A file may carry a secret, so no name, byte or path of one appears in a log line or an error text. The modes keep a run's files from every other user; they do not separate it from another process of the same user or from root. An invalid name raises `ChildProcessSpecificationError` before anything is created. After a tree exists, a setup failure makes one removal attempt; a setup `OSError` then becomes `CliEnvironmentUnavailableError` with `HOME_NOT_CREATED`, unchained and without a path, and any other exception propagates unchanged. The tree is removed by one attempt once the context has ended and no reservation from `RunDirectories.reserve()` still holds it; the attempt is claimed exactly once, and a failed removal never makes it claimable again. `anchored_turn_child` takes such a reservation as its `home_reservation` and releases it with the turn's pool slot, so the directories of a retained group stay until `confirm_group_gone(group)` returns `True`. The removal never follows a link and repairs a read-only directory as a home's removal does. Before it deletes anything it reads the mount table once, and it refuses a tree with a mount point at or below it, or a table it cannot read, because a recursive delete would cross into the mounted filesystem. That is detection at one instant: the host must keep the mount topology at and below the working root unchanged for the whole of every removal, and, as for the permission repair above, the removal promises no containment against concurrent same-user relocation. The agent service's container is required to meet this with a working root that is its own tmpfs, a non-root user without capabilities, and nothing mounted below the root or propagated into it while the service runs; that is a deployment condition, not something the library checks. A tree that cannot be removed, or whose removal is refused, is logged once at error level by class or reason, never with its path; it raises nothing, holds no later run and is never retried: there is no finalizer and no exit sweep, so it stays under the root until the host clears the root (the agent service's root is a tmpfs that empties at restart). An asynchronous interruption of the kind the Interruptions obligation below describes, arriving between the removal's claim and its call, can leave the tree with neither an attempt nor a log line, and nothing retries or sweeps it; the obligation (stop using the library and end the process) applies. A setup exception and a task cancellation are not such interruptions: each still makes its one attempt.
 
+## How a host provides each provider's login
+
+Each provider reads its login from one file that the host names. The file is
+the host's to make and to keep fresh; the library never creates, renews or
+rewrites it.
+
+The agent service holds the one login per provider for all apps. Anyone with
+the KI-Abo in Keycloak may use it. The service names
+the file as `profiles.<name>.token_file`, and today only Claude has a profile:
+
+```toml
+[profiles.subscription]
+provider = "claude"
+token_file = "/run/secrets/claude-token"
+```
+
+An app that still uses the core directly names the same kind of file in the
+provider's block of its `ProviderRuntimeConfig` (`claude.token_file`,
+`codex.token_file`, `grok.token_file`). This is the interim path. It has the
+gaps listed at the end of this section, and #18 A1r5 removes it.
+
+### Claude
+
+- **What goes into the file.** One line: the token that `claude setup-token`
+  prints. The mode must give nothing to group or others (0600 or 0400). The
+  file may be at most 16 KiB. JSON, such as a credentials file, and API keys
+  (`sk-ant-api...`) are refused. A link is followed, and its target is checked.
+- **How it is made.** Run `claude setup-token` once, sign in with the
+  subscription, and write the printed token into the file.
+- **Who keeps it fresh.** You do. The token lasts a year. To renew, write the
+  new token into a file beside the old one and move it over with `mv -T`. The
+  next turn or run reads the file again, so no restart is needed. The token
+  reaches the child only as `CLAUDE_CODE_OAUTH_TOKEN`, never as a file and
+  never in its arguments.
+- **On expiry.** A streaming turn ends with the safe code `CLI_AUTH_REJECTED`,
+  whose text is "CLI login was rejected or has expired." A turn without a
+  stream says "Claude CLI is unavailable. Check server logs for details."
+  (gap L6). A service run fails with `provider_error`. A missing or refused
+  file fails with `CLI_LOGIN_NOT_CONFIGURED` before any child starts. The model
+  list asks the CLI without a login and names no default.
+
+### Codex
+
+- **What goes into the file.** The `auth.json` that `codex login` writes, for
+  example your own `~/.codex/auth.json`.
+- **How it is made.** Run `codex login` and copy the file to the host.
+- **Who keeps it fresh.** Whoever uses that Codex CLI keeps it fresh. A child
+  gets a copy with an empty `refresh_token`, so it cannot rotate your real one.
+- **On expiry.** The access token in the copy runs out, and Codex turns are
+  refused until someone puts in a renewed file. Renewal on a server is not yet
+  decided (#115 HQ2). The service has no Codex profile yet.
+
+### Grok
+
+- **What goes into the file.** The `auth.json` that `grok login` writes.
+- **How it is made.** Run `grok login` and copy the file to the host.
+- **Who keeps it fresh.** Whoever uses that Grok CLI keeps it fresh. A child
+  gets the full copy, `refresh_token` included. Whether a child can renew or
+  rotate your login with it is not measured yet (G0b; #255 S4g decides).
+- **On expiry.** Grok turns are refused until someone puts in a renewed file.
+  The service has no Grok profile yet.
+
+### What does not yet hold on the interim core path
+
+- **L1.** Codex and Grok files are read without a mode check, up to 256 KiB.
+  Grok's readiness check reads its file with no size limit.
+- **L2.** The Codex and Grok turn copy refuses a link. That is stricter, not
+  unsafe. Grok's readiness check follows a link without checking the target.
+- **L3.** Codex and Grok read the file once per turn. A swapped file reaches
+  the next turn, not the running one.
+- **L4.** Grok's format is checked only for readiness. A turn or catalog copies
+  any readable file, even `{}`.
+- **L5.** Grok's child gets the full copy (see above).
+- **L6.** A Claude turn without a stream reports a rejected token as unavailable.
+- **L7.** Claude's readiness check reports a rejected token as signed in.
+
+#18 A1r5 deletes this core path. L1 to L4, L6 and L7 go with it; the service
+reads its files under the rules of the Claude section above.
+
 ## Safe diagnostic codes
 
 The library logs closed diagnostic codes for rejected Grok tool-protocol and

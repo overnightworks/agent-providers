@@ -1,8 +1,9 @@
 """H5 routing from the caller's groups (decision record 0001).
 
-The subscription groups, the API groups and the app's own group decide the route; the
-purpose never does. Test values: subscription groups ``/old-sub`` and ``/new-sub``, API
-group ``/api-members``, one Claude profile and the alias ``assistant-api``.
+The subscription groups and the API groups decide the route; the purpose never does, and
+membership of the app is the caller check's gate, before any route is chosen. Test values:
+subscription groups ``/old-sub`` and ``/new-sub``, API group ``/api-members``, one Claude
+profile and the alias ``assistant-api``.
 """
 
 from __future__ import annotations
@@ -25,7 +26,6 @@ ROUTE = RouteConfig(api_alias="assistant-api")
 CLI = Cli("claude-main")
 API = Api("assistant-api")
 OFF = NotEnabled()
-APP = "/apps/songmaker"
 
 
 SONNET_LISTED = {Provider.CLAUDE: frozenset({"sonnet"})}
@@ -38,11 +38,10 @@ def _routed(
     profiles=PROFILES,
     route_facts=ROUTE,
     identity=IDENTITY,
-    app="songmaker",
     model=None,
     listed=SONNET_LISTED,
 ):
-    return route(identity, route_facts, profiles, frozenset(groups), app, model, listed)
+    return route(identity, route_facts, profiles, frozenset(groups), model, listed)
 
 
 @pytest.mark.parametrize(
@@ -51,28 +50,15 @@ def _routed(
         pytest.param({"/new-sub"}, PROFILES, ROUTE, CLI, id="R1-new-subscription-group"),
         pytest.param({"/old-sub"}, PROFILES, ROUTE, CLI, id="R2-stale-token-keeps-its-route"),
         pytest.param({"/old-sub", "/new-sub"}, PROFILES, ROUTE, CLI, id="R3-both-names"),
-        pytest.param(
-            {"/new-sub", "/api-members", APP}, PROFILES, ROUTE, CLI, id="R4-subscription-wins"
-        ),
-        pytest.param(
-            {"/new-sub", "/api-members", APP}, {}, ROUTE, API, id="R5-no-profile-uses-the-api"
-        ),
+        pytest.param({"/new-sub", "/api-members"}, PROFILES, ROUTE, CLI, id="R4-subscription-wins"),
+        pytest.param({"/new-sub", "/api-members"}, {}, ROUTE, API, id="R5-no-profile-uses-the-api"),
         pytest.param({"/new-sub"}, {}, None, OFF, id="R6-nothing-configured"),
-        pytest.param({"/api-members", APP}, PROFILES, ROUTE, API, id="R7-api-member"),
-        pytest.param({"/api-members", APP}, PROFILES, None, OFF, id="R8-no-alias"),
-        pytest.param({"/api-members"}, PROFILES, ROUTE, OFF, id="R9-api-group-without-the-app"),
-        pytest.param({APP}, PROFILES, ROUTE, OFF, id="R10-app-group-alone"),
-        pytest.param(
-            {"/api-members", "/apps/presentator"}, PROFILES, ROUTE, OFF, id="R11-another-app"
-        ),
+        pytest.param({"/api-members"}, PROFILES, ROUTE, API, id="R7-api-member"),
+        pytest.param({"/api-members"}, PROFILES, None, OFF, id="R8-no-alias"),
         pytest.param({"/new-sub/friends"}, PROFILES, ROUTE, OFF, id="R12-subscription-subgroup"),
         pytest.param({"/new-sub-x"}, PROFILES, ROUTE, OFF, id="R12-subscription-look-alike"),
-        pytest.param({"/api-members/friends", APP}, PROFILES, ROUTE, OFF, id="R12a-api-subgroup"),
-        pytest.param({"/api-members-x", APP}, PROFILES, ROUTE, OFF, id="R12a-api-look-alike"),
-        pytest.param(
-            {"/api-members", f"{APP}/friends"}, PROFILES, ROUTE, OFF, id="R12b-app-subgroup"
-        ),
-        pytest.param({"/api-members", f"{APP}-x"}, PROFILES, ROUTE, OFF, id="R12b-app-look-alike"),
+        pytest.param({"/api-members/friends"}, PROFILES, ROUTE, OFF, id="R12a-api-subgroup"),
+        pytest.param({"/api-members-x"}, PROFILES, ROUTE, OFF, id="R12a-api-look-alike"),
         pytest.param(set(), PROFILES, ROUTE, OFF, id="R13-no-groups"),
     ],
 )
@@ -89,10 +75,8 @@ def test_a_stale_subscription_name_is_not_enabled_once_the_configuration_drops_i
 
 
 SUBSCRIBER = {"/new-sub"}
-API_ONLY = {"/api-members", APP}
-API_WITHOUT_APP = {"/api-members"}
-BOTH = {"/new-sub", "/api-members", APP}
-BOTH_WITHOUT_APP = {"/new-sub", "/api-members"}
+API_ONLY = {"/api-members"}
+BOTH = {"/new-sub", "/api-members"}
 
 
 @pytest.mark.parametrize(
@@ -108,26 +92,16 @@ BOTH_WITHOUT_APP = {"/new-sub", "/api-members"}
             Api("assistant-api", "claude/sonnet"),
             id="R-a-A",
         ),
-        pytest.param(API_WITHOUT_APP, "claude/sonnet", SONNET_LISTED, OFF, id="R-a-A0"),
         pytest.param(
             BOTH, "claude/sonnet", SONNET_LISTED, Cli("claude-main", "sonnet"), id="R-a-D"
-        ),
-        pytest.param(
-            BOTH_WITHOUT_APP,
-            "claude/sonnet",
-            SONNET_LISTED,
-            Cli("claude-main", "sonnet"),
-            id="R-a-DX",
         ),
         pytest.param(SUBSCRIBER, "claude/opus", SONNET_LISTED, OFF, id="R-b-S"),
         pytest.param(
             API_ONLY, "claude/opus", SONNET_LISTED, Api("assistant-api", "claude/opus"), id="R-b-A"
         ),
-        pytest.param(API_WITHOUT_APP, "claude/opus", SONNET_LISTED, OFF, id="R-b-A0"),
         pytest.param(
             BOTH, "claude/opus", SONNET_LISTED, Api("assistant-api", "claude/opus"), id="R-b-D"
         ),
-        pytest.param(BOTH_WITHOUT_APP, "claude/opus", SONNET_LISTED, OFF, id="R-b-DX"),
         pytest.param(SUBSCRIBER, "claude/sonnet", NOTHING_LISTED, OFF, id="R-c-S"),
         pytest.param(
             BOTH, "claude/sonnet", NOTHING_LISTED, Api("assistant-api", "claude/sonnet"), id="R-c-D"

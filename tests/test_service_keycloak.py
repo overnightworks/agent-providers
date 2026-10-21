@@ -121,7 +121,11 @@ def service(runners) -> Iterator[str]:
 
 @pytest.mark.parametrize(
     ("user", "route", "expected_route"),
-    [("alice", "CLI", Cli("claude-main")), ("bob", "API", Api(API_ALIAS))],
+    [
+        ("alice", "CLI", Cli("claude-main")),
+        ("bob", "API", Api(API_ALIAS)),
+        ("dave", "CLI", Cli("claude-main")),
+    ],
 )
 def test_a_real_user_and_workload_token_stream_the_scripted_run(
     service, runners, user, route, expected_route
@@ -151,10 +155,11 @@ def test_a_real_run_is_recorded_for_its_user_alone(service):
     assert_rejected(bob, RejectionCode.NOT_FOUND, 404)
 
 
-def test_a_user_in_no_group_is_not_enabled(service):
-    response = post_run(service, run_headers(_songmaker_workload(), _user_token("carol")))
+@pytest.mark.parametrize("user", ["carol", "erin"])
+def test_a_user_outside_the_app_is_forbidden(service, user):
+    response = post_run(service, run_headers(_songmaker_workload(), _user_token(user)))
 
-    assert_rejected(response, RejectionCode.NOT_ENABLED, 403)
+    assert_rejected(response, RejectionCode.FORBIDDEN, 403)
 
 
 def test_a_real_user_token_sent_as_the_workload_token_is_forbidden(service):
@@ -171,14 +176,29 @@ def test_another_apps_workload_cannot_act_for_a_user_of_this_app(service):
     assert_rejected(response, RejectionCode.FORBIDDEN, 403)
 
 
+def test_a_user_of_one_app_is_forbidden_through_another_app_they_do_not_belong_to(service):
+    response = post_run(
+        service,
+        run_headers(_workload_token(PRESENTATOR_CLIENT), _user_token("alice", PRESENTATOR_CLIENT)),
+    )
+
+    assert_rejected(response, RejectionCode.FORBIDDEN, 403)
+
+
 def test_only_the_user_who_started_a_run_reads_it_with_real_tokens(verify):  # noqa: F811 - the imported fixture
     alice_claims = verify(_user_token("alice"))
-    run_id = uuid4()
+    frank_claims = verify(_user_token("frank", PRESENTATOR_CLIENT))
+    run_id, franks_songmaker_run = uuid4(), uuid4()
     records = RunRecords()
     records.begin(
         started(run_id),
         "songmaker",
         Principal(str(alice_claims["iss"]), str(alice_claims["sub"])),
+    )
+    records.begin(
+        started(franks_songmaker_run),
+        "songmaker",
+        Principal(str(frank_claims["iss"]), str(frank_claims["sub"])),
     )
     app = create_app(
         service_config(issuer=_realm_url()),
@@ -193,9 +213,9 @@ def test_only_the_user_who_started_a_run_reads_it_with_real_tokens(verify):  # n
         through_presentator = get_run(
             base_url,
             run_headers(
-                _workload_token(PRESENTATOR_CLIENT), _user_token("alice", PRESENTATOR_CLIENT)
+                _workload_token(PRESENTATOR_CLIENT), _user_token("frank", PRESENTATOR_CLIENT)
             ),
-            str(run_id),
+            str(franks_songmaker_run),
         )
 
     assert RunStatus.model_validate_json(alice.content).run_id == run_id

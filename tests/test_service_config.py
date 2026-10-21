@@ -596,6 +596,24 @@ def test_a_name_with_a_newline_is_shown_escaped_once_on_one_line(tmp_path, capsy
     assert _refused_on_one_line(_written(tmp_path, text), capsys) == refusal
 
 
+@pytest.mark.parametrize(
+    ("table_name", "shown_name"),
+    [
+        pytest.param('"song/maker"', "song/maker", id="A10-a-slash-makes-two-segments"),
+        pytest.param('" songmaker"', " songmaker", id="A10-whitespace-around-the-name"),
+        pytest.param('"song\\u0007maker"', "song\\x07maker", id="A10-a-control-character"),
+    ],
+)
+def test_an_app_name_that_is_not_one_group_segment_stops_startup_naming_the_app(
+    tmp_path, capsys, table_name, shown_name
+):
+    text = VALID_CONFIG.replace("[apps.songmaker]", f"[apps.{table_name}]")
+
+    refusal = _refused_on_one_line(_written(tmp_path, text), capsys)
+
+    assert refusal.startswith(f"apps.{shown_name}: ")
+
+
 ORIGIN_WITHOUT_SIGNING = _with(SIGNING_SECTION, "")
 ORIGIN_WITHOUT_SIGNING_REFUSAL = (
     "apps.songmaker.mcp_origin: needs a [signing] section,"

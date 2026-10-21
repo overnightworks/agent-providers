@@ -21,7 +21,15 @@
       "name": "apps",
       "subGroups": [
         {
-          "name": "songmaker"
+          "name": "songmaker",
+          "subGroups": [
+            {
+              "name": "admin"
+            }
+          ]
+        },
+        {
+          "name": "songmaker-other"
         },
         {
           "name": "presentator"
@@ -652,6 +660,63 @@
         }
       ],
       "groups": []
+    },
+    {
+      "username": "dave",
+      "enabled": true,
+      "email": "dave@example.test",
+      "emailVerified": true,
+      "firstName": "Dave",
+      "lastName": "Test",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "dave-test-password",
+          "temporary": false
+        }
+      ],
+      "groups": [
+        "/subscription-members",
+        "/apps/songmaker/admin"
+      ]
+    },
+    {
+      "username": "erin",
+      "enabled": true,
+      "email": "erin@example.test",
+      "emailVerified": true,
+      "firstName": "Erin",
+      "lastName": "Test",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "erin-test-password",
+          "temporary": false
+        }
+      ],
+      "groups": [
+        "/subscription-members",
+        "/apps/songmaker-other"
+      ]
+    },
+    {
+      "username": "frank",
+      "enabled": true,
+      "email": "frank@example.test",
+      "emailVerified": true,
+      "firstName": "Frank",
+      "lastName": "Test",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "frank-test-password",
+          "temporary": false
+        }
+      ],
+      "groups": [
+        "/subscription-members",
+        "/apps/presentator"
+      ]
     }
   ]
 }

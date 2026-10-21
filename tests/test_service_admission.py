@@ -133,9 +133,7 @@ def service(request, tmp_path, monkeypatch) -> Iterator[_Service]:
     api = ScriptedRunner(FINAL)
     signed = record_signed_tokens(monkeypatch)
     runs = getattr(request, "param", RunConfig(max_parallel_cli_runs=PLACES))
-    config = capable_service_config(tmp_path).model_copy(
-        update={"runs": runs}
-    )
+    config = capable_service_config(tmp_path).model_copy(update={"runs": runs})
     app = create_app(config, runners=Runners(cli=held, api=api), fetch_key_set=MINT.fetch_key_set)
     with served(app) as base_url, ThreadPoolExecutor() as pool:
         try:
@@ -180,13 +178,28 @@ def test_a_cli_request_with_every_place_taken_answers_busy_before_a_run_id_or_a_
 @pytest.mark.parametrize(
     ("user", "body", "code"),
     [
-        pytest.param(MINT.user(groups=()), {}, RejectionCode.NOT_ENABLED, id="route-not-enabled"),
+        pytest.param(
+            MINT.user(groups=[SONGMAKER_GROUP]),
+            {},
+            RejectionCode.NOT_ENABLED,
+            id="route-not-enabled",
+        ),
     ],
 )
 def test_a_refusal_before_the_limit_takes_nothing(service, user, body, code):
     for _ in range(PLACES):
         assert_rejected(service.run(user, **body), code, 403)
 
+    service.let_all_go(service.fill_the_places())
+
+
+def test_a_non_member_with_every_place_taken_is_forbidden_not_busy_and_holds_no_place(service):
+    held = service.fill_the_places()
+
+    refused = service.run(MINT.user(groups=[SUBSCRIPTION_GROUP]))
+
+    assert_rejected(refused, RejectionCode.FORBIDDEN, 403)
+    service.let_all_go(held)
     service.let_all_go(service.fill_the_places())
 
 
@@ -445,7 +458,7 @@ class FirstRunHeldRunner:
         finally:
             if first:
                 self.closing.set()
-                await self.close_gate.wait()
+                await within_the_bound(self.close_gate.wait())
                 self.closed.set()
 
 

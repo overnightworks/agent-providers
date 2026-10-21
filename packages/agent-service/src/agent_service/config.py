@@ -41,6 +41,7 @@ from pydantic import (
     model_validator,
 )
 from webauth.https_client import is_https_url
+from webauth.oidc_login import AdmissionConfig
 
 from agent_client.capability import McpOrigin
 from agent_client.wire import MAX_EVENT_BYTES, MODEL_PART_PATTERN
@@ -63,6 +64,9 @@ def _https_url_the_verifier_accepts(url: str) -> str:
 
 
 HttpsUrl = Annotated[str, AfterValidator(_https_url_the_verifier_accepts)]
+
+
+APP_GROUP_PREFIX: Final = "/apps/"
 
 
 class ConfigError(ValueError):
@@ -440,6 +444,18 @@ class ServiceConfig(_Section):
                 )
         return self
 
+    @model_validator(mode="after")
+    def _app_names_are_group_segments(self) -> Self:
+        for app_name in self.apps:
+            try:
+                self._admission_of(app_name)
+            except ValueError as error:
+                raise ValueError(
+                    f"apps.{shown_text(app_name)}: not one group path segment: "
+                    f"{shown_text(str(error))}"
+                ) from error
+        return self
+
     def capability_scope(self, app_name: str, tools: Iterable[str]) -> CapabilityScope | None:
         """What the app's capability is bound to, granting exactly ``tools`` sorted."""
         app = self.apps[app_name]
@@ -458,6 +474,24 @@ class ServiceConfig(_Section):
         if self.mcp is None or not any(map(_declares_an_origin, self.apps.values())):
             return None
         return self.mcp.ca_file
+
+    def app_admission(self, app_name: str) -> AdmissionConfig:
+        """Who may use the app: its group ``/apps/<app>``, segment-aware, and its admins below."""
+        return self._admissions[app_name]
+
+    @cached_property
+    def _admissions(self) -> dict[str, AdmissionConfig]:
+        return {app_name: self._admission_of(app_name) for app_name in self.apps}
+
+    def _admission_of(self, app_name: str) -> AdmissionConfig:
+        if "/" in app_name:
+            raise ValueError("an app name is exactly one path segment")
+        group = f"{APP_GROUP_PREFIX}{app_name}"
+        return AdmissionConfig(
+            bound_issuer=self.identity.issuer,
+            login_group=group,
+            admin_group=f"{group}/admin",
+        )
 
     def app_of_workload_client(self, client_id: str) -> str | None:
         return self._apps_by_workload_client.get(client_id)

@@ -4,8 +4,11 @@ and ``GET /runs/{id}``, through which the app and user that started it read wher
 Both routes check the two tokens first, with the same answers. A ``POST`` is then
 checked in a fixed order, and the first failure answers:
 
-1. the workload token, then the user token (``agent_service.identity``);
-2. the body's protocol version, then its shape (``agent_service.run_request``);
+1. the workload token, then the user token, then membership of the app
+   (``/apps/<app>`` or a path below it), before the body is read or anything else
+   is decided (``agent_service.identity``);
+2. the body's framing, then its protocol version, then its shape
+   (``agent_service.run_request``);
 3. tools named by an app without an MCP origin answer ``forbidden``, before the route;
 4. the route (``agent_service.routing``), which reads the requested model and the
    installation's listed models; no model is ever replaced;
@@ -210,7 +213,6 @@ def _admitted(
         config.route,
         config.profiles,
         caller.groups,
-        caller.app,
         run_request.model,
         config.subscription_models(),
     )

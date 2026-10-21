@@ -321,13 +321,16 @@ hour after the run ended, and gone after a restart). `agent_client.wire` owns bo
 bodies and the typed rejections.
 
 **Who may run what.** A caller presents a workload token bound to one registered
-app and a user token bound to one principal (`agent_service.identity`).
-`agent_service.routing.route` decides the route from the caller's groups and the
+app and a user token bound to one principal (`agent_service.identity`). The user must
+first be a member of the app: one of their groups is `/apps/<app>` or a path below it
+(`/apps/songmaker-other` is not a member of `songmaker`), for both routes and for
+`GET /runs/{id}`; anyone else gets 403 `forbidden`, before the body is read.
+`agent_service.routing.route` then decides the route from the caller's groups and the
 requested model, never the purpose: a member of a subscription group (`[identity]
 subscription_groups`) takes the CLI route under the subscription profile when no model
 is requested or the subscription can run exactly that model (the names in `[cli.claude]
 models`); a member of an API group (`api_groups`, set together with `[route] api_alias`)
-who also holds the app's own group takes the paid API route otherwise; anyone else is not
+takes the paid API route otherwise; anyone else is not
 enabled. A requested model is never replaced by another.
 `RunRequest.purpose` (`[a-z][a-z0-9-]{0,63}`) labels the run and its capability
 and routes nothing. An app without an MCP origin that names a tool answers 403

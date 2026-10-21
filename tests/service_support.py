@@ -567,10 +567,6 @@ def everything_a_refusal_holds(refusal: BaseException) -> list[object]:
     return held
 
 
-# Generated per run, never written, never published.
-ATTACKER_KEY: Final = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-
-
 class TokenMint:
     """Signs RS256 tokens with a throwaway key and serves that key's set, recording each fetch.
 
@@ -678,7 +674,9 @@ class TokenMint:
         return self.token(self.user_claims(groups, **overrides))
 
 
-MAX_HEADER_SEGMENT: Final = 512  # the verifier's bound on a token's header segment
+# The verifier's bound on a token's header segment: webauth.jwt_verification
+# _MAX_HEADER_SEGMENT_CHARACTERS (v0.20.1).
+MAX_HEADER_SEGMENT: Final = 512
 
 
 def _base64url(raw: bytes) -> str:

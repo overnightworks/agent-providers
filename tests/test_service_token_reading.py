@@ -3,23 +3,22 @@
 A token the issuer signed is read as Python's JSON reader reads it: a repeated member keeps its
 last value, and the header members that name a key are ignored. A token signed by anyone else
 is still refused, and only the configured key set is ever fetched. The checks that precede
-the key (size, encoding, header shape) and the order key, signature, payload hold. Cells
-that are not driven here, with their upstream evidence, are listed in the service's decision
-record (A1a1 amendment).
+the key (size, encoding, header shape) and the order key, signature, payload hold. A refused
+request starts no run: both runners' admissions are unchanged across it.
 """
 
 from __future__ import annotations
 
 import json
 from collections.abc import Iterator
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, Final
 
 import httpx
 import pytest
-from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from jwt.algorithms import ECAlgorithm
 from service_support import (
-    ATTACKER_KEY,
     SONGMAKER_CLIENT,
     TEST_JWKS_URL,
     ScriptedRunner,
@@ -49,6 +48,9 @@ UNAUTHORIZED = RejectionCode.UNAUTHORIZED
 
 MINT = TokenMint()
 
+# Generated per run, never written, never published.
+ATTACKER_KEY: Final = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
 
 @pytest.fixture(scope="module")
 def runners() -> Runners:
@@ -60,6 +62,22 @@ def service(runners) -> Iterator[str]:
     app = create_app(service_config(), runners=runners, fetch_key_set=MINT.fetch_key_set)
     with served(app) as base_url:
         yield base_url
+
+
+@contextmanager
+def _no_run_started(runners: Runners) -> Iterator[None]:
+    """Fail when a request sent inside the block was admitted to either runner."""
+    before = (len(runners.cli.admitted), len(runners.api.admitted))
+    yield
+    assert (len(runners.cli.admitted), len(runners.api.admitted)) == before, "a run was started"
+
+
+def _refused(
+    runners: Runners, base_url: str, headers: dict[str, Any], code: RejectionCode, status: int
+) -> None:
+    with _no_run_started(runners):
+        response = post_run(base_url, headers)
+    assert_rejected(response, code, status)
 
 
 def _header(kid: str = MINT.key_id, **members: object) -> str:
@@ -156,47 +174,49 @@ def test_a_user_whose_token_names_sub_twice_is_the_last_one(service, runners):
         pytest.param((MINT.key_id, UNKNOWN_KID), False, id="published-first"),
     ],
 )
-def test_a_header_naming_kid_twice_binds_the_last_value(service, kids, admitted):
+def test_a_header_naming_kid_twice_binds_the_last_value(service, runners, kids, admitted):
     header = f'{{"alg": "RS256", "kid": "{kids[0]}", "kid": "{kids[1]}"}}'
     token = MINT.raw_token(header, _payload(MINT.user_claims()))
 
-    response = post_run(service, run_headers(MINT.workload(), token))
+    headers = run_headers(MINT.workload(), token)
 
     if admitted:
-        _admitted(response)
+        _admitted(post_run(service, headers))
     else:
-        assert_rejected(response, UNAUTHORIZED, 401)
+        _refused(runners, service, headers, UNAUTHORIZED, 401)
 
 
 def _with_non_ascii_character(token: str) -> bytes:
     return f"Bearer {token}".encode() + "é".encode("latin-1")
 
 
-def test_a_token_holding_a_non_ascii_character_is_refused(service):
+def test_a_token_holding_a_non_ascii_character_is_refused(service, runners):
     headers = run_headers(MINT.workload(), None)
     headers["Authorization"] = _with_non_ascii_character(MINT.user())
 
-    assert_rejected(post_run(service, headers), UNAUTHORIZED, 401)
+    _refused(runners, service, headers, UNAUTHORIZED, 401)
 
 
-def test_a_signed_token_with_a_header_segment_over_the_bound_is_refused(service):
+def test_a_signed_token_with_a_header_segment_over_the_bound_is_refused(service, runners):
     token = MINT.raw_token(
         _header(padding="x" * 600), _payload(MINT.user_claims()), oversized_header=True
     )
 
-    assert_rejected(post_run(service, run_headers(MINT.workload(), token)), UNAUTHORIZED, 401)
+    _refused(runners, service, run_headers(MINT.workload(), token), UNAUTHORIZED, 401)
 
 
-def test_a_token_that_marks_exp_as_critical_is_refused(service):
+def test_a_token_that_marks_exp_as_critical_is_refused(service, runners):
     token = MINT.raw_token(_header(crit=["exp"]), _payload(MINT.user_claims()))
 
-    assert_rejected(post_run(service, run_headers(MINT.workload(), token)), UNAUTHORIZED, 401)
+    _refused(runners, service, run_headers(MINT.workload(), token), UNAUTHORIZED, 401)
 
 
-def test_a_badly_signed_token_with_a_payload_that_is_no_object_is_refused_over_http(service):
+def test_a_badly_signed_token_with_a_payload_that_is_no_object_is_refused_over_http(
+    service, runners
+):
     token = MINT.raw_token(_header(), "[1]", key=ATTACKER_KEY)
 
-    assert_rejected(post_run(service, run_headers(MINT.workload(), token)), UNAUTHORIZED, 401)
+    _refused(runners, service, run_headers(MINT.workload(), token), UNAUTHORIZED, 401)
 
 
 @pytest.mark.parametrize(
@@ -229,14 +249,12 @@ DETACHED = _header(b64=False, crit=["b64"])
     ],
 )
 def test_a_workload_token_is_refused_by_the_stage_it_fails_when_no_key_set_is_held(
-    header, payload, code, status
+    runners, header, payload, code, status
 ):
-    app = create_app(service_config(), fetch_key_set=_cold_issuer)
+    app = create_app(service_config(), runners=runners, fetch_key_set=_cold_issuer)
     with served(app) as base_url:
         token = MINT.raw_token(header, payload)
-        response = post_run(base_url, run_headers(token, MINT.user()))
-
-    assert_rejected(response, code, status)
+        _refused(runners, base_url, run_headers(token, MINT.user()), code, status)
 
 
 def test_a_detached_workload_token_without_a_payload_is_refused_once_the_key_set_is_held(runners):
@@ -245,9 +263,7 @@ def test_a_detached_workload_token_without_a_payload_is_refused_once_the_key_set
     with served(app) as base_url:
         _admitted(post_run(base_url, run_headers(mint.workload(), mint.user())))
         token = mint.raw_token(DETACHED, "", key=None)
-        response = post_run(base_url, run_headers(token, mint.user()))
-
-    assert_rejected(response, UNAUTHORIZED, 401)
+        _refused(runners, base_url, run_headers(token, mint.user()), UNAUTHORIZED, 401)
 
 
 WRONG_CLIENT = "unregistered-client"
@@ -261,15 +277,14 @@ OTHER_APP = "another-app"
         pytest.param((SONGMAKER_CLIENT, WRONG_CLIENT), False, id="wrong-azp-last"),
     ],
 )
-def test_a_user_token_naming_azp_twice_binds_the_last_value(service, azps, admitted):
+def test_a_user_token_naming_azp_twice_binds_the_last_value(service, runners, azps, admitted):
     token = MINT.raw_token(_header(), _payload(MINT.user_claims(), azp=azps))
-
-    response = post_run(service, run_headers(MINT.workload(), token))
+    headers = run_headers(MINT.workload(), token)
 
     if admitted:
-        _admitted(response)
+        _admitted(post_run(service, headers))
     else:
-        assert_rejected(response, RejectionCode.FORBIDDEN, 403)
+        _refused(runners, service, headers, RejectionCode.FORBIDDEN, 403)
 
 
 @pytest.mark.parametrize(
@@ -279,15 +294,16 @@ def test_a_user_token_naming_azp_twice_binds_the_last_value(service, azps, admit
         pytest.param(("agent-service", OTHER_APP), False, id="another-app-last"),
     ],
 )
-def test_a_workload_token_naming_aud_twice_binds_the_last_value(service, audiences, admitted):
+def test_a_workload_token_naming_aud_twice_binds_the_last_value(
+    service, runners, audiences, admitted
+):
     token = MINT.raw_token(_header(), _payload(MINT.workload_claims(), aud=audiences))
-
-    response = post_run(service, run_headers(token, MINT.user()))
+    headers = run_headers(token, MINT.user())
 
     if admitted:
-        _admitted(response)
+        _admitted(post_run(service, headers))
     else:
-        assert_rejected(response, UNAUTHORIZED, 401)
+        _refused(runners, service, headers, UNAUTHORIZED, 401)
 
 
 @pytest.mark.parametrize(
@@ -297,15 +313,15 @@ def test_a_workload_token_naming_aud_twice_binds_the_last_value(service, audienc
         pytest.param((SONGMAKER_CLIENT, WRONG_CLIENT), False, id="unregistered-last"),
     ],
 )
-def test_a_workload_token_naming_azp_twice_binds_the_last_value(service, azps, admitted):
+def test_a_workload_token_naming_azp_twice_binds_the_last_value(service, runners, azps, admitted):
     token = MINT.raw_token(_header(), _payload(MINT.workload_claims(), azp=azps))
-
-    response = post_run(service, run_headers(token, MINT.user()))
+    headers = run_headers(token, MINT.user())
 
     if admitted:
-        _admitted(response)
+        _admitted(post_run(service, headers))
+        assert runners.cli.admitted[-1].app == "songmaker"
     else:
-        assert_rejected(response, RejectionCode.FORBIDDEN, 403)
+        _refused(runners, service, headers, RejectionCode.FORBIDDEN, 403)
 
 
 def test_a_signed_claim_nested_300_levels_deep_is_admitted(service):

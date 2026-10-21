@@ -180,14 +180,24 @@ body rules be fixed before the build.
   infinity or `NaN` are accepted, and the `jwk`, `jku`, `x5u` and `x5c` header members are
   ignored, not refused. The key set stays the configured one alone; the issuer's
   signature, issuer, audience and times are still checked, so no unsigned or foreign-signed
-  token is admitted. Authority: webauth's 0.19.0 CHANGELOG ("What the issuer signs is
-  accepted as PyJWT reads it"), the head's adoption of that reading on #391 (21.10.2026)
-  for the broader tolerance, and RFC 7515 section 4 for the header members only. Section 4
-  supports last-member handling of duplicate header parameters and ignoring `jwk`, `jku`,
-  `x5u` and `x5c`; it does not authorise tolerance of deep nesting, `NaN` or the token
-  encodings in a claim, and neither RFC 8259 section 6 nor RFC 7515 section 10.12
-  authorises a literal `NaN` or infinity there. That tolerance is solely webauth's adopted behaviour, as `json.loads`
-  reads it.
+  token is admitted.
+
+  RFC 7515 section 10.12 requires a parser to reject JSON that does not conform to
+  JSON-text syntax. The service departs from it by adopting webauth's reading. The
+  authority is the operator's ruling of 20.10.2026 on overnightworks/webauth#302,
+  finding 2 ("`_parse_token` and `_strict_json_object` go"), built for webauth 0.19.0
+  (CHANGELOG, "What the issuer signs is accepted as PyJWT reads it"), and the head's
+  adoption of that reading on #391 (21.10.2026). The reason is webauth's threat model
+  (its README, "Security model", webauth#270 finding 22): the configured issuer is
+  trusted for what it signs; webauth is the only reader of the token; the payload is
+  parsed only after the RS256 signature holds; and the header stays bounded (ASCII,
+  512 characters, RS256 only, `typ`, `kid` selecting only a configured key). RFC 7519
+  section 4 lets a repeated claim name keep its last value, and RFC 7515 section 4 does
+  the same for repeated header names and allows ignoring `jwk`, `jku`, `x5u` and `x5c`.
+  Neither authorises tolerance of deep nesting, `NaN` or the token encodings in a claim,
+  and neither RFC 8259 section 6 nor RFC 7515 section 10.12 authorises a literal `NaN`
+  or infinity there; that tolerance is solely webauth's adopted behaviour, as
+  `json.loads` reads it.
 
   Every rejection is a `RunRejection` with `Cache-Control: no-store`, and no
   answer or log line carries token text.

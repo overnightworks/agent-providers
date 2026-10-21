@@ -801,10 +801,11 @@ The app side of the profile is `agent_client.mcp_server` (`McpServer`, `McpTool`
 
   **Amendment (21.10.2026, #382, #388).** A name the capability signs but the app's
   `tools/list` does not offer ends the run as `failed: provider_error` before any model
-  execution; the relay no longer drops it silently. The operator's words on #382: „A name the
+  execution; the relay no longer drops it silently. Authority: #382's design line „A name the
   app does not offer ends the run with `failed: provider_error` before any model execution“,
-  confirmed with „wir bauen das entsprechend“. An offered tool the capability does not sign
-  stays out of the CLI's list and is refused when called, as before.
+  shown to the operator with the design and accepted with „wir bauen das entsprechend“. An
+  offered tool the capability does not sign stays out of the CLI's list and is refused when
+  called, as before.
 
 Procedure to publish the key (O2 step 2). Run it after every key change for every app with an
 MCP origin, then restart the service and those apps together. Tool calls of runs admitted

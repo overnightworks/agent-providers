@@ -146,7 +146,7 @@ def _read_text(source: Traversable, file_name: str) -> str:
 
 
 def _split_file(file_name: str, text: str) -> tuple[str, str]:
-    lines = text.splitlines()
+    lines = [line.removesuffix("\r") for line in text.split("\n")]
     if not lines or lines[0] != _FRONT_MATTER_FENCE:
         raise AgentFileError(
             f"{file_name}: front matter must open with a {_FRONT_MATTER_FENCE} line"
@@ -170,7 +170,7 @@ def _parse_front_matter(file_name: str, text: str) -> _FrontMatter:
     try:
         parsed = _YAML.load(io.StringIO(text))
     except YAMLError as error:
-        raise AgentFileError(f"{file_name}: {_yaml_problem(error)}") from error
+        raise AgentFileError(f"{file_name}: {_yaml_problem(error)}") from None
     if not isinstance(parsed, dict):
         raise AgentFileError(f"{file_name}: front matter must be a mapping of keys to values")
     try:

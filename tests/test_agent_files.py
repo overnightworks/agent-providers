@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import traceback
 from pathlib import Path
 
 import pytest
@@ -42,6 +43,15 @@ def agent_text(
     if extra:
         lines.append(extra)
     return "---\n" + "\n".join(lines) + "\n---\n" + body + "\n"
+
+
+def with_field_replaced(front_matter: str) -> str:
+    base = "name: notes-assistant\ndescription: d\nappRoles: [admin]\n"
+    replaced_key = front_matter.lstrip().split(":")[0]
+    kept = "".join(
+        line + "\n" for line in base.splitlines() if line.split(":")[0] != replaced_key
+    )
+    return kept + front_matter
 
 
 def write(tmp_path: Path, text: str | bytes, stem: str = "notes-assistant") -> Path:
@@ -243,11 +253,7 @@ def test_missing_empty_or_multiline_description_is_refused(
 def test_duplicate_key_is_refused_and_named(
     tmp_path: Path, front_matter: str, key: str
 ) -> None:
-    base = "name: notes-assistant\ndescription: d\nappRoles: [admin]\n"
-    kept = "".join(
-        line + "\n" for line in base.splitlines() if not front_matter.startswith(line.split(":")[0])
-    )
-    path = front_matter_file(tmp_path, kept + front_matter)
+    path = front_matter_file(tmp_path, with_field_replaced(front_matter))
 
     with pytest.raises(AgentFileError, match=f"{key}: appears twice"):
         load_agent(path, DECLARATIONS)
@@ -258,7 +264,7 @@ def test_duplicate_key_is_refused_and_named(
     [
         ("tools: *shared", "front matter"),
         ("description: |\n  two\n  lines", "description"),
-        ("description: >\n  folded", "description"),
+        ("description: >\n  folded\n\n  paragraphs", "description"),
         ("tools:\n  nested: value", "tools"),
         ("color:\n  red: 1", "color"),
         ("description: Helps: with notes", "front matter"),
@@ -280,12 +286,12 @@ def test_duplicate_key_is_refused_and_named(
 def test_front_matter_that_is_not_plain_text_is_refused_and_named(
     tmp_path: Path, front_matter: str, key: str
 ) -> None:
-    path = front_matter_file(
-        tmp_path, "name: notes-assistant\ndescription: d\nappRoles: [admin]\n" + front_matter
-    )
+    path = front_matter_file(tmp_path, with_field_replaced(front_matter))
 
-    with pytest.raises(AgentFileError, match=rf"notes-assistant\.md: .*{key}"):
+    with pytest.raises(AgentFileError, match=rf"notes-assistant\.md: .*{key}") as refusal:
         load_agent(path, DECLARATIONS)
+
+    assert "appears twice" not in str(refusal.value)
 
 
 @pytest.mark.parametrize(
@@ -314,6 +320,30 @@ def test_nul_inside_quotes_is_refused_without_echoing_it(tmp_path: Path) -> None
         load_agent(path, DECLARATIONS)
 
     assert "secret" not in str(refusal.value)
+
+
+@pytest.mark.parametrize("character", ["\x0b", "\x0c", "\x1c", "\x1d", "\x1e"])
+def test_control_character_inside_quotes_is_refused_not_normalized(
+    tmp_path: Path, character: str
+) -> None:
+    path = write(tmp_path, agent_text(description=f'"before{character}after"'))
+
+    with pytest.raises(AgentFileError, match=r"notes-assistant\.md"):
+        load_agent(path, DECLARATIONS)
+
+
+@pytest.mark.parametrize(
+    "extra", ["description: sentinelvalue", "description: 'sentinelvalue"]
+)
+def test_formatted_traceback_does_not_show_file_values(tmp_path: Path, extra: str) -> None:
+    path = write(tmp_path, agent_text(extra=extra))
+
+    with pytest.raises(AgentFileError) as refusal:
+        load_agent(path, DECLARATIONS)
+
+    assert "sentinelvalue" not in "".join(traceback.format_exception(refusal.value))
+    assert refusal.value.__cause__ is None
+    assert refusal.value.__suppress_context__
 
 
 def test_duplicate_key_message_does_not_echo_the_value(tmp_path: Path) -> None:

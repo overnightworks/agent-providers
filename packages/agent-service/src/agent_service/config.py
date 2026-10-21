@@ -1,8 +1,9 @@
 """The service's one configuration: identity, listener, profiles, the route and apps.
 
 The service accepts at most one subscription profile, for Claude, which needs its
-token file and a ``[cli.claude]`` table naming the absolute program, the exact version and the models it serves
-it must report, beside the ``[cli]`` section's private ``working_root``, checked at load. An
+token file and a ``[cli.claude]`` table naming the absolute program, the exact version it
+must report and the models it serves, beside the ``[cli]`` section's private
+``working_root``, checked at load. An
 app that offers tools names its one https MCP origin, and the service signs a capability for
 each run that grants the tools its request names; an origin is never shared between apps and
 needs the signing key. The ``[mcp]`` section names the one CA bundle (``ca_file``, an absolute

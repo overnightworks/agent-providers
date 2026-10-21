@@ -2623,7 +2623,8 @@ JWT. Codex's refresh behaviour is untouched.
 Measured on 17.10.2026 on `$HOME/.local/share/claude/versions/2.1.302`
 (`claude --version` prints `2.1.302 (Claude Code)`), a 285,793,528-byte Bun
 executable. No cell used a login, a token or an Anthropic account, except
-A1b-0b1, A1b-0b2 and A1b-0e, which used the dedicated measurement token, and A1b-0f,
+A1b-0b1, A1b-0b2, A1b-0e and A1b-12a, which used the dedicated measurement token
+(A1b-12a through the service), and A1b-0f,
 which ran on 2.1.303 and whose m5 ran on 2.1.304. Nothing here
 reads `~/.claude`.
 
@@ -3370,6 +3371,62 @@ lists register one was not read). The run then ends `error_max_turns`, which
 `_raise_for_error_result` turns into `failed: provider_error`, never into a success. No call runs
 that the service has not accepted, because the relay holds every call. The end-to-end proof is
 A1b-8's. A larger k would be a guess no measurement supports and would weaken the backstop.
+
+#### A1b-12a the first live runs through the service
+
+Measured on 20.10.2026 on the pinned 2.1.302, with the operator's dedicated
+measurement token, authorized for two live runs: the operator ruled one run on
+19.10.2026 and one repeat on 20.10.2026. Both ran `agent-service --config` in a scratch
+container with A1d's conditions (run label `r336-ee138e40`); the repeat ran on the image
+that carries #347's per-run token read. The evidence was reduced to counts and verdicts, and
+five secret reviews ended SAFE: the capture holds 0 token and 0 prefix hits, and the scan
+over 393 and 490 stored sources found 0. The scratch harness stays outside the
+repository and is retired; no further paid run happens in this item.
+
+**Held.**
+
+- **c2, the place limit.** Five current runs at one instant; the sixth gets `429 busy` with
+  `Retry-After: 10` and `no-store`, no run id and no sixth CLI group.
+- **c3, a client that stops reading.** One WARNING at the stall deadline, the CLI group reaped
+  once, the place free for the next run, and line 10's order.
+- **c5, no token in any argument.** 0 of 336 `ps` samples in the first run, 0 of 339 in the
+  repeat.
+- **c6-held, memory per group with five held.** Per group RSS about 157 MB and PSS about
+  68.5 MB in the first run, 157.5 MB and 68.8 MB in the repeat; the container's
+  `memory.current` 350,429,184 and 350,711,808 bytes; the service process 68,952 and
+  69,608 kB RSS.
+- **c7.** The start lists under the full argv.
+- **token_reads.** The profile's token file is read per run: at startup, at c1's run and at
+  each of the five runs, in one service process throughout (#347, proven live in the repeat).
+- **M22.** The A1d shape.
+- **M23.** The forwarded-request ledger: forwarded 1, granted 1, spent 1 in each run.
+- **M4.** `CONNECT` only to `api.anthropic.com:443`.
+
+**Not proven here, each with its new owner.**
+
+- **c1, a real answered turn (M1 to M3).** In both runs the one permitted
+  `POST /v1/messages` got HTTP 429 from upstream (179 and 180 bytes, not recorded by
+  design); the CLI made no retry, the run ended `failed` with `provider_error`, the group was
+  reaped 0.005 s and 0.11 s after the terminal, and the root was empty. The cause of the 429
+  is not recorded. Paid total: 2 forwarded requests, both answered 429. Edge accepted it as
+  A1d-6 cell L2 (the real turn) (edge#184 A1d-6, accepted 21.10.2026).
+- **c6-release, the five answered and the memory at the answer phase (M9 to M10).** Skipped by
+  the release rule, because no further permit was granted. Edge accepted it as A1d-6 cell L7
+  (the container's peak memory during L2, reported per run for 12r) (edge#184 A1d-6, accepted
+  21.10.2026).
+- **c4, the `[runs]` defaults judged.** 12r, with A1d-6's memory figures.
+
+**Not measured:** tool calls (12b), the token's lifetime, a held run past 120 s, other
+models.
+
+**Rulings.**
+
+- Operator, 19.10.2026: one run under the operator's Claude login.
+- Operator, 20.10.2026: one repeat.
+- Operator, 21.10.2026, „Ja, so schneiden“: #336 closes with the cells already proven. The
+  real turn and the answer-phase memory move to edge's A1d-6 live smoke in the real
+  deployment with the fresh token. The scratch harness is retired, and no further paid run
+  happens here.
 
 #### A1b-0e tool calls over http, live
 

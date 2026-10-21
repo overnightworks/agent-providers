@@ -36,6 +36,7 @@ from service_support import (
     ScriptedRunner,
     StepClock,
     TokenMint,
+    asgi_post_status,
     assert_rejected,
     decoded_events,
     post_run,
@@ -136,14 +137,15 @@ def _loaded_service_run(tmp_path, subscription_groups, user_groups):
     config = load_config(service_config_file(tmp_path, subscription_groups=subscription_groups))
     app = create_app(config, runners=runners, fetch_key_set=MINT.fetch_key_set)
     with served(app) as base_url:
-        response = post_run(base_url, run_headers(MINT.workload(), MINT.user(groups=user_groups)))
+        response = post_run(
+            base_url,
+            run_headers(MINT.workload(), MINT.user(groups=[*user_groups, SONGMAKER_GROUP])),
+        )
     return response, runners
 
 
 @pytest.mark.parametrize("group", [SUBSCRIPTION_GROUP, OLD_SUBSCRIPTION_GROUP])
-def test_a_member_of_either_listed_subscription_group_alone_runs_on_the_cli_route(
-    tmp_path, group
-):
+def test_a_member_of_either_listed_subscription_group_alone_runs_on_the_cli_route(tmp_path, group):
     response, runners = _loaded_service_run(
         tmp_path, [SUBSCRIPTION_GROUP, OLD_SUBSCRIPTION_GROUP], [group]
     )
@@ -170,7 +172,7 @@ def test_a_subscription_group_removed_from_the_configuration_is_not_enabled(
 def test_a_member_of_neither_group_is_not_enabled_and_starts_no_run(service, runners):
     runs_before = len(runners.cli.admitted) + len(runners.api.admitted)
 
-    response = post_run(service, run_headers(MINT.workload(), MINT.user(groups=[])))
+    response = post_run(service, run_headers(MINT.workload(), MINT.user(groups=[SONGMAKER_GROUP])))
 
     assert_rejected(response, RejectionCode.NOT_ENABLED, 403)
     assert len(runners.cli.admitted) + len(runners.api.admitted) == runs_before
@@ -492,7 +494,7 @@ def test_a_body_naming_anything_beyond_purpose_model_turn_and_tools_is_invalid(s
 
 LISTED = f"claude/{LISTED_MODEL}"
 UNLISTED = f"claude/{UNLISTED_MODEL}"
-SUBSCRIBER = [SUBSCRIPTION_GROUP]
+SUBSCRIBER = [SUBSCRIPTION_GROUP, SONGMAKER_GROUP]
 API_MEMBER = [API_GROUP, SONGMAKER_GROUP]
 
 
@@ -562,7 +564,7 @@ def test_v6_a_malformed_model_is_invalid_before_tools_are_forbidden(service):
         service,
         run_headers(
             MINT.workload(client=PRESENTATOR_CLIENT),
-            MINT.user(azp=PRESENTATOR_CLIENT, groups=[SUBSCRIPTION_GROUP]),
+            MINT.user(azp=PRESENTATOR_CLIENT, groups=[SUBSCRIPTION_GROUP, "/apps/presentator"]),
         ),
         run_body(model="sonnet", tools=SONGMAKER_TOOLS),
     )
@@ -701,31 +703,12 @@ def test_an_oversized_body_without_a_declared_length_is_refused_while_read(servi
 
 
 async def _asgi_status(app: FastAPI, headers: dict[str, str], body: bytes) -> int:
-    scope = {
-        "type": "http",
-        "asgi": {"version": "3.0"},
-        "http_version": "1.1",
-        "method": "POST",
-        "scheme": "http",
-        "path": "/runs",
-        "raw_path": b"/runs",
-        "query_string": b"",
-        "root_path": "",
-        "headers": [(name.lower().encode(), value.encode()) for name, value in headers.items()],
-        "client": ("127.0.0.1", 50000),
-        "server": ("127.0.0.1", 80),
-    }
     pending = [{"type": "http.request", "body": body, "more_body": False}]
-    sent: list[dict[str, object]] = []
 
     async def receive() -> dict[str, object]:
         return pending.pop(0) if pending else {"type": "http.disconnect"}
 
-    async def send(message: dict[str, object]) -> None:
-        sent.append(message)
-
-    await app(scope, receive, send)
-    return sent[0]["status"]
+    return await asgi_post_status(app, headers, receive)
 
 
 def test_a_single_chunk_over_the_limit_is_refused_without_being_buffered():

@@ -2,18 +2,16 @@
 
 ``route`` is the one decider: the CLI route under the subscription profile for
 members of a subscription group, else the API route under the installation's alias
-for members of an API group who also hold the app's group, else not enabled.
+for members of an API group, else not enabled. Membership of the app is the caller
+check's gate (``agent_service.identity``), before any route is chosen.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Final
 
 from agent_service.config import IdentityConfig, ProfileConfig, Provider, RouteConfig
-
-APP_GROUP_PREFIX: Final = "/apps/"
 
 
 @dataclass(frozen=True)
@@ -64,17 +62,12 @@ def route(
     route_facts: RouteConfig | None,
     profiles: Mapping[str, ProfileConfig],
     groups: frozenset[str],
-    app: str,
     model: str | None,
     listed_models: Mapping[Provider, frozenset[str]],
 ) -> Route:
     subscription = _subscription_route(identity, profiles, groups, model, listed_models)
     if subscription is not None:
         return subscription
-    if (
-        route_facts is not None
-        and not identity.api_groups.isdisjoint(groups)
-        and f"{APP_GROUP_PREFIX}{app}" in groups
-    ):
+    if route_facts is not None and not identity.api_groups.isdisjoint(groups):
         return Api(route_facts.api_alias, model)
     return NotEnabled()

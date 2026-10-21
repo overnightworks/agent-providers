@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
-from contextlib import contextmanager
 from typing import Any, Final
 
 import httpx
@@ -27,6 +26,7 @@ from service_support import (
     assert_rejected,
     decoded_events,
     get_run,
+    no_run_started,
     post_run,
     run_headers,
     served,
@@ -64,18 +64,10 @@ def service(runners) -> Iterator[str]:
         yield base_url
 
 
-@contextmanager
-def _no_run_started(runners: Runners) -> Iterator[None]:
-    """Fail when a request sent inside the block was admitted to either runner."""
-    before = (len(runners.cli.admitted), len(runners.api.admitted))
-    yield
-    assert (len(runners.cli.admitted), len(runners.api.admitted)) == before, "a run was started"
-
-
 def _refused(
     runners: Runners, base_url: str, headers: dict[str, Any], code: RejectionCode, status: int
 ) -> None:
-    with _no_run_started(runners):
+    with no_run_started(runners):
         response = post_run(base_url, headers)
     assert_rejected(response, code, status)
 

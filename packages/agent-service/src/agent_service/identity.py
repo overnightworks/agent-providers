@@ -5,7 +5,8 @@ issuer and audience (decision record 0001, H1). The workload token is checked
 first, then the user token, and the first failure decides: a token that does
 not verify is ``unauthorized``, a key set that cannot be fetched is
 ``unavailable``, and verified tokens that do not bind one registered app to one
-end user are ``forbidden`` (H3). A user token whose subject is missing, or is
+end user are ``forbidden`` (H3), as is a user who is no member of the app: none of their groups is
+``/apps/<app>`` or below it. A user token whose subject is missing, or is
 not valid Unicode text (a lone surrogate), is a credential no later token can
 name, so it is ``unauthorized`` for every app; any other subject, of any
 length, is accepted.
@@ -33,6 +34,7 @@ from webauth.jwt_verification import (
     RejectionReason,
     VerifiedClaims,
 )
+from webauth.oidc_login import app_role
 
 from agent_client.wire import RejectionCode, UnicodeText
 from agent_service.config import IdentityConfig, ServiceConfig
@@ -105,6 +107,8 @@ class CallerCheck:
         if user.claims.get("azp") != workload.claims["azp"]:
             raise _Refused(RejectionCode.FORBIDDEN)
         if user.subject == workload.subject:
+            raise _Refused(RejectionCode.FORBIDDEN)
+        if app_role(tuple(groups), self._config.app_admission(app)) is None:
             raise _Refused(RejectionCode.FORBIDDEN)
         return Caller(app=app, principal=Principal(user.issuer, user.subject), groups=groups)
 

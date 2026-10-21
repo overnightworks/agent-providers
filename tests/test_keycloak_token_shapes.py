@@ -42,11 +42,17 @@ USER_PASSWORDS = {
     "alice": "alice-test-password",
     "bob": "bob-test-password",
     "carol": "carol-test-password",
+    "dave": "dave-test-password",
+    "erin": "erin-test-password",
+    "frank": "frank-test-password",
 }
 EXPECTED_GROUPS = {
     "alice": {"/subscription-members", "/apps/songmaker"},
     "bob": {"/api-members", "/apps/songmaker"},
     "carol": set(),
+    "dave": {"/subscription-members", "/apps/songmaker/admin"},
+    "erin": {"/subscription-members", "/apps/songmaker-other"},
+    "frank": {"/subscription-members", "/apps/presentator"},
 }
 
 WORKLOAD_CLIENTS = sorted(CLIENT_SECRETS)

@@ -199,6 +199,15 @@ body rules be fixed before the build.
   or infinity there; that tolerance is solely webauth's adopted behaviour, as
   `json.loads` reads it.
 
+  *Amendment (21.10.2026, #391).* The table gains one row, after the 403 binding row
+  (the user's `azp`, the user's `sub`) and before the body is read:
+
+  | Check | Answer |
+  |---|---|
+  | `app_role` is `None` for the user's verified groups: none is `/apps/<app>` or a path below it | 403 `forbidden`, before the body is read |
+
+  The role the call returns is not used here. Authority: the line of #382's accepted design „/apps/<app> (or a descendant): may use the app at all; the service checks this at admission, segment-aware“, which the operator was shown and accepted with „ja klingt gut! gib es dem head!“ and „wir bauen das entsprechend“ (21.10.2026).
+
   Every rejection is a `RunRejection` with `Cache-Control: no-store`, and no
   answer or log line carries token text.
   A token whose `kid` is missing from a still-current key set answers 503
@@ -293,8 +302,14 @@ membership in the configured subscription groups (`[identity] subscription_group
 `/ki-abo` is renamed `/ai-subscription` through a membership-preserving procedure that
 edge owns, and both names are accepted while tokens carry either. Where this record
 says `/ki-abo` elsewhere (H1's measured token shapes, H11, H12, A1a5), it reads as
-"the configured subscription groups". Authority: „/ai-subscription /ai-api“ and „lauf abo oder litellm nicht am dienst entscheiden => sondern wie rechte per keycloak“. The app
-gate that P2 adds is P2's own amendment, not this one.
+"the configured subscription groups". Authority: „/ai-subscription /ai-api“ and „lauf abo oder litellm nicht am dienst entscheiden => sondern wie rechte per keycloak“.
+
+**Amendment (21.10.2026, #382, #391).** Every route also requires membership of the app:
+one of the caller's groups is `/apps/<app>` or a path below it (segment-aware, so
+`/apps/songmaker/team` is a member of `songmaker` and `/apps/songmaker-other` is not),
+checked at admission from the forwarded verified user token. A member of a subscription
+group who is no member of the app gets `forbidden`; the subscription alone no longer
+reaches an app's runs. Authority: the line of #382's accepted design „/apps/<app> (or a descendant): may use the app at all; the service checks this at admission, segment-aware“, which the operator was shown and accepted with „ja klingt gut! gib es dem head!“ and „wir bauen das entsprechend“ (21.10.2026).
 
 ## H2b Subscription profiles are configuration
 
@@ -967,6 +982,13 @@ the model an agent names, what happens to a person who also holds API rights?“
 English rule in this block is the head's record of that answer, a paraphrase and not
 an operator quotation.
 
+**Amendment (21.10.2026, #382, #391).** The interim requirement of the first amendment,
+that the API route needs the exact group `/apps/<app>`, is gone: the app gate (H2's
+amendment of this date) replaces it for both routes, before any route is chosen, so the
+route no longer reads the app. The model sentence of the second amendment now reads
+"otherwise over the API when the caller holds the API rights (`api_groups`)", the app's
+group being the gate's. Authority: the line of #382's accepted design „/apps/<app> (or a descendant): may use the app at all; the service checks this at admission, segment-aware“, which the operator was shown and accepted with „ja klingt gut! gib es dem head!“ and „wir bauen das entsprechend“ (21.10.2026).
+
 **Consequence.** The app-local provider/model/route settings for a moved purpose
 are removed from settings, API and UI.
 
@@ -1449,6 +1471,7 @@ the parallel-run limit stands once, in H7's Decision.
    - *Default:* entfällt; wie formuliert entschieden.
    - *Beleg:* A1b-0b1, A1b-6a, A1b-6r.
    - *Terminology (21.10.2026, #382, #385):* the meaning is unchanged. "Das KI-Abo" is membership in a configured subscription group, `/ai-subscription` after the rename (H2). Authority: „/ai-subscription /ai-api“.
+   - *Terminology (21.10.2026, #382, #391):* the meaning is narrowed: "nutzen darf es jeder mit dem KI-Abo" now means everyone with it who is a member of the app (`/apps/<app>` or a path below it, H2). Authority: the line of #382's accepted design „/apps/<app> (or a descendant): may use the app at all; the service checks this at admission, segment-aware“, which the operator was shown and accepted with „ja klingt gut! gib es dem head!“ and „wir bauen das entsprechend“ (21.10.2026).
 9. [ruled by the operator 17.10.2026: "ja 5"] **Es gibt N Plätze für den ganzen Dienst, Default 5, in der Konfiguration des Dienstes. Erst wenn alle belegt sind, kommt sofort „beschäftigt“ mit Wiederholzeit. Kein automatisches Ausweichen auf den API-Weg.**
    - *Geerbt (Kopf):* H7 „one active subscription run … 429 Retry-After … no queue“ (jetzt: N parallele Abo-Läufe, ein Limit für den Dienst, nicht je Profil) und #68 „die Weigerung kommt vor der Capability“. Nur Abo-Läufe belegen einen Platz.
    - *Beispiel:* Mit den fünf Plätzen belegt will Songmaker einen sechsten Abo-Lauf: Er bekommt sofort „The service is busy; retry later.“ mit `Retry-After: 10`. Ein Lauf auf dem API-Weg, den er ausdrücklich verlangt, startet trotzdem und belegt nichts; ein abgewiesener Antrag belegt nichts. Steht in der Konfiguration `max_parallel_cli_runs = 2`, sind es zwei Plätze.

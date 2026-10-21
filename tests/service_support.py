@@ -27,6 +27,7 @@ import uuid
 from collections.abc import (
     AsyncGenerator,
     AsyncIterator,
+    Awaitable,
     Callable,
     Coroutine,
     Iterable,
@@ -516,6 +517,14 @@ def record_signed_tokens(monkeypatch) -> list[str]:
     return signed
 
 
+@contextmanager
+def no_run_started(runners: Runners) -> Iterator[None]:
+    """Fail when a request sent inside the block was admitted to either runner."""
+    before = (len(runners.cli.admitted), len(runners.api.admitted))
+    yield
+    assert (len(runners.cli.admitted), len(runners.api.admitted)) == before, "a run was started"
+
+
 class UnrelatedFailure(Exception):
     """Raised by a test only to leave a handler active around the call under test."""
 
@@ -655,7 +664,7 @@ class TokenMint:
         return self.token(self.workload_claims(client, **overrides))
 
     def user_claims(
-        self, groups: object = (SUBSCRIPTION_GROUP,), **overrides: object
+        self, groups: object = (SUBSCRIPTION_GROUP, SONGMAKER_GROUP), **overrides: object
     ) -> dict[str, object]:
         now = int(time.time())
         claims = {
@@ -670,7 +679,9 @@ class TokenMint:
         }
         return _merged(claims, overrides)
 
-    def user(self, groups: object = (SUBSCRIPTION_GROUP,), **overrides: object) -> str:
+    def user(
+        self, groups: object = (SUBSCRIPTION_GROUP, SONGMAKER_GROUP), **overrides: object
+    ) -> str:
         return self.token(self.user_claims(groups, **overrides))
 
 
@@ -816,6 +827,33 @@ def post_run(
         content=payload,
         timeout=timeout,
     )
+
+
+async def asgi_post_status(
+    app: Any, headers: Mapping[str, str], receive: Callable[[], Awaitable[dict[str, object]]]
+) -> int:
+    """The status ``app`` answers a ``POST /runs`` driven in-process, body read from ``receive``."""
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/runs",
+        "raw_path": b"/runs",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [(name.lower().encode(), value.encode()) for name, value in headers.items()],
+        "client": ("127.0.0.1", 50000),
+        "server": ("127.0.0.1", 80),
+    }
+    sent: list[dict[str, object]] = []
+
+    async def send(message: dict[str, object]) -> None:
+        sent.append(message)
+
+    await app(scope, receive, send)
+    return sent[0]["status"]
 
 
 def get_run(base_url: str, headers: Mapping[str, str], segment: str) -> httpx.Response:

@@ -227,7 +227,9 @@ def _service_config_document(
     songmaker: Mapping[str, object] | None,
     claude_binary: Path | None = None,
     token_file: Path | None = None,
+    models: Mapping[str, Mapping[str, str]] | None = None,
 ) -> dict[str, Any]:
+    overrides = models or {}
     return {
         **({} if runs is None else {"runs": runs}),
         "identity": {
@@ -259,9 +261,13 @@ def _service_config_document(
             "songmaker": {
                 "workload_client": SONGMAKER_CLIENT,
                 "mcp_origin": SONGMAKER_ORIGIN,
+                **({"models": overrides["songmaker"]} if "songmaker" in overrides else {}),
                 **(songmaker or {}),
             },
-            "presentator": {"workload_client": PRESENTATOR_CLIENT},
+            "presentator": {
+                "workload_client": PRESENTATOR_CLIENT,
+                **({"models": overrides["presentator"]} if "presentator" in overrides else {}),
+            },
         },
     }
 
@@ -273,10 +279,14 @@ def service_config(
     songmaker: Mapping[str, object] | None = None,
     claude_binary: Path | None = None,
     token_file: Path | None = None,
+    models: Mapping[str, Mapping[str, str]] | None = None,
 ) -> ServiceConfig:
-    """The test configuration; its profile logs in from ``token_file``, by default the process's."""
+    """The test configuration; its profile logs in from ``token_file``, by default the process's.
+
+    ``models`` gives each named app its ``[apps.<app>.models]`` table.
+    """
     return ServiceConfig.model_validate(
-        _service_config_document(issuer, runs, songmaker, claude_binary, token_file)
+        _service_config_document(issuer, runs, songmaker, claude_binary, token_file, models)
     )
 
 
@@ -296,9 +306,14 @@ def _toml_lines(table: Mapping[str, object], path: tuple[str, ...] = ()) -> list
     return lines
 
 
-def service_config_file(directory: Path, *, subscription_groups: list[str]) -> Path:
+def service_config_file(
+    directory: Path,
+    *,
+    subscription_groups: list[str],
+    models: Mapping[str, Mapping[str, str]] | None = None,
+) -> Path:
     """The test configuration written as the TOML file ``load_config`` reads."""
-    document = _service_config_document(TEST_ISSUER, None, None)
+    document = _service_config_document(TEST_ISSUER, None, None, models=models)
     document["identity"]["subscription_groups"] = subscription_groups
     path = directory / "agent-service.toml"
     path.write_text("\n".join(_toml_lines(document)) + "\n", encoding="utf-8")

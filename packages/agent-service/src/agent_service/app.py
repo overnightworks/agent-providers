@@ -217,7 +217,7 @@ def _admitted(
         config.route,
         config.profiles,
         caller.groups,
-        run_request.model,
+        config.model_for(caller.app, run_request.purpose, run_request.model),
         config.subscription_models(),
     )
     if isinstance(served, NotEnabled):

@@ -2,6 +2,16 @@
 
 Read by a host bumping its pin; each release that breaks a host has one section, newest first.
 
+## Migrating to 0.6.1
+
+No action needed; every change is optional.
+
+| Before | Now |
+|---|---|
+| (absent) | `[apps.<app>.models]`, optional: `<agent> = "<provider>/<model>"`, the agent being the `purpose` of its runs (`agent_client.wire.Purpose`) and the value an `agent_client.wire.ModelName`. A name or value outside those grammars, or a `models` that is not a table, stops startup naming `apps.<app>.models.<agent>` before any secret file is read. A restart applies a change; nothing checks that the app has an agent of that name, and an override for one it never sends matches nothing |
+| `RunRequest.purpose` labels the run and its capability and routes nothing | it also keys the override of its app; it chooses no route itself, so an installation with no `models` table behaves as 0.6.0 |
+| a request's `model` is what the route reads | an override for the agent replaces it before the route, and the routing table of 0.6.0 applies to the overridden model unchanged: a listed model takes the subscription for a caller with subscription rights, otherwise the API for a caller with API rights, otherwise 403 `not_enabled`; an override grants no right |
+
 ## Migrating to 0.6.0
 
 A host migrates at its pin bump to 0.6.0. Prepare the realm first: give every user the

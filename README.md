@@ -311,8 +311,9 @@ missing one and exits 2. `agent_service.config` documents the file, and the
 decision record owns the rulings behind it.
 
 **Routes.** `POST /runs` takes a `RunRequest` (wire version 2: `v`, `purpose`,
-`turn`, `tools`, a map from each tool the run may call to its effect, and an optional
-`model` as `<provider>/<model>`; a body
+`turn`, `roles`, the agent's allowed roles, exactly `["admin"]` or `["admin", "user"]`,
+which `AgentDefinition.request` fills from the agent file; `tools`, a map from each tool
+the run may call to its effect, and an optional `model` as `<provider>/<model>`; a body
 with any other `v` answers 400 `unsupported_version`) and answers with the run's event
 stream (SSE), ending every run with exactly one terminal event except the cut
 stream of a dropped client. `GET /runs/{id}` returns the run's status, readable
@@ -324,7 +325,9 @@ bodies and the typed rejections.
 app and a user token bound to one principal (`agent_service.identity`). The user must
 first be a member of the app: one of their groups is `/apps/<app>` or a path below it
 (`/apps/notes-other` is not a member of `notes`), for both routes and for
-`GET /runs/{id}`; anyone else gets 403 `forbidden`, before the body is read.
+`GET /runs/{id}`; anyone else gets 403 `forbidden`, before the body is read. Their role in
+the app is then `admin` in `/apps/<app>/admin` or below, else `user`; a `POST` whose `roles`
+lacks it gets 403 `forbidden`, before the tools check and the route.
 `agent_service.routing.route` then decides the route from the caller's groups and the
 requested model, never the purpose: a member of a subscription group (`[identity]
 subscription_groups`) takes the CLI route under the subscription profile when no model

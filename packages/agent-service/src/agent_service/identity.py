@@ -34,9 +34,9 @@ from webauth.jwt_verification import (
     RejectionReason,
     VerifiedClaims,
 )
-from webauth.oidc_login import app_role
+from webauth.oidc_login import AppRole, app_role
 
-from agent_client.wire import RejectionCode, UnicodeText
+from agent_client.wire import AgentRole, RejectionCode, UnicodeText
 from agent_service.config import IdentityConfig, ServiceConfig
 
 WORKLOAD_ROLE: Final = "agent-workload"
@@ -52,13 +52,20 @@ class Principal:
     subject: str
 
 
+_AGENT_ROLE_OF: Final[Mapping[AppRole, AgentRole]] = {
+    AppRole.ADMIN: "admin",
+    AppRole.USER: "user",
+}
+
+
 @dataclass(frozen=True)
 class Caller:
-    """A verified app acting for a verified end user."""
+    """A verified app acting for a verified end user, who holds ``role`` in that app."""
 
     app: str
     principal: Principal
     groups: frozenset[str]
+    role: AgentRole
 
 
 def build_verifier(
@@ -108,9 +115,15 @@ class CallerCheck:
             raise _Refused(RejectionCode.FORBIDDEN)
         if user.subject == workload.subject:
             raise _Refused(RejectionCode.FORBIDDEN)
-        if app_role(tuple(groups), self._config.app_admission(app)) is None:
+        role = app_role(tuple(groups), self._config.app_admission(app))
+        if role is None:
             raise _Refused(RejectionCode.FORBIDDEN)
-        return Caller(app=app, principal=Principal(user.issuer, user.subject), groups=groups)
+        return Caller(
+            app=app,
+            principal=Principal(user.issuer, user.subject),
+            groups=groups,
+            role=_AGENT_ROLE_OF[role],
+        )
 
     async def _verified(self, token: str | None) -> VerifiedClaims:
         if token is None:

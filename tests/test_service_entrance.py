@@ -484,7 +484,7 @@ def test_a_user_token_outside_the_bearer_scheme_is_unauthorized(service):
     "field",
     ["provider", "route", "user_id", "mcp_url", "mcp_token"],
 )
-def test_a_body_naming_anything_beyond_purpose_model_turn_and_tools_is_invalid(service, field):
+def test_a_body_naming_a_field_reserved_to_the_service_is_invalid(service, field):
     response = post_run(
         service, run_headers(MINT.workload(), MINT.user()), run_body(**{field: "x"})
     )

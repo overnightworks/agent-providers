@@ -203,6 +203,16 @@ def test_a_non_member_with_every_place_taken_is_forbidden_not_busy_and_holds_no_
     service.let_all_go(service.fill_the_places())
 
 
+def test_a_user_on_an_admin_only_agent_with_every_place_taken_is_forbidden_not_busy(service):
+    held = service.fill_the_places()
+
+    refused = service.run(MINT.user(groups=[SUBSCRIPTION_GROUP, SONGMAKER_GROUP]), roles=["admin"])
+
+    assert_rejected(refused, RejectionCode.FORBIDDEN, 403)
+    service.let_all_go(held)
+    service.let_all_go(service.fill_the_places())
+
+
 def test_a_member_of_both_routes_with_every_place_taken_gets_busy_and_no_api_run(service):
     held = service.fill_the_places()
     signed_before = len(service.signed)

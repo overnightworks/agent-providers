@@ -386,6 +386,7 @@ REQUEST = {
     "v": PROTOCOL_VERSION,
     "purpose": "assistant",
     "model": "claude/sonnet",
+    "roles": ["admin", "user"],
     "turn": {
         "system": "You are a helpful assistant.",
         "messages": [

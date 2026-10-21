@@ -101,6 +101,7 @@ class AgentDefinition(BaseModel):
             purpose=self.name,
             model=self.model,
             turn=Turn(system=self.prompt, messages=messages),
+            roles=self.roles,
             tools={declaration.name: declaration.effect for declaration in self.tools},
         )
 

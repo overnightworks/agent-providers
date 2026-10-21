@@ -709,6 +709,7 @@ def leave_when(
                 "v": 2,
                 "purpose": "cowriter",
                 "turn": {"system": "s", "messages": [{"role": "user", "text": "a"}]},
+                "roles": ["admin", "user"],
                 "tools": dict(tools),
             }
         ),

@@ -450,7 +450,7 @@ def test_request_is_the_v2_body_with_purpose_prompt_and_tool_effects(tmp_path: P
         "read_note": ToolEffect.READ_ONLY,
         "edit_note": ToolEffect.SIDE_EFFECTING,
     }
-    assert set(request.model_dump()) == {"v", "purpose", "model", "turn", "tools"}
+    assert set(request.model_dump()) == {"v", "purpose", "model", "turn", "roles", "tools"}
 
 
 @pytest.mark.parametrize(
@@ -466,6 +466,15 @@ def test_request_carries_the_files_model_or_none(
     agent = load(tmp_path, agent_text(model=model_line))
 
     assert agent.request([TurnMessage(role=TurnRole.USER, text="hi")]).model == model
+
+
+@pytest.mark.parametrize("roles", ["[admin]", "[admin, user]"])
+def test_request_carries_the_files_roles_unchanged(tmp_path: Path, roles: str) -> None:
+    agent = load(tmp_path, agent_text(roles=roles))
+
+    request = agent.request([TurnMessage(role=TurnRole.USER, text="hi")])
+
+    assert request.roles == agent.roles
 
 
 def test_request_of_an_agent_without_tools_names_none(tmp_path: Path) -> None:

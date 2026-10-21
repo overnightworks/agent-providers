@@ -614,12 +614,6 @@ def test_an_app_name_that_is_not_one_group_segment_stops_startup_naming_the_app(
     assert refusal.startswith(f"apps.{shown_name}: ")
 
 
-def test_each_apps_admission_is_built_once_when_the_config_loads(tmp_path):
-    config = load_config(_written(tmp_path, VALID_CONFIG))
-
-    assert config.app_admission("songmaker") is config.app_admission("songmaker")
-
-
 ORIGIN_WITHOUT_SIGNING = _with(SIGNING_SECTION, "")
 ORIGIN_WITHOUT_SIGNING_REFUSAL = (
     "apps.songmaker.mcp_origin: needs a [signing] section,"

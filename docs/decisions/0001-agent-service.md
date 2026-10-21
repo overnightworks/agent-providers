@@ -151,6 +151,54 @@ body rules be fixed before the build.
   `not_enabled` row; and the `capability_too_large` row no longer has a preflight
   reserve (O6 amendment): it means the actual token exceeds 8,192 characters.
 
+  *Amendment (21.10.2026, #396).* The table stands as ruled for what it answers, and
+  for the first row's first refusals it is superseded by the order webauth v0.20.1
+  follows (`jwt_verification.py`, `_verified_claims`), which applies to the workload
+  and the user token alike:
+
+  1. Header checks, before any key is looked up: longer than 8192 characters; a
+     non-ASCII character; a header segment over 512 characters; not a compact JWS with
+     base64url segments and a JSON-object header; a null or non-string `kid`; a `crit`
+     naming anything but a present `b64`; `b64: false` with a non-empty payload; an `alg`
+     other than RS256; an empty or overlong `kid`. All answer 401 `unauthorized`.
+  2. The key. A current key set is held, or fetched when cold; no key set, or an unknown
+     `kid` after a failed refresh, answers 503 `unavailable`; an unknown `kid` after a
+     successful refresh, or a token without `kid` against several keys, answers 401.
+  3. The signature. A failing signature answers 401. A detached-form token (`b64: false`,
+     empty payload segment) passes step 1 and is refused here, in decode, after the key,
+     so while no key set can be fetched it answers 503.
+  4. The payload's JSON, read only after the signature holds (a signed payload that is
+     not a JSON object answers 401), then issuer, audience, `exp`, `iat` and `nbf` with
+     leeway, and the claims' types, all 401.
+
+  Unchanged: the answers (401 `unauthorized` for every refusal, 503 `unavailable` with
+  `Retry-After: 30` for a missing key set). Changed: the precedence. The former first row
+  parsed the payload before any key lookup, so a workload token with a parseable header
+  and a payload that is no JSON object answered 401 even when no key set could be
+  fetched; it now answers 503 until a key set is held. Also changed: a header or claim
+  named twice keeps its last value, nesting deeper than 8 and a number overflowing to
+  infinity or `NaN` are accepted, and the `jwk`, `jku`, `x5u` and `x5c` header members are
+  ignored, not refused. The key set stays the configured one alone; the issuer's
+  signature, issuer, audience and times are still checked, so no unsigned or foreign-signed
+  token is admitted.
+
+  RFC 7515 section 10.12 requires a parser to reject JSON that does not conform to
+  JSON-text syntax. The service departs from it by adopting webauth's reading. The
+  authority is the operator's ruling of 20.10.2026 on overnightworks/webauth#302,
+  finding 2 ("`_parse_token` and `_strict_json_object` go"), built for webauth 0.19.0
+  (CHANGELOG, "What the issuer signs is accepted as PyJWT reads it"), and the head's
+  adoption of that reading on #391 (21.10.2026). The reason is webauth's threat model
+  (its README, "Security model", webauth#270 finding 22): the configured issuer is
+  trusted for what it signs; webauth is the only reader of the token; the payload is
+  parsed only after the RS256 signature holds; and the header stays bounded (ASCII,
+  512 characters, RS256 only, `typ`, `kid` selecting only a configured key). RFC 7519
+  section 4 lets a repeated claim name keep its last value, and RFC 7515 section 4 does
+  the same for repeated header names and allows ignoring `jwk`, `jku`, `x5u` and `x5c`.
+  Neither authorises tolerance of deep nesting, `NaN` or the token encodings in a claim,
+  and neither RFC 8259 section 6 nor RFC 7515 section 10.12 authorises a literal `NaN`
+  or infinity there; that tolerance is solely webauth's adopted behaviour, as
+  `json.loads` reads it.
+
   Every rejection is a `RunRejection` with `Cache-Control: no-store`, and no
   answer or log line carries token text.
   A token whose `kid` is missing from a still-current key set answers 503

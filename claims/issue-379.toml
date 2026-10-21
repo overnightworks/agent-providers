@@ -1,0 +1,7 @@
+claim_id = "7f64b81c036b4803b0f84d4ad908e6eb"
+agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
+role = "builder"
+base = "62b1f375d779eb748a0491392a2339d975cfb260"
+branch = "claude/issue-379-login-copy-shape"
+scope = ["docs/decisions/0001-agent-service.md"]
+opened_commit = "d727cca0818a6ba1c7162d42ef9b51ea25e5fd3b"

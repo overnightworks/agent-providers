@@ -121,6 +121,14 @@ def model_options(arguments: tuple[str, ...]) -> list[str]:
     return [a for a in arguments if a == "--model" or a.startswith("--model=")]
 
 
+def option_values_by_option(arguments: tuple[str, ...]) -> dict[str, str]:
+    return {
+        option: value
+        for option, value in zip(arguments, arguments[1:], strict=False)
+        if option.startswith("--") and not value.startswith("-")
+    }
+
+
 FORBIDDEN_FLAGS = (
     "--permission-mode",
     "--dangerously-skip-permissions",
@@ -852,6 +860,11 @@ def test_a_model_is_one_equals_argument_and_the_only_change(
 
     assert model_options(arguments) == [f"--model={model}"]
     assert sorted(arguments) == sorted((*without_model, f"--model={model}"))
+    assert arguments.count(f"--model={model}") == 1
+    model_index = arguments.index(f"--model={model}")
+    assert arguments[model_index - 1] not in option_values_by_option(without_model)
+    for option, value in option_values_by_option(without_model).items():
+        assert arguments[arguments.index(option) + 1] == value
     assert arguments.count("-p") == 1
     assert arguments.count(model) == without_model.count(model)
 

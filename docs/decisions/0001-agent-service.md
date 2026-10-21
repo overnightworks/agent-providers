@@ -1499,7 +1499,10 @@ the operator's word „a“ on #390 are the operator's own; "never replaced" is 
 rule (the head's record of „a“, a paraphrase there). The list as the required key and the
 existing `not_enabled` as the refusal are the head's decisions on #382; the form
 `--model=<name>` and its flag-injection reasoning are the head's design decision from the
-second gate's finding on PR #394 (#395), not the operator's words.
+second gate's finding on PR #394 (#395), not the operator's words. How a logged-in CLI
+treats a model name it does not know (refuse, warn or fall back) is unverified until the
+live smoke (edge#214, edge#218); before login the pinned 2.1.302 only warns
+(`unrecognized_model`).
 
 
 #### Inherited constraints (settled; A1b makes them true and does not reopen them)

@@ -1,8 +1,0 @@
-claim_id = "d6ef4d842eda4ec98e042129b1303a05"
-agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
-role = "builder"
-base = "e2dd338a5ca10e1e5badca853e790ae67be539bb"
-branch = "claude/issue-396-a4-p2a0-webauth-0-20-1"
-scope = ["docs/MIGRATING.md", "docs/decisions/0001-agent-service.md", "packages/agent-service/pyproject.toml", "tests/keycloak/requirements.in", "tests/keycloak/requirements.txt", "tests/service_support.py", "tests/test_service_token_reading.py", "uv.lock"]
-opened_commit = "e6ea3f00a70c94fc4fc581f32e2fad306962e413"
-whole_reason = "The pin, its lock and hashed requirements files are one change; the verifier cells need two mint seams and one new test module; the amendment documents the same change."

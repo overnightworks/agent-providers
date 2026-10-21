@@ -1,8 +1,0 @@
-claim_id = "f2804e41a86b4f25873576aa8b2aedad"
-agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
-role = "builder"
-base = "a65e4dd93464190f6a71fb923ba80713fa997eca"
-branch = "claude/issue-389-a4-p2c-wire-v2-request-tools"
-scope = ["README.md", "docs/MIGRATING.md", "docs/decisions/0001-agent-service.md", "packages/agent-client/src/agent_client/agents.py", "packages/agent-client/src/agent_client/capability.py", "packages/agent-client/src/agent_client/wire.py", "packages/agent-service/src/agent_service/__init__.py", "packages/agent-service/src/agent_service/app.py", "packages/agent-service/src/agent_service/capability.py", "packages/agent-service/src/agent_service/config.py", "packages/agent-service/src/agent_service/run_events.py", "tests/service_support.py", "tests/test_agent_files.py", "tests/test_capability_verifier.py", "tests/test_service_admission.py", "tests/test_service_capability.py", "tests/test_service_cli_runner.py", "tests/test_service_cli_runner_tools.py", "tests/test_service_config.py", "tests/test_service_entrance.py", "tests/test_service_keycloak.py", "tests/test_service_run_events.py", "tests/test_service_run_recording.py", "tests/test_service_run_status.py", "tests/test_service_tool_relay_barrier.py", "tests/test_sse_codec.py", "tests/test_wire_protocol.py"]
-opened_commit = "b3b63477db2ec01cbb3cd6a2eec4fbd8dcd0e579"
-whole_reason = "The grant source moves from the service table to the request in one step: removing the table without the field leaves nothing signed, adding the field without removing the table leaves two sources; wire v2's version change touches every frame pin."

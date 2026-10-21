@@ -1,8 +1,0 @@
-claim_id = "46548507226145449a64a57a82890a30"
-agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
-role = "builder"
-base = "e2dd338a5ca10e1e5badca853e790ae67be539bb"
-branch = "claude/issue-395-a4-p2d2-claude-run-model"
-scope = ["docs/MIGRATING.md", "docs/decisions/0001-agent-service.md", "packages/agent-service/src/agent_service/cli_runner.py", "src/agent_providers/claude/provider.py", "tests/test_claude_run.py", "tests/test_service_cli_runner.py", "tests/test_service_cli_runner_tools.py", "tests/test_service_tool_relay.py"]
-opened_commit = "92bbf1c659fd4864b22d5ec632f8d2abbc128ace"
-whole_reason = "One argv path: the ClaudeRun field, the runner passing the route model, their tests and the two document rows change together."

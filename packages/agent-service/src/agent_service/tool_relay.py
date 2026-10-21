@@ -112,9 +112,7 @@ def _declares_no_body(request: h11.Request) -> bool:
 
 
 def _declares_both_framings(request: h11.Request) -> bool:
-    return bool(_field_values(request, b"transfer-encoding")) and bool(
-        _field_values(request, b"content-length")
-    )
+    return all(_field_values(request, name) for name in (b"transfer-encoding", b"content-length"))
 
 
 def _declared_length(request: h11.Request) -> int:
@@ -234,7 +232,6 @@ class Relay:
         self._server.close()
 
     async def _close_once(self) -> None:
-        loop = asyncio.get_running_loop()
         deadline = self._clock() + RELAY_CLOSE_SECONDS
         self.stop_listening()
         connections = dict(self._connections)
@@ -242,7 +239,7 @@ class Relay:
             transport.abort()
         for task in connections:
             task.cancel()
-        wait_closed = loop.create_task(
+        wait_closed = asyncio.get_running_loop().create_task(
             self._server.wait_closed(), name=f"relay:{self._run_id}:wait-closed"
         )
         try:
@@ -287,13 +284,9 @@ class Relay:
         self, connection: h11.Connection, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> bool:
         try:
+            head_deadline = self._receive_deadline(HEAD_RECEIVE_SECONDS, writer, "head")
             body_deadline = self._receive_deadline(BODY_RECEIVE_SECONDS, writer, "body")
-            request = await self._read_head(
-                connection,
-                reader,
-                self._receive_deadline(HEAD_RECEIVE_SECONDS, writer, "head"),
-                body_deadline,
-            )
+            request = await self._read_head(connection, reader, head_deadline, body_deadline)
             if request is None:
                 return False
             if (status := self._head_status(request)) is not None:
@@ -862,6 +855,10 @@ class RepeatedToolOffer(Exception):
         super().__init__("an allowed tool was offered more than once")
 
 
+class UnofferedTool(Exception):
+    """A signed tool is missing from the app's list; the message names no tool."""
+
+
 def _narrowed_to(
     allowed: Sequence[str], offered: Sequence[ToolDefinition]
 ) -> tuple[ToolDefinition, ...]:
@@ -869,6 +866,8 @@ def _narrowed_to(
     kept = [tool for tool in offered if tool.name in permitted]
     if len({tool.name for tool in kept}) != len(kept):
         raise_without_chain(RepeatedToolOffer())
+    if len(kept) != len(permitted):
+        raise_without_chain(UnofferedTool("a signed tool is not in the app's list"))
     return tuple(kept)
 
 

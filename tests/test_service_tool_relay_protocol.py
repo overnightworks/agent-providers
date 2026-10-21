@@ -43,9 +43,10 @@ from agent_service.tool_relay import (
     RelayRequest,
     RepeatedToolOffer,
     Unanswered,
+    UnofferedTool,
 )
 
-CLAIM = ("list_songs", "read_lyrics", "save_lyrics")
+CLAIM = ("read_lyrics", "save_lyrics")
 SUPPORTED = "2025-11-25"
 CLI_DISCOVERY_VERSION = "2026-07-28"
 CANARY = canary_token()
@@ -279,6 +280,34 @@ def test_an_offer_naming_an_allowed_tool_twice_is_refused_without_naming_it() ->
         owner_of(offer)
 
     assert "save_lyrics" not in f"{refusal.value!s} {refusal.value!r}"
+
+
+@pytest.mark.parametrize(
+    "offer",
+    [
+        pytest.param(
+            [tool("delete_song", "Deletes.", {"type": "object"})], id="none-signed-offered"
+        ),
+        pytest.param(the_offer()[:1], id="partial-overlap"),
+    ],
+)
+def test_a_signed_tool_the_app_does_not_offer_is_refused_without_naming_it(
+    offer: list[ToolDefinition],
+) -> None:
+    with pytest.raises(UnofferedTool) as refusal:
+        owner_of(offer)
+
+    text = f"{refusal.value!s} {refusal.value!r}"
+    assert not [name for name in ("save_lyrics", "read_lyrics", "delete_song") if name in text]
+
+
+def test_an_offered_tool_the_claim_does_not_sign_is_refused_when_called_and_not_handed_on() -> None:
+    calls = ScriptedCalls()
+
+    answer = answered(owner_of(calls=calls), json_rpc("tools/call", 7, {"name": "delete_song"}))
+
+    assert answer == ok_json(error_body(7, -32602, "Invalid params"))
+    assert calls.calls == []
 
 
 def test_a_repeated_name_outside_the_claim_is_dropped_not_refused() -> None:

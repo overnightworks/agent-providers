@@ -1,8 +1,0 @@
-claim_id = "fea79c13108340c0940e1b6319faa85d"
-agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
-role = "builder"
-base = "6cad96596c76c960a2fc279b76c0ce0df8d0c4aa"
-branch = "claude/issue-385-a4-p1-route-by-groups"
-scope = ["README.md", "docs/decisions/0001-agent-service.md", "packages/agent-client/src/agent_client/wire.py", "packages/agent-service/src/agent_service/app.py", "packages/agent-service/src/agent_service/capability.py", "packages/agent-service/src/agent_service/config.py", "packages/agent-service/src/agent_service/routing.py", "tests/keycloak/realm.json", "tests/service_support.py", "tests/test_capability_verifier.py", "tests/test_keycloak_token_shapes.py", "tests/test_service_admission.py", "tests/test_service_capability.py", "tests/test_service_cli_runner_tools.py", "tests/test_service_config.py", "tests/test_service_entrance.py", "tests/test_service_keycloak.py", "tests/test_service_routing.py", "tests/test_wire_protocol.py"]
-opened_commit = "02e28310ec04050f66e24b0ab184e9ca5537b4b5"
-whole_reason = "The purpose table, the routing that reads it, the preflight that iterates it and the request grammar that replaces it are one decision; removing one alone leaves the service unrouted or unchecked."

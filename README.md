@@ -329,14 +329,15 @@ first be a member of the app: one of their groups is `/apps/<app>` or a path bel
 the app is then `admin` in `/apps/<app>/admin` or below, else `user`; a `POST` whose `roles`
 lacks it gets 403 `forbidden`, before the tools check and the route.
 `agent_service.routing.route` then decides the route from the caller's groups and the
-requested model, never the purpose: a member of a subscription group (`[identity]
+model the agent runs on, never the purpose: that model is the app's override for the
+run's purpose (`[apps.<app>.models]`) when one exists, else the requested model: a member of a subscription group (`[identity]
 subscription_groups`) takes the CLI route under the subscription profile when no model
 is requested or the subscription can run exactly that model (the names in `[cli.claude]
 models`); a member of an API group (`api_groups`, set together with `[route] api_alias`)
 takes the paid API route otherwise; anyone else is not
-enabled. A requested model is never replaced by another.
+enabled. A requested model is never replaced by another, except by the app's per-agent override.
 `RunRequest.purpose` (`[a-z][a-z0-9-]{0,63}`) labels the run and its capability
-and routes nothing. An app without an MCP origin that names a tool answers 403
+and keys the app's model override; it chooses no route itself. An app without an MCP origin that names a tool answers 403
 `forbidden`, before the route. At most `[runs] max_parallel_cli_runs` (default 5) CLI runs
 are admitted; one beyond gets 429 `busy` with `Retry-After` and never falls back
 to the API route. Today only the CLI runner is installed, with Claude as its only
@@ -352,7 +353,11 @@ boundary: the service checks the role.
 
 **App tools through MCP.** An app that offers tools declares one canonical https
 MCP origin in the service's configuration (`[apps.<app>]` holds `workload_client` and
-`mcp_origin`); the app names the tools of each run in its request, and the service
+`mcp_origin`, and optionally `[apps.<app>.models]`, which maps an agent's name to the model
+it runs on, such as `summarizer = "claude/sonnet"`; a restart applies a change, and a name the
+app never sends matches nothing, with no error; a model the subscription does not list sends
+that agent to the paid API for every caller with API rights, and gives subscription-only
+callers `not_enabled`); the app names the tools of each run in its request, and the service
 mints each admitted run a capability that grants exactly those names, and stamps the
 request's effects onto the run's tool calls (a tool outside the map counts as
 side-effecting). The capability is an RS256 token signed with the service's one RSA-3072 key,

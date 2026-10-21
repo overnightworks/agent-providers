@@ -38,6 +38,7 @@ from pydantic import (
     PrivateAttr,
     StrictFloat,
     StrictInt,
+    TypeAdapter,
     ValidationError,
     model_validator,
 )
@@ -45,7 +46,7 @@ from webauth.https_client import is_https_url
 from webauth.oidc_login import AdmissionConfig
 
 from agent_client.capability import McpOrigin
-from agent_client.wire import MAX_EVENT_BYTES, MODEL_PART_PATTERN
+from agent_client.wire import MAX_EVENT_BYTES, MODEL_PART_PATTERN, ModelName, Purpose
 from agent_providers.config import PrivateWorkingRoot, WorkingRootNotPrivateError
 from agent_providers.secret_file import read_token_file, shown_text
 from agent_service.capability import CapabilityScope
@@ -285,13 +286,16 @@ class RouteConfig(_Section):
 
 
 class AppConfig(_Section):
-    """One app: its workload client and its MCP origin.
+    """One app: its workload client, its MCP origin and its per-agent model overrides.
 
-    The app's tools and their effects arrive with each run request.
+    The app's tools and their effects arrive with each run request. ``models`` maps an
+    agent's name (the ``purpose`` of its runs) to the model that agent runs on instead of
+    the one it asks for.
     """
 
     workload_client: NonEmptyText
     mcp_origin: McpOrigin | None = None
+    models: dict[Purpose, ModelName] = Field(default_factory=dict)
 
 
 def _named_tables(
@@ -381,6 +385,32 @@ def _refuse_an_origin_without_a_ca_bundle(document: object) -> None:
             )
 
 
+_AGENT_NAME: Final = TypeAdapter(Purpose)
+_MODEL_NAME: Final = TypeAdapter(ModelName)
+
+
+def _refuse_a_malformed_model_override(document: object) -> None:
+    for app_name, app in _named_tables(document, "apps", AppConfig):
+        overrides = _value(app, "models")
+        where = f"apps.{shown_text(app_name)}.models"
+        if overrides is None:
+            continue
+        if not isinstance(overrides, Mapping):
+            raise ValueError(f'{where}: must be a table of <agent> = "<provider>/<model>"')
+        for agent, model in overrides.items():
+            for decider, text, what in (
+                (_AGENT_NAME, agent, "agent name"),
+                (_MODEL_NAME, model, "model"),
+            ):
+                try:
+                    decider.validate_python(text, strict=True)
+                except ValidationError as error:
+                    problem = _message(error.errors()[0]["msg"])
+                    raise ValueError(
+                        f"{where}.{shown_text(str(agent))}: {what} {problem}"
+                    ) from error
+
+
 RULES_ON_THE_RAW_DOCUMENT: Final = (
     _refuse_a_second_profile_for_one_provider,
     _refuse_a_profile_for_a_provider_without_a_route,
@@ -388,6 +418,7 @@ RULES_ON_THE_RAW_DOCUMENT: Final = (
     _refuse_a_claude_profile_without_its_program_table,
     _refuse_an_origin_without_signing,
     _refuse_an_origin_without_a_ca_bundle,
+    _refuse_a_malformed_model_override,
 )
 
 
@@ -470,6 +501,10 @@ class ServiceConfig(_Section):
         if self.cli is None:
             return {}
         return {provider: pin.models for provider, pin in self.cli.programs().items()}
+
+    def model_for(self, app_name: str, purpose: str, requested: str | None) -> str | None:
+        """The model the route is asked about: the agent's override, else the request's."""
+        return self.apps[app_name].models.get(purpose, requested)
 
     def mcp_trust_bundle(self) -> Path | None:
         """The CA bundle for the apps' MCP origins; ``None`` while no app declares an origin."""

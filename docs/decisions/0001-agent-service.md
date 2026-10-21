@@ -17,6 +17,9 @@ use the operator's subscription, and which route serves the caller. The app
 never names a provider, a model, a route or a user id, and never holds an LLM or
 subscription credential.
 
+*Amendment (22.10.2026, #382, #406).* The purpose still labels the run and its capability and now
+also keys the model override of its app (H5); it chooses no route itself.
+
 There are exactly two routes:
 
 - the **CLI route** runs an isolated `claude -p` under a configured subscription
@@ -1004,6 +1007,21 @@ amendment of this date) replaces it for both routes, before any route is chosen,
 route no longer reads the app. The model sentence of the second amendment now reads
 "otherwise over the API when the caller holds the API rights (`api_groups`)", the app's
 group being the gate's. Authority: the line of #382's accepted design „/apps/<app> (or a descendant): may use the app at all; the service checks this at admission, segment-aware“, which the operator was shown and accepted with „ja klingt gut! gib es dem head!“ and „wir bauen das entsprechend“ (21.10.2026).
+
+**Amendment (22.10.2026, #382, #406).** The model the route reads is the per-agent override
+from `[apps.<app>.models]` when one exists for the run's purpose, else the request's model,
+else none; the table of the #390 amendment applies to it unchanged, so an override gives no
+rights and an API-only caller uses the API as without one. Authority: the operator's „in 1 will
+ich dass es funktioniert => und dass wir es später ausbauen können ohne dass die apps dann
+wieder all zu viel ändern müssen“ (stage 1 is a line in the service config, changed by
+restart); the design line of #382 „Stage 1 (P4): the per-agent override is a line in the
+service config (`<app>/<agent>` → `<provider>/<model>`), changed by editing and restarting“
+(the design's, accepted with „wir bauen das entsprechend“); the operator's „a“ on #390 for
+what an overridden model routes to. The table's name and nested shape, the grammar-only
+startup check (an override may name a model the subscription does not list, which follows
+„a“ on #390 and supersedes #390's line that P4 checks every override against the listed
+models) and the rule that an override for an agent the app never sends simply never matches
+are the head's decisions on #406.
 
 **Consequence.** The app-local provider/model/route settings for a moved purpose
 are removed from settings, API and UI.

@@ -41,6 +41,8 @@ MAX_EVENT_BYTES: Final = 1_048_576
 MAX_TOOL_INPUT_DEPTH: Final = 128
 MAX_MESSAGE_LENGTH: Final = 500
 MAX_PURPOSE_LENGTH: Final = 64
+MODEL_PART_PATTERN: Final = re.compile(r"[a-z0-9.-]+")
+_MODEL_NAME_PATTERN: Final = re.compile(rf"[a-z0-9-]+/{MODEL_PART_PATTERN.pattern}")
 _PURPOSE_PATTERN: Final = re.compile(rf"[a-z][a-z0-9-]{{0,{MAX_PURPOSE_LENGTH - 1}}}")
 
 
@@ -181,7 +183,11 @@ UnicodeText = Annotated[str, AfterValidator(_refuse_non_unicode_text)]
 """The one type of wire text: valid Unicode, so the body or frame it lands in encodes as JSON."""
 
 NonEmptyUnicodeText = Annotated[UnicodeText, Field(min_length=1)]
-"""The one owner of non-empty wire text: a call id, a tool's name, a message's text."""
+"""The one owner of non-empty wire text.
+
+It covers a call id, a tool's name, an assistant or final text and a capability's
+identifying claims.
+"""
 
 ToolUseId = NonEmptyUnicodeText
 """The one decider of a valid call id, so a call and its result accept the same ids."""
@@ -198,6 +204,16 @@ def _refuse_non_purpose(text: str) -> str:
 
 Purpose = Annotated[str, AfterValidator(_refuse_non_purpose)]
 """The one decider of an agent's name: the purpose a run is started for."""
+
+
+def _refuse_non_model_name(text: str) -> str:
+    if _MODEL_NAME_PATTERN.fullmatch(text) is None:
+        raise ValueError("must be <provider>/<model> with no version, such as claude/sonnet")
+    return text
+
+
+ModelName = Annotated[str, AfterValidator(_refuse_non_model_name)]
+"""The one decider of a requested model: ``<provider>/<model>``, never a version."""
 
 AgentRole = Literal["admin", "user"]
 """The two roles an app gives a person; the host's own role names map onto these."""
@@ -374,9 +390,11 @@ class RunRequest(_WireModel):
 
     ``tools`` maps each tool the run may call to its effect. The service signs
     exactly those names into the run's capability and stamps the effects onto
-    the run's tool calls; it grants nothing else.
+    the run's tool calls; it grants nothing else. ``model``, when present, is the
+    model the run must use; the service never substitutes another.
     """
 
     purpose: Purpose
+    model: ModelName | None = None
     turn: Turn
     tools: dict[NonEmptyUnicodeText, Annotated[ToolEffect, Field(strict=False)]]

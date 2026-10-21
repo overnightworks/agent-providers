@@ -24,6 +24,7 @@ from service_support import (
     API_ALIAS,
     API_GROUP,
     COWRITER,
+    LISTED_MODEL,
     MALFORMED_PURPOSES,
     OLD_SUBSCRIPTION_GROUP,
     PRESENTATOR_CLIENT,
@@ -31,6 +32,7 @@ from service_support import (
     SONGMAKER_GROUP,
     SONGMAKER_TOOLS,
     SUBSCRIPTION_GROUP,
+    UNLISTED_MODEL,
     ScriptedRunner,
     StepClock,
     TokenMint,
@@ -42,6 +44,9 @@ from service_support import (
     served,
     service_config,
     service_config_file,
+    with_listed_models,
+    without_cli,
+    without_profiles,
 )
 from webauth.https_client import KeySetFetchError
 from webauth.jwt_verification import KEY_SET_REFRESH_COOLDOWN_SECONDS
@@ -475,14 +480,102 @@ def test_a_user_token_outside_the_bearer_scheme_is_unauthorized(service):
 
 @pytest.mark.parametrize(
     "field",
-    ["provider", "model", "route", "user_id", "mcp_url", "mcp_token"],
+    ["provider", "route", "user_id", "mcp_url", "mcp_token"],
 )
-def test_a_body_naming_anything_beyond_purpose_turn_and_tools_is_invalid(service, field):
+def test_a_body_naming_anything_beyond_purpose_model_turn_and_tools_is_invalid(service, field):
     response = post_run(
         service, run_headers(MINT.workload(), MINT.user()), run_body(**{field: "x"})
     )
 
     assert_rejected(response, RejectionCode.INVALID_REQUEST, 422)
+
+
+LISTED = f"claude/{LISTED_MODEL}"
+UNLISTED = f"claude/{UNLISTED_MODEL}"
+SUBSCRIBER = [SUBSCRIPTION_GROUP]
+API_MEMBER = [API_GROUP, SONGMAKER_GROUP]
+
+
+def _routed_run(config, groups, **body):
+    runners = Runners(cli=ScriptedRunner(CLI_SCRIPT), api=ScriptedRunner(API_SCRIPT))
+    app = create_app(config, runners=runners, fetch_key_set=MINT.fetch_key_set)
+    with served(app) as base_url:
+        response = post_run(
+            base_url, run_headers(MINT.workload(), MINT.user(groups=groups)), run_body(**body)
+        )
+    return response, runners
+
+
+def test_h1_a_listed_model_reaches_the_cli_route_by_name():
+    response, runners = _routed_run(service_config(), SUBSCRIBER, model=LISTED)
+
+    assert _admitted_events(response)
+    assert runners.cli.admitted[-1].route == Cli("claude-main", LISTED_MODEL)
+
+
+def test_h2_an_unlisted_model_reaches_an_api_only_caller_by_its_full_name():
+    response, runners = _routed_run(service_config(), API_MEMBER, model=UNLISTED)
+
+    assert _admitted_events(response)
+    assert runners.api.admitted[-1].route == Api(API_ALIAS, UNLISTED)
+
+
+def test_h3_a_null_model_runs_the_default_even_when_the_subscription_lists_nothing():
+    config = with_listed_models(service_config(), [])
+
+    response, runners = _routed_run(config, SUBSCRIBER, model=None)
+
+    assert _admitted_events(response)
+    assert runners.cli.admitted[-1].route == Cli("claude-main", None)
+
+
+@pytest.mark.parametrize(
+    ("configure", "groups", "api_route"),
+    [
+        pytest.param(without_cli, API_MEMBER, True, id="H4-no-cli-api"),
+        pytest.param(without_cli, SUBSCRIBER, False, id="H5-no-cli-subscriber"),
+        pytest.param(without_profiles, API_MEMBER, True, id="H6-no-profiles-api"),
+        pytest.param(without_profiles, SUBSCRIBER, False, id="H7-no-profiles-subscriber"),
+        pytest.param(
+            lambda config: with_listed_models(config, []),
+            SUBSCRIBER,
+            False,
+            id="H8-nothing-listed-subscriber",
+        ),
+    ],
+)
+def test_a_named_model_without_subscription_facts_goes_to_the_api_or_is_refused(
+    configure, groups, api_route
+):
+    response, runners = _routed_run(configure(service_config()), groups, model=LISTED)
+
+    if api_route:
+        assert _admitted_events(response)
+        assert runners.api.admitted[-1].route == Api(API_ALIAS, LISTED)
+    else:
+        assert_rejected(response, RejectionCode.NOT_ENABLED, 403)
+        assert runners.cli.admitted == runners.api.admitted == []
+
+
+def test_v6_a_malformed_model_is_invalid_before_tools_are_forbidden(service):
+    response = post_run(
+        service,
+        run_headers(
+            MINT.workload(client=PRESENTATOR_CLIENT),
+            MINT.user(azp=PRESENTATOR_CLIENT, groups=[SUBSCRIPTION_GROUP]),
+        ),
+        run_body(model="sonnet", tools=SONGMAKER_TOOLS),
+    )
+
+    assert_rejected(response, RejectionCode.INVALID_REQUEST, 422)
+
+
+def test_v7_a_malformed_model_with_an_unsupported_version_answers_the_version(service):
+    response = post_run(
+        service, run_headers(MINT.workload(), MINT.user()), run_body(v=1, model="sonnet")
+    )
+
+    assert_rejected(response, RejectionCode.UNSUPPORTED_VERSION, 400)
 
 
 def _too_large() -> bytes:

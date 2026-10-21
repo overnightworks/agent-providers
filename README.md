@@ -311,7 +311,8 @@ missing one and exits 2. `agent_service.config` documents the file, and the
 decision record owns the rulings behind it.
 
 **Routes.** `POST /runs` takes a `RunRequest` (wire version 2: `v`, `purpose`,
-`turn` and `tools`, a map from each tool the run may call to its effect; a body
+`turn`, `tools`, a map from each tool the run may call to its effect, and an optional
+`model` as `<provider>/<model>`; a body
 with any other `v` answers 400 `unsupported_version`) and answers with the run's event
 stream (SSE), ending every run with exactly one terminal event except the cut
 stream of a dropped client. `GET /runs/{id}` returns the run's status, readable
@@ -321,11 +322,13 @@ bodies and the typed rejections.
 
 **Who may run what.** A caller presents a workload token bound to one registered
 app and a user token bound to one principal (`agent_service.identity`).
-`agent_service.routing.route` decides the route from the caller's groups alone,
-never the purpose: a member of a subscription group (`[identity]
-subscription_groups`) takes the CLI route under the subscription profile; a member
-of an API group (`api_groups`, set together with `[route] api_alias`) who also
-holds the app's own group takes the paid API route; anyone else is not enabled.
+`agent_service.routing.route` decides the route from the caller's groups and the
+requested model, never the purpose: a member of a subscription group (`[identity]
+subscription_groups`) takes the CLI route under the subscription profile when no model
+is requested or the subscription can run exactly that model (the names in `[cli.claude]
+models`); a member of an API group (`api_groups`, set together with `[route] api_alias`)
+who also holds the app's own group takes the paid API route otherwise; anyone else is not
+enabled. A requested model is never replaced by another.
 `RunRequest.purpose` (`[a-z][a-z0-9-]{0,63}`) labels the run and its capability
 and routes nothing. An app without an MCP origin that names a tool answers 403
 `forbidden`, before the route. At most `[runs] max_parallel_cli_runs` (default 5) CLI runs

@@ -145,7 +145,7 @@ body rules be fixed before the build.
   | Admitted | 200 `text/event-stream` |
 
   *Amendment (21.10.2026, #389).* The table stands as ruled, with three changes: the
-  version row reads "not 2" (the H3 amendment above); after the 422 `invalid_request`
+  version row reads "not 2" (the A1a1 amendment below, #382, #389); after the 422 `invalid_request`
   row comes a row for a request that names tools while its app has no origin the
   service can sign a capability for, which answers 403 `forbidden` before the
   `not_enabled` row; and the `capability_too_large` row no longer has a preflight
@@ -904,6 +904,21 @@ groups uses the subscription when a profile is configured, and the paid route wh
 none is: that second case is an explicit configuration choice. A busy subscription
 still answers `busy` and never falls back. Authority: „/ai-subscription /ai-api“, „lauf abo oder litellm nicht am dienst entscheiden => sondern wie rechte per keycloak“ and „wir bauen das entsprechend“.
 
+**Amendment (21.10.2026, #382, #390).** For a request that names a model, the
+sentence above that a member of both groups uses the subscription whenever a profile
+is configured is replaced: the run goes over the subscription when the subscription can
+run exactly that model, otherwise over the API when the caller holds the API rights
+(`api_groups` and the app's group), otherwise it is `not_enabled`. A model counts as
+run by the subscription when the profile's provider is the requested provider and the
+name is in that provider's `[cli.<provider>] models`; an empty list lists nothing. Nothing
+substitutes the model: not the subscription's default, not another listed name, not
+another provider. With no model requested the sentence stands, and `busy` never falls
+back to the API; a run routed to the API takes no subscription place. Authority: the
+operator's word „a“ on #390 (21.10.2026), the answer to „if the subscription cannot run
+the model an agent names, what happens to a person who also holds API rights?“; the
+English rule in this block is the head's record of that answer, a paraphrase and not
+an operator quotation.
+
 **Consequence.** The app-local provider/model/route settings for a moved purpose
 are removed from settings, API and UI.
 
@@ -957,6 +972,14 @@ accepted with „wir bauen das entsprechend“; `roles` is the design's and not 
 operator ruling. The operator's own words on model choice, for `model?` only: „in 1 will ich
 dass es funktioniert => und dass wir es später ausbauen können ohne dass die apps dann
 wieder all zu viel ändern müssen“. P2d and P2a add their fields to this block.
+
+**Amendment (21.10.2026, #382, #390).** `model` is optional on wire v2: absent or an
+explicit `null` means no model, and a present model is `<provider>/<model>`
+(`agent_client.wire.ModelName`), anything else is 422 `invalid_request`. It joins the
+block above; `roles` is still P2a's. Authority: the operator's model quotes above, #382's
+design line „Per run, wire v2: `{v: 2, purpose, turn, roles, tools: {name: effect}}`“
+(the design's, accepted with „wir bauen das entsprechend“), and the operator's word „a“
+on #390 for what a named model routes to.
 
 ### A0b wire ruling (head, 15.10.2026)
 
@@ -1460,6 +1483,18 @@ lines) stand above in "A1b ruling (operator, 17.10.2026)". These are the others:
   - former Q4 is lines 12 and 13 (line 3 is ruled above), plus `[cli]` holding `claude_binary`, `claude_version` and `working_root` (the per-provider shape is the open decision HQ4);
   - former Q5 is line 8;
   - former Q6 and Q7 are line 9's retry time and that only subscription runs take a place.
+
+**Amendment (21.10.2026, #382, #390).** Line 8 („Es antwortet das Standardmodell deines
+Abos.“, verbatim from #115's body) holds for a subscription run with no requested model. A
+named `claude/<name>` that the installation lists in `[cli.claude] models` takes the
+subscription route; an unlisted one takes the API for a caller with API rights and is
+otherwise refused with `not_enabled`, never replaced. The list is the required key
+`[cli.claude] models`, an array that may be empty. That a listed name runs as
+`--model <name>` is written when the CLI route passes the flag. A fixed model per profile
+stays avoided. Authority: „agents.md hat auch provider + model“, „in 1 will ich dass es
+funktioniert => und dass wir es später ausbauen können ohne dass die apps dann wieder all
+zu viel ändern müssen“ and the operator's word „a“ on #390; the list as the required key
+and the existing `not_enabled` as the refusal are the head's decisions on #382.
 
 
 #### Inherited constraints (settled; A1b makes them true and does not reopen them)

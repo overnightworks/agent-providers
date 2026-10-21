@@ -28,6 +28,7 @@ from collections.abc import (
     AsyncIterator,
     Callable,
     Coroutine,
+    Iterable,
     Iterator,
     Mapping,
     Sequence,
@@ -200,6 +201,24 @@ def process_claude_cli() -> Path:
     )
 
 
+LISTED_MODEL: Final = "sonnet"
+UNLISTED_MODEL: Final = "opus"
+
+
+def with_listed_models(config: ServiceConfig, models: Iterable[str]) -> ServiceConfig:
+    """``config`` whose Claude program serves exactly ``models`` on the subscription."""
+    claude = config.cli.claude.model_copy(update={"models": frozenset(models)})
+    return config.model_copy(update={"cli": config.cli.model_copy(update={"claude": claude})})
+
+
+def without_cli(config: ServiceConfig) -> ServiceConfig:
+    return config.model_copy(update={"cli": None})
+
+
+def without_profiles(config: ServiceConfig) -> ServiceConfig:
+    return config.model_copy(update={"profiles": {}})
+
+
 def _service_config_document(
     issuer: str,
     runs: Mapping[str, object] | None,
@@ -222,6 +241,7 @@ def _service_config_document(
             "claude": {
                 "binary": str(claude_binary or process_claude_cli()),
                 "version": PINNED_CLAUDE_VERSION,
+                "models": [LISTED_MODEL],
             },
         },
         "mcp": {"ca_file": "/etc/agent-service/mcp-ca.pem"},

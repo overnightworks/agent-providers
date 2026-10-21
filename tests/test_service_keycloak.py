@@ -264,7 +264,7 @@ def _songmaker_workload() -> str:
             run_body(model="opus"),
             RejectionCode.INVALID_REQUEST,
             422,
-            id="names-a-model",
+            id="malformed-model",
         ),
         pytest.param(
             _songmaker_workload,

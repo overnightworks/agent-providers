@@ -28,8 +28,21 @@ OFF = NotEnabled()
 APP = "/apps/songmaker"
 
 
-def _routed(groups, *, profiles=PROFILES, route_facts=ROUTE, identity=IDENTITY, app="songmaker"):
-    return route(identity, route_facts, profiles, frozenset(groups), app)
+SONNET_LISTED = {Provider.CLAUDE: frozenset({"sonnet"})}
+NOTHING_LISTED = {Provider.CLAUDE: frozenset()}
+
+
+def _routed(
+    groups,
+    *,
+    profiles=PROFILES,
+    route_facts=ROUTE,
+    identity=IDENTITY,
+    app="songmaker",
+    model=None,
+    listed=SONNET_LISTED,
+):
+    return route(identity, route_facts, profiles, frozenset(groups), app, model, listed)
 
 
 @pytest.mark.parametrize(
@@ -73,3 +86,60 @@ def test_a_stale_subscription_name_is_not_enabled_once_the_configuration_drops_i
     )
 
     assert _routed({"/old-sub"}, identity=after_the_cut_over) == OFF
+
+
+SUBSCRIBER = {"/new-sub"}
+API_ONLY = {"/api-members", APP}
+API_WITHOUT_APP = {"/api-members"}
+BOTH = {"/new-sub", "/api-members", APP}
+BOTH_WITHOUT_APP = {"/new-sub", "/api-members"}
+
+
+@pytest.mark.parametrize(
+    ("groups", "model", "listed", "expected"),
+    [
+        pytest.param(
+            SUBSCRIBER, "claude/sonnet", SONNET_LISTED, Cli("claude-main", "sonnet"), id="R-a-S"
+        ),
+        pytest.param(
+            API_ONLY,
+            "claude/sonnet",
+            SONNET_LISTED,
+            Api("assistant-api", "claude/sonnet"),
+            id="R-a-A",
+        ),
+        pytest.param(API_WITHOUT_APP, "claude/sonnet", SONNET_LISTED, OFF, id="R-a-A0"),
+        pytest.param(
+            BOTH, "claude/sonnet", SONNET_LISTED, Cli("claude-main", "sonnet"), id="R-a-D"
+        ),
+        pytest.param(
+            BOTH_WITHOUT_APP,
+            "claude/sonnet",
+            SONNET_LISTED,
+            Cli("claude-main", "sonnet"),
+            id="R-a-DX",
+        ),
+        pytest.param(SUBSCRIBER, "claude/opus", SONNET_LISTED, OFF, id="R-b-S"),
+        pytest.param(
+            API_ONLY, "claude/opus", SONNET_LISTED, Api("assistant-api", "claude/opus"), id="R-b-A"
+        ),
+        pytest.param(API_WITHOUT_APP, "claude/opus", SONNET_LISTED, OFF, id="R-b-A0"),
+        pytest.param(
+            BOTH, "claude/opus", SONNET_LISTED, Api("assistant-api", "claude/opus"), id="R-b-D"
+        ),
+        pytest.param(BOTH_WITHOUT_APP, "claude/opus", SONNET_LISTED, OFF, id="R-b-DX"),
+        pytest.param(SUBSCRIBER, "claude/sonnet", NOTHING_LISTED, OFF, id="R-c-S"),
+        pytest.param(
+            BOTH, "claude/sonnet", NOTHING_LISTED, Api("assistant-api", "claude/sonnet"), id="R-c-D"
+        ),
+        pytest.param(SUBSCRIBER, "xai/sonnet", SONNET_LISTED, OFF, id="R-d-S"),
+        pytest.param(
+            BOTH, "xai/sonnet", SONNET_LISTED, Api("assistant-api", "xai/sonnet"), id="R-d-D"
+        ),
+        pytest.param(set(), "claude/sonnet", SONNET_LISTED, OFF, id="R-e-N"),
+    ],
+)
+def test_a_named_model_runs_on_the_subscription_only_when_it_is_listed(
+    groups, model, listed, expected
+):
+    assert _routed(groups, model=model, listed=listed) == expected

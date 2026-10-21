@@ -27,11 +27,18 @@ from pydantic import (
 from ruamel.yaml import YAML, YAMLError
 
 from agent_client.tools import ToolDeclaration
-from agent_client.wire import AgentRole, AgentRoles, Purpose, RunRequest, Turn, TurnMessage
+from agent_client.wire import (
+    AgentRole,
+    AgentRoles,
+    ModelName,
+    Purpose,
+    RunRequest,
+    Turn,
+    TurnMessage,
+)
 
 _AGENT_FILE_SUFFIX: Final = ".md"
 _FRONT_MATTER_FENCE: Final = "---"
-_MODEL_PATTERN: Final = re.compile(r"[a-z0-9-]+/[a-z0-9.-]+")
 _AGENT_ROLES: Final = TypeAdapter(AgentRole)
 _PURPOSE: Final = TypeAdapter(Purpose)
 _YAML: Final = YAML(typ="safe", pure=True)
@@ -40,12 +47,6 @@ _DUPLICATE_KEY: Final = re.compile(r'found duplicate key "(.*?)" with value')
 
 class AgentFileError(ValueError):
     """An agent file is refused; the message names the file and the field."""
-
-
-def _refuse_non_model(text: str) -> str:
-    if _MODEL_PATTERN.fullmatch(text) is None:
-        raise ValueError("must be <provider>/<model> with no version, such as claude/sonnet")
-    return text
 
 
 def _refuse_non_single_line(text: str) -> str:
@@ -60,7 +61,7 @@ class _FrontMatter(BaseModel):
     name: Purpose
     description: Annotated[StrictStr, AfterValidator(_refuse_non_single_line)]
     tools: list[StrictStr] = Field(default_factory=list)
-    model: Annotated[StrictStr, AfterValidator(_refuse_non_model)] | None = None
+    model: ModelName | None = None
     roles: AgentRoles = Field(alias="appRoles")
 
     @model_validator(mode="before")
@@ -98,6 +99,7 @@ class AgentDefinition(BaseModel):
         return RunRequest(
             v=2,
             purpose=self.name,
+            model=self.model,
             turn=Turn(system=self.prompt, messages=messages),
             tools={declaration.name: declaration.effect for declaration in self.tools},
         )

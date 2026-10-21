@@ -1,0 +1,8 @@
+claim_id = "69433773103646c7a0c8918b86f83766"
+agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
+role = "builder"
+base = "90c6d4f0a48fc32213949efff2da01a091229150"
+branch = "claude/issue-402-a4-p2a2-role-check"
+scope = ["README.md", "docs/MIGRATING.md", "docs/decisions/0001-agent-service.md", "packages/agent-client/src/agent_client/agents.py", "packages/agent-client/src/agent_client/wire.py", "packages/agent-service/src/agent_service/app.py", "packages/agent-service/src/agent_service/identity.py", "tests/service_support.py", "tests/test_agent_files.py", "tests/test_service_admission.py", "tests/test_service_app_gate.py", "tests/test_service_cli_runner_tools.py", "tests/test_service_config.py", "tests/test_service_entrance.py", "tests/test_service_keycloak.py", "tests/test_wire_protocol.py"]
+opened_commit = "00b5f3a8291aa6029dd2d233700fa36e23fd05ca"
+whole_reason = "The field, its carrier, the derived role and the check are one path; the test modules and documents are what the required roles field and the new order pin."

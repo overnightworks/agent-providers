@@ -3900,6 +3900,17 @@ repository without PyPI.
 the core wheel would make the resolver ask PyPI, where the names are
 unregistered — a dependency-confusion surface — so both URLs are required.
 
+### Agent file (21.10.2026, #382, #383)
+
+**Decision.** The client owns the agent-file contract (`agent_client.agents`).
+The file is Claude Code's subagent format: YAML front matter between `---`
+lines, the Markdown body as the prompt, under `src/<pkg>/agents/<name>.md`.
+Beyond `name`, `description` and `tools` it carries `model`
+(`<provider>/<model>`, no version) and our one extension `appRoles`, exactly
+`[admin]` or `[admin, user]`. The client parses with PyYAML `safe_load` and a
+strict pydantic model, so H9's client dependencies gain PyYAML. `offered_to`
+is a display filter, not a boundary; the service's role check is.
+
 ## H10 Gateway proof
 
 **Context.** LiteLLM holds the upstream keys and could leak prompts.

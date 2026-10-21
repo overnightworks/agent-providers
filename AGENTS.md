@@ -36,7 +36,7 @@ its packages ship.
   client, `pydantic`, `httpx` and `anyio` at runtime, and on nothing else — no
   host application, no web framework, no database. Everything host-specific
   arrives from the host, as the first two Code patterns say.
-- The agent client is light: its base depends on `pydantic` only and owns the tool
+- The agent client is light: its base depends on `pydantic` and `pyyaml` only and owns the tool
   contract `ToolDeclaration` in `agent_client.tools`. The core builds on it and
   re-exports the identical class from `agent_providers.tools`; the client never
   imports the core.

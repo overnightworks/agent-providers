@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 from provider_test_support import SAMPLE_TOOL_MARKUP
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 from wire_builders import (
     OTHER_RUN_ID,
     RUN_ID,
@@ -31,9 +31,12 @@ from agent_client.run_stream import RunStream, StreamViolation, ViolationKind, p
 from agent_client.tools import ToolDeclaration, ToolEffect
 from agent_client.wire import (
     MAX_MESSAGE_LENGTH,
+    MAX_PURPOSE_LENGTH,
     PROTOCOL_VERSION,
+    AgentRoles,
     ClientLoss,
     FailureCode,
+    Purpose,
     RejectionCode,
     RunEvent,
     RunRejection,
@@ -670,3 +673,34 @@ def test_a_violation_detail_shows_the_first_problems_and_counts_the_rest() -> No
     assert isinstance(violation, StreamViolation)
     assert violation.detail.endswith("… and 995 more")
     assert len(violation.detail) < 1_000
+
+
+PURPOSE = TypeAdapter(Purpose)
+AGENT_ROLES = TypeAdapter(AgentRoles)
+
+
+@pytest.mark.parametrize("text", ["a", "notes-2", "a" + "b" * (MAX_PURPOSE_LENGTH - 1)])
+def test_a_purpose_in_the_grammar_is_accepted(text: str) -> None:
+    assert PURPOSE.validate_python(text) == text
+
+
+@pytest.mark.parametrize(
+    "text", ["a" + "b" * MAX_PURPOSE_LENGTH, "A", "1a", "-a", "a_b", "a.b", "a\n", ""]
+)
+def test_a_purpose_outside_the_grammar_is_refused(text: str) -> None:
+    with pytest.raises(ValidationError):
+        PURPOSE.validate_python(text)
+
+
+@pytest.mark.parametrize("roles", [["admin"], ["admin", "user"]])
+def test_the_two_agent_role_lists_are_accepted(roles: list[str]) -> None:
+    assert AGENT_ROLES.validate_python(roles) == roles
+
+
+@pytest.mark.parametrize(
+    "roles",
+    [[], ["user"], ["user", "admin"], ["admin", "admin"], "admin", ["admin", "guest"], None],
+)
+def test_any_other_agent_roles_are_refused(roles: object) -> None:
+    with pytest.raises(ValidationError):
+        AGENT_ROLES.validate_python(roles)

@@ -1,8 +1,0 @@
-claim_id = "00ca2876c58b46f3bbbe0e41274ee77b"
-agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
-role = "builder"
-base = "c7e29e6c08555604800345adb8fa100308c5d4ba"
-branch = "claude/issue-400-quality-v0-3-1"
-scope = [".github/workflows/ci.yml", "tests/keycloak/requirements.txt", "uv.lock"]
-opened_commit = "7442827557cabacbdb3fd6b435c43dc1ad89de2a"
-whole_reason = "The quality v0.3.1 pin and the certifi advisory its new osv check raises land together: the pin cannot go green without the lock fix."

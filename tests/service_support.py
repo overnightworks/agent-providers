@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import base64
 import functools
 import gc
 import json
@@ -45,8 +46,8 @@ import jwt
 import pytest
 import uvicorn
 from bounds import TEST_WAIT_SECONDS
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from fastapi import FastAPI
 from jwt.algorithms import RSAAlgorithm
 from mcp_app_fake import TestAuthority, TlsCredentials
@@ -567,7 +568,7 @@ def everything_a_refusal_holds(refusal: BaseException) -> list[object]:
 
 
 class TokenMint:
-    """Signs RS256 tokens with a throwaway key and serves that key's set, counting each fetch.
+    """Signs RS256 tokens with a throwaway key and serves that key's set, recording each fetch.
 
     ``kidless`` signs tokens without a ``kid`` header; ``extra_signing_keys`` publishes that
     many more RS256 keys beside the signing key.
@@ -593,7 +594,7 @@ class TokenMint:
                 for number in range(extra_signing_keys)
             ),
         ]
-        self.key_set_fetches = 0
+        self.fetched_urls: list[str] = []
 
     @staticmethod
     def _published(key: rsa.RSAPrivateKey, key_id: str) -> dict[str, Any]:
@@ -603,15 +604,40 @@ class TokenMint:
     def key_set(self) -> dict[str, Any]:
         return {"keys": list(self._published_keys)}
 
-    def fetch_key_set(self, _url: str) -> bytes:
-        self.key_set_fetches += 1
+    @property
+    def key_set_fetches(self) -> int:
+        return len(self.fetched_urls)
+
+    def fetch_key_set(self, url: str) -> bytes:
+        self.fetched_urls.append(url)
         return json.dumps(self.key_set()).encode()
 
     def token(self, claims: Mapping[str, object]) -> str:
         headers = None if self._kidless else {"kid": self.key_id}
         return jwt.encode(dict(claims), self._key, algorithm="RS256", headers=headers)
 
-    def workload(self, client: str = SONGMAKER_CLIENT, **overrides: object) -> str:
+    def raw_token(
+        self,
+        header_text: str,
+        payload_text: str,
+        *,
+        key: rsa.RSAPrivateKey | None = None,
+        oversized_header: bool = False,
+    ) -> str:
+        """Sign the given header and payload text as written, so a member can repeat.
+
+        ``key`` defaults to the mint's key. A header segment over the verifier's 512-character
+        bound is refused here unless the caller means to cross it.
+        """
+        header = _base64url(header_text.encode())
+        assert oversized_header or len(header) <= MAX_HEADER_SEGMENT, len(header)
+        signing_input = f"{header}.{_base64url(payload_text.encode())}".encode()
+        signature = (key or self._key).sign(signing_input, padding.PKCS1v15(), hashes.SHA256())
+        return f"{signing_input.decode()}.{_base64url(signature)}"
+
+    def workload_claims(
+        self, client: str = SONGMAKER_CLIENT, **overrides: object
+    ) -> dict[str, object]:
         now = int(time.time())
         claims = {
             "iss": TEST_ISSUER,
@@ -623,9 +649,14 @@ class TokenMint:
             "iat": now,
             "exp": now + 300,
         }
-        return self.token(_merged(claims, overrides))
+        return _merged(claims, overrides)
 
-    def user(self, groups: object = (SUBSCRIPTION_GROUP,), **overrides: object) -> str:
+    def workload(self, client: str = SONGMAKER_CLIENT, **overrides: object) -> str:
+        return self.token(self.workload_claims(client, **overrides))
+
+    def user_claims(
+        self, groups: object = (SUBSCRIPTION_GROUP,), **overrides: object
+    ) -> dict[str, object]:
         now = int(time.time())
         claims = {
             "iss": TEST_ISSUER,
@@ -637,7 +668,19 @@ class TokenMint:
             "iat": now,
             "exp": now + 300,
         }
-        return self.token(_merged(claims, overrides))
+        return _merged(claims, overrides)
+
+    def user(self, groups: object = (SUBSCRIPTION_GROUP,), **overrides: object) -> str:
+        return self.token(self.user_claims(groups, **overrides))
+
+
+# The verifier's bound on a token's header segment: webauth.jwt_verification
+# _MAX_HEADER_SEGMENT_CHARACTERS (v0.20.1).
+MAX_HEADER_SEGMENT: Final = 512
+
+
+def _base64url(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
 
 
 def _merged(claims: dict[str, object], overrides: Mapping[str, object]) -> dict[str, object]:
@@ -760,7 +803,7 @@ def served(
 
 def post_run(
     base_url: str,
-    headers: Mapping[str, str],
+    headers: Mapping[str, str | bytes],
     body: object = None,
     *,
     content: bytes | None = None,

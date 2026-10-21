@@ -1,14 +1,15 @@
 """The agent file an app ships, and the definition read from it.
 
 An agent file is Claude Code's subagent format (YAML front matter between two
-``---`` lines, written in the strict subset of ``agent_client._front_matter``, then the
-prompt as Markdown) with two extra keys, ``model`` and ``appRoles`` (decision record 0001,
-H9). ``offered_to`` is a display filter for the app's own UI; the boundary is the
+``---`` lines, read as YAML 1.2 by ruamel.yaml, then the prompt as Markdown) with two
+extra keys, ``model`` and ``appRoles`` (decision record 0001, H9). ``offered_to`` is a display
+filter for the app's own UI; the boundary is the
 service's role check.
 """
 
 from __future__ import annotations
 
+import io
 import re
 from importlib.resources.abc import Traversable
 from typing import Annotated, Final
@@ -21,9 +22,10 @@ from pydantic import (
     StrictStr,
     TypeAdapter,
     ValidationError,
+    model_validator,
 )
+from ruamel.yaml import YAML, YAMLError
 
-from agent_client._front_matter import FrontMatterError, parse_front_matter
 from agent_client.tools import ToolDeclaration
 from agent_client.wire import AgentRole, AgentRoles, Purpose, RunRequest, Turn, TurnMessage
 
@@ -32,6 +34,8 @@ _FRONT_MATTER_FENCE: Final = "---"
 _MODEL_PATTERN: Final = re.compile(r"[a-z0-9-]+/[a-z0-9.-]+")
 _AGENT_ROLES: Final = TypeAdapter(AgentRole)
 _PURPOSE: Final = TypeAdapter(Purpose)
+_YAML: Final = YAML(typ="safe", pure=True)
+_DUPLICATE_KEY: Final = re.compile(r'found duplicate key "(.*?)" with value')
 
 
 class AgentFileError(ValueError):
@@ -58,6 +62,15 @@ class _FrontMatter(BaseModel):
     tools: list[StrictStr] = Field(default_factory=list)
     model: Annotated[StrictStr, AfterValidator(_refuse_non_model)] | None = None
     roles: AgentRoles = Field(alias="appRoles")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _refuse_keys_without_a_value(cls, data: object) -> object:
+        if isinstance(data, dict):
+            for key, value in data.items():
+                if value is None:
+                    raise ValueError(f"{key}: has no value")
+        return data
 
 
 class AgentDefinition(BaseModel):
@@ -155,13 +168,24 @@ def _without_surrounding_blank_lines(lines: list[str]) -> str:
 
 def _parse_front_matter(file_name: str, text: str) -> _FrontMatter:
     try:
-        parsed = parse_front_matter(text)
-    except FrontMatterError as error:
-        raise AgentFileError(f"{file_name}: {error}") from error
+        parsed = _YAML.load(io.StringIO(text))
+    except YAMLError as error:
+        raise AgentFileError(f"{file_name}: {_yaml_problem(error)}") from error
+    if not isinstance(parsed, dict):
+        raise AgentFileError(f"{file_name}: front matter must be a mapping of keys to values")
     try:
         return _FrontMatter.model_validate(parsed)
     except ValidationError as error:
         raise AgentFileError(f"{file_name}: {_first_message(error)}") from error
+
+
+def _yaml_problem(error: YAMLError) -> str:
+    duplicate = _DUPLICATE_KEY.search(str(getattr(error, "problem", None)))
+    if duplicate is not None:
+        return f"{duplicate[1]}: appears twice"
+    mark = getattr(error, "problem_mark", None)
+    where = f" at line {mark.line + 1}" if mark is not None else ""
+    return f"front matter is not valid YAML{where}"
 
 
 def _first_message(error: ValidationError) -> str:

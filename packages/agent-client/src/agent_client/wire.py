@@ -31,7 +31,6 @@ from pydantic import (
     BeforeValidator,
     ConfigDict,
     Field,
-    Strict,
     model_validator,
 )
 
@@ -207,7 +206,15 @@ def _refuse_non_agent_roles(roles: list[AgentRole]) -> list[AgentRole]:
     return roles
 
 
-AgentRoles = Annotated[list[AgentRole], Strict(), AfterValidator(_refuse_non_agent_roles)]
+def _require_list(roles: object) -> object:
+    if not isinstance(roles, list):
+        raise ValueError("must be a list")
+    return roles
+
+
+AgentRoles = Annotated[
+    list[AgentRole], BeforeValidator(_require_list), AfterValidator(_refuse_non_agent_roles)
+]
 """The one decider of which roles an agent is offered to: admin alone, or admin and user."""
 
 

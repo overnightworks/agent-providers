@@ -14,7 +14,7 @@ Three distributions ship from this repository, released together from one tag:
 - `overnightworks-agent-providers`, import package `agent_providers` — the
   provider core.
 - `overnightworks-agent-client`, import package `agent_client` — the light
-  client an app installs; it depends on `pydantic` only, plus PyJWT with
+  client an app installs; it depends on `pydantic` and `ruamel.yaml`, plus PyJWT with
   cryptography in `[mcp-server]`, and owns the tool
   contract `ToolDeclaration` and the agent service's run contract: the
   `RunRequest` that starts a run and the events it streams.
@@ -84,7 +84,7 @@ It leaves the application everything the library cannot know: the MCP tool set
 and its execution, the prompts, where settings are stored, and domain
 ownership. The core depends on the agent client, `pydantic`, `httpx` and
 `anyio` at runtime and on nothing else — no host application, no web framework,
-no database; the client depends on `pydantic` only, plus PyJWT with cryptography in `[mcp-server]`, and never imports the core.
+no database; the client depends on `pydantic` and `ruamel.yaml`, plus PyJWT with cryptography in `[mcp-server]`, and never imports the core.
 Import-linter contracts forbid either package reaching back into
 `songmaker_cli` or the sibling `webauth` library and layer the service above
 the core above the client; only the service verifies user and workload tokens,

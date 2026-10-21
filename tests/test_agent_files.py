@@ -256,39 +256,79 @@ def test_duplicate_key_is_refused_and_named(
 @pytest.mark.parametrize(
     ("front_matter", "key"),
     [
-        ("tools: &shared [read_note]", "tools"),
-        ("tools: *shared", "tools"),
-        ("description: !!str Helps", "description"),
+        ("tools: *shared", "front matter"),
         ("description: |\n  two\n  lines", "description"),
         ("description: >\n  folded", "description"),
-        ("description: first\n  second", "description"),
         ("tools:\n  nested: value", "tools"),
         ("color:\n  red: 1", "color"),
-        ("description: Helps: with notes", "description"),
-        ("description: Helps # with notes", "description"),
-        ("description: 'unclosed", "description"),
-        ('description: "bad \\q escape"', "description"),
-        ("tools: [read_note, ]", "tools"),
+        ("description: Helps: with notes", "front matter"),
+        ("description: 'unclosed", "front matter"),
+        ('description: "bad \\q escape"', "front matter"),
         ("tools: [[read_note]]", "tools"),
         ("tools: {a: b}", "tools"),
-        ("tools: [read_note", "tools"),
+        ("tools: [read_note", "front matter"),
         ("tools:", "tools"),
-        ("tools:\n  - &anchor read_note", "tools"),
-        ("\tdescription: tabbed", "tabs"),
-        ("description:\ttabbed", "tabs"),
-        ("# a comment", "line"),
+        ("\tdescription: tabbed", "front matter"),
+        ("description: 123", "description"),
+        ("description: true", "description"),
+        ("description: null", "description"),
+        ("tools: [read_note, 1]", "tools"),
+        ("tools:\n  - read_note\n    - edit_note", "tools"),
     ],
     ids=lambda value: value.replace("\n", "|") if "\n" in value else value,
 )
-def test_yaml_outside_the_subset_is_refused_and_named(
+def test_front_matter_that_is_not_plain_text_is_refused_and_named(
     tmp_path: Path, front_matter: str, key: str
 ) -> None:
     path = front_matter_file(
-        tmp_path, "name: notes-assistant\nappRoles: [admin]\n" + front_matter
+        tmp_path, "name: notes-assistant\ndescription: d\nappRoles: [admin]\n" + front_matter
     )
 
     with pytest.raises(AgentFileError, match=rf"notes-assistant\.md: .*{key}"):
         load_agent(path, DECLARATIONS)
+
+
+@pytest.mark.parametrize(
+    "roles", ["[admin, 1]", "[admin, true]", "[admin, null]", "\n  - admin\n    - user"]
+)
+def test_app_roles_that_are_not_text_or_are_misindented_are_refused(
+    tmp_path: Path, roles: str
+) -> None:
+    path = write(tmp_path, agent_text(roles=roles))
+
+    with pytest.raises(AgentFileError, match=r"notes-assistant\.md: appRoles"):
+        load_agent(path, DECLARATIONS)
+
+
+def test_name_that_is_a_number_is_refused(tmp_path: Path) -> None:
+    path = write(tmp_path, agent_text(name="123"), stem="notes-assistant")
+
+    with pytest.raises(AgentFileError, match=r"notes-assistant\.md: name"):
+        load_agent(path, DECLARATIONS)
+
+
+def test_nul_inside_quotes_is_refused_without_echoing_it(tmp_path: Path) -> None:
+    path = write(tmp_path, agent_text(description='"secret\x00text"'))
+
+    with pytest.raises(AgentFileError, match=r"notes-assistant\.md") as refusal:
+        load_agent(path, DECLARATIONS)
+
+    assert "secret" not in str(refusal.value)
+
+
+def test_duplicate_key_message_does_not_echo_the_value(tmp_path: Path) -> None:
+    path = write(tmp_path, agent_text(extra="description: topsecret"))
+
+    with pytest.raises(AgentFileError, match="description: appears twice") as refusal:
+        load_agent(path, DECLARATIONS)
+
+    assert "topsecret" not in str(refusal.value)
+
+
+def test_yaml_anchors_and_tags_are_read_as_yaml_reads_them(tmp_path: Path) -> None:
+    agent = load(tmp_path, agent_text(tools="&shared [read_note]", description="!!str Helps"))
+
+    assert (agent.tools, agent.description) == ((READ_NOTE,), "Helps")
 
 
 @pytest.mark.parametrize(

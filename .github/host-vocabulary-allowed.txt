@@ -8,4 +8,7 @@
 ^tests/fixtures/codex-image-no-image-events\.jsonl:
 ^tests/test_grok_cli_adapter\.py:[0-9]+:.*(get_song|song_id|"songmaker"|<songmaker_tool_call>|state of a song)
 ^tests/test_codex_cli_adapter\.py:[0-9]+:.*The open song is Midnight Drive\.
-^docs/MIGRATING\.md:
+^docs/MIGRATING\.md:[0-9]+:.*(constants\.(COWRITER|JUDGE)_[A-Z_]+|tool_loop\.COWRITER_MAX_TOOL_ROUNDS|dispatch\.stream_cowriter_turn|JOB_ERROR_COVER_IMAGE_CLI_FAILED|[a-z_.]*cover_image[a-z_]*|CoverImageCapability|judge_timeout)
+^docs/MIGRATING\.md:[0-9]+:.*(src/songmaker_cli/jobs/_runtime\.py|scoring/lyrical_coherence\.py|tests/test_cowriter_(catalog|providers)\.py)
+^docs/MIGRATING\.md:[0-9]+:.*\b[Ss]ongmaker\b
+^docs/MIGRATING\.md:[0-9]+:\| (The tool messages `Co-Writer tool|The catalog error `Unknown co-writer provider)

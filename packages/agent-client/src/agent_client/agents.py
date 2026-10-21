@@ -1,18 +1,18 @@
 """The agent file an app ships, and the definition read from it.
 
 An agent file is Claude Code's subagent format (YAML front matter between two
-``---`` lines, then the prompt as Markdown) with two extra keys, ``model`` and
-``appRoles`` (decision record 0001, H9). ``offered_to`` is a display filter for
-the app's own UI; the boundary is the service's role check.
+``---`` lines, written in the strict subset of ``agent_client._front_matter``, then the
+prompt as Markdown) with two extra keys, ``model`` and ``appRoles`` (decision record 0001,
+H9). ``offered_to`` is a display filter for the app's own UI; the boundary is the
+service's role check.
 """
 
 from __future__ import annotations
 
 import re
 from importlib.resources.abc import Traversable
-from typing import Annotated, Any, Final
+from typing import Annotated, Final
 
-import yaml
 from pydantic import (
     AfterValidator,
     BaseModel,
@@ -23,6 +23,7 @@ from pydantic import (
     ValidationError,
 )
 
+from agent_client._front_matter import FrontMatterError, parse_front_matter
 from agent_client.tools import ToolDeclaration
 from agent_client.wire import AgentRole, AgentRoles, Purpose, RunRequest, Turn, TurnMessage
 
@@ -143,16 +144,20 @@ def _split_file(file_name: str, text: str) -> tuple[str, str]:
         raise AgentFileError(
             f"{file_name}: front matter must close with a {_FRONT_MATTER_FENCE} line"
         ) from error
-    return "\n".join(lines[1:closing]), "\n".join(lines[closing + 1 :]).strip()
+    return "\n".join(lines[1:closing]), _without_surrounding_blank_lines(lines[closing + 1 :])
+
+
+def _without_surrounding_blank_lines(lines: list[str]) -> str:
+    first = next((index for index, line in enumerate(lines) if line.strip()), len(lines))
+    last = next((index for index in reversed(range(len(lines))) if lines[index].strip()), -1)
+    return "\n".join(lines[first : last + 1])
 
 
 def _parse_front_matter(file_name: str, text: str) -> _FrontMatter:
     try:
-        parsed: Any = yaml.safe_load(text)
-    except yaml.YAMLError as error:
-        raise AgentFileError(f"{file_name}: front matter is not valid YAML: {error}") from error
-    if not isinstance(parsed, dict):
-        raise AgentFileError(f"{file_name}: front matter must be a mapping of keys")
+        parsed = parse_front_matter(text)
+    except FrontMatterError as error:
+        raise AgentFileError(f"{file_name}: {error}") from error
     try:
         return _FrontMatter.model_validate(parsed)
     except ValidationError as error:

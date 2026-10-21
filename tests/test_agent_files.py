@@ -58,6 +58,10 @@ def load(tmp_path: Path, text: str | bytes, stem: str = "notes-assistant", decla
     return load_agent(path, DECLARATIONS if declarations is None else declarations)
 
 
+def front_matter_file(tmp_path: Path, front_matter: str, body: str = PROMPT) -> Path:
+    return write(tmp_path, f"---\n{front_matter}\n---\n{body}\n")
+
+
 def test_full_file_loads_with_tools_in_file_order(tmp_path: Path) -> None:
     agent = load(tmp_path, agent_text(tools="[edit_note, read_note]"))
 
@@ -77,65 +81,93 @@ def test_minimal_file_has_no_tools_and_no_model(tmp_path: Path) -> None:
     assert agent.model is None
 
 
-def test_prompt_is_the_body_without_surrounding_blank_lines(tmp_path: Path) -> None:
-    agent = load(tmp_path, agent_text(body="\n\nFirst.\n\nSecond.\n\n"))
-
-    assert agent.prompt == "First.\n\nSecond."
+@pytest.mark.parametrize(
+    ("body", "prompt"),
+    [
+        ("\n\nFirst.\n\nSecond.\n\n", "First.\n\nSecond."),
+        ("\n    code\n    next\n", "    code\n    next"),
+        ("Line with hard break  \nnext  \n", "Line with hard break  \nnext  "),
+        ("\n  \n  indented\n \n", "  indented"),
+    ],
+    ids=["blank-lines", "indented-code", "trailing-spaces", "blank-whitespace-lines"],
+)
+def test_prompt_drops_only_surrounding_blank_lines(
+    tmp_path: Path, body: str, prompt: str
+) -> None:
+    assert load(tmp_path, agent_text(body=body)).prompt == prompt
 
 
 @pytest.mark.parametrize(
-    "roles", ["[user]", "[]", "[user, admin]", "[admin, admin]", "admin", None]
+    "roles", ["[user]", "[]", "[user, admin]", "[admin, admin]", "admin", "[admin, no]", None]
 )
 def test_app_roles_other_than_the_two_lists_are_refused(tmp_path: Path, roles: str | None) -> None:
+    path = write(tmp_path, agent_text(roles=roles))
+
     with pytest.raises(AgentFileError, match="appRoles"):
-        load(tmp_path, agent_text(roles=roles))
+        load_agent(path, DECLARATIONS)
 
 
 @pytest.mark.parametrize("key", ["color: red", "permissionMode: plan"])
 def test_unknown_key_is_refused_and_named(tmp_path: Path, key: str) -> None:
+    path = write(tmp_path, agent_text(extra=key))
+
     with pytest.raises(AgentFileError, match=key.split(":")[0]):
-        load(tmp_path, agent_text(extra=key))
+        load_agent(path, DECLARATIONS)
 
 
-def test_name_differing_from_the_stem_is_refused(tmp_path: Path) -> None:
+@pytest.mark.parametrize("name", ["other-name", "123", "'123'", '"notes-assistant2"'])
+def test_name_differing_from_the_stem_is_refused(tmp_path: Path, name: str) -> None:
+    path = write(tmp_path, agent_text(name=name))
+
     with pytest.raises(AgentFileError, match="name"):
-        load(tmp_path, agent_text(name="other-name"))
+        load_agent(path, DECLARATIONS)
 
 
 def test_missing_name_is_refused(tmp_path: Path) -> None:
-    text = agent_text().replace("name: notes-assistant\n", "", 1)
+    path = write(tmp_path, agent_text().replace("name: notes-assistant\n", "", 1))
+
     with pytest.raises(AgentFileError, match="name"):
-        load(tmp_path, text)
+        load_agent(path, DECLARATIONS)
 
 
 def test_undeclared_tool_is_refused_and_named(tmp_path: Path) -> None:
+    path = write(tmp_path, agent_text(tools="[delete_note]"))
+
     with pytest.raises(AgentFileError, match="delete_note"):
-        load(tmp_path, agent_text(tools="[delete_note]"))
+        load_agent(path, DECLARATIONS)
 
 
 def test_duplicate_tool_in_the_file_is_refused(tmp_path: Path) -> None:
+    path = write(tmp_path, agent_text(tools="[read_note, read_note]"))
+
     with pytest.raises(AgentFileError, match="read_note"):
-        load(tmp_path, agent_text(tools="[read_note, read_note]"))
+        load_agent(path, DECLARATIONS)
 
 
 def test_two_declarations_with_one_name_are_refused(tmp_path: Path) -> None:
     twin = READ_NOTE.model_copy(update={"effect": ToolEffect.SIDE_EFFECTING})
+    path = write(tmp_path, agent_text())
+
     with pytest.raises(AgentFileError, match="read_note"):
-        load(tmp_path, agent_text(), declarations=[READ_NOTE, twin])
+        load_agent(path, [READ_NOTE, twin])
 
 
 @pytest.mark.parametrize("body", ["", "   \n\n  "])
 def test_empty_prompt_is_refused(tmp_path: Path, body: str) -> None:
+    path = write(tmp_path, agent_text(body=body))
+
     with pytest.raises(AgentFileError, match="prompt"):
-        load(tmp_path, agent_text(body=body))
+        load_agent(path, DECLARATIONS)
 
 
 @pytest.mark.parametrize(
     "stem", ["Notes", "notes.assistant", "notes_assistant", "a" + "b" * 64, "1notes", "-notes"]
 )
 def test_stem_that_is_not_a_purpose_is_refused(tmp_path: Path, stem: str) -> None:
+    path = write(tmp_path, agent_text(name=stem), stem=stem)
+
     with pytest.raises(AgentFileError, match=stem):
-        load(tmp_path, agent_text(name=stem), stem=stem)
+        load_agent(path, DECLARATIONS)
 
 
 def test_file_without_md_suffix_is_refused(tmp_path: Path) -> None:
@@ -155,16 +187,20 @@ def test_file_without_md_suffix_is_refused(tmp_path: Path) -> None:
         "---\n- a\n- b\n---\nbody\n",
         "---\n---\nbody\n",
     ],
-    ids=["no-opening", "no-closing", "broken-yaml", "not-a-mapping", "empty-front-matter"],
+    ids=["no-opening", "no-closing", "broken-list", "not-a-mapping", "empty-front-matter"],
 )
 def test_malformed_front_matter_is_refused(tmp_path: Path, text: str) -> None:
+    path = write(tmp_path, text)
+
     with pytest.raises(AgentFileError, match="notes-assistant.md"):
-        load(tmp_path, text)
+        load_agent(path, DECLARATIONS)
 
 
 def test_bytes_that_are_not_utf8_are_refused(tmp_path: Path) -> None:
+    path = write(tmp_path, b"---\nname: \xff\xfe\n---\nbody\n")
+
     with pytest.raises(AgentFileError, match="UTF-8"):
-        load(tmp_path, b"---\nname: \xff\xfe\n---\nbody\n")
+        load_agent(path, DECLARATIONS)
 
 
 @pytest.mark.parametrize("model", ["claude/sonnet", "xai/grok-4.6", "openai/gpt-6-astra"])
@@ -173,29 +209,132 @@ def test_model_in_the_grammar_is_accepted(tmp_path: Path, model: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "model", ["claude/sonnet@2", "'claude/sonnet:1'", "Claude/Sonnet", "sonnet", "''"]
+    "model", ["claude/sonnet@2", "'claude/sonnet:1'", "Claude/Sonnet", "sonnet", "''", "null", ""]
 )
-def test_model_outside_the_grammar_is_refused(tmp_path: Path, model: str) -> None:
+def test_model_outside_the_grammar_or_without_a_value_is_refused(
+    tmp_path: Path, model: str
+) -> None:
+    path = write(tmp_path, agent_text(model=model))
+
     with pytest.raises(AgentFileError, match="model"):
-        load(tmp_path, agent_text(model=model))
+        load_agent(path, DECLARATIONS)
 
 
-def test_yaml_boolean_in_app_roles_is_not_read_as_text(tmp_path: Path) -> None:
-    with pytest.raises(AgentFileError, match="appRoles"):
-        load(tmp_path, agent_text(roles="[admin, no]"))
-
-
-def test_numeric_name_is_not_read_as_text(tmp_path: Path) -> None:
-    with pytest.raises(AgentFileError, match="name"):
-        load(tmp_path, agent_text(name="123"), stem="123")
-
-
-@pytest.mark.parametrize("description", [None, "''", '"two\\nlines"', "|\n  two\n  lines"])
+@pytest.mark.parametrize("description", [None, "''", '"two\\nlines"', "|", "|\n  two\n  lines"])
 def test_missing_empty_or_multiline_description_is_refused(
     tmp_path: Path, description: str | None
 ) -> None:
+    path = write(tmp_path, agent_text(description=description))
+
     with pytest.raises(AgentFileError, match="description"):
-        load(tmp_path, agent_text(description=description))
+        load_agent(path, DECLARATIONS)
+
+
+@pytest.mark.parametrize(
+    ("front_matter", "key"),
+    [
+        ("name: notes-assistant\nname: notes-assistant", "name"),
+        ("appRoles: [admin]\nappRoles: [admin, user]", "appRoles"),
+        ("tools: []\ntools: [edit_note]", "tools"),
+        ("model: claude/sonnet\nmodel: claude/opus", "model"),
+        ("tools:\n  - read_note\ntools: [edit_note]", "tools"),
+    ],
+)
+def test_duplicate_key_is_refused_and_named(
+    tmp_path: Path, front_matter: str, key: str
+) -> None:
+    base = "name: notes-assistant\ndescription: d\nappRoles: [admin]\n"
+    kept = "".join(
+        line + "\n" for line in base.splitlines() if not front_matter.startswith(line.split(":")[0])
+    )
+    path = front_matter_file(tmp_path, kept + front_matter)
+
+    with pytest.raises(AgentFileError, match=f"{key}: appears twice"):
+        load_agent(path, DECLARATIONS)
+
+
+@pytest.mark.parametrize(
+    ("front_matter", "key"),
+    [
+        ("tools: &shared [read_note]", "tools"),
+        ("tools: *shared", "tools"),
+        ("description: !!str Helps", "description"),
+        ("description: |\n  two\n  lines", "description"),
+        ("description: >\n  folded", "description"),
+        ("description: first\n  second", "description"),
+        ("tools:\n  nested: value", "tools"),
+        ("color:\n  red: 1", "color"),
+        ("description: Helps: with notes", "description"),
+        ("description: Helps # with notes", "description"),
+        ("description: 'unclosed", "description"),
+        ('description: "bad \\q escape"', "description"),
+        ("tools: [read_note, ]", "tools"),
+        ("tools: [[read_note]]", "tools"),
+        ("tools: {a: b}", "tools"),
+        ("tools: [read_note", "tools"),
+        ("tools:", "tools"),
+        ("tools:\n  - &anchor read_note", "tools"),
+        ("\tdescription: tabbed", "tabs"),
+        ("description:\ttabbed", "tabs"),
+        ("# a comment", "line"),
+    ],
+    ids=lambda value: value.replace("\n", "|") if "\n" in value else value,
+)
+def test_yaml_outside_the_subset_is_refused_and_named(
+    tmp_path: Path, front_matter: str, key: str
+) -> None:
+    path = front_matter_file(
+        tmp_path, "name: notes-assistant\nappRoles: [admin]\n" + front_matter
+    )
+
+    with pytest.raises(AgentFileError, match=rf"notes-assistant\.md: .*{key}"):
+        load_agent(path, DECLARATIONS)
+
+
+@pytest.mark.parametrize(
+    ("description", "expected"),
+    [
+        ("Helps with notes", "Helps with notes"),
+        ("'Helps: with notes'", "Helps: with notes"),
+        ('"Helps: with # notes"', "Helps: with # notes"),
+        ("'it''s'", "it's"),
+        ('"say \\"hi\\" \\\\"', 'say "hi" \\'),
+        ("a:b", "a:b"),
+    ],
+)
+def test_scalars_are_plain_or_quoted_text(
+    tmp_path: Path, description: str, expected: str
+) -> None:
+    assert load(tmp_path, agent_text(description=description)).description == expected
+
+
+@pytest.mark.parametrize(
+    ("tools", "selected"),
+    [
+        ("[]", ()),
+        ("[read_note]", (READ_NOTE,)),
+        ("['edit_note', \"read_note\"]", (EDIT_NOTE, READ_NOTE)),
+        ("[ read_note ,edit_note ]", (READ_NOTE, EDIT_NOTE)),
+        ("\n  - read_note\n  - 'edit_note'", (READ_NOTE, EDIT_NOTE)),
+    ],
+    ids=["empty-flow", "one", "quoted-items", "loose-spacing", "block-list"],
+)
+def test_lists_are_flow_or_block(
+    tmp_path: Path, tools: str, selected: tuple[ToolDeclaration, ...]
+) -> None:
+    assert load(tmp_path, agent_text(tools=tools)).tools == selected
+
+
+def test_crlf_line_endings_load_like_lf(tmp_path: Path) -> None:
+    text = agent_text(body="First.\n\nSecond.").replace("\n", "\r\n")
+
+    agent = load(tmp_path, text.encode("utf-8"))
+
+    assert (agent.name, agent.roles, agent.prompt) == (
+        "notes-assistant",
+        ["admin", "user"],
+        "First.\n\nSecond.",
+    )
 
 
 @pytest.mark.parametrize(
@@ -212,8 +351,10 @@ def test_offered_to_follows_the_app_roles(
 
 @pytest.mark.parametrize("role", ["guest", ""])
 def test_offered_to_refuses_a_role_outside_the_two(tmp_path: Path, role: str) -> None:
+    agent = load(tmp_path, agent_text())
+
     with pytest.raises(ValueError, match="role"):
-        load(tmp_path, agent_text()).offered_to(role)  # type: ignore[arg-type]
+        agent.offered_to(role)  # type: ignore[arg-type]
 
 
 def test_request_is_the_v1_body_with_purpose_and_prompt(tmp_path: Path) -> None:
@@ -229,8 +370,10 @@ def test_request_is_the_v1_body_with_purpose_and_prompt(tmp_path: Path) -> None:
 
 
 def test_request_without_messages_is_refused(tmp_path: Path) -> None:
+    agent = load(tmp_path, agent_text())
+
     with pytest.raises(ValidationError):
-        load(tmp_path, agent_text()).request([])
+        agent.request([])
 
 
 def test_loaded_definition_is_frozen(tmp_path: Path) -> None:

@@ -699,7 +699,18 @@ def test_the_two_agent_role_lists_are_accepted(roles: list[str]) -> None:
 
 @pytest.mark.parametrize(
     "roles",
-    [[], ["user"], ["user", "admin"], ["admin", "admin"], "admin", ["admin", "guest"], None],
+    [
+        [],
+        ["user"],
+        ["user", "admin"],
+        ["admin", "admin"],
+        "admin",
+        ["admin", "guest"],
+        None,
+        ("admin",),
+        ("admin", "user"),
+        {"admin"},
+    ],
 )
 def test_any_other_agent_roles_are_refused(roles: object) -> None:
     with pytest.raises(ValidationError):

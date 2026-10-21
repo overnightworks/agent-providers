@@ -391,10 +391,13 @@ class RunRequest(_WireModel):
     ``tools`` maps each tool the run may call to its effect. The service signs
     exactly those names into the run's capability and stamps the effects onto
     the run's tool calls; it grants nothing else. ``model``, when present, is the
-    model the run must use; the service never substitutes another.
+    model the run must use; the service never substitutes another. ``roles`` is
+    what the agent file offers the agent to, never what the caller is: the
+    service answers ``forbidden`` unless the person's own role is in it.
     """
 
     purpose: Purpose
     model: ModelName | None = None
     turn: Turn
+    roles: AgentRoles
     tools: dict[NonEmptyUnicodeText, Annotated[ToolEffect, Field(strict=False)]]

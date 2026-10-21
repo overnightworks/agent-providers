@@ -208,6 +208,22 @@ body rules be fixed before the build.
 
   The role the call returns is not used here. Authority: the line of #382's accepted design „/apps/<app> (or a descendant): may use the app at all; the service checks this at admission, segment-aware“, which the operator was shown and accepted with „ja klingt gut! gib es dem head!“ and „wir bauen das entsprechend“ (21.10.2026).
 
+  *Amendment (21.10.2026, #402).* The table gains one row, after the 422
+  `invalid_request` row and before the row for tools from an app without an origin:
+
+  | Check | Answer |
+  |---|---|
+  | `caller.role` is not in the body's `roles` | 403 `forbidden`, before the tools check, the route and the subscription place |
+
+  `caller.role` is the role `app_role` returns for the user's verified groups, mapped onto
+  the wire's two names: `admin` for `/apps/<app>/admin` or a path below it, else `user`. It
+  is read from the verified token alone and is not checked again on `GET /runs/{id}`.
+  Authority: #382's design line „the service answers `forbidden` unless the person's
+  derived role is in it“, accepted with „wir bauen das entsprechend“; the derivation is
+  the webauth head's input of 21.10.2026 (`admin` from `/apps/<app>/admin` or below, else
+  `user`); the two-role shape is the operator's own: „admin => hat alles => user hat halt
+  nur bestimmte auswahl … so 2 rollen … kein fan von 100 rollen … vorbelegen“.
+
   Every rejection is a `RunRejection` with `Cache-Control: no-store`, and no
   answer or log line carries token text.
   A token whose `kid` is missing from a still-current key set answers 503
@@ -1050,6 +1066,16 @@ block above; `roles` is still P2a's. Authority: the operator's model quotes abov
 design line „Per run, wire v2: `{v: 2, purpose, turn, roles, tools: {name: effect}}`“
 (the design's, accepted with „wir bauen das entsprechend“), and the operator's word „a“
 on #390 for what a named model routes to.
+
+**Amendment (21.10.2026, #382, #402).** `roles` joins the block above and is required:
+exactly `["admin"]` or `["admin", "user"]` (`agent_client.wire.AgentRoles`); a missing
+`roles`, `null`, an empty list, any other list, a string or an unknown role is 422
+`invalid_request`, and a body with an unknown key (a `role`, an `appRoles`) is too.
+`AgentDefinition.request` fills it from the agent file's `appRoles`. The service answers
+403 `forbidden` unless the person's role is in it (A1a1 amendment, #402). Authority: the
+design's line „Per run, wire v2: `{v: 2, purpose, turn, roles, tools: {name: effect}}`“,
+accepted with „wir bauen das entsprechend“; `roles` is the design's and not a separate
+operator ruling.
 
 ### A0b wire ruling (head, 15.10.2026)
 

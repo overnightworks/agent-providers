@@ -327,6 +327,7 @@ def run_body(**overrides: object) -> dict[str, Any]:
         "v": 2,
         "purpose": COWRITER,
         "turn": {"system": "You help write songs.", "messages": [{"role": "user", "text": "Hi"}]},
+        "roles": ["admin", "user"],
         "tools": {},
         **overrides,
     }

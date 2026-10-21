@@ -9,13 +9,15 @@ checked in a fixed order, and the first failure answers:
    is decided (``agent_service.identity``);
 2. the body's framing, then its protocol version, then its shape
    (``agent_service.run_request``);
-3. tools named by an app without an MCP origin answer ``forbidden``, before the route;
-4. the route (``agent_service.routing``), which reads the requested model and the
+3. the person's role in the app (``admin`` in ``/apps/<app>/admin`` or below, else
+   ``user``) must be one of the body's ``roles``, else ``forbidden``;
+4. tools named by an app without an MCP origin answer ``forbidden``, before the route;
+5. the route (``agent_service.routing``), which reads the requested model and the
    installation's listed models; no model is ever replaced;
-5. for the CLI route, the service's admission limit (``agent_service.admission``): a
+6. for the CLI route, the service's admission limit (``agent_service.admission``): a
    subscription run beyond it answers ``busy`` with ``Retry-After`` before anything is
    signed;
-6. for an app with an MCP origin, whether the run's capability, which signs exactly the
+7. for an app with an MCP origin, whether the run's capability, which signs exactly the
    request's tool names, fits the 8,192 characters every verifier accepts
    (``capability_too_large``).
 
@@ -205,6 +207,8 @@ def _admitted(
     caller: Caller,
     run_request: RunRequest,
 ) -> Response:
+    if caller.role not in run_request.roles:
+        return rejection(RejectionCode.FORBIDDEN)
     scope = config.capability_scope(caller.app, run_request.tools)
     if run_request.tools and scope is None:
         return rejection(RejectionCode.FORBIDDEN)

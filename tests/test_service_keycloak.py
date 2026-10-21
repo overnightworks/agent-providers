@@ -307,3 +307,20 @@ def test_the_rejection_table_holds_for_real_tokens(service, workload_token, body
     response = post_run(service, run_headers(workload_token(), _user_token("alice")), body)
 
     assert_rejected(response, code, status)
+
+
+@pytest.mark.parametrize(
+    ("user", "admitted"),
+    [("dave", True), ("alice", False), ("bob", False)],
+)
+def test_real_tokens_decide_which_user_runs_an_admin_only_agent(service, runners, user, admitted):
+    runs_before = len(runners.cli.admitted) + len(runners.api.admitted)
+    body = run_body(roles=["admin"])
+
+    response = post_run(service, run_headers(_songmaker_workload(), _user_token(user)), body)
+
+    if admitted:
+        assert response.status_code == 200, response.text
+    else:
+        assert_rejected(response, RejectionCode.FORBIDDEN, 403)
+        assert len(runners.cli.admitted) + len(runners.api.admitted) == runs_before

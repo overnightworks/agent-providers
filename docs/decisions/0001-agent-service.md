@@ -828,6 +828,14 @@ The app side of the profile is `agent_client.mcp_server` (`McpServer`, `McpTool`
   capability's signature becomes `HandlerFailureWithheld`.
 - **D12 Two-sided narrowing.** The app lists and runs only tools the capability allows.
 
+  **Amendment (21.10.2026, #382, #388).** A name the capability signs but the app's
+  `tools/list` does not offer ends the run as `failed: provider_error` before any model
+  execution; the relay no longer drops it silently. Authority: #382's design line „A name the
+  app does not offer ends the run with `failed: provider_error` before any model execution“,
+  shown to the operator with the design and accepted with „wir bauen das entsprechend“. An
+  offered tool the capability does not sign stays out of the CLI's list and is refused when
+  called, as before.
+
   *Amendment (21.10.2026, #382, #389).* The capability's names come from the request
   (the failure rule for an unoffered name is P2b's). Authority: „wir bauen das
   entsprechend“.

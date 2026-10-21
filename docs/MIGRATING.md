@@ -16,6 +16,7 @@ A host migrates at its pin bump to 0.6.0.
 | (absent) | `RunRequest.tools`, required and possibly `{}`: a map from each tool name to its `ToolEffect`. The service signs exactly those names, sorted, into the run's capability and stamps the effects onto the run's tool calls; a call outside the map is side-effecting. An app without an `mcp_origin` that names any tool answers 403 `forbidden`. `AgentDefinition.request` builds it from the agent's tools |
 | `[apps.<app>] tools` table (the tools a capability permits, with their effects) | removed; a leftover table stops startup naming `apps.<app>.tools`. The app names its tools in each request; `AppConfig.tools`, `granted_tools` and `tool_effect`, and the startup size check with its `preflight_claims`, are gone, and the 8,192-character check of the actual token (422 `capability_too_large`) is the only size check |
 | `agent_client.mcp_wire.object_without_duplicate_members` | removed, no alias remains; `agent_client.mcp_wire.read_strict_json(text)` reads JSON that repeats no member and holds no `NaN` or infinity, and raises only `ValueError` |
+| A signed tool the app's `tools/list` does not offer is dropped from the run | the run ends as `failed: provider_error` before any model execution; an app's `tools/list` must cover every name its requests are signed for. An offered tool that is not signed stays out of the run, as before |
 
 ## Migrating to 0.5.0
 

@@ -259,6 +259,31 @@ def service_config(
     )
 
 
+def _toml_value(value: object) -> str:
+    if isinstance(value, list):
+        return "[" + ", ".join(_toml_value(item) for item in value) + "]"
+    return json.dumps(value)
+
+
+def _toml_lines(table: Mapping[str, object], path: tuple[str, ...] = ()) -> list[str]:
+    scalars = {key: value for key, value in table.items() if not isinstance(value, Mapping)}
+    lines = [f"[{'.'.join(path)}]"] if path else []
+    lines += [f"{key} = {_toml_value(value)}" for key, value in scalars.items()]
+    for key, value in table.items():
+        if isinstance(value, Mapping):
+            lines += ["", *_toml_lines(value, (*path, key))]
+    return lines
+
+
+def service_config_file(directory: Path, *, subscription_groups: list[str]) -> Path:
+    """The test configuration written as the TOML file ``load_config`` reads."""
+    document = _service_config_document(TEST_ISSUER, None, None)
+    document["identity"]["subscription_groups"] = subscription_groups
+    path = directory / "agent-service.toml"
+    path.write_text("\n".join(_toml_lines(document)) + "\n", encoding="utf-8")
+    return path
+
+
 def plain_service_config() -> ServiceConfig:
     """``service_config`` with songmaker listing no tools and naming no origin."""
     return service_config(songmaker={"tools": {}, "mcp_origin": None})

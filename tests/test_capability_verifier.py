@@ -140,7 +140,6 @@ def test_the_preflight_capability_is_refused_as_issued_in_the_future():
         preflight_claims(
             SCOPE,
             app="notes",
-            purpose="notes.assistant",
             issuer="https://k.test",
             max_duration_s=60,
         ),

@@ -598,6 +598,9 @@ def _unreachable_issuer(_url: str) -> bytes:
         pytest.param(_unreachable_issuer, {}, {}, id="unavailable"),
         pytest.param(MINT.fetch_key_set, {"groups": []}, {}, id="not-enabled"),
         pytest.param(MINT.fetch_key_set, {}, {"v": 2}, id="unsupported-version"),
+        pytest.param(
+            MINT.fetch_key_set, {}, {"purpose": "notes.assistant"}, id="malformed-purpose"
+        ),
         pytest.param(MINT.fetch_key_set, {}, {"turn": {"system": "x", "messages": []}}, id="shape"),
     ],
 )

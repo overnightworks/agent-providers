@@ -1052,14 +1052,8 @@ def test_a_document_with_no_profile_or_one_sound_claude_profile_reaches_serving(
     assert [where for _app, where in served_apps] == [{"host": "127.0.0.1", "port": 8099}]
 
 
-def test_an_installation_without_a_profile_has_none(tmp_path):
+def test_an_installation_without_a_profile_has_none_and_still_scopes_its_apps(tmp_path):
     config = load_config(_written(tmp_path, NO_PROFILE))
-
-    assert config.profiles == {}
-
-
-def test_an_api_only_installation_with_tools_an_origin_and_signing_loads(tmp_path):
-    config = load_config(_written(tmp_path, NO_PROFILE.replace('cli_provider = "claude"\n', "")))
 
     assert config.profiles == {}
     assert config.capability_scope("songmaker") is not None

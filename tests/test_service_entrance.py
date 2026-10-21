@@ -25,9 +25,11 @@ from service_support import (
     API_GROUP,
     COWRITER,
     MALFORMED_PURPOSES,
+    OLD_SUBSCRIPTION_GROUP,
     PRESENTATOR_CLIENT,
     SONGMAKER_CLIENT,
     SONGMAKER_GROUP,
+    SUBSCRIPTION_GROUP,
     ScriptedRunner,
     StepClock,
     TokenMint,
@@ -38,6 +40,7 @@ from service_support import (
     run_headers,
     served,
     service_config,
+    service_config_file,
 )
 from webauth.https_client import KeySetFetchError
 from webauth.jwt_verification import KEY_SET_REFRESH_COOLDOWN_SECONDS
@@ -45,6 +48,7 @@ from webauth.jwt_verification import KEY_SET_REFRESH_COOLDOWN_SECONDS
 from agent_client.wire import Failed, FailureCode, RejectionCode, RunRejection
 from agent_providers.events import AssistantTextEvent, FinalEvent
 from agent_service.app import create_app, rejection
+from agent_service.config import load_config
 from agent_service.routing import Api, Cli
 from agent_service.run_request import MAX_REQUEST_BYTES
 from agent_service.runners import Runners
@@ -119,6 +123,42 @@ def test_an_api_group_member_of_the_app_runs_on_the_api_route(service, runners):
 
     assert decoded_events(response.content)[-1].text == "API answer"
     assert runners.api.admitted[-1].route == Api(API_ALIAS)
+
+
+def _loaded_service_run(tmp_path, subscription_groups, user_groups):
+    runners = Runners(cli=ScriptedRunner(CLI_SCRIPT), api=ScriptedRunner(API_SCRIPT))
+    config = load_config(service_config_file(tmp_path, subscription_groups=subscription_groups))
+    app = create_app(config, runners=runners, fetch_key_set=MINT.fetch_key_set)
+    with served(app) as base_url:
+        response = post_run(base_url, run_headers(MINT.workload(), MINT.user(groups=user_groups)))
+    return response, runners
+
+
+@pytest.mark.parametrize("group", [SUBSCRIPTION_GROUP, OLD_SUBSCRIPTION_GROUP])
+def test_a_member_of_either_listed_subscription_group_alone_runs_on_the_cli_route(
+    tmp_path, group
+):
+    response, runners = _loaded_service_run(
+        tmp_path, [SUBSCRIPTION_GROUP, OLD_SUBSCRIPTION_GROUP], [group]
+    )
+
+    assert _admitted_events(response) == ["run_started", "assistant_text", "succeeded"]
+    assert runners.cli.admitted[-1].route == Cli("claude-main")
+    assert runners.api.admitted == []
+
+
+@pytest.mark.parametrize(
+    ("kept", "dropped"),
+    [(SUBSCRIPTION_GROUP, OLD_SUBSCRIPTION_GROUP), (OLD_SUBSCRIPTION_GROUP, SUBSCRIPTION_GROUP)],
+)
+def test_a_subscription_group_removed_from_the_configuration_is_not_enabled(
+    tmp_path, kept, dropped
+):
+    response, runners = _loaded_service_run(tmp_path, [kept], [dropped])
+
+    assert_rejected(response, RejectionCode.NOT_ENABLED, 403)
+    assert runners.cli.admitted == []
+    assert runners.api.admitted == []
 
 
 def test_a_member_of_neither_group_is_not_enabled_and_starts_no_run(service, runners):

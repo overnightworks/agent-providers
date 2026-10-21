@@ -1,8 +1,0 @@
-claim_id = "464174b13bcc406aa92ad3838508b765"
-agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
-role = "builder"
-base = "146fd9ef1e6724b3d5e99ccbb80f13e58f8f695b"
-branch = "claude/issue-390-a4-p2d1-model-decides-route"
-scope = ["README.md", "docs/MIGRATING.md", "docs/decisions/0001-agent-service.md", "packages/agent-client/src/agent_client/agents.py", "packages/agent-client/src/agent_client/wire.py", "packages/agent-service/src/agent_service/app.py", "packages/agent-service/src/agent_service/config.py", "packages/agent-service/src/agent_service/routing.py", "tests/service_support.py", "tests/test_agent_files.py", "tests/test_service_admission.py", "tests/test_service_config.py", "tests/test_service_entrance.py", "tests/test_service_keycloak.py", "tests/test_service_routing.py", "tests/test_wire_protocol.py"]
-opened_commit = "0abc7a0a189c1d4349e473a7f0a1036dc54764cc"
-whole_reason = "The model field, its route and the config key that lists what the subscription runs are one path: without any one of them the model is carried and silently replaced."

@@ -26,9 +26,11 @@ the directory of its owner: the provider core (distribution
 agent client (distribution `overnightworks-agent-client`) under
 `packages/agent-client/`, the agent service (distribution
 `overnightworks-agent-service`) under `packages/agent-service/`, the suite for
-all three under `tests/`, and the decision records under `docs/decisions/` —
-among them the decision that this repository hosts the agent service and how
-its packages ship.
+all three under `tests/`, shipped operator commands such as
+`scripts/replace_token_file.py` under `scripts/`, the per-release host
+migration notes in `docs/MIGRATING.md`, and the decision records under
+`docs/decisions/` — among them the decision that this repository hosts the
+agent service and how its packages ship.
 
 ## Boundaries
 
@@ -128,7 +130,7 @@ tokens; elsewhere that suite skips.
 A release is a tag, and the three distributions move in lockstep. On a `v*`
 tag `.github/workflows/release.yml` builds the three wheels, checks that their
 names carry the tag's version, and attaches exactly those three wheels to the
-GitHub release; hosts pin those wheel URLs and never install by name from PyPI. A release whose README
+GitHub release; hosts pin those wheel URLs and never install by name from PyPI. A release whose `docs/MIGRATING.md`
 holds `## Migrating to <version>` gets a release page that opens with a link to
 that section, so a breaking release writes that section before the tag. A tag
 is never moved — a broken release gets the next patch tag — so the pull

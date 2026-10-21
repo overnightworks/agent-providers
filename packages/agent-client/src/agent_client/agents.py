@@ -134,7 +134,7 @@ def _checked_stem(file_name: str) -> str:
     except ValidationError as error:
         raise AgentFileError(
             f"{file_name}: file name stem {stem!r}: {_first_message(error)}"
-        ) from error
+        ) from None
     return stem
 
 
@@ -176,7 +176,7 @@ def _parse_front_matter(file_name: str, text: str) -> _FrontMatter:
     try:
         return _FrontMatter.model_validate(parsed)
     except ValidationError as error:
-        raise AgentFileError(f"{file_name}: {_first_message(error)}") from error
+        raise AgentFileError(f"{file_name}: {_first_message(error)}") from None
 
 
 def _yaml_problem(error: YAMLError) -> str:

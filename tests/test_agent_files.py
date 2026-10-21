@@ -333,10 +333,19 @@ def test_control_character_inside_quotes_is_refused_not_normalized(
 
 
 @pytest.mark.parametrize(
-    "extra", ["description: sentinelvalue", "description: 'sentinelvalue"]
+    "fields",
+    [
+        {"extra": "description: sentinelvalue"},
+        {"extra": "description: 'sentinelvalue"},
+        {"model": "sentinelvalue"},
+        {"description": "[sentinelvalue]"},
+    ],
+    ids=["duplicate-key", "syntax-error", "invalid-model", "non-string-description"],
 )
-def test_formatted_traceback_does_not_show_file_values(tmp_path: Path, extra: str) -> None:
-    path = write(tmp_path, agent_text(extra=extra))
+def test_formatted_traceback_does_not_show_file_values(
+    tmp_path: Path, fields: dict[str, str]
+) -> None:
+    path = write(tmp_path, agent_text(**fields))
 
     with pytest.raises(AgentFileError) as refusal:
         load_agent(path, DECLARATIONS)

@@ -6,6 +6,13 @@ Read by a host bumping its pin; each release that breaks a host has one section,
 
 A host migrates at its pin bump to 0.6.0.
 
+Two additions need no action. `agent-client` gains the agent file loader
+`agent_client.agents` and, with it, the base dependency `ruamel.yaml>=0.19,<0.20`, which a
+host that pins the client's dependencies itself resolves. The optional extra
+`agent-client[mcp-server]` (PyJWT with cryptography) brings `agent_client.mcp_server`, which
+verifies a run capability and accepts only an RSA key of `capability.SIGNING_KEY_BITS`
+(3072) bits; no base module imports it.
+
 | Before | Now |
 |---|---|
 | `[identity] subscription_group`, one string | `subscription_groups`, a non-empty array; write `["/ki-abo", "/ai-subscription"]` while tokens still carry the old name, and drop the old entry once they expire; a leftover `subscription_group` stops startup naming it |

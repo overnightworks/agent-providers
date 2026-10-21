@@ -3328,7 +3328,7 @@ five secret reviews ended SAFE: the capture holds 0 token and 0 prefix hits, and
 over 393 and 490 stored sources found 0. The scratch harness stays outside the
 repository and is retired; no further paid run happens in this item.
 
-**Held (both runs unless a number says otherwise).**
+**Held.**
 
 - **c2, the place limit.** Five current runs at one instant; the sixth gets `429 busy` with
   `Retry-After: 10` and `no-store`, no run id and no sixth CLI group.
@@ -3354,10 +3354,11 @@ repository and is retired; no further paid run happens in this item.
   design); the CLI made no retry, the run ended `failed` with `provider_error`, the group was
   reaped 0.005 s and 0.11 s after the terminal, and the root was empty. The cause of the 429
   is not recorded. Paid total: 2 forwarded requests, both answered 429. Edge accepted it as
-  A1d-6 cell L2 (the real turn).
+  A1d-6 cell L2 (the real turn) (edge#184 A1d-6, accepted 21.10.2026).
 - **c6-release, the five answered and the memory at the answer phase (M9 to M10).** Skipped by
   the release rule, because no further permit was granted. Edge accepted it as A1d-6 cell L7
-  (the container's peak memory during L2, reported per run for 12r).
+  (the container's peak memory during L2, reported per run for 12r) (edge#184 A1d-6, accepted
+  21.10.2026).
 - **c4, the `[runs]` defaults judged.** 12r, with A1d-6's memory figures.
 
 **Not measured:** tool calls (12b), the token's lifetime, a held run past 120 s, other

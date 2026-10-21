@@ -217,11 +217,19 @@ def test_only_the_user_who_started_a_run_reads_it_with_real_tokens(verify):  # n
             ),
             str(franks_songmaker_run),
         )
+        non_member_reading_alices_run = get_run(
+            base_url,
+            run_headers(
+                _workload_token(PRESENTATOR_CLIENT), _user_token("alice", PRESENTATOR_CLIENT)
+            ),
+            str(run_id),
+        )
 
     assert RunStatus.model_validate_json(alice.content).run_id == run_id
     assert_rejected(never_begun, RejectionCode.NOT_FOUND, 404)
     assert answer_of(bob) == answer_of(never_begun)
     assert answer_of(through_presentator) == answer_of(never_begun)
+    assert_rejected(non_member_reading_alices_run, RejectionCode.FORBIDDEN, 403)
 
 
 def test_a_token_of_an_unpublished_key_is_unavailable_once_the_key_set_origin_stops():

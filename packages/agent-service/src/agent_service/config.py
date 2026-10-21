@@ -35,6 +35,7 @@ from pydantic import (
     ConfigDict,
     Field,
     PlainValidator,
+    PrivateAttr,
     StrictFloat,
     StrictInt,
     ValidationError,
@@ -400,6 +401,7 @@ class ServiceConfig(_Section):
     profiles: dict[NonEmptyText, ProfileConfig] = Field(default_factory=dict)
     route: RouteConfig | None = None
     apps: dict[NonEmptyText, AppConfig]
+    _admissions: dict[str, AdmissionConfig] = PrivateAttr(default_factory=dict)
 
     @model_validator(mode="before")
     @classmethod
@@ -448,7 +450,7 @@ class ServiceConfig(_Section):
     def _app_names_are_group_segments(self) -> Self:
         for app_name in self.apps:
             try:
-                self._admission_of(app_name)
+                self._admissions[app_name] = self._admission_of(app_name)
             except ValueError as error:
                 raise ValueError(
                     f"apps.{shown_text(app_name)}: not one group path segment: "
@@ -478,10 +480,6 @@ class ServiceConfig(_Section):
     def app_admission(self, app_name: str) -> AdmissionConfig:
         """Who may use the app: its group ``/apps/<app>``, segment-aware, and its admins below."""
         return self._admissions[app_name]
-
-    @cached_property
-    def _admissions(self) -> dict[str, AdmissionConfig]:
-        return {app_name: self._admission_of(app_name) for app_name in self.apps}
 
     def _admission_of(self, app_name: str) -> AdmissionConfig:
         if "/" in app_name:

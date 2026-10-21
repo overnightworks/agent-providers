@@ -323,7 +323,7 @@ bodies and the typed rejections.
 **Who may run what.** A caller presents a workload token bound to one registered
 app and a user token bound to one principal (`agent_service.identity`). The user must
 first be a member of the app: one of their groups is `/apps/<app>` or a path below it
-(`/apps/songmaker-other` is not a member of `songmaker`), for both routes and for
+(`/apps/notes-other` is not a member of `notes`), for both routes and for
 `GET /runs/{id}`; anyone else gets 403 `forbidden`, before the body is read.
 `agent_service.routing.route` then decides the route from the caller's groups and the
 requested model, never the purpose: a member of a subscription group (`[identity]

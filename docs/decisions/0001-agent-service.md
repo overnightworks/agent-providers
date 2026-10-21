@@ -753,8 +753,8 @@ The app side of the profile is `agent_client.mcp_server` (`McpServer`, `McpTool`
   remains in the service.
 - **D4 One server half.** `decide_server_message` decides what a server does with a body, for
   the relay and for the helper; the head checks stay per server, in the same order.
-- **D5 Dependencies.** The `[mcp-server]` extra holds PyJWT with cryptography; the base stays
-  pydantic only.
+- **D5 Dependencies.** The `[mcp-server]` extra holds PyJWT with cryptography; the base keeps
+  its dependencies (pydantic, plus ruamel.yaml from the agent file).
 - **D6 The helper in front.** `server.in_front_of(host_app)` owns `/mcp` and `/mcp/...`, so no
   router of the host redirects there and its middleware never sees an MCP request.
 - **D7 Trust by file.** Each app trusts one PEM public key exported from the active signing
@@ -3899,6 +3899,20 @@ repository without PyPI.
 **Consequence.** No consumer changes its imports. A consumer that listed only
 the core wheel would make the resolver ask PyPI, where the names are
 unregistered — a dependency-confusion surface — so both URLs are required.
+
+### Agent file (21.10.2026, #382, #383)
+
+**Decision.** The client owns the agent-file contract (`agent_client.agents`).
+The file is Claude Code's subagent format: YAML front matter between `---`
+lines, the Markdown body as the prompt, under `src/<pkg>/agents/<name>.md`.
+Beyond `name`, `description` and `tools` it carries `model`
+(`<provider>/<model>`, no version) and our one extension `appRoles`, exactly
+`[admin]` or `[admin, user]`. The client reads the front matter with ruamel.yaml (YAML 1.2, pure
+Python wheel without dependencies of its own; duplicate keys raise) and a
+strict pydantic model that refuses every value that is not text, so H9's
+client depends on pydantic and ruamel.yaml; the same files are plain YAML,
+so Claude Code reads them. `offered_to`
+is a display filter, not a boundary; the service's role check is.
 
 ## H10 Gateway proof
 

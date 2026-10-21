@@ -14,7 +14,7 @@ Three distributions ship from this repository, released together from one tag:
 - `overnightworks-agent-providers`, import package `agent_providers` — the
   provider core.
 - `overnightworks-agent-client`, import package `agent_client` — the light
-  client an app installs; it depends on `pydantic` only, plus PyJWT with
+  client an app installs; it depends on `pydantic` and `ruamel.yaml`, plus PyJWT with
   cryptography in `[mcp-server]`, and owns the tool
   contract `ToolDeclaration` and the agent service's run contract: the
   `RunRequest` that starts a run and the events it streams.
@@ -38,7 +38,8 @@ It owns the machinery that is the same in every deployment:
 | `agent_providers.events` | The `StreamEvent` union a turn emits in-process (assistant text, tool call, tool result, final); not the service wire |
 | `agent_providers.tool_loop` | The provider-agnostic tool loop driving a `ToolExecutor` over a `ToolTransport` |
 | `agent_client.tools` | `ToolDeclaration`: one tool's name, description, JSON-schema arguments and `ToolEffect` |
-| `agent_client.wire` | The one owner of the agent service's wire: the `RunRequest` body, the versioned run-event union, the `RunRejection` body and the `RunStatus` body of `GET /runs/{id}` |
+| `agent_client.agents` | `load_agent`: reads an app's agent file (Claude Code's subagent format plus `model` and `appRoles`, under `src/<pkg>/agents/<name>.md`) into an `AgentDefinition` with its selected tools, `offered_to(role)` (a display filter, not the security boundary: the service checks the role) and `request(messages)`; `AgentFileError` names the file and the field |
+| `agent_client.wire` | The one owner of the agent service's wire, and of `Purpose`, `AgentRole` and `AgentRoles`: the `RunRequest` body, the versioned run-event union, the `RunRejection` body and the `RunStatus` body of `GET /runs/{id}` |
 | `agent_client.run_stream` | `parse_event` and `RunStream`: the rules a run's event stream keeps, and how a cut-short run ends |
 | `agent_client.sse` | `encode_event` and `RunStreamDecoder`: one SSE frame per run event, decoded and checked against the wire and its stream rules |
 | `agent_client.capability` | The format of the run capability the service mints and an app's MCP server verifies (A1m): token type `agent-capability+jwt`, at most 8,192 characters, the strict `CapabilityClaims`, `McpOrigin`, the one decider of an app's canonical https MCP origin, `MCP_ENDPOINT_PATH`, the one path an app's MCP server serves and the service's client calls, and `carries_signature_of(token, data)`, the one needle for whether data carries a token or its signature segment |
@@ -83,7 +84,7 @@ It leaves the application everything the library cannot know: the MCP tool set
 and its execution, the prompts, where settings are stored, and domain
 ownership. The core depends on the agent client, `pydantic`, `httpx` and
 `anyio` at runtime and on nothing else — no host application, no web framework,
-no database; the client depends on `pydantic` only, plus PyJWT with cryptography in `[mcp-server]`, and never imports the core.
+no database; the client depends on `pydantic` and `ruamel.yaml`, plus PyJWT with cryptography in `[mcp-server]`, and never imports the core.
 Import-linter contracts forbid either package reaching back into
 `songmaker_cli` or the sibling `webauth` library and layer the service above
 the core above the client; only the service verifies user and workload tokens,

@@ -17,6 +17,7 @@ number have no defaults.
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Iterator
 from datetime import timedelta
 from enum import StrEnum
@@ -39,6 +40,8 @@ PROTOCOL_VERSION: Final = 1
 MAX_EVENT_BYTES: Final = 1_048_576
 MAX_TOOL_INPUT_DEPTH: Final = 128
 MAX_MESSAGE_LENGTH: Final = 500
+MAX_PURPOSE_LENGTH: Final = 64
+_PURPOSE_PATTERN: Final = re.compile(rf"[a-z][a-z0-9-]{{0,{MAX_PURPOSE_LENGTH - 1}}}")
 
 
 class FailureCode(StrEnum):
@@ -179,6 +182,40 @@ UnicodeText = Annotated[str, AfterValidator(_refuse_non_unicode_text)]
 
 ToolUseId = Annotated[UnicodeText, Field(min_length=1)]
 """The one decider of a valid call id, so a call and its result accept the same ids."""
+
+
+def _refuse_non_purpose(text: str) -> str:
+    if _PURPOSE_PATTERN.fullmatch(text) is None:
+        raise ValueError(
+            f"must be 1 to {MAX_PURPOSE_LENGTH} characters from a-z, 0-9 and -, "
+            "starting with a letter"
+        )
+    return text
+
+
+Purpose = Annotated[str, AfterValidator(_refuse_non_purpose)]
+"""The one decider of an agent's name: the purpose a run is started for."""
+
+AgentRole = Literal["admin", "user"]
+"""The two roles an app gives a person; the host's own role names map onto these."""
+
+
+def _refuse_non_agent_roles(roles: list[AgentRole]) -> list[AgentRole]:
+    if roles not in (["admin"], ["admin", "user"]):
+        raise ValueError("must be exactly [admin] or [admin, user]")
+    return roles
+
+
+def _require_list(roles: object) -> object:
+    if not isinstance(roles, list):
+        raise ValueError("must be a list")
+    return roles
+
+
+AgentRoles = Annotated[
+    list[AgentRole], BeforeValidator(_require_list), AfterValidator(_refuse_non_agent_roles)
+]
+"""The one decider of which roles an agent is offered to: admin alone, or admin and user."""
 
 
 class _StrictModel(BaseModel):

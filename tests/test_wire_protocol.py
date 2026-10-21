@@ -430,8 +430,10 @@ def test_a_run_request_with_tools_missing_or_off_the_contract_is_refused(tools: 
     if tools is not None:
         body["tools"] = tools
 
+    payload = json.dumps(body)
+
     with pytest.raises(ValidationError):
-        RunRequest.model_validate_json(json.dumps(body))
+        RunRequest.model_validate_json(payload)
 
 
 def test_a_run_request_may_name_no_tools() -> None:

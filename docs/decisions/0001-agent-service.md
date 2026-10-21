@@ -144,6 +144,13 @@ body rules be fixed before the build.
   | The run's capability would exceed 8,192 characters (A1a4 item 12): a subject wider than the preflight's reserve, or a wall clock past 2286 | 422 `capability_too_large` |
   | Admitted | 200 `text/event-stream` |
 
+  *Amendment (21.10.2026, #389).* The table stands as ruled, with three changes: the
+  version row reads "not 2" (the H3 amendment above); after the 422 `invalid_request`
+  row comes a row for a request that names tools while its app has no origin the
+  service can sign a capability for, which answers 403 `forbidden` before the
+  `not_enabled` row; and the `capability_too_large` row no longer has a preflight
+  reserve (O6 amendment): it means the actual token exceeds 8,192 characters.
+
   Every rejection is a `RunRejection` with `Cache-Control: no-store`, and no
   answer or log line carries token text.
   A token whose `kid` is missing from a still-current key set answers 503
@@ -456,7 +463,7 @@ compromise.
   `purpose`, `principal {iss, sub}` and `tools`; no `jti`, `nbf`, groups or turn text.
 - **D8 issuer.** `CAPABILITY_ISSUER = "agent-service"`; installations are told apart
   by their keys.
-- **D10 registry.** `mcp_origin` is required when an app lists tools and optional otherwise, and must be in its serialized form: a
+- **D10 registry.** *Amended (21.10.2026, #389): the app lists no tools (H3 amendment); `mcp_origin` is optional, and an app without one that names tools in a request is `forbidden`. The rule below is kept as ruled.* `mcp_origin` is required when an app lists tools and optional otherwise, and must be in its serialized form: a
   lower-case DNS host, a non-default port only, no path. A host whose last label is
   all decimal digits or `0x` followed by zero or more hexadecimal digits, and a bracketed IPv6
   address, are refused.
@@ -467,10 +474,10 @@ compromise.
   run is stopped; a call after `exp` fails closed.
 - **D17 the cut.** A1a4-2a owns every public contract and the startup check;
   A1a4-2b owns admission, the hand-over to the runner and the log boundary.
-- **D18 subject reserve.** The preflight measures with a subject of 255 quotation
+- **D18 subject reserve.** *Superseded (21.10.2026, #389): the preflight is gone (O6 amendment); only the admission check of the actual token remains.* The preflight measures with a subject of 255 quotation
   marks (255 characters at the widest printable-ASCII JSON encoding). A longer or
   wider subject is admitted whenever its actual capability fits.
-- **D19 measuring by signing.** The preflight signs its measurement claims through
+- **D19 measuring by signing.** *Superseded (21.10.2026, #389): the preflight is gone (O6 amendment), so nothing is measured by signing.* The preflight signs its measurement claims through
   the same `signed_capability` that admission uses and drops the token at once. A
   verifier rejects future-issued capabilities with its trusted clock, which rejects
   measurement tokens (`iat` 9,999,999,999) as `issued-in-future`.

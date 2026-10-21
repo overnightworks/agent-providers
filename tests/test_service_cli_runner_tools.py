@@ -200,7 +200,7 @@ def a_tool_run(
     overrides: Mapping[str, Responder] | None = None,
     serving_authority: TestAuthority | None = None,
     app_stays_up: bool = True,
-    scenario: Callable[[str, ToolApp], list[RunEvent]] = a_plain_run,
+    scenario: Callable[[str, ToolApp], list[RunEvent]] | None = None,
     before_stop: Callable[[ServiceConfig], None] = lambda _config: None,
     token_file: Path | None = None,
     **claude_options: Any,
@@ -208,7 +208,9 @@ def a_tool_run(
     """One run of the real runner with its tools on, against a TLS fake app, over HTTP.
 
     The runner trusts ``authority``; the app is signed by ``serving_authority`` (default the
-    same). ``app_stays_up=False`` stops the app before the run, so its origin refuses.
+    same). The default scenario posts a run whose request grants exactly ``tools``; ``offered``
+    is the list the app answers with. ``app_stays_up=False`` stops the app before the run, so its
+    origin refuses.
     ``before_stop`` runs once the run has settled and the service still serves, because stopping
     the service cancels what a faulty close would have left behind.
     """
@@ -237,7 +239,11 @@ def a_tool_run(
         )
 
         def play(base_url: str) -> tuple[list[RunEvent], RunStatus]:
-            events = scenario(base_url, app)
+            events = (
+                post_a_run_naming(base_url, tools)
+                if scenario is None
+                else scenario(base_url, app)
+            )
             status = settled_status(base_url, events)
             before_stop(config)
             return events, status

@@ -180,7 +180,10 @@ def _refuse_non_unicode_text(text: str) -> str:
 UnicodeText = Annotated[str, AfterValidator(_refuse_non_unicode_text)]
 """The one type of wire text: valid Unicode, so the body or frame it lands in encodes as JSON."""
 
-ToolUseId = Annotated[UnicodeText, Field(min_length=1)]
+NonEmptyUnicodeText = Annotated[UnicodeText, Field(min_length=1)]
+"""The one owner of non-empty wire text: a call id, a tool's name, a message's text."""
+
+ToolUseId = NonEmptyUnicodeText
 """The one decider of a valid call id, so a call and its result accept the same ids."""
 
 
@@ -241,7 +244,7 @@ class RunStarted(_RunEvent):
 
 class AssistantText(_RunEvent):
     type: Literal["assistant_text"] = "assistant_text"
-    text: Annotated[UnicodeText, Field(min_length=1)]
+    text: NonEmptyUnicodeText
 
 
 class ToolCall(_RunEvent):
@@ -269,7 +272,7 @@ class Heartbeat(_RunEvent):
 
 class Succeeded(_RunEvent):
     type: Literal["succeeded"] = "succeeded"
-    text: Annotated[UnicodeText, Field(min_length=1)]
+    text: NonEmptyUnicodeText
 
 
 class Failed(_RunEvent):
@@ -343,10 +346,6 @@ class RunStatus(_WireModel):
         if (self.ended_at is None) != (self.state is RunState.RUNNING):
             raise ValueError("ended_at is set exactly when the run is over")
         return self
-
-
-NonEmptyUnicodeText = Annotated[UnicodeText, Field(min_length=1)]
-"""The one owner of non-empty wire text: a tool's name, a capability's identifying claims."""
 
 
 class TurnRole(StrEnum):

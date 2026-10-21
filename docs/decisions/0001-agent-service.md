@@ -1343,7 +1343,7 @@ lines) stand above in "A1b ruling (operator, 17.10.2026)". These are the others:
 
 - **The CLI runner serves Claude, Codex and Grok alike. Ruled on 18.10.2026**, verbatim: "du hast hier nur claude als beispiel => grok und codex müssen genauso gehen!" and "wieso musst du was von /ki-abo wissen? also die lib sollte davon nichts wissen" ([journal](https://github.com/overnightworks/agent-providers/issues/115#issuecomment-6244540824)). Consequences: one neutral core (isolation, private home per profile, places, relay, group reap and retention, quarantine) with one CLI adapter per provider; no library or service code names the deployment group (landed: `subscription_group` is a required config field, PR #247; the core moved out of the Claude module, #248, PR #249).
 - **Order. Ruled on 18.10.2026**, verbatim: "ob claude zuerst ist mir egal ! alle müssen funktionieren". The head takes order (a): Claude reaches the first real run first, because its facts are measured; Codex and Grok probe in parallel and join right after. Done means all three providers work.
-- **Probes. Ruled on 18.10.2026**, verbatim: "logins für die proben? mein login welches denn sonst?". The Codex and Grok probes run under the operator's own logins. Tokens are never read or printed; the CLIs use their own login as on the operator's machine. Risk the probe briefs carry: a child that refreshes could rotate the operator's real refresh token (fact 10). C0a and G0a use no login. How C0b and G0b handle the login (the CLI's normal home in place, or the library's own blanked copy in a throwaway home) is a secrets decision the head puts to the operator before C0b and G0b start; until then no probe copies, reads or prints an auth file.
+- **Probes. Ruled on 18.10.2026**, verbatim: "logins für die proben? mein login welches denn sonst?". The Codex and Grok probes run under the operator's own logins. Tokens are never read or printed; the CLIs use their own login as on the operator's machine. Risk the probe briefs carry: a child that refreshes could rotate the operator's real refresh token (fact 10). C0a and G0a use no login. How C0b and G0b handle the login (the CLI's normal home in place, or the library's own blanked copy in a throwaway home) is a secrets decision the head puts to the operator before C0b and G0b start. Rulings 21.10.2026 „Kopie ohne Refresh“ and „Ja, nur Namen + Laufzeit“: library-side code may read a copy once in memory and output only member names and the access token's lifetime in hours, never a value (A1b-K0); any other probe copies, reads or prints no auth file.
 - **Neutral wording and deletion. Ruled on 18.10.2026**: the neutral wording of lines 2, 14, 15 and 16 ("ja") and line 19 (a), the deletion of a run's directories, in the lines themselves.
 - **Line 3. Ruled on 18.10.2026**, verbatim in the line: one profile per provider, switchable by changing the login file and restarting; a provider without a built adapter stops the start.
 - **Conversation memory. Not pulled.** The app's history stays the only history a run sees (line 5). A central, provider-neutral conversation store with a data and backup store is an idea on #18 ("ja B => longterm"), not an item.
@@ -1433,9 +1433,9 @@ A run's relay reaches its CLI only as the run's MCP config: one http server name
 Measured on 18.10.2026 on the installed `grok-1.0.60-linux-x86_64` (191,294,880
 bytes, sha256 prefix `10e6af64b247`; the hash was the same after the last run,
 so the self-updater never touched the binary). Operator ruling 18.10.2026: G0a
-uses no login. No cell read, copied, hashed or printed an auth file or a token,
+uses no login. No A1b-G0a cell read, copied, hashed or printed an auth file or a token,
 and none ran `login`, `logout` or `update` without `--check`. No model turn was
-possible, so no quota was used. Cells that need a login are listed under
+possible, so no quota was used. A1b-K0 below reads the Grok login through the library, under the 21.10.2026 rulings. Cells that need a login are listed under
 "Deferred to G0b / G0c" below.
 
 #### A1b-G0a the Grok CLI without a login
@@ -2089,14 +2089,20 @@ g0a.report("A1", "ACP initialize and session/new over agent stdio", r)
 ```
 
 
+#### A1b-K0 the shape of the Grok login's copy
+
+Recorded once for both providers under "A1b measured: codex 0.163.0", cell
+A1b-K0. For Grok: the source carries a `refresh_token`, so the core copy holds a
+renewal member (#255 S4g, branch (a)); the access token's lifetime is unmeasured.
+
 ### A1b measured: codex 0.163.0
 
 Measured on 18.10.2026 on the installed `codex`, whose native executable prints
-`codex-cli 0.163.0` (V1). No cell used a login, a token, an auth file or a model
-turn; the probe never ran `login` or `logout`, never opened any auth file, and
+`codex-cli 0.163.0` (V1). No A1b-C0a cell used a login, a token, an auth file or a model
+turn; the C0a probe never ran `login` or `logout`, never opened any auth file, and
 each cell's home started empty, and every `codex` run inside the harness used a
 scratch `CODEX_HOME`. One possible run of the shim in the ordinary environment is
-unrecorded (see the V1 caveat); the probe itself never opened `~/.codex`. Operator ruling 18.10.2026: C0a uses no login.
+unrecorded (see the V1 caveat); the probe itself never opened `~/.codex`. A1b-K0, recorded above, reads the Codex login through the library, under the 21.10.2026 rulings. Operator ruling 18.10.2026: C0a uses no login.
 
 #### A1b-C0a the Codex CLI without a login (flags, stream, MCP client, files, egress)
 
@@ -2562,6 +2568,55 @@ connects to a configured HTTP MCP server before the first model call, with
 `initialize` at `2025-06-18`, the bearer from the named environment variable and
 no `GET` stream. Adapter-port review: no CLI turn limit exists by name. HQ9: a
 start-up with every feature off executes no `bwrap` and creates no namespace.
+
+#### A1b-K0 the shape of the two logins' copies (Codex and Grok)
+
+**What ran.** Operator rulings 18.10.2026 (the probes run under the operator's
+own logins), 21.10.2026 „Kopie ohne Refresh“ and 21.10.2026 „Ja, nur Namen +
+Laufzeit“ (library-side code may read the copy once in memory and output only
+member names and the access token's lifetime in hours, never a value). No CLI was
+launched and no quota was used; the library read the source login. A scratch
+script ran as the `credential_copy` hook, inspected the bytes inside the
+library's own read and failure boundary and returned `None`, so the library wrote
+no copy and the working root was empty afterwards (`copy_removed` true for both).
+Two secret-safety gates accepted the script before any run (Codex astra high,
+Opus high). Each provider ran once, with script sha256
+`ade4c8ca48b7fb9e2ba0e1a3d48d2c569a25c4efc7df68c8f1ff041cb9f4f4cc`. The script
+stays in scratch, outside the repository, like the probe precedent. Its rules:
+it keeps only member paths (a key outside a fixed set of schema names prints as
+`<other>`, with a count), `renewal_member_present` (an exact `refresh_token`,
+`refreshToken` or `refresh` key, even if empty), `renewal_names_unknown` (some
+`<other>` key exists) and the access token's lifetime in hours from its issue and
+expiry claims, or one fixed reason code; duplicate members are rejected; any
+error becomes a reason code without a value; the run's output was posted only
+when the exit code was 0 and the output was one line with `copy_removed` true.
+
+**Codex (the library's blanked copy).** Members: `OPENAI_API_KEY`, `auth_mode`,
+`last_refresh`, `tokens`, `tokens.access_token`, `tokens.account_id`,
+`tokens.id_token`, `tokens.refresh_token`; no unlisted key. The access token
+lives 240 hours (10 days). `renewal_member_present` is true; the head reads this
+as the blanked copy's empty `refresh_token` (the library's blanking keeps the key
+without a value), not as a usable refresh.
+
+**Grok (the raw source).** Members as recorded: `<other>`, `<other>.<other>`,
+`<other>.auth_mode`, `<other>.email`, `<other>.expires_at`, `<other>.key`,
+`<other>.refresh_token`; 12 keys outside the schema set in all
+(`other_key_count`, at any depth). `renewal_member_present` is true: the source
+holds a `refresh_token` key. No `access_token` key exists, so the lifetime was
+not measured (`no_access_member`).
+
+**What each consumer may rely on (the head's reading of these results).**
+- #255 S4g: the head reads the Grok source's `refresh_token` key as a renewal
+  member, so branch (a) applies: a library copy without it comes before any live
+  Grok cell.
+- HQ2: Codex's access token lives 10 days, over the "about a week" threshold,
+  which points to option (b). A copy on a server has no one renewing it, so the
+  source goes stale after 10 days (#255's residual, C6). This cell does not rule
+  HQ2. Grok's lifetime is still unmeasured.
+- #377 and #378 take these as refinement inputs.
+
+**Unavailable after K0.** Grok's access-token lifetime and whether `key` is a
+JWT. Codex's refresh behaviour is untouched.
 
 ### A1b measured: claude 2.1.302
 

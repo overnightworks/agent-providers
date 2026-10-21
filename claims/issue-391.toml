@@ -1,8 +1,0 @@
-claim_id = "2d2b5f4cb1f846959576d03368925255"
-agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
-role = "builder"
-base = "a0646353a8edbbc44b2fe8297f736014ec99081c"
-branch = "claude/issue-391-a4-p2a1-app-gate"
-scope = ["README.md", "docs/MIGRATING.md", "docs/decisions/0001-agent-service.md", "packages/agent-service/src/agent_service/app.py", "packages/agent-service/src/agent_service/config.py", "packages/agent-service/src/agent_service/identity.py", "packages/agent-service/src/agent_service/routing.py", "tests/keycloak/realm.json", "tests/service_support.py", "tests/test_keycloak_token_shapes.py", "tests/test_service_admission.py", "tests/test_service_app_gate.py", "tests/test_service_capability.py", "tests/test_service_config.py", "tests/test_service_entrance.py", "tests/test_service_keycloak.py", "tests/test_service_routing.py", "tests/test_service_run_status.py", "tests/test_service_token_reading.py"]
-opened_commit = "17a6168fad9a9310c5600581f01cc99a03e49f07"
-whole_reason = "The gate, its per-app configuration, the removal of the interim guard it replaces and the call site are one path; the realm fixtures and the test modules are what the membership rule pins."

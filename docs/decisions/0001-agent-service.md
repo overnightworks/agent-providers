@@ -2594,21 +2594,25 @@ when the exit code was 0 and the output was one line with `copy_removed` true.
 **Codex (the library's blanked copy).** Members: `OPENAI_API_KEY`, `auth_mode`,
 `last_refresh`, `tokens`, `tokens.access_token`, `tokens.account_id`,
 `tokens.id_token`, `tokens.refresh_token`; no unlisted key. The access token
-lives 240 hours (10 days). `renewal_member_present` is true only because the
-blanked copy keeps an empty `refresh_token`; it does not mean the copy holds a
-usable refresh.
+lives 240 hours (10 days). `renewal_member_present` is true; the head reads this
+as the blanked copy's empty `refresh_token` (the library's blanking keeps the key
+without a value), not as a usable refresh.
 
-**Grok (the raw source).** One unlisted top-level key holds `auth_mode`, `email`,
-`expires_at`, `key` and `refresh_token`; 12 top-level keys are unlisted. The
-source carries a `refresh_token` (`renewal_member_present` true). The access token
-is not under `access_token`, so its lifetime was not measured
-(`no_access_member`).
+**Grok (the raw source).** Members as recorded: `<other>`, `<other>.<other>`,
+`<other>.auth_mode`, `<other>.email`, `<other>.expires_at`, `<other>.key`,
+`<other>.refresh_token`; 12 keys outside the schema set in all
+(`other_key_count`, at any depth). `renewal_member_present` is true: the source
+holds a `refresh_token` key. No `access_token` key exists, so the lifetime was
+not measured (`no_access_member`).
 
-**What each consumer may rely on.**
-- #255 S4g: Grok's core copy carries a renewal member, so branch (a) applies: a
-  library copy without it comes before any live Grok cell.
-- HQ2: Codex's access token lives 10 days, over the "about a week" threshold.
-  Grok's lifetime is still unmeasured.
+**What each consumer may rely on (the head's reading of these results).**
+- #255 S4g: the head reads the Grok source's `refresh_token` key as a renewal
+  member, so branch (a) applies: a library copy without it comes before any live
+  Grok cell.
+- HQ2: Codex's access token lives 10 days, over the "about a week" threshold,
+  which points to option (b). A copy on a server has no one renewing it, so the
+  source goes stale after 10 days (#255's residual, C6). This cell does not rule
+  HQ2. Grok's lifetime is still unmeasured.
 - #377 and #378 take these as refinement inputs.
 
 **Unavailable after K0.** Grok's access-token lifetime and whether `key` is a

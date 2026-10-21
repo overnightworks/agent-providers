@@ -1,8 +1,0 @@
-claim_id = "6d954d51820c45dfae6157f82ced9c39"
-agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
-role = "builder"
-base = "1165bda54f6ae6c67b98a82db7c81214661c0fe7"
-branch = "claude/issue-404-release-0-6-0"
-scope = ["docs/MIGRATING.md", "packages/agent-client/pyproject.toml", "packages/agent-service/pyproject.toml", "pyproject.toml", "src/agent_providers/__init__.py", "uv.lock"]
-opened_commit = "c695aa1a5af745775ad8686a318481dbfe2f361e"
-whole_reason = "One release: the seven version literals, the lock that records them and the migration section move together."

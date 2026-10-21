@@ -513,7 +513,7 @@ def test_an_origin_app_naming_no_tools_gets_a_capability_that_grants_none(servin
     "groups",
     [
         pytest.param(["/apps/presentator", API_GROUP], id="with-a-route"),
-        pytest.param([], id="without-a-route"),
+        pytest.param(["/apps/presentator"], id="without-a-route"),
     ],
 )
 def test_an_app_without_an_origin_naming_tools_is_forbidden_before_the_route_and_signs_nothing(
@@ -574,7 +574,7 @@ def _unreachable_issuer(_url: str) -> bytes:
     [
         pytest.param(MINT.fetch_key_set, {"sub": None}, {}, id="unauthorized"),
         pytest.param(_unreachable_issuer, {}, {}, id="unavailable"),
-        pytest.param(MINT.fetch_key_set, {"groups": []}, {}, id="not-enabled"),
+        pytest.param(MINT.fetch_key_set, {"groups": []}, {}, id="outside-the-app"),
         pytest.param(MINT.fetch_key_set, {}, {"v": 1}, id="unsupported-version"),
         pytest.param(
             MINT.fetch_key_set, {}, {"purpose": "notes.assistant"}, id="malformed-purpose"

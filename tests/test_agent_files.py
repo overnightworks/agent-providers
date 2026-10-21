@@ -450,7 +450,22 @@ def test_request_is_the_v2_body_with_purpose_prompt_and_tool_effects(tmp_path: P
         "read_note": ToolEffect.READ_ONLY,
         "edit_note": ToolEffect.SIDE_EFFECTING,
     }
-    assert set(request.model_dump()) == {"v", "purpose", "turn", "tools"}
+    assert set(request.model_dump()) == {"v", "purpose", "model", "turn", "tools"}
+
+
+@pytest.mark.parametrize(
+    ("model_line", "model"),
+    [
+        pytest.param("claude/sonnet", "claude/sonnet", id="A1-the-files-model"),
+        pytest.param(None, None, id="A2-no-model"),
+    ],
+)
+def test_request_carries_the_files_model_or_none(
+    tmp_path: Path, model_line: str | None, model: str | None
+) -> None:
+    agent = load(tmp_path, agent_text(model=model_line))
+
+    assert agent.request([TurnMessage(role=TurnRole.USER, text="hi")]).model == model
 
 
 def test_request_of_an_agent_without_tools_names_none(tmp_path: Path) -> None:

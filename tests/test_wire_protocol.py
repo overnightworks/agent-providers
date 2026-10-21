@@ -385,6 +385,7 @@ def test_a_status_body_off_the_contract_is_refused(body: dict[str, object]) -> N
 REQUEST = {
     "v": PROTOCOL_VERSION,
     "purpose": "assistant",
+    "model": "claude/sonnet",
     "turn": {
         "system": "You are a helpful assistant.",
         "messages": [
@@ -405,7 +406,7 @@ def test_a_run_request_round_trips_through_its_json() -> None:
 
 
 @pytest.mark.parametrize(
-    "field", ["provider", "model", "route", "user_id", "mcp_url", "mcp_token"]
+    "field", ["provider", "route", "user_id", "mcp_url", "mcp_token"]
 )
 def test_a_run_request_naming_what_the_service_decides_is_refused(field: str) -> None:
     request_json = json.dumps({**REQUEST, field: "chosen by the client"})
@@ -745,3 +746,23 @@ def test_the_two_agent_role_lists_are_accepted(roles: list[str]) -> None:
 def test_any_other_agent_roles_are_refused(roles: object) -> None:
     with pytest.raises(ValidationError):
         AGENT_ROLES.validate_python(roles)
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        pytest.param("claude/sonnet@2", id="V1-a-version"),
+        pytest.param("sonnet", id="V2-no-provider"),
+        pytest.param("claude/sonnet\n", id="V3-a-trailing-newline"),
+        pytest.param("", id="V4-empty"),
+        pytest.param(5, id="V5-not-a-string"),
+    ],
+)
+def test_a_run_request_with_a_model_outside_the_grammar_is_refused(model: object) -> None:
+    with pytest.raises(ValidationError):
+        RunRequest.model_validate({**REQUEST, "model": model})
+
+
+@pytest.mark.parametrize("model", [pytest.param("claude/sonnet"), pytest.param(None)])
+def test_a_run_request_may_name_a_model_or_an_explicit_null(model: str | None) -> None:
+    assert RunRequest.model_validate({**REQUEST, "model": model}).model == model

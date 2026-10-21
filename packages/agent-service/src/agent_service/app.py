@@ -7,7 +7,8 @@ checked in a fixed order, and the first failure answers:
 1. the workload token, then the user token (``agent_service.identity``);
 2. the body's protocol version, then its shape (``agent_service.run_request``);
 3. tools named by an app without an MCP origin answer ``forbidden``, before the route;
-4. the route (``agent_service.routing``);
+4. the route (``agent_service.routing``), which reads the requested model and the
+   installation's listed models; no model is ever replaced;
 5. for the CLI route, the service's admission limit (``agent_service.admission``): a
    subscription run beyond it answers ``busy`` with ``Retry-After`` before anything is
    signed;
@@ -204,7 +205,15 @@ def _admitted(
     scope = config.capability_scope(caller.app, run_request.tools)
     if run_request.tools and scope is None:
         return rejection(RejectionCode.FORBIDDEN)
-    served = route(config.identity, config.route, config.profiles, caller.groups, caller.app)
+    served = route(
+        config.identity,
+        config.route,
+        config.profiles,
+        caller.groups,
+        caller.app,
+        run_request.model,
+        config.subscription_models(),
+    )
     if isinstance(served, NotEnabled):
         return rejection(RejectionCode.NOT_ENABLED)
     lease = None

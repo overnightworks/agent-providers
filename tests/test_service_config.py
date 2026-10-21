@@ -57,9 +57,12 @@ ROOT_MARKER = "synthetic-private-root-marker"
 WORKING_ROOT_LINE = f"working_root = {json.dumps(str(process_working_root().path))}"
 
 
-def cli_section(*, binary: str, version: str, root: str) -> str:
+MODELS_LINE = 'models = ["sonnet", "opus"]'
+
+
+def cli_section(*, binary: str, version: str, root: str, models: str = MODELS_LINE) -> str:
     root_lines = f"{root}\n" if root else ""
-    program_lines = "".join(f"{line}\n" for line in (binary, version) if line)
+    program_lines = "".join(f"{line}\n" for line in (binary, version, models) if line)
     program_table = f"[cli.claude]\n{program_lines}\n" if program_lines else ""
     return f"[cli]\n{root_lines}\n{program_table}"
 
@@ -1181,6 +1184,47 @@ def test_a_pinned_version_that_is_not_three_integers_is_refused_by_field(
     assert _refused_on_one_line(_written(tmp_path, text), capsys) == refusal
 
 
+def _with_models(models_line: str) -> str:
+    return _with(
+        CLI_SECTION,
+        cli_section(
+            binary=CLAUDE_BINARY_LINE,
+            version=CLAUDE_VERSION_LINE,
+            root=WORKING_ROOT_LINE,
+            models=models_line,
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "models_line",
+    [
+        pytest.param("", id="C1-missing"),
+        pytest.param('models = "sonnet"', id="C2-a-string"),
+        pytest.param('models = ["sonnet@1"]', id="C3-an-entry-outside-the-grammar"),
+    ],
+)
+def test_a_claude_program_without_a_models_array_in_the_grammar_is_refused_by_field(
+    tmp_path, capsys, models_line
+):
+    refusal = _refused_on_one_line(_written(tmp_path, _with_models(models_line)), capsys)
+
+    assert refusal.startswith("cli.claude.models")
+
+
+@pytest.mark.parametrize(
+    ("models_line", "listed"),
+    [
+        pytest.param('models = ["sonnet", "opus"]', {"sonnet", "opus"}, id="C4-two-names"),
+        pytest.param("models = []", set(), id="C5-none"),
+    ],
+)
+def test_a_claude_program_lists_the_models_it_serves(tmp_path, models_line, listed):
+    config = load_config(_written(tmp_path, _with_models(models_line)))
+
+    assert config.subscription_models() == {Provider.CLAUDE: listed}
+
+
 def _cli_naming_the_working_root(root_line: str, program: Path) -> str:
     binary_line = f"binary = {json.dumps(str(program))}"
     return _with(
@@ -1370,7 +1414,7 @@ def test_a_bad_working_root_and_a_bad_token_file_are_both_named_on_one_line(tmp_
 
 
 PROGRAM_TABLE_REQUIRED = "cli.claude: required for a claude profile"
-ROOT_ONLY_CLI = cli_section(binary="", version="", root=WORKING_ROOT_LINE)
+ROOT_ONLY_CLI = cli_section(binary="", version="", root=WORKING_ROOT_LINE, models="")
 FORMER_FLAT_KEYS = f"claude_{CLAUDE_BINARY_LINE}\nclaude_{CLAUDE_VERSION_LINE}\n"
 FORMER_FLAT_KEYS_REFUSED = (
     "cli.claude_binary: Extra inputs are not permitted;"
@@ -1412,7 +1456,7 @@ def test_a_claude_profile_without_its_program_table_is_refused_before_its_token_
         ),
         pytest.param(
             f"[cli]\n{WORKING_ROOT_LINE}\n{FORMER_FLAT_KEYS}\n[cli.claude]\n"
-            f"{CLAUDE_BINARY_LINE}\n{CLAUDE_VERSION_LINE}\n\n",
+            f"{CLAUDE_BINARY_LINE}\n{CLAUDE_VERSION_LINE}\n{MODELS_LINE}\n\n",
             FORMER_FLAT_KEYS_REFUSED,
             id="beside-a-program-table",
         ),

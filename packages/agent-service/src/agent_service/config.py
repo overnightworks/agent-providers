@@ -1,7 +1,7 @@
 """The service's one configuration: identity, listener, profiles, the route and apps.
 
 The service accepts at most one subscription profile, for Claude, which needs its
-token file and a ``[cli.claude]`` table naming the absolute program and the exact version
+token file and a ``[cli.claude]`` table naming the absolute program, the exact version and the models it serves
 it must report, beside the ``[cli]`` section's private ``working_root``, checked at load. An
 app that offers tools names its one https MCP origin, and the service signs a capability for
 each run that grants the tools its request names; an origin is never shared between apps and
@@ -42,7 +42,7 @@ from pydantic import (
 from webauth.https_client import is_https_url
 
 from agent_client.capability import McpOrigin
-from agent_client.wire import MAX_EVENT_BYTES
+from agent_client.wire import MAX_EVENT_BYTES, MODEL_PART_PATTERN
 from agent_providers.config import PrivateWorkingRoot, WorkingRootNotPrivateError
 from agent_providers.secret_file import read_token_file, shown_text
 from agent_service.capability import CapabilityScope
@@ -160,11 +160,25 @@ def _program(path: object) -> Path:
     return _absolute_path_to("program", path)
 
 
+def _model_part_in_grammar(name: str) -> str:
+    if MODEL_PART_PATTERN.fullmatch(name) is None:
+        raise ValueError("must be a model name from a-z, 0-9, . and -, with no provider or version")
+    return name
+
+
+ListedModel = Annotated[str, Field(strict=True), AfterValidator(_model_part_in_grammar)]
+
+
 class ProgramPin(_Section):
-    """One provider's program and the exact version it must report."""
+    """One provider's program, the exact version it must report and the models it serves.
+
+    ``models`` lists what this installation runs on the subscription; an empty list
+    lists nothing, so a named model then goes to the API route.
+    """
 
     binary: Annotated[Path, BeforeValidator(_program)]
     version: PinnedVersion
+    models: frozenset[ListedModel]
 
 
 def _private_working_root(value: object) -> PrivateWorkingRoot:
@@ -431,6 +445,12 @@ class ServiceConfig(_Section):
         if app.mcp_origin is None or self.signing is None:
             return None
         return CapabilityScope(app.mcp_origin, tuple(sorted(tools)), self.signing.key)
+
+    def subscription_models(self) -> Mapping[Provider, frozenset[str]]:
+        """The model names each provider's subscription program serves; empty without ``[cli]``."""
+        if self.cli is None:
+            return {}
+        return {provider: pin.models for provider, pin in self.cli.programs().items()}
 
     def mcp_trust_bundle(self) -> Path | None:
         """The CA bundle for the apps' MCP origins; ``None`` while no app declares an origin."""

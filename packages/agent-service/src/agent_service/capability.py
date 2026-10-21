@@ -2,17 +2,14 @@
 
 ``capability_claims`` is the one place the claim values and the expiry
 arithmetic live; ``signed_capability`` is the one decider of whether a signed
-capability fits the 8,192 characters every verifier accepts. The configuration
-preflight measures through the same two functions with reserved values, so the
-measured length is the production length. Nothing here mints a capability for a
-run: that is admission (A1a4-2b).
+capability fits the 8,192 characters every verifier accepts. Nothing here mints
+a capability for a run: that is admission (A1a4-2b).
 """
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Final
 from uuid import UUID
 
 from agent_client.capability import (
@@ -23,13 +20,7 @@ from agent_client.capability import (
     CapabilityPrincipal,
     carries_signature_of,
 )
-from agent_client.wire import MAX_PURPOSE_LENGTH
 from agent_service.signing import SigningKey
-
-PREFLIGHT_SUBJECT: Final = '"' * 255
-PREFLIGHT_ISSUED_AT: Final = 9_999_999_999
-PREFLIGHT_RUN_ID: Final = UUID(int=0)
-PREFLIGHT_PURPOSE: Final = "a" * MAX_PURPOSE_LENGTH
 
 
 class CapabilityTooLarge(Exception):
@@ -90,18 +81,3 @@ def signed_capability(scope: CapabilityScope, claims: CapabilityClaims) -> Capab
         del token  # the refusal's traceback keeps this frame alive
         raise CapabilityTooLarge(length)
     return Capability(claims, token)
-
-
-def preflight_claims(
-    scope: CapabilityScope, *, app: str, issuer: str, max_duration_s: float
-) -> CapabilityClaims:
-    return capability_claims(
-        scope,
-        run_id=PREFLIGHT_RUN_ID,
-        app=app,
-        issuer=issuer,
-        subject=PREFLIGHT_SUBJECT,
-        purpose=PREFLIGHT_PURPOSE,
-        now=PREFLIGHT_ISSUED_AT,
-        max_duration_s=max_duration_s,
-    )

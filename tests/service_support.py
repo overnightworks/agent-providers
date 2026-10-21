@@ -236,7 +236,6 @@ def _service_config_document(
         "apps": {
             "songmaker": {
                 "workload_client": SONGMAKER_CLIENT,
-                "tools": {"read_song": "read_only", "edit_song": "side_effecting"},
                 "mcp_origin": SONGMAKER_ORIGIN,
                 **(songmaker or {}),
             },
@@ -285,8 +284,8 @@ def service_config_file(directory: Path, *, subscription_groups: list[str]) -> P
 
 
 def plain_service_config() -> ServiceConfig:
-    """``service_config`` with songmaker listing no tools and naming no origin."""
-    return service_config(songmaker={"tools": {}, "mcp_origin": None})
+    """``service_config`` with songmaker naming no origin."""
+    return service_config(songmaker={"mcp_origin": None})
 
 
 def capable_service_config(
@@ -303,9 +302,10 @@ def capable_service_config(
 
 def run_body(**overrides: object) -> dict[str, Any]:
     return {
-        "v": 1,
+        "v": 2,
         "purpose": COWRITER,
         "turn": {"system": "You help write songs.", "messages": [{"role": "user", "text": "Hi"}]},
+        "tools": {},
         **overrides,
     }
 
@@ -921,7 +921,7 @@ class SplitFailureRunner(GatedRunner):
         return _SplitFailure(self)
 
 
-SONGMAKER = service_config().apps["songmaker"]
+SONGMAKER_TOOLS: Final = {"read_song": "read_only", "edit_song": "side_effecting"}
 ALICE = Principal(TEST_ISSUER, "user-alice")
 
 
@@ -930,7 +930,7 @@ def alice_admitted_run(run_id: uuid.UUID) -> AdmittedRun:
         run_id=run_id,
         app="songmaker",
         principal=ALICE,
-        request=RunRequest.model_validate(run_body()),
+        request=RunRequest.model_validate(run_body(tools=SONGMAKER_TOOLS)),
         route=Cli("claude-main"),
         capability=None,
     )
@@ -1204,7 +1204,7 @@ def the_app_on(
     """The real app on the drive's runner, clock and store.
 
     ``runners`` replace the drive's runner, as ``Runners()`` serves a run without one.
-    ``config`` replaces the default one, which lists the songmaker's tools.
+    ``config`` replaces the default one.
 
     The app builds its own quarantine on ``drive.clock`` with its own
     ``ScriptedConfirmation``, so a custom ``confirm`` and ``drive.quarantine_clock``
@@ -1316,7 +1316,6 @@ class Drive:
         self.frames = run_frames(
             alice_admitted_run(self.run_id),
             runner,
-            SONGMAKER,
             runs,
             clock,
             self.records,

@@ -33,7 +33,6 @@ from service_support import (
     ALICE,
     CUT_BY_ITS_SCOPE,
     MOST_BUSY_TURNS_BEFORE_THE_RUN_NEVER_SETTLES,
-    SONGMAKER,
     STRAY_CANCELLATION_CANARY,
     BrokenClock,
     ClientSocket,
@@ -302,7 +301,6 @@ def _frames_of_a_run_without_a_runner(
     frames = run_frames(
         alice_admitted_run(run_id),
         None,
-        SONGMAKER,
         RunConfig(),
         LoopClock(),
         records,

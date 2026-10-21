@@ -121,10 +121,13 @@ def test_every_variant_round_trips_through_its_json(raw: dict[str, object]) -> N
             wire("thinking", 1, text="hm"), ViolationKind.UNKNOWN_TYPE, id="unknown type"
         ),
         pytest.param(
-            {**wire("heartbeat", 1), "v": 2}, ViolationKind.UNSUPPORTED_VERSION, id="newer version"
+            {**wire("heartbeat", 1), "v": 1}, ViolationKind.UNSUPPORTED_VERSION, id="older version"
         ),
         pytest.param(
-            {**wire("assistant_text", 1, text="hi", tone="warm"), "v": 2},
+            {**wire("heartbeat", 1), "v": 3}, ViolationKind.UNSUPPORTED_VERSION, id="newer version"
+        ),
+        pytest.param(
+            {**wire("assistant_text", 1, text="hi", tone="warm"), "v": 3},
             ViolationKind.UNSUPPORTED_VERSION,
             id="newer version with a field this client does not know",
         ),
@@ -134,7 +137,7 @@ def test_every_variant_round_trips_through_its_json(raw: dict[str, object]) -> N
             id="version true",
         ),
         pytest.param(
-            {**wire("heartbeat", 1), "v": 1.0},
+            {**wire("heartbeat", 1), "v": 2.0},
             ViolationKind.UNSUPPORTED_VERSION,
             id="version as a float",
         ),
@@ -277,7 +280,7 @@ def test_a_rejection_body_round_trips_through_its_json(code: RejectionCode) -> N
     "body",
     [
         pytest.param({**REJECTION, "v": True}, id="version true"),
-        pytest.param({**REJECTION, "v": 1.0}, id="version as a float"),
+        pytest.param({**REJECTION, "v": 2.0}, id="version as a float"),
         pytest.param({"code": "busy", "message": "Another run is active."}, id="no version"),
         pytest.param(
             {**REJECTION, "message": "x" * (MAX_MESSAGE_LENGTH + 1)}, id="message too long"
@@ -353,8 +356,8 @@ def test_a_status_body_names_its_state_and_codes_as_enums() -> None:
             for missing in STATUS
         ),
         pytest.param({**STATUS, "v": True}, id="version true"),
-        pytest.param({**STATUS, "v": 1.0}, id="version as a float"),
-        pytest.param({**STATUS, "v": 2}, id="version 2"),
+        pytest.param({**STATUS, "v": 2.0}, id="version as a float"),
+        pytest.param({**STATUS, "v": 1}, id="version 1"),
         pytest.param({**STATUS, "events": 0}, id="no events"),
         pytest.param({**STATUS, "events": True}, id="events true"),
         pytest.param({**STATUS, "events": 1.0}, id="events as a float"),
@@ -390,6 +393,7 @@ REQUEST = {
             {"role": "user", "text": "Now a paragraph."},
         ],
     },
+    "tools": {"read_note": "read_only", "edit_note": "side_effecting"},
 }
 
 
@@ -401,13 +405,39 @@ def test_a_run_request_round_trips_through_its_json() -> None:
 
 
 @pytest.mark.parametrize(
-    "field", ["provider", "model", "route", "user_id", "mcp_url", "mcp_token", "tools"]
+    "field", ["provider", "model", "route", "user_id", "mcp_url", "mcp_token"]
 )
 def test_a_run_request_naming_what_the_service_decides_is_refused(field: str) -> None:
     request_json = json.dumps({**REQUEST, field: "chosen by the client"})
 
     with pytest.raises(ValidationError):
         RunRequest.model_validate_json(request_json)
+
+
+@pytest.mark.parametrize(
+    "tools",
+    [
+        pytest.param(None, id="omitted"),
+        pytest.param([], id="a list"),
+        pytest.param({"": "read_only"}, id="an empty name"),
+        pytest.param({"\ud800": "read_only"}, id="a lone surrogate in a name"),
+        pytest.param({"read_note": "write"}, id="an unknown effect"),
+        pytest.param({"read_note": 1}, id="an effect that is no text"),
+    ],
+)
+def test_a_run_request_with_tools_missing_or_off_the_contract_is_refused(tools: object) -> None:
+    body = {name: value for name, value in REQUEST.items() if name != "tools"}
+    if tools is not None:
+        body["tools"] = tools
+
+    payload = json.dumps(body)
+
+    with pytest.raises(ValidationError):
+        RunRequest.model_validate_json(payload)
+
+
+def test_a_run_request_may_name_no_tools() -> None:
+    assert RunRequest.model_validate({**REQUEST, "tools": {}}).tools == {}
 
 
 @pytest.mark.parametrize(

@@ -144,6 +144,13 @@ body rules be fixed before the build.
   | The run's capability would exceed 8,192 characters (A1a4 item 12): a subject wider than the preflight's reserve, or a wall clock past 2286 | 422 `capability_too_large` |
   | Admitted | 200 `text/event-stream` |
 
+  *Amendment (21.10.2026, #389).* The table stands as ruled, with three changes: the
+  version row reads "not 2" (the H3 amendment above); after the 422 `invalid_request`
+  row comes a row for a request that names tools while its app has no origin the
+  service can sign a capability for, which answers 403 `forbidden` before the
+  `not_enabled` row; and the `capability_too_large` row no longer has a preflight
+  reserve (O6 amendment): it means the actual token exceeds 8,192 characters.
+
   Every rejection is a `RunRejection` with `Cache-Control: no-store`, and no
   answer or log line carries token text.
   A token whose `kid` is missing from a still-current key set answers 503
@@ -205,6 +212,14 @@ lists `subscription_groups` and the optional `api_groups`, `[route] api_alias`
 replaces `[purposes]`, `[apps.<app>]` loses its purposes, the order-of-checks table
 loses its row "The purpose is not in the app's list", and its 422 row covers a
 purpose outside `agent_client.wire.Purpose`. S3 stands. Authority: „wir bauen das entsprechend“ on #382.
+
+**Amendment (21.10.2026, #382, #389).** S3 now reads: the request names purpose, turn
+and tools. The roles and an optional model are named as later slices (P2a, P2d) and are
+not implemented here. `[apps.<app>]` holds `workload_client` and `mcp_origin`; a
+leftover `tools` table stops startup naming `apps.<app>.tools`. The order-of-checks
+table changes with it: the version row reads "not 2"; after the 422 shape row comes
+403 `forbidden` for tools named by an app without an origin, before the `not_enabled`
+row; and the capability row is the one size check of the actual token. Authority (#382, 21.10.2026): „ok das klingt langsam für mich stimmig“, said after the head explained that an app's own tools are the app's, and „wir bauen das entsprechend“.
 
 **Consequence.** Tests prove each row with minted tokens over a real socket,
 and `tests/test_service_keycloak.py` proves the entrance end to end with real
@@ -296,6 +311,16 @@ workload client to allowed purposes. It maps it to its own canonical MCP origin 
 its tool allowlist only; any purpose that `agent_client.wire.Purpose` accepts is
 admitted from any app, and the capability's scope comes from the authenticated app,
 never from the purpose. Authority: #382's accepted purpose-independent design and „wir bauen das entsprechend“.
+
+**Amendment (21.10.2026, #382, #389).** The registry maps a workload client to its own
+canonical MCP origin only. „Registering an app delegates its own agent policy, tool
+selection and effect classification to it“ (the design's O5 amendment, accepted on
+#382). The `tools` claim of a capability is the names of the request's `tools`, sorted;
+O4's replay ceiling (the signed names, one app, one person, until `exp`) is unchanged. The
+sentence "The request carries no MCP URL, MCP token, route, provider, model or user id"
+now reads: it carries no MCP URL, MCP token, route or user id; it names its tools with
+their effects and may name a model (P2d). An app without an origin that names any tool
+is `forbidden`. Authority (#382, 21.10.2026): „ok das klingt langsam für mich stimmig“, said after the head explained that an app's own tools are the app's, and „wir bauen das entsprechend“.
 
 ### A1a4 ruling (operator and head, 16.10.2026)
 
@@ -415,6 +440,10 @@ compromise.
 - **O5 Which tools.** Membership in an app's `tools` table grants capability
   permission, absence denies it, and an empty table grants none. The `tools` claim is
   the table's keys, sorted.
+
+  *Amendment (21.10.2026, #382, #389).* The grant is the names of the request's `tools`,
+  signed sorted; the service table is gone and an empty map grants none. See H3's
+  amendment. Authority (#382, 21.10.2026): „ok das klingt langsam für mich stimmig“, said after the head explained that an app's own tools are the app's, and „wir bauen das entsprechend“.
 - **O6 Capability size.** `identity.py` gains no subject policy beyond O7's
   valid-Unicode rule. A capability is at
   most `MAX_CAPABILITY_CHARACTERS = 8192` characters, webauth's token limit. The
@@ -422,6 +451,9 @@ compromise.
   a reserve; admission checks the actual compact token (A1a4-2b) and answers an
   oversized one with HTTP 422 `capability_too_large`, never `unavailable`,
   `unauthorized` or `invalid_request`.
+
+  *Amendment (21.10.2026, #382, #389).* The configuration preflight is gone: the
+  admission check of the actual token is the one size check. Authority (#382, 21.10.2026): „ok das klingt langsam für mich stimmig“, said after the head explained that an app's own tools are the app's, and „wir bauen das entsprechend“.
 
   *Amendment (21.10.2026, #382, #385).* The preflight measures every app with a
   capability scope once, with a reserved purpose of the grammar's maximum length
@@ -431,7 +463,7 @@ compromise.
   `purpose`, `principal {iss, sub}` and `tools`; no `jti`, `nbf`, groups or turn text.
 - **D8 issuer.** `CAPABILITY_ISSUER = "agent-service"`; installations are told apart
   by their keys.
-- **D10 registry.** `mcp_origin` is required when an app lists tools and optional otherwise, and must be in its serialized form: a
+- **D10 registry.** *Amended (21.10.2026, #389): the app lists no tools (H3 amendment); `mcp_origin` is optional, and an app without one that names tools in a request is `forbidden`. The rule below is kept as ruled.* `mcp_origin` is required when an app lists tools and optional otherwise, and must be in its serialized form: a
   lower-case DNS host, a non-default port only, no path. A host whose last label is
   all decimal digits or `0x` followed by zero or more hexadecimal digits, and a bracketed IPv6
   address, are refused.
@@ -442,10 +474,10 @@ compromise.
   run is stopped; a call after `exp` fails closed.
 - **D17 the cut.** A1a4-2a owns every public contract and the startup check;
   A1a4-2b owns admission, the hand-over to the runner and the log boundary.
-- **D18 subject reserve.** The preflight measures with a subject of 255 quotation
+- **D18 subject reserve.** *Superseded (21.10.2026, #389): the preflight is gone (O6 amendment); only the admission check of the actual token remains.* The preflight measures with a subject of 255 quotation
   marks (255 characters at the widest printable-ASCII JSON encoding). A longer or
   wider subject is admitted whenever its actual capability fits.
-- **D19 measuring by signing.** The preflight signs its measurement claims through
+- **D19 measuring by signing.** *Superseded (21.10.2026, #389): the preflight is gone (O6 amendment), so nothing is measured by signing.* The preflight signs its measurement claims through
   the same `signed_capability` that admission uses and drops the token at once. A
   verifier rejects future-issued capabilities with its trusted clock, which rejects
   measurement tokens (`iat` 9,999,999,999) as `issued-in-future`.
@@ -462,6 +494,9 @@ compromise.
    from 1 to 65535 without leading zeros, and nothing else. Origins are unique, and an
    origin needs `[signing]`, and an app that lists tools needs an origin. A refusal names `apps.<app>.mcp_origin` and gives the
    canonical form where one exists and would itself load.
+   *Amendment (21.10.2026, #389):* the rule "an app that lists tools needs an origin" is
+   gone from startup; an app without an origin that names tools in a request is `forbidden`
+   at request time (H3 amendment).
 9. **The format.** `CapabilityClaims` (frozen, strict, `extra="forbid"`) with token
    type `agent-capability+jwt`; `principal.sub` is the exact verified subject, never
    truncated, normalized or substituted. A changed claim set gets a new token type.
@@ -479,6 +514,10 @@ compromise.
     capability scope, with a reserved purpose of the grammar's maximum length, and its
     refusal names `apps.<app>.tools`, that length, the measured length and the limit.
     Authority: „wir bauen das entsprechend“.
+
+    *Amendment (21.10.2026, #382, #389).* The preflight and its reserved values
+    (`preflight_claims`, `PREFLIGHT_*`) are removed; admission's check of the actual
+    token stays authoritative and is the only size check. Authority (#382, 21.10.2026): „ok das klingt langsam für mich stimmig“, said after the head explained that an app's own tools are the app's, and „wir bauen das entsprechend“.
 15a. **Documents.** This ruling, H3's registry bullet, the A0b codes table and the
     the modules `agent_client.capability`, `agent_service.config` and
     `agent_service.capability`.
@@ -807,6 +846,10 @@ The app side of the profile is `agent_client.mcp_server` (`McpServer`, `McpTool`
   offered tool the capability does not sign stays out of the CLI's list and is refused when
   called, as before.
 
+  *Amendment (21.10.2026, #382, #389).* The capability's names come from the request
+  (the failure rule for an unoffered name is P2b's). Authority: „wir bauen das
+  entsprechend“.
+
 Procedure to publish the key (O2 step 2). Run it after every key change for every app with an
 MCP origin, then restart the service and those apps together. Tool calls of runs admitted
 between the restarts fail with 401, because there is no grace period. A compromise takes the
@@ -901,6 +944,19 @@ run's ending is in its record (A1a2).
 from `GET /runs/{id}` while the record is held (the status bullet above); once
 it is gone, the ending is unknown, and a run that emitted a side-effecting call
 may have changed state.
+
+**Amendment (21.10.2026, #382, #389).** Wire v2 is `{v: 2, purpose, turn, roles,
+tools: {name: effect}, model?}` once P2d and P2a have landed; this slice carries
+`v`, `purpose`, `turn` and `tools`. Every stream event, rejection and status carries
+`v: 2`; a body with any other `v` is `unsupported_version`, and so is a v1 frame
+read by a v2 `RunStream`. The effects from the request decide `cancelled` versus
+`failed: interrupted`; a tool outside the map counts as side-effecting. Authority
+(#382, 21.10.2026): the wire shape is the design's line on #382, „Per run, wire v2: `{v: 2,
+purpose, turn, roles, tools: {name: effect}}`“, shown to the operator with the design and
+accepted with „wir bauen das entsprechend“; `roles` is the design's and not a separate
+operator ruling. The operator's own words on model choice, for `model?` only: „in 1 will ich
+dass es funktioniert => und dass wir es später ausbauen können ohne dass die apps dann
+wieder all zu viel ändern müssen“. P2d and P2a add their fields to this block.
 
 ### A0b wire ruling (head, 15.10.2026)
 
@@ -1345,6 +1401,7 @@ the parallel-run limit stands once, in H7's Decision.
       - **Der Entkommene.** Ein Prozess, den das Programm selbst mit `setsid` oder `setpgid` aus der Prozessgruppe seines Laufs nimmt, lebt bis zum Neustart des Containers und reicht so weit wie das Programm (Zeile 19).
     - *Das Netz:* Der Lauf teilt das Netz des Dienstes und erreicht, was der Container erreicht. Dazu gehören der Port des Dienstes und das Relay seines Laufs auf dem lokalen Loopback, die internen Dienste in den Netzen des Containers (LiteLLM, die MCP-Server der Apps, step-ca) und die freigegebenen Ziele.
     - *Beispiel:* Bittet jemand im Co-Writer das Modell, den Signierschlüssel zu lesen oder `ls` auszuführen, hat es dafür kein Werkzeug. Es kann nur die Werkzeuge rufen, die `[apps.songmaker] tools` nennt.
+      - *Terminology (21.10.2026, #382, #389):* the app's allowed tools are the names its request signs; the line's text stands. Authority: „wir bauen das entsprechend“.
     - *Gegenbeispiel:* Der Dienst baut um jeden Lauf eine eigene Sandbox, damit auch ein fehlerhaftes Programm den Schlüssel nicht sieht (Q3 d, nicht gewählt).
     - *Default:* entfällt; wie formuliert entschieden.
     - *Beleg:* A1b-4a, A1b-5, A1b-7n, A1b-12b.

@@ -275,8 +275,15 @@ class ChildCapture:
 
     @property
     def replies(self) -> list[dict[str, Any]]:
+        return self._replies_to("tools/call")
+
+    @property
+    def listing_replies(self) -> list[dict[str, Any]]:
+        return self._replies_to("tools/list")
+
+    def _replies_to(self, method: str) -> list[dict[str, Any]]:
         lines = self.text_of("replies").splitlines()
-        return [reply for reply in map(json.loads, lines) if reply["method"] == "tools/call"]
+        return [reply for reply in map(json.loads, lines) if reply["method"] == method]
 
 
 @dataclass(frozen=True)

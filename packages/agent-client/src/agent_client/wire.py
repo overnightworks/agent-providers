@@ -36,7 +36,7 @@ from pydantic import (
 
 from agent_client.tools import ToolEffect
 
-PROTOCOL_VERSION: Final = 1
+PROTOCOL_VERSION: Final = 2
 MAX_EVENT_BYTES: Final = 1_048_576
 MAX_TOOL_INPUT_DEPTH: Final = 128
 MAX_MESSAGE_LENGTH: Final = 500
@@ -93,7 +93,7 @@ def _json_integer(value: object) -> object:
     return value
 
 
-ProtocolVersion = Annotated[Literal[1], BeforeValidator(_json_integer)]
+ProtocolVersion = Annotated[Literal[2], BeforeValidator(_json_integer)]
 """The one decider of whether a ``v`` is the version this package speaks."""
 
 
@@ -180,7 +180,10 @@ def _refuse_non_unicode_text(text: str) -> str:
 UnicodeText = Annotated[str, AfterValidator(_refuse_non_unicode_text)]
 """The one type of wire text: valid Unicode, so the body or frame it lands in encodes as JSON."""
 
-ToolUseId = Annotated[UnicodeText, Field(min_length=1)]
+NonEmptyUnicodeText = Annotated[UnicodeText, Field(min_length=1)]
+"""The one owner of non-empty wire text: a call id, a tool's name, a message's text."""
+
+ToolUseId = NonEmptyUnicodeText
 """The one decider of a valid call id, so a call and its result accept the same ids."""
 
 
@@ -241,7 +244,7 @@ class RunStarted(_RunEvent):
 
 class AssistantText(_RunEvent):
     type: Literal["assistant_text"] = "assistant_text"
-    text: Annotated[UnicodeText, Field(min_length=1)]
+    text: NonEmptyUnicodeText
 
 
 class ToolCall(_RunEvent):
@@ -269,7 +272,7 @@ class Heartbeat(_RunEvent):
 
 class Succeeded(_RunEvent):
     type: Literal["succeeded"] = "succeeded"
-    text: Annotated[UnicodeText, Field(min_length=1)]
+    text: NonEmptyUnicodeText
 
 
 class Failed(_RunEvent):
@@ -300,7 +303,7 @@ _RUN_EVENT_TYPES: Final = frozenset(get_args(_RunEventVariant))
 
 def is_run_event(value: object) -> TypeGuard[RunEvent]:
     # The exact type, not isinstance: a subclass may add fields the closed
-    # v1 union does not carry.
+    # union does not carry.
     return type(value) in _RUN_EVENT_TYPES
 
 
@@ -367,7 +370,13 @@ class Turn(_StrictModel):
 
 
 class RunRequest(_WireModel):
-    """The HTTP body a client sends to start a run."""
+    """The HTTP body a client sends to start a run.
+
+    ``tools`` maps each tool the run may call to its effect. The service signs
+    exactly those names into the run's capability and stamps the effects onto
+    the run's tool calls; it grants nothing else.
+    """
 
     purpose: Purpose
     turn: Turn
+    tools: dict[NonEmptyUnicodeText, Annotated[ToolEffect, Field(strict=False)]]

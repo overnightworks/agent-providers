@@ -6,12 +6,14 @@ checked in a fixed order, and the first failure answers:
 
 1. the workload token, then the user token (``agent_service.identity``);
 2. the body's protocol version, then its shape (``agent_service.run_request``);
-3. the route (``agent_service.routing``);
-4. for the CLI route, the service's admission limit (``agent_service.admission``): a
+3. tools named by an app without an MCP origin answer ``forbidden``, before the route;
+4. the route (``agent_service.routing``);
+5. for the CLI route, the service's admission limit (``agent_service.admission``): a
    subscription run beyond it answers ``busy`` with ``Retry-After`` before anything is
    signed;
-5. for an app with an MCP origin, whether the run's capability fits the 8,192
-   characters every verifier accepts (``capability_too_large``).
+6. for an app with an MCP origin, whether the run's capability, which signs exactly the
+   request's tool names, fits the 8,192 characters every verifier accepts
+   (``capability_too_large``).
 
 An admitted run answers ``200 text/event-stream`` with its frames
 (``agent_service.run_events``), and its response closes those frames whenever it
@@ -47,6 +49,7 @@ from agent_providers import lost_groups
 from agent_service.admission import AdmissionSlot, Lease
 from agent_service.capability import (
     Capability,
+    CapabilityScope,
     CapabilityTooLarge,
     capability_claims,
     signed_capability,
@@ -198,6 +201,9 @@ def _admitted(
     caller: Caller,
     run_request: RunRequest,
 ) -> Response:
+    scope = config.capability_scope(caller.app, run_request.tools)
+    if run_request.tools and scope is None:
+        return rejection(RejectionCode.FORBIDDEN)
     served = route(config.identity, config.route, config.profiles, caller.groups, caller.app)
     if isinstance(served, NotEnabled):
         return rejection(RejectionCode.NOT_ENABLED)
@@ -208,7 +214,16 @@ def _admitted(
             return rejection(RejectionCode.BUSY)
     try:
         response = _admitted_response(
-            config, runners, records, lease, quarantine, wall_clock, caller, run_request, served
+            config,
+            runners,
+            records,
+            lease,
+            quarantine,
+            wall_clock,
+            caller,
+            run_request,
+            served,
+            scope,
         )
     except BaseException:
         _release(lease)
@@ -234,10 +249,11 @@ def _admitted_response(
     caller: Caller,
     run_request: RunRequest,
     served: ServedRoute,
+    scope: CapabilityScope | None,
 ) -> _RunResponse | RejectionCode:
     run_id = uuid.uuid4()
     try:
-        capability = _capability_of(config, caller, run_request, run_id, wall_clock)
+        capability = _capability_of(config, scope, caller, run_request, run_id, wall_clock)
     except CapabilityTooLarge as too_large:
         _log.warning(
             "The capability of a run of app %s is %d characters; the limit is %d.",
@@ -254,12 +270,10 @@ def _admitted_response(
         route=served,
         capability=capability,
     )
-    app_config = config.apps[caller.app]
     return _RunResponse(
         run_frames(
             admitted,
             runners.for_route(served),
-            app_config,
             config.runs,
             LoopClock(),
             records,
@@ -272,12 +286,12 @@ def _admitted_response(
 
 def _capability_of(
     config: ServiceConfig,
+    scope: CapabilityScope | None,
     caller: Caller,
     run_request: RunRequest,
     run_id: UUID,
     wall_clock: Callable[[], datetime],
 ) -> Capability | None:
-    scope = config.capability_scope(caller.app)
     if scope is None:
         return None
     claims = capability_claims(

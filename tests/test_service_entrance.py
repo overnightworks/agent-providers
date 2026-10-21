@@ -29,6 +29,7 @@ from service_support import (
     PRESENTATOR_CLIENT,
     SONGMAKER_CLIENT,
     SONGMAKER_GROUP,
+    SONGMAKER_TOOLS,
     SUBSCRIPTION_GROUP,
     ScriptedRunner,
     StepClock,
@@ -89,9 +90,9 @@ def test_a_subscription_member_with_both_tokens_runs_on_the_cli_route(service, r
 
 
 def test_a_runner_that_offers_tools_serves_an_app_with_tools(service):
-    assert service_config().apps["songmaker"].tools
-
-    response = post_run(service, run_headers(MINT.workload(), MINT.user()))
+    response = post_run(
+        service, run_headers(MINT.workload(), MINT.user()), run_body(tools=SONGMAKER_TOOLS)
+    )
 
     assert decoded_events(response.content)[-1].text == "CLI answer"
 
@@ -474,9 +475,9 @@ def test_a_user_token_outside_the_bearer_scheme_is_unauthorized(service):
 
 @pytest.mark.parametrize(
     "field",
-    ["provider", "model", "route", "user_id", "mcp_url", "mcp_token", "tools"],
+    ["provider", "model", "route", "user_id", "mcp_url", "mcp_token"],
 )
-def test_a_body_naming_anything_beyond_purpose_and_turn_is_invalid(service, field):
+def test_a_body_naming_anything_beyond_purpose_turn_and_tools_is_invalid(service, field):
     response = post_run(
         service, run_headers(MINT.workload(), MINT.user()), run_body(**{field: "x"})
     )
@@ -489,7 +490,7 @@ def _too_large() -> bytes:
 
 
 BODY_REJECTIONS = [
-    pytest.param(b'{"v": 1, "purpose": NaN}', RejectionCode.INVALID_REQUEST, 422, id="nan"),
+    pytest.param(b'{"v": 2, "purpose": NaN}', RejectionCode.INVALID_REQUEST, 422, id="nan"),
     pytest.param(
         json.dumps(run_body())[:-1].encode() + b', "purpose": "cowriter"}',
         RejectionCode.INVALID_REQUEST,
@@ -497,7 +498,7 @@ BODY_REJECTIONS = [
         id="a-member-named-twice",
     ),
     pytest.param(b"[1]", RejectionCode.INVALID_REQUEST, 422, id="not-an-object"),
-    pytest.param(b'{"v": 1,', RejectionCode.INVALID_REQUEST, 422, id="not-json"),
+    pytest.param(b'{"v": 2,', RejectionCode.INVALID_REQUEST, 422, id="not-json"),
     pytest.param(_too_large(), RejectionCode.INVALID_REQUEST, 422, id="over-256-kib"),
     *(
         pytest.param(
@@ -515,7 +516,29 @@ BODY_REJECTIONS = [
         id="wrong-shape",
     ),
     pytest.param(
-        json.dumps(run_body(v=2)).encode(), RejectionCode.UNSUPPORTED_VERSION, 400, id="v-2"
+        json.dumps(run_body(v=1)).encode(), RejectionCode.UNSUPPORTED_VERSION, 400, id="v-1"
+    ),
+    pytest.param(
+        json.dumps(run_body(v=3)).encode(), RejectionCode.UNSUPPORTED_VERSION, 400, id="v-3"
+    ),
+    pytest.param(
+        json.dumps({name: value for name, value in run_body().items() if name != "tools"}).encode(),
+        RejectionCode.INVALID_REQUEST,
+        422,
+        id="tools-omitted",
+    ),
+    *(
+        pytest.param(
+            json.dumps(run_body(tools=tools)).encode(),
+            RejectionCode.INVALID_REQUEST,
+            422,
+            id=f"tools-{label}",
+        )
+        for label, tools in (
+            ("with-an-empty-name", {"": "read_only"}),
+            ("with-an-unknown-effect", {"read_song": "write"}),
+            ("as-a-list", ["read_song"]),
+        )
     ),
     pytest.param(
         json.dumps(run_body(v="1")).encode(),
@@ -524,7 +547,7 @@ BODY_REJECTIONS = [
         id="v-as-a-string",
     ),
     pytest.param(
-        json.dumps(run_body(v=2, provider="claude")).encode(),
+        json.dumps(run_body(v=1, provider="claude")).encode(),
         RejectionCode.UNSUPPORTED_VERSION,
         400,
         id="version-is-read-before-the-shape",
@@ -568,7 +591,7 @@ def test_a_body_that_is_not_an_allowed_run_request_is_refused(service, content, 
 
 def test_an_oversized_body_without_a_declared_length_is_refused_while_read(service):
     def chunks() -> Iterator[bytes]:
-        yield b'{"v": 1, "purpose": "'
+        yield b'{"v": 2, "purpose": "'
         for _ in range(MAX_REQUEST_BYTES // 1024 + 1):
             yield b"x" * 1024
         yield b'"}'

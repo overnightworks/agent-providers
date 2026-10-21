@@ -19,7 +19,7 @@ from uuid import UUID
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
-from agent_client.wire import UnicodeText
+from agent_client.wire import NonEmptyUnicodeText
 
 CAPABILITY_ISSUER: Final = "agent-service"
 CAPABILITY_TOKEN_TYPE: Final = "agent-capability+jwt"
@@ -118,7 +118,6 @@ def _run_id_in_canonical_text(text: str) -> str:
 
 
 RunIdText = Annotated[str, AfterValidator(_run_id_in_canonical_text)]
-NonEmptyUnicodeText = Annotated[UnicodeText, Field(min_length=1)]
 
 
 class _StrictClaims(BaseModel):

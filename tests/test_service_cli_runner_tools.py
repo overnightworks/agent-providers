@@ -78,7 +78,6 @@ from service_support import (
 from test_service_cli_runner import (
     FIRST_LOGIN,
     LOGIN_FILES_GONE_BAD,
-    PLAIN_APP,
     SECOND_LOGIN,
     ScriptedRun,
     a_config,
@@ -90,12 +89,14 @@ from test_service_cli_runner import (
     eventually,
     headers,
     login_the_child_saw,
-    post_a_run,
     private_root_of,
     status_of,
     swap_login,
     through_the_service_entry,
     trusting,
+)
+from test_service_cli_runner import (
+    post_a_run as post_a_run_naming,
 )
 from test_service_run_tools import Stall
 
@@ -178,6 +179,10 @@ def settled_status(base_url: str, events: Sequence[RunEvent]) -> RunStatus:
     return status_of(base_url, list(events))
 
 
+def post_a_run(base_url: str) -> list[RunEvent]:
+    return post_a_run_naming(base_url, TOOLS)
+
+
 def a_plain_run(base_url: str, _app: ToolApp) -> list[RunEvent]:
     return post_a_run(base_url)
 
@@ -195,7 +200,7 @@ def a_tool_run(
     overrides: Mapping[str, Responder] | None = None,
     serving_authority: TestAuthority | None = None,
     app_stays_up: bool = True,
-    scenario: Callable[[str, ToolApp], list[RunEvent]] = a_plain_run,
+    scenario: Callable[[str, ToolApp], list[RunEvent]] | None = None,
     before_stop: Callable[[ServiceConfig], None] = lambda _config: None,
     token_file: Path | None = None,
     **claude_options: Any,
@@ -203,7 +208,9 @@ def a_tool_run(
     """One run of the real runner with its tools on, against a TLS fake app, over HTTP.
 
     The runner trusts ``authority``; the app is signed by ``serving_authority`` (default the
-    same). ``app_stays_up=False`` stops the app before the run, so its origin refuses.
+    same). The default scenario posts a run whose request grants exactly ``tools``; ``offered``
+    is the list the app answers with. ``app_stays_up=False`` stops the app before the run, so its
+    origin refuses.
     ``before_stop`` runs once the run has settled and the service still serves, because stopping
     the service cancels what a faulty close would have left behind.
     """
@@ -224,7 +231,7 @@ def a_tool_run(
             tmp_path,
             binary,
             runs=runs,
-            songmaker={"tools": dict(tools), "mcp_origin": app.origin},
+            songmaker={"mcp_origin": app.origin},
             token_file=token_file,
         )
         runners = Runners(
@@ -232,7 +239,11 @@ def a_tool_run(
         )
 
         def play(base_url: str) -> tuple[list[RunEvent], RunStatus]:
-            events = scenario(base_url, app)
+            events = (
+                post_a_run_naming(base_url, tools)
+                if scenario is None
+                else scenario(base_url, app)
+            )
             status = settled_status(base_url, events)
             before_stop(config)
             return events, status
@@ -277,12 +288,44 @@ def test_a_relay_call_reaches_the_wire_under_the_apps_own_tool_name(
         pytest.param(SAVE_NOTE, "side_effecting", id="side-effecting"),
     ],
 )
-def test_each_calls_effect_follows_the_apps_list(
+def test_each_calls_effect_follows_the_request(
     tmp_path, authority, child_cleanup, monkeypatch, call, effect
 ):
     run = a_tool_run(tmp_path, authority, child_cleanup, monkeypatch, calls=[call])
 
     assert [shape[3] for shape in wire_shape(run.events) if shape[0] == "tool_call"] == [effect]
+
+
+def test_the_effect_a_request_names_changes_the_ending_and_nothing_the_child_is_given(
+    tmp_path, authority, child_cleanup, monkeypatch
+):
+    def left_after_the_first_call(effect: str):
+        def play(base_url: str, _app: ToolApp) -> list[RunEvent]:
+            named = {**TOOLS, "save_note": effect}
+            return leave_when(base_url, "tool_call", tools=named)
+
+        (tmp_path / effect).mkdir()
+        return a_tool_run(
+            tmp_path / effect,
+            authority,
+            child_cleanup,
+            monkeypatch,
+            calls=[SAVE_NOTE],
+            scenario=play,
+        )
+
+    read_only = left_after_the_first_call("read_only")
+    side_effecting = left_after_the_first_call("side_effecting")
+
+    assert [ending_of(run.status) for run in (read_only, side_effecting)] == [
+        (RunState.CANCELLED, None),
+        (RunState.FAILED, FailureCode.INTERRUPTED),
+    ]
+    assert read_only.capture.stdin
+    assert read_only.capture.stdin == side_effecting.capture.stdin
+    assert read_only.capture.listing_replies
+    assert read_only.capture.listing_replies == side_effecting.capture.listing_replies
+    assert read_only.capture.replies == side_effecting.capture.replies
 
 
 def a_fake_claude_printing_its_own_tool_lines(tmp_path: Path) -> Path:
@@ -327,7 +370,7 @@ def test_the_clis_own_tool_lines_never_reach_the_wire(
         events = run.events
     else:
         config = a_config(tmp_path, a_fake_claude_printing_its_own_tool_lines(tmp_path))
-        events = drive_over_http(child_cleanup, monkeypatch, config, post_a_run)
+        events = drive_over_http(child_cleanup, monkeypatch, config, post_a_run_naming)
 
     assert [shape[1] for shape in wire_shape(events) if shape[0] == "tool_call"] == (
         ["save_note"] if with_relay else []
@@ -448,19 +491,19 @@ def test_a_capability_reflected_in_an_upstream_result_fails_the_run(
     assert not [shape for shape in wire_shape(run.events) if shape[0] == "tool_result"]
 
 
-@pytest.mark.parametrize("with_origin", [False, True], ids=["no-origin", "empty-table"])
+@pytest.mark.parametrize("with_origin", [False, True], ids=["no-origin", "no-tools"])
 def test_an_app_without_granted_tools_gets_the_tool_free_run(
     tmp_path, authority, child_cleanup, monkeypatch, with_origin
 ):
     binary = a_fake_claude(tmp_path, version_line=f"{PINNED_CLAUDE_VERSION} (Claude Code)")
     with a_tool_app(authority) as app:
-        songmaker = {"tools": {}, "mcp_origin": app.origin if with_origin else None}
-        config = a_config(tmp_path, binary, songmaker=songmaker or PLAIN_APP)
+        songmaker = {"mcp_origin": app.origin if with_origin else None}
+        config = a_config(tmp_path, binary, songmaker=songmaker)
         runners = Runners(
             cli=CliRunner(config, tls_context=mcp_tls_context(authority.ca_file), clock=LoopClock())
         )
 
-        events = drive_over_http(child_cleanup, monkeypatch, config, post_a_run, runners)
+        events = drive_over_http(child_cleanup, monkeypatch, config, post_a_run_naming, runners)
 
         assert (wire_shape(events), app.fake.accepted_connections) == ([("succeeded", "done")], 0)
 
@@ -621,7 +664,11 @@ def test_a_call_to_a_tool_outside_the_apps_grant_ends_the_run_and_never_reaches_
 
 
 def leave_when(
-    base_url: str, event_type: str, ready: Callable[[], None] = lambda: None
+    base_url: str,
+    event_type: str,
+    ready: Callable[[], None] = lambda: None,
+    *,
+    tools: Mapping[str, str] = TOOLS,
 ) -> list[RunEvent]:
     """Start a run, read its stream up to ``event_type``, wait until ``ready``, then leave."""
     decoder = RunStreamDecoder()
@@ -632,9 +679,10 @@ def leave_when(
         headers={"Content-Type": "application/json", **headers()},
         content=json.dumps(
             {
-                "v": 1,
+                "v": 2,
                 "purpose": "cowriter",
                 "turn": {"system": "s", "messages": [{"role": "user", "text": "a"}]},
+                "tools": dict(tools),
             }
         ),
         timeout=HELD_RUN_CLIENT_TIMEOUT_SECONDS,
@@ -1042,7 +1090,10 @@ def answered_with_its_marker(request: RecordedRequest):
 def post_a_run_marked(base_url: str, marker: str) -> list[RunEvent]:
     turn = {"system": marker, "messages": [{"role": "user", "text": "a"}]}
     response = post_run(
-        base_url, headers(), run_body(turn=turn), timeout=HELD_RUN_CLIENT_TIMEOUT_SECONDS
+        base_url,
+        headers(),
+        run_body(turn=turn, tools=TOOLS),
+        timeout=HELD_RUN_CLIENT_TIMEOUT_SECONDS,
     )
     return decoded_events(response.content)
 
@@ -1236,7 +1287,7 @@ def test_a_real_group_keeps_its_place_through_the_service_until_the_reap_ends(
         a_tool_app(authority, list(TOOLS), overrides=overrides) as app,
         DescendantRow(handshake, child_cleanup) as row,
     ):
-        songmaker = {"tools": TOOLS, "mcp_origin": app.origin}
+        songmaker = {"mcp_origin": app.origin}
         runs = {"max_parallel_cli_runs": 1}
         config = trusting(a_config(tmp_path, binary, runs=runs, songmaker=songmaker), authority)
         forwards: list[HeldRequest] = []
@@ -1260,7 +1311,7 @@ def test_a_real_group_keeps_its_place_through_the_service_until_the_reap_ends(
                         status_of(base_url, first).state,
                         row.descendant_is_dead(),
                     )
-                    second = post_run(base_url, headers(), run_body())
+                    second = post_run(base_url, headers(), run_body(tools=TOOLS))
                     first_reap.released.set()
                     [forward] = forwards
                     forward.wait_for_peer_left()
@@ -1322,7 +1373,7 @@ def capability_for(app: ToolApp) -> Capability:
 
 
 def a_scripted_tool_run(tmp_path: Path, authority: TestAuthority, app: ToolApp) -> ScriptedRun:
-    songmaker = {"tools": dict(TOOLS), "mcp_origin": app.origin}
+    songmaker = {"mcp_origin": app.origin}
     config = a_config(tmp_path, a_fake_claude(tmp_path), songmaker=songmaker)
     return a_scripted_run(
         tmp_path,
@@ -1641,7 +1692,7 @@ def test_a_run_trusts_exactly_the_configured_bundle(
     binary = a_relay_calling_claude(tmp_path, version=PINNED_CLAUDE_VERSION, calls=[SAVE_NOTE])
     serving_authority = authority if signed_by_the_configured_ca else other_authority
     with a_tool_app(serving_authority, list(TOOLS)) as app:
-        songmaker = {"tools": TOOLS, "mcp_origin": app.origin}
+        songmaker = {"mcp_origin": app.origin}
         config = trusting(a_config(tmp_path, binary, songmaker=songmaker), authority)
 
         captures = [ChildCapture(tmp_path / "capture")] if signed_by_the_configured_ca else []

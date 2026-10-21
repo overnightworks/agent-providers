@@ -71,13 +71,13 @@ RUN = "00000000-0000-4000-8000-000000000000"
 def _frozen_frames(route: str) -> bytes:
     return (
         "id: 0\nevent: run_started\n"
-        f'data: {{"v":1,"run_id":"{RUN}","seq":0,"type":"run_started",'
+        f'data: {{"v":2,"run_id":"{RUN}","seq":0,"type":"run_started",'
         '"heartbeat_interval_s":15}\n\n'
         "id: 1\nevent: assistant_text\n"
-        f'data: {{"v":1,"run_id":"{RUN}","seq":1,"type":"assistant_text",'
+        f'data: {{"v":2,"run_id":"{RUN}","seq":1,"type":"assistant_text",'
         f'"text":"Hello from the {route}."}}\n\n'
         "id: 2\nevent: succeeded\n"
-        f'data: {{"v":1,"run_id":"{RUN}","seq":2,"type":"succeeded","text":"{route} done."}}\n\n'
+        f'data: {{"v":2,"run_id":"{RUN}","seq":2,"type":"succeeded","text":"{route} done."}}\n\n'
     ).encode()
 
 
@@ -254,7 +254,7 @@ def _songmaker_workload() -> str:
         ),
         pytest.param(
             _songmaker_workload,
-            run_body(v=2),
+            run_body(v=1),
             RejectionCode.UNSUPPORTED_VERSION,
             400,
             id="unsupported-version",

@@ -359,7 +359,7 @@ class Turn(_StrictModel):
     """The conversation a run answers: the system prompt and the messages so far.
 
     It names no provider, model, route, user or MCP endpoint: the service
-    decides those from the run's ``purpose`` and the caller's identity.
+    decides those from the caller's identity and the app's registration.
     """
 
     system: UnicodeText
@@ -369,5 +369,5 @@ class Turn(_StrictModel):
 class RunRequest(_WireModel):
     """The HTTP body a client sends to start a run."""
 
-    purpose: Annotated[UnicodeText, Field(min_length=1)]
+    purpose: Purpose
     turn: Turn

@@ -20,9 +20,11 @@ import httpx
 import pytest
 from bounds import TEST_WAIT_SECONDS, within_the_bound
 from service_support import (
-    PRESENTER,
+    API_GROUP,
+    LONGEST_PURPOSE,
     SONGMAKER,
     SONGMAKER_GROUP,
+    SUBSCRIPTION_GROUP,
     ClientSocket,
     ScriptedConfirmation,
     ScriptedRunner,
@@ -60,7 +62,7 @@ from agent_service.runners import Runner, Runners
 PLACES: Final = 2
 MINT = TokenMint()
 FINAL = (FinalEvent(text="done"),)
-BOB_ON_THE_API_ROUTE = {"groups": [SONGMAKER_GROUP], "sub": "user-bob"}
+BOB_ON_THE_API_ROUTE = {"groups": [SONGMAKER_GROUP, API_GROUP], "sub": "user-bob"}
 
 
 class HeldRunner:
@@ -176,7 +178,6 @@ def test_a_cli_request_with_every_place_taken_answers_busy_before_a_run_id_or_a_
 @pytest.mark.parametrize(
     ("user", "body", "code"),
     [
-        pytest.param(None, {"purpose": PRESENTER}, RejectionCode.FORBIDDEN, id="purpose-refused"),
         pytest.param(MINT.user(groups=()), {}, RejectionCode.NOT_ENABLED, id="route-not-enabled"),
     ],
 )
@@ -185,6 +186,17 @@ def test_a_refusal_before_the_limit_takes_nothing(service, user, body, code):
         assert_rejected(service.run(user, **body), code, 403)
 
     service.let_all_go(service.fill_the_places())
+
+
+def test_a_member_of_both_routes_with_every_place_taken_gets_busy_and_no_api_run(service):
+    held = service.fill_the_places()
+    signed_before = len(service.signed)
+    both = MINT.user(groups=[SUBSCRIPTION_GROUP, API_GROUP, SONGMAKER_GROUP])
+
+    assert_rejected(service.run(both), RejectionCode.BUSY, 429)
+
+    assert (service.api.admitted, len(service.signed)) == ([], signed_before)
+    service.let_all_go(held)
 
 
 def test_an_api_run_while_every_cli_place_is_taken_is_admitted_and_takes_nothing(service):
@@ -201,7 +213,7 @@ def test_an_api_run_while_every_cli_place_is_taken_is_admitted_and_takes_nothing
 def test_a_capability_too_large_after_the_take_releases_its_place(service):
     for _ in range(PLACES):
         assert_rejected(
-            service.run(MINT.user(sub=QUOTATION_MARKS_256)),
+            service.run(MINT.user(sub=QUOTATION_MARKS_256), purpose=LONGEST_PURPOSE),
             RejectionCode.CAPABILITY_TOO_LARGE,
             422,
         )

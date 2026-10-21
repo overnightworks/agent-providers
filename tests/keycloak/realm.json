@@ -15,6 +15,9 @@
       "name": "subscription-members"
     },
     {
+      "name": "api-members"
+    },
+    {
       "name": "apps",
       "subGroups": [
         {
@@ -630,6 +633,7 @@
         }
       ],
       "groups": [
+        "/api-members",
         "/apps/songmaker"
       ]
     },

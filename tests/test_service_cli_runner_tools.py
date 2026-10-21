@@ -601,7 +601,7 @@ def leave_when(
         content=json.dumps(
             {
                 "v": 1,
-                "purpose": "songmaker.cowriter",
+                "purpose": "cowriter",
                 "turn": {"system": "s", "messages": [{"role": "user", "text": "a"}]},
             }
         ),

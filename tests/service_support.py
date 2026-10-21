@@ -55,7 +55,14 @@ from pydantic import ValidationError
 import agent_service.signing as signing
 from agent_client.run_stream import StreamViolation, ViolationKind
 from agent_client.sse import RunStreamDecoder
-from agent_client.wire import RejectionCode, RunEvent, RunRejection, RunRequest, RunStatus
+from agent_client.wire import (
+    MAX_PURPOSE_LENGTH,
+    RejectionCode,
+    RunEvent,
+    RunRejection,
+    RunRequest,
+    RunStatus,
+)
 from agent_providers.config import PrivateWorkingRoot
 from agent_providers.errors import RetainedGroup
 from agent_providers.events import AssistantTextEvent, StreamEvent, ToolCallEvent
@@ -74,17 +81,31 @@ TEST_ISSUER: Final = "https://keycloak.test/realms/agent-test"
 TEST_JWKS_URL: Final = "https://keycloak.test/realms/agent-test/protocol/openid-connect/certs"
 SONGMAKER_CLIENT: Final = "songmaker-test"
 PRESENTATOR_CLIENT: Final = "presentator-test"
-COWRITER: Final = "songmaker.cowriter"
-PRESENTER: Final = "presentator.copresenter"
+COWRITER: Final = "cowriter"
+PRESENTER: Final = "copresenter"
 SUBSCRIPTION_GROUP: Final = "/subscription-members"
+OLD_SUBSCRIPTION_GROUP: Final = "/old-subscription-members"
+API_GROUP: Final = "/api-members"
 AUDIENCE: Final = "agent-service"
 GROUP_CLAIM: Final = "groups"
 SONGMAKER_GROUP: Final = "/apps/songmaker"
 CLI_PROFILE: Final = "claude-main"
-COWRITER_ALIAS: Final = "cowriter"
+API_ALIAS: Final = "assistant-api"
 SONGMAKER_ORIGIN: Final = "https://songmaker.internal"
 PROCESS_TOKEN: Final = "setup-token-for-the-test-process"
 PINNED_CLAUDE_VERSION: Final = "2.1.302"
+ADMITTED_PURPOSES: Final = ("a", "assistant", "notes-2", "a" + "b" * 63)
+LONGEST_PURPOSE: Final = "a" * MAX_PURPOSE_LENGTH
+MALFORMED_PURPOSES: Final = (
+    "a" * 65,
+    "notes.assistant",
+    "Assistant",
+    "1chat",
+    "-x",
+    "co_pilot",
+    "assistant\n",
+    "",
+)
 RUN_ID_PLACEHOLDER: Final = "00000000-0000-4000-8000-000000000000"
 
 
@@ -192,7 +213,8 @@ def _service_config_document(
             "issuer": issuer,
             "jwks_url": TEST_JWKS_URL,
             "audience": AUDIENCE,
-            "subscription_group": SUBSCRIPTION_GROUP,
+            "subscription_groups": [SUBSCRIPTION_GROUP, OLD_SUBSCRIPTION_GROUP],
+            "api_groups": [API_GROUP],
             "group_claim": GROUP_CLAIM,
         },
         "cli": {
@@ -210,19 +232,15 @@ def _service_config_document(
                 "token_file": str(token_file or process_token_file()),
             }
         },
-        "purposes": {
-            COWRITER: {"cli_provider": "claude", "api_alias": COWRITER_ALIAS},
-            PRESENTER: {"api_alias": "copresenter"},
-        },
+        "route": {"api_alias": API_ALIAS},
         "apps": {
             "songmaker": {
                 "workload_client": SONGMAKER_CLIENT,
-                "purposes": [COWRITER],
                 "tools": {"read_song": "read_only", "edit_song": "side_effecting"},
                 "mcp_origin": SONGMAKER_ORIGIN,
                 **(songmaker or {}),
             },
-            "presentator": {"workload_client": PRESENTATOR_CLIENT, "purposes": [PRESENTER]},
+            "presentator": {"workload_client": PRESENTATOR_CLIENT},
         },
     }
 
@@ -239,6 +257,31 @@ def service_config(
     return ServiceConfig.model_validate(
         _service_config_document(issuer, runs, songmaker, claude_binary, token_file)
     )
+
+
+def _toml_value(value: object) -> str:
+    if isinstance(value, list):
+        return "[" + ", ".join(_toml_value(item) for item in value) + "]"
+    return json.dumps(value)
+
+
+def _toml_lines(table: Mapping[str, object], path: tuple[str, ...] = ()) -> list[str]:
+    scalars = {key: value for key, value in table.items() if not isinstance(value, Mapping)}
+    lines = [f"[{'.'.join(path)}]"] if path else []
+    lines += [f"{key} = {_toml_value(value)}" for key, value in scalars.items()]
+    for key, value in table.items():
+        if isinstance(value, Mapping):
+            lines += ["", *_toml_lines(value, (*path, key))]
+    return lines
+
+
+def service_config_file(directory: Path, *, subscription_groups: list[str]) -> Path:
+    """The test configuration written as the TOML file ``load_config`` reads."""
+    document = _service_config_document(TEST_ISSUER, None, None)
+    document["identity"]["subscription_groups"] = subscription_groups
+    path = directory / "agent-service.toml"
+    path.write_text("\n".join(_toml_lines(document)) + "\n", encoding="utf-8")
+    return path
 
 
 def plain_service_config() -> ServiceConfig:
@@ -394,7 +437,7 @@ class WallClock:
 
 
 SHORT_TOOL_NAME_LENGTH = 35
-LAST_TOOL_NAME_LENGTH_AT_THE_LIMIT = 55
+LAST_TOOL_NAME_LENGTH_AT_THE_LIMIT = 9
 
 
 def tool_names_with_the_last_of_length(last_tool_name_length: int) -> list[str]:

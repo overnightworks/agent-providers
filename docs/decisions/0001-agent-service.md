@@ -10,17 +10,17 @@ going, not what exists; each slice below makes its part true when it lands.
 
 ## Mental model
 
-Apps stop talking to language models themselves. An app sends a **purpose** (a
-closed value such as `songmaker.cowriter`), the turn data, and two tokens — the
+Apps stop talking to language models themselves. An app sends a **purpose** (the
+name of its agent, such as `cowriter`; it labels the run and routes nothing), the turn data, and two tokens — the
 end user's and its own. One agent service decides who is asking, whether they may
-use the operator's subscription, and which route serves the purpose. The app
+use the operator's subscription, and which route serves the caller. The app
 never names a provider, a model, a route or a user id, and never holds an LLM or
 subscription credential.
 
 There are exactly two routes:
 
 - the **CLI route** runs an isolated `claude -p` under a configured subscription
-  profile, for members of the Keycloak group `/ki-abo` only;
+  profile, for members of a configured subscription group only;
 - the **API route** goes through LiteLLM, which alone maps aliases to upstream
   models and keys.
 
@@ -31,9 +31,9 @@ run.
 ```mermaid
 flowchart LR
     App["App<br/>(webauth OIDC session, agent-client)"]
-    KC["Keycloak<br/>groups /ki-abo, /apps/&lt;app&gt;"]
+    KC["Keycloak<br/>groups /ai-subscription, /ai-api, /apps/&lt;app&gt;"]
     subgraph internal["Internal network only"]
-        Svc["Agent service<br/>verify user + app, policy (purpose table, /ki-abo, owner binding), route"]
+        Svc["Agent service<br/>verify user + app, policy (subscription and API groups, owner binding), route"]
         CLI["CLI route<br/>isolated claude -p, one profile"]
         Relay["per-run relay (loopback)"]
         API["API route<br/>service tool loop"]
@@ -139,8 +139,7 @@ body rules be fixed before the build.
   | The user token is missing or not `Authorization: Bearer <token>`, or fails verification as the workload token above; or it has no `sub`, a `sub` that is not valid Unicode text (A1a4 O7), or a malformed group claim | 401 `unauthorized`, one body, `WWW-Authenticate: Bearer` |
   | The workload binding above fails (among others: an absent workload `sub`, an absent or empty `azp` or `client_id`); the user's `azp` differs from the workload's; the user's `sub` equals the workload's | 403 `forbidden` |
   | The body, at most 256 KiB enforced before buffering, parsed as strict JSON (no `NaN`, no member twice): its `v` is absent, not an integer, or not 1 | 400 `unsupported_version` |
-  | The body is not strict JSON or not UTF-8 (UTF-16 and UTF-32, with or without a BOM, are refused; a UTF-8 BOM is accepted), too large, or not exactly a `RunRequest` | 422 `invalid_request` |
-  | The purpose is not in the app's list | 403 `forbidden` |
+  | The body is not strict JSON or not UTF-8 (UTF-16 and UTF-32, with or without a BOM, are refused; a UTF-8 BOM is accepted), too large, or not exactly a `RunRequest` (a malformed purpose included) | 422 `invalid_request` |
   | H5 routing answers `not_enabled`; no run starts | 403 `not_enabled` |
   | The run's capability would exceed 8,192 characters (A1a4 item 12): a subject wider than the preflight's reserve, or a wall clock past 2286 | 422 `capability_too_large` |
   | Admitted | 200 `text/event-stream` |
@@ -158,8 +157,8 @@ body rules be fixed before the build.
   signature, issuer, audience, expiry and role checks still apply.
 - **The policy.** The service reads one TOML file into frozen models that
   forbid unknown fields; a refused file stops startup naming the field.
-  `[identity]` requires issuer, key-set URL (https), audience, subscription
-  group and group claim, none with a default, and takes the clock leeway
+  `[identity]` requires issuer, key-set URL (https), audience, `subscription_groups`
+  and group claim, none with a default, takes the optional `api_groups`, and takes the clock leeway
   `leeway_seconds` (0 to 300), the only field that defaults, to 0;
   `[runs]` the run's pace and limits: `heartbeat_interval_s` (an integer, 1 to
   300, default 15), `stall_timeout_s` (default 30), `idle_timeout_s`
@@ -175,8 +174,8 @@ body rules be fixed before the build.
   version reader is built, today `[cli.claude]` with the absolute `binary` and
   the `version` (three integers) it must report, required by a Claude profile
   and probed at startup (A1b-P1, HQ4 a);
-  `[purposes."<p>"]` an optional `cli_provider` and `api_alias`;
-  `[apps.<app>]` its `workload_client`, its purposes, and its tools' effects,
+  `[route]` an optional `api_alias`, set together with `api_groups`;
+  `[apps.<app>]` its `workload_client` and its tools' effects,
   where an unlisted tool counts as side-effecting. `agent_service.routing.route`
   is the one pure H5 decider.
 - **The stream.** A runner is a port per route. Production installs the
@@ -201,6 +200,12 @@ body rules be fixed before the build.
   webauth's), token leakage into logs and bodies; stale groups for a token's
   lifetime are accepted.
 
+**Amendment (21.10.2026, #382, #385).** The purpose table is gone. `[identity]`
+lists `subscription_groups` and the optional `api_groups`, `[route] api_alias`
+replaces `[purposes]`, `[apps.<app>]` loses its purposes, the order-of-checks table
+loses its row "The purpose is not in the app's list", and its 422 row covers a
+purpose outside `agent_client.wire.Purpose`. S3 stands. Authority: „wir bauen das entsprechend“ on #382.
+
 **Consequence.** Tests prove each row with minted tokens over a real socket,
 and `tests/test_service_keycloak.py` proves the entrance end to end with real
 Keycloak 26.8.1 tokens in the `keycloak-token-shapes` job.
@@ -219,6 +224,14 @@ are members of `/ki-abo`.
 subscription, which the consumer terms forbid (architectural reading). The
 operator accepted this residual risk; avoiding it is the admin's responsibility.
 Per-person subscription mapping waits for a named caller.
+
+**Amendment (21.10.2026, #382, #385).** The subscription route is decided by
+membership in the configured subscription groups (`[identity] subscription_groups`).
+`/ki-abo` is renamed `/ai-subscription` through a membership-preserving procedure that
+edge owns, and both names are accepted while tokens carry either. Where this record
+says `/ki-abo` elsewhere (H1's measured token shapes, H11, H12, A1a5), it reads as
+"the configured subscription groups". Authority: „/ai-subscription /ai-api“ and „lauf abo oder litellm nicht am dienst entscheiden => sondern wie rechte per keycloak“. The app
+gate that P2 adds is P2's own amendment, not this one.
 
 ## H2b Subscription profiles are configuration
 
@@ -277,6 +290,12 @@ a request that names its own tools or MCP endpoint could reach anything.
 **Consequence.** Tool reach is decided once, server-side, per app; a leaked
 capability is useful only for one app, one user and one allowlist, until its run's
 maximum duration has passed since admission, even after the run ended.
+
+**Amendment (21.10.2026, #382, #385).** The static app registry no longer maps a
+workload client to allowed purposes. It maps it to its own canonical MCP origin and
+its tool allowlist only; any purpose that `agent_client.wire.Purpose` accepts is
+admitted from any app, and the capability's scope comes from the authenticated app,
+never from the purpose. Authority: #382's accepted purpose-independent design and „wir bauen das entsprechend“.
 
 ### A1a4 ruling (operator and head, 16.10.2026)
 
@@ -403,6 +422,10 @@ compromise.
   a reserve; admission checks the actual compact token (A1a4-2b) and answers an
   oversized one with HTTP 422 `capability_too_large`, never `unavailable`,
   `unauthorized` or `invalid_request`.
+
+  *Amendment (21.10.2026, #382, #385).* The preflight measures every app with a
+  capability scope once, with a reserved purpose of the grammar's maximum length
+  (64 characters), instead of every configured purpose. Authority: „wir bauen das entsprechend“.
 - **D6 format owner.** `agent_client.capability`, strict and frozen like the wire.
 - **D7 claims.** Exactly `iss`, `aud`, `sub` (the run id), `iat`, `exp`, `app`,
   `purpose`, `principal {iss, sub}` and `tools`; no `jti`, `nbf`, groups or turn text.
@@ -451,6 +474,11 @@ compromise.
     and `iat = 9_999_999_999`, and refuses startup naming `apps.<app>.tools`, the
     purpose, the measured length and the limit. Passing it does not guarantee that
     every accepted principal fits; the guard at admission stays authoritative.
+
+    *Amendment (21.10.2026, #382, #385).* The preflight runs once for every app with a
+    capability scope, with a reserved purpose of the grammar's maximum length, and its
+    refusal names `apps.<app>.tools`, that length, the measured length and the limit.
+    Authority: „wir bauen das entsprechend“.
 15a. **Documents.** This ruling, H3's registry bullet, the A0b codes table and the
     README rows `agent_client.capability`, `agent_service.config` and
     `agent_service.capability`.
@@ -809,6 +837,21 @@ and an optional LiteLLM alias. Routing order:
 3. Otherwise → `not_enabled`.
 
 LiteLLM alone maps aliases to upstream models and keys.
+
+**Amendment (21.10.2026, #382, #385).** The route comes from groups, not from a
+purpose table; the order above is replaced by:
+
+1. a caller in any configured subscription group, with a subscription profile
+   configured → CLI under that profile;
+2. otherwise a caller in any `api_groups` group who also holds the app's group
+   `/apps/<app>` exactly, with `[route] api_alias` set → API under that alias;
+3. otherwise → `not_enabled`.
+
+`/ai-api` (configured as `api_groups`) is a new entitlement to the paid route, in
+addition to `/apps/<app>` until P2's app gate replaces that guard. A member of both
+groups uses the subscription when a profile is configured, and the paid route when
+none is: that second case is an explicit configuration choice. A busy subscription
+still answers `busy` and never falls back. Authority: „/ai-subscription /ai-api“, „lauf abo oder litellm nicht am dienst entscheiden => sondern wie rechte per keycloak“ and „wir bauen das entsprechend“.
 
 **Consequence.** The app-local provider/model/route settings for a moved purpose
 are removed from settings, API and UI.
@@ -1270,6 +1313,7 @@ the parallel-run limit stands once, in H7's Decision.
    - *Gegenbeispiel:* Der Dienst liest die Datei nur beim Start, und ein Tausch braucht einen Neustart (so bis 20.10.2026). Oder eine App bekommt ein eigenes Token.
    - *Default:* entfällt; wie formuliert entschieden.
    - *Beleg:* A1b-0b1, A1b-6a, A1b-6r.
+   - *Terminology (21.10.2026, #382, #385):* the meaning is unchanged. "Das KI-Abo" is membership in a configured subscription group, `/ai-subscription` after the rename (H2). Authority: „/ai-subscription /ai-api“.
 9. [ruled by the operator 17.10.2026: "ja 5"] **Es gibt N Plätze für den ganzen Dienst, Default 5, in der Konfiguration des Dienstes. Erst wenn alle belegt sind, kommt sofort „beschäftigt“ mit Wiederholzeit. Kein automatisches Ausweichen auf den API-Weg.**
    - *Geerbt (Kopf):* H7 „one active subscription run … 429 Retry-After … no queue“ (jetzt: N parallele Abo-Läufe, ein Limit für den Dienst, nicht je Profil) und #68 „die Weigerung kommt vor der Capability“. Nur Abo-Läufe belegen einen Platz.
    - *Beispiel:* Mit den fünf Plätzen belegt will Songmaker einen sechsten Abo-Lauf: Er bekommt sofort „The service is busy; retry later.“ mit `Retry-After: 10`. Ein Lauf auf dem API-Weg, den er ausdrücklich verlangt, startet trotzdem und belegt nichts; ein abgewiesener Antrag belegt nichts. Steht in der Konfiguration `max_parallel_cli_runs = 2`, sind es zwei Plätze.

@@ -1,110 +1,75 @@
-"""H5 routing over its full cross-product (decision record 0001).
+"""H5 routing from the caller's groups (decision record 0001).
 
-Every combination of the five inputs is one row: whether the purpose names a
-CLI provider, whether a profile for that provider exists, whether the caller is
-in ``/subscription-members``, whether the purpose has an API alias, and whether the caller is
-in the app's group.
+The subscription groups, the API groups and the app's own group decide the route; the
+purpose never does. Test values: subscription groups ``/old-sub`` and ``/new-sub``, API
+group ``/api-members``, one Claude profile and the alias ``assistant-api``.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from agent_service.config import ProfileConfig, Provider, PurposeConfig
+from agent_service.config import IdentityConfig, ProfileConfig, Provider, RouteConfig
 from agent_service.routing import Api, Cli, NotEnabled, route
 
-CLAUDE_PROFILE = {"claude-main": ProfileConfig(provider=Provider.CLAUDE)}
-ONLY_ANOTHER_PROVIDERS_PROFILE = {"grok-main": ProfileConfig(provider=Provider.GROK)}
+IDENTITY = IdentityConfig(
+    issuer="https://keycloak.test/realms/agent-test",
+    jwks_url="https://keycloak.test/realms/agent-test/protocol/openid-connect/certs",
+    audience="agent-service",
+    subscription_groups=frozenset({"/old-sub", "/new-sub"}),
+    api_groups=frozenset({"/api-members"}),
+    group_claim="groups",
+)
+PROFILES = {"claude-main": ProfileConfig(provider=Provider.CLAUDE)}
+ROUTE = RouteConfig(api_alias="assistant-api")
 CLI = Cli("claude-main")
-API = Api("cowriter")
+API = Api("assistant-api")
 OFF = NotEnabled()
-
-# cli set, profile exists, in subscription group, api alias set, in /apps/songmaker -> route
-CROSS_PRODUCT = [
-    (True, True, True, True, True, CLI),
-    (True, True, True, True, False, CLI),
-    (True, True, True, False, True, CLI),
-    (True, True, True, False, False, CLI),
-    (True, True, False, True, True, API),
-    (True, True, False, True, False, OFF),
-    (True, True, False, False, True, OFF),
-    (True, True, False, False, False, OFF),
-    (True, False, True, True, True, API),
-    (True, False, True, True, False, OFF),
-    (True, False, True, False, True, OFF),
-    (True, False, True, False, False, OFF),
-    (True, False, False, True, True, API),
-    (True, False, False, True, False, OFF),
-    (True, False, False, False, True, OFF),
-    (True, False, False, False, False, OFF),
-    (False, True, True, True, True, API),
-    (False, True, True, True, False, OFF),
-    (False, True, True, False, True, OFF),
-    (False, True, True, False, False, OFF),
-    (False, True, False, True, True, API),
-    (False, True, False, True, False, OFF),
-    (False, True, False, False, True, OFF),
-    (False, True, False, False, False, OFF),
-    (False, False, True, True, True, API),
-    (False, False, True, True, False, OFF),
-    (False, False, True, False, True, OFF),
-    (False, False, True, False, False, OFF),
-    (False, False, False, True, True, API),
-    (False, False, False, True, False, OFF),
-    (False, False, False, False, True, OFF),
-    (False, False, False, False, False, OFF),
-]
+APP = "/apps/songmaker"
 
 
-def _row_id(row: tuple) -> str:
-    names = ("cli", "profile", "subscription-members", "alias", "app-group")
-    present = [name if flag else f"no-{name}" for name, flag in zip(names, row[:5], strict=True)]
-    return "-".join(present)
+def _routed(groups, *, profiles=PROFILES, route_facts=ROUTE, identity=IDENTITY, app="songmaker"):
+    return route(identity, route_facts, profiles, frozenset(groups), app)
 
 
 @pytest.mark.parametrize(
-    ("cli_provider", "profile_exists", "in_subscription", "alias", "in_app_group", "expected"),
-    CROSS_PRODUCT,
-    ids=[_row_id(row) for row in CROSS_PRODUCT],
+    ("groups", "profiles", "route_facts", "expected"),
+    [
+        pytest.param({"/new-sub"}, PROFILES, ROUTE, CLI, id="R1-new-subscription-group"),
+        pytest.param({"/old-sub"}, PROFILES, ROUTE, CLI, id="R2-stale-token-keeps-its-route"),
+        pytest.param({"/old-sub", "/new-sub"}, PROFILES, ROUTE, CLI, id="R3-both-names"),
+        pytest.param(
+            {"/new-sub", "/api-members", APP}, PROFILES, ROUTE, CLI, id="R4-subscription-wins"
+        ),
+        pytest.param(
+            {"/new-sub", "/api-members", APP}, {}, ROUTE, API, id="R5-no-profile-uses-the-api"
+        ),
+        pytest.param({"/new-sub"}, {}, None, OFF, id="R6-nothing-configured"),
+        pytest.param({"/api-members", APP}, PROFILES, ROUTE, API, id="R7-api-member"),
+        pytest.param({"/api-members", APP}, PROFILES, None, OFF, id="R8-no-alias"),
+        pytest.param({"/api-members"}, PROFILES, ROUTE, OFF, id="R9-api-group-without-the-app"),
+        pytest.param({APP}, PROFILES, ROUTE, OFF, id="R10-app-group-alone"),
+        pytest.param(
+            {"/api-members", "/apps/presentator"}, PROFILES, ROUTE, OFF, id="R11-another-app"
+        ),
+        pytest.param({"/new-sub/friends"}, PROFILES, ROUTE, OFF, id="R12-subscription-subgroup"),
+        pytest.param({"/new-sub-x"}, PROFILES, ROUTE, OFF, id="R12-subscription-look-alike"),
+        pytest.param({"/api-members/friends", APP}, PROFILES, ROUTE, OFF, id="R12a-api-subgroup"),
+        pytest.param({"/api-members-x", APP}, PROFILES, ROUTE, OFF, id="R12a-api-look-alike"),
+        pytest.param(
+            {"/api-members", f"{APP}/friends"}, PROFILES, ROUTE, OFF, id="R12b-app-subgroup"
+        ),
+        pytest.param({"/api-members", f"{APP}-x"}, PROFILES, ROUTE, OFF, id="R12b-app-look-alike"),
+        pytest.param(set(), PROFILES, ROUTE, OFF, id="R13-no-groups"),
+    ],
 )
-def test_route_follows_the_h5_table(
-    cli_provider, profile_exists, in_subscription, alias, in_app_group, expected
-):
-    purpose = PurposeConfig(
-        cli_provider=Provider.CLAUDE if cli_provider else None,
-        api_alias="cowriter" if alias else None,
-    )
-    groups = frozenset(
-        group
-        for group, member in (
-            ("/subscription-members", in_subscription),
-            ("/apps/songmaker", in_app_group),
-        )
-        if member
+def test_the_route_follows_the_groups(groups, profiles, route_facts, expected):
+    assert _routed(groups, profiles=profiles, route_facts=route_facts) == expected
+
+
+def test_a_stale_subscription_name_is_not_enabled_once_the_configuration_drops_it():
+    after_the_cut_over = IDENTITY.model_copy(
+        update={"subscription_groups": frozenset({"/new-sub"})}
     )
 
-    served = route(
-        purpose,
-        CLAUDE_PROFILE if profile_exists else ONLY_ANOTHER_PROVIDERS_PROFILE,
-        groups,
-        "songmaker",
-        subscription_group="/subscription-members",
-    )
-
-    assert served == expected
-
-
-def test_the_cross_product_is_complete():
-    assert len({row[:5] for row in CROSS_PRODUCT}) == 2**5
-
-
-def test_another_apps_group_does_not_open_the_api_route():
-    served = route(
-        PurposeConfig(api_alias="cowriter"),
-        {},
-        frozenset({"/apps/presentator"}),
-        "songmaker",
-        subscription_group="/subscription-members",
-    )
-
-    assert served == NotEnabled()
+    assert _routed({"/old-sub"}, identity=after_the_cut_over) == OFF

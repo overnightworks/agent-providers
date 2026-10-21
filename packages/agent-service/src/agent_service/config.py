@@ -1,4 +1,4 @@
-"""The service's one configuration: identity, listener, profiles, purposes and apps.
+"""The service's one configuration: identity, listener, profiles, the route and apps.
 
 The service accepts at most one subscription profile, for Claude, which needs its
 token file and a ``[cli.claude]`` table naming the absolute program and the exact version
@@ -44,7 +44,7 @@ from webauth.https_client import is_https_url
 
 from agent_client.capability import MAX_CAPABILITY_CHARACTERS, McpOrigin
 from agent_client.tools import ToolEffect
-from agent_client.wire import MAX_EVENT_BYTES
+from agent_client.wire import MAX_EVENT_BYTES, MAX_PURPOSE_LENGTH
 from agent_providers.config import PrivateWorkingRoot, WorkingRootNotPrivateError
 from agent_providers.secret_file import read_token_file, shown_text
 from agent_service.capability import (
@@ -85,13 +85,23 @@ class _Section(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
 
+def _group_path(name: str) -> str:
+    if not name.startswith("/"):
+        raise ValueError("must begin with /")
+    return name
+
+
+GroupName = Annotated[NonEmptyText, AfterValidator(_group_path)]
+
+
 class IdentityConfig(_Section):
     """Who issues the tokens the service accepts, and which claims carry the groups."""
 
     issuer: NonEmptyText
     jwks_url: HttpsUrl
     audience: NonEmptyText
-    subscription_group: NonEmptyText
+    subscription_groups: frozenset[GroupName] = Field(min_length=1)
+    api_groups: frozenset[GroupName] = frozenset()
     group_claim: NonEmptyText
     leeway_seconds: int = Field(default=0, ge=0, le=300)
 
@@ -255,22 +265,20 @@ class ProfileConfig(_Section):
     token_file: Annotated[Path, BeforeValidator(_sound_token_file)] | None = None
 
 
-class PurposeConfig(_Section):
-    """Which routes may serve one purpose (decision record 0001, H5)."""
+class RouteConfig(_Section):
+    """The paid route's alias (decision record 0001, H5)."""
 
-    cli_provider: Provider | None = None
-    api_alias: NonEmptyText | None = None
+    api_alias: NonEmptyText
 
 
 class AppConfig(_Section):
-    """One app: its workload client, the purposes it may ask for, and its tools' effects.
+    """One app: its workload client, its MCP origin and its tools' effects.
 
     A tool the app does not list is treated as side-effecting. The keys of the tools
     table are the tools a capability permits; an empty table permits none.
     """
 
     workload_client: NonEmptyText
-    purposes: tuple[NonEmptyText, ...]
     tools: dict[NonEmptyText, ToolEffect] = Field(default_factory=dict)
     mcp_origin: McpOrigin | None = None
 
@@ -396,7 +404,7 @@ class ServiceConfig(_Section):
     mcp: McpConfig | None = None
     signing: SigningConfig | None = None
     profiles: dict[NonEmptyText, ProfileConfig] = Field(default_factory=dict)
-    purposes: dict[NonEmptyText, PurposeConfig]
+    route: RouteConfig | None = None
     apps: dict[NonEmptyText, AppConfig]
 
     @model_validator(mode="before")
@@ -408,13 +416,11 @@ class ServiceConfig(_Section):
         return document
 
     @model_validator(mode="after")
-    def _apps_name_known_purposes(self) -> Self:
-        for app_name, app in self.apps.items():
-            for purpose in app.purposes:
-                if purpose not in self.purposes:
-                    raise ValueError(
-                        f"apps.{shown_text(app_name)}.purposes: unknown purpose {purpose!r}"
-                    )
+    def _api_groups_and_alias_come_together(self) -> Self:
+        if self.identity.api_groups and self.route is None:
+            raise ValueError("route.api_alias: required because identity.api_groups is set")
+        if self.route is not None and not self.identity.api_groups:
+            raise ValueError("identity.api_groups: required because route.api_alias is set")
         return self
 
     @model_validator(mode="after")
@@ -449,22 +455,20 @@ class ServiceConfig(_Section):
         for app_name, app in self.apps.items():
             if (scope := self.capability_scope(app_name)) is None:
                 continue
-            for purpose in app.purposes:
-                claims = preflight_claims(
-                    scope,
-                    app=app_name,
-                    purpose=purpose,
-                    issuer=self.identity.issuer,
-                    max_duration_s=self.runs.max_duration_s,
-                )
-                try:
-                    signed_capability(scope, claims)
-                except CapabilityTooLarge as too_large:
-                    raise ValueError(
-                        f"apps.{shown_text(app_name)}.tools: the capability for purpose"
-                        f" {purpose!r} would be {too_large.length} characters;"
-                        f" the limit is {MAX_CAPABILITY_CHARACTERS}"
-                    ) from None
+            claims = preflight_claims(
+                scope,
+                app=app_name,
+                issuer=self.identity.issuer,
+                max_duration_s=self.runs.max_duration_s,
+            )
+            try:
+                signed_capability(scope, claims)
+            except CapabilityTooLarge as too_large:
+                raise ValueError(
+                    f"apps.{shown_text(app_name)}.tools: the capability for a purpose of"
+                    f" {MAX_PURPOSE_LENGTH} characters would be {too_large.length} characters;"
+                    f" the limit is {MAX_CAPABILITY_CHARACTERS}"
+                ) from None
         return self
 
     def capability_scope(self, app_name: str) -> CapabilityScope | None:

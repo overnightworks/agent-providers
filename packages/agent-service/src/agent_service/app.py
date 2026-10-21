@@ -6,12 +6,11 @@ checked in a fixed order, and the first failure answers:
 
 1. the workload token, then the user token (``agent_service.identity``);
 2. the body's protocol version, then its shape (``agent_service.run_request``);
-3. whether the app may ask for the purpose;
-4. the route (``agent_service.routing``);
-5. for the CLI route, the service's admission limit (``agent_service.admission``): a
+3. the route (``agent_service.routing``);
+4. for the CLI route, the service's admission limit (``agent_service.admission``): a
    subscription run beyond it answers ``busy`` with ``Retry-After`` before anything is
    signed;
-6. for an app with an MCP origin, whether the run's capability fits the 8,192
+5. for an app with an MCP origin, whether the run's capability fits the 8,192
    characters every verifier accepts (``capability_too_large``).
 
 An admitted run answers ``200 text/event-stream`` with its frames
@@ -199,16 +198,7 @@ def _admitted(
     caller: Caller,
     run_request: RunRequest,
 ) -> Response:
-    app_config = config.apps[caller.app]
-    if run_request.purpose not in app_config.purposes:
-        return rejection(RejectionCode.FORBIDDEN)
-    served = route(
-        config.purposes[run_request.purpose],
-        config.profiles,
-        caller.groups,
-        caller.app,
-        subscription_group=config.identity.subscription_group,
-    )
+    served = route(config.identity, config.route, config.profiles, caller.groups, caller.app)
     if isinstance(served, NotEnabled):
         return rejection(RejectionCode.NOT_ENABLED)
     lease = None

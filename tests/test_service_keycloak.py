@@ -18,6 +18,7 @@ from uuid import uuid4
 
 import pytest
 from service_support import (
+    API_ALIAS,
     PRESENTATOR_CLIENT,
     SONGMAKER_CLIENT,
     ScriptedRunner,
@@ -120,7 +121,7 @@ def service(runners) -> Iterator[str]:
 
 @pytest.mark.parametrize(
     ("user", "route", "expected_route"),
-    [("alice", "CLI", Cli("claude-main")), ("bob", "API", Api("cowriter"))],
+    [("alice", "CLI", Cli("claude-main")), ("bob", "API", Api(API_ALIAS))],
 )
 def test_a_real_user_and_workload_token_stream_the_scripted_run(
     service, runners, user, route, expected_route
@@ -267,10 +268,10 @@ def _songmaker_workload() -> str:
         ),
         pytest.param(
             _songmaker_workload,
-            run_body(purpose="presentator.copresenter"),
-            RejectionCode.FORBIDDEN,
-            403,
-            id="another-apps-purpose",
+            run_body(purpose="notes.assistant"),
+            RejectionCode.INVALID_REQUEST,
+            422,
+            id="purpose-outside-the-grammar",
         ),
     ],
 )

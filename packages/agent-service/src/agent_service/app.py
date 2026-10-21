@@ -6,12 +6,14 @@ checked in a fixed order, and the first failure answers:
 
 1. the workload token, then the user token (``agent_service.identity``);
 2. the body's protocol version, then its shape (``agent_service.run_request``);
-3. the route (``agent_service.routing``);
-4. for the CLI route, the service's admission limit (``agent_service.admission``): a
+3. tools named by an app without an MCP origin answer ``forbidden``, before the route;
+4. the route (``agent_service.routing``);
+5. for the CLI route, the service's admission limit (``agent_service.admission``): a
    subscription run beyond it answers ``busy`` with ``Retry-After`` before anything is
    signed;
-5. for an app with an MCP origin, whether the run's capability fits the 8,192
-   characters every verifier accepts (``capability_too_large``).
+6. for an app with an MCP origin, whether the run's capability, which signs exactly the
+   request's tool names, fits the 8,192 characters every verifier accepts
+   (``capability_too_large``).
 
 An admitted run answers ``200 text/event-stream`` with its frames
 (``agent_service.run_events``), and its response closes those frames whenever it
@@ -198,6 +200,8 @@ def _admitted(
     caller: Caller,
     run_request: RunRequest,
 ) -> Response:
+    if run_request.tools and config.apps[caller.app].mcp_origin is None:
+        return rejection(RejectionCode.FORBIDDEN)
     served = route(config.identity, config.route, config.profiles, caller.groups, caller.app)
     if isinstance(served, NotEnabled):
         return rejection(RejectionCode.NOT_ENABLED)
@@ -254,12 +258,10 @@ def _admitted_response(
         route=served,
         capability=capability,
     )
-    app_config = config.apps[caller.app]
     return _RunResponse(
         run_frames(
             admitted,
             runners.for_route(served),
-            app_config,
             config.runs,
             LoopClock(),
             records,
@@ -277,7 +279,7 @@ def _capability_of(
     run_id: UUID,
     wall_clock: Callable[[], datetime],
 ) -> Capability | None:
-    scope = config.capability_scope(caller.app)
+    scope = config.capability_scope(caller.app, run_request.tools)
     if scope is None:
         return None
     claims = capability_claims(

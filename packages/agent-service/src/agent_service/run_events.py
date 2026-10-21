@@ -42,6 +42,7 @@ from pydantic_core import PydanticSerializationError
 
 from agent_client.run_stream import RunStream
 from agent_client.sse import EventTooLarge, encode_event
+from agent_client.tools import ToolEffect
 from agent_client.wire import (
     PROTOCOL_VERSION,
     AssistantText,
@@ -64,7 +65,7 @@ from agent_providers.events import (
     ToolResultEvent,
 )
 from agent_service.admission import Lease
-from agent_service.config import AppConfig, RunConfig
+from agent_service.config import RunConfig
 from agent_service.quarantine import Quarantine
 from agent_service.run_liveness import (
     FailedPart,
@@ -123,7 +124,6 @@ _COMMIT_FAILED: Final = _DecidedFailure(FailureCode.PROVIDER_ERROR, RUNNER_FAILE
 async def run_frames(
     admitted: AdmittedRun,
     runner: Runner | None,
-    app: AppConfig,
     runs: RunConfig,
     clock: RunClock,
     records: RunRecords,
@@ -131,7 +131,7 @@ async def run_frames(
     *,
     quarantine: Quarantine,
 ) -> AsyncGenerator[bytes, None]:
-    wire = _WireRun(admitted, app, runs, records, lease, quarantine)
+    wire = _WireRun(admitted, runs, records, lease, quarantine)
     failures = RunFailures(admitted.run_id)
     started = wire.started()
     started_at = clock()
@@ -174,7 +174,6 @@ class _WireRun:
     def __init__(
         self,
         admitted: AdmittedRun,
-        app: AppConfig,
         runs: RunConfig,
         records: RunRecords,
         lease: Lease | None,
@@ -182,7 +181,6 @@ class _WireRun:
     ) -> None:
         self._admitted = admitted
         self._run_id = admitted.run_id
-        self._app = app
         self._runs = runs
         self._records = records
         self._lease = lease
@@ -328,7 +326,7 @@ class _WireRun:
             tool_use_id=core_event.tool_use_id,
             name=core_event.name,
             input=core_event.input,
-            effect=self._app.tool_effect(core_event.name),
+            effect=self._admitted.request.tools.get(core_event.name, ToolEffect.SIDE_EFFECTING),
         )
         return call.model_copy(update={"input": copy.deepcopy(call.input)})
 

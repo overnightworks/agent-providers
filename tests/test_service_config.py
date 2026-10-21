@@ -20,7 +20,6 @@ from provider_test_support import fake_cli_executable
 from pydantic import ValidationError
 from service_support import (
     CALLED_PLAINLY_OR_FROM_AN_ACTIVE_HANDLER,
-    LAST_TOOL_NAME_LENGTH_AT_THE_LIMIT,
     PINNED_CLAUDE_VERSION,
     PROCESS_TOKEN,
     called_from,
@@ -32,11 +31,8 @@ from service_support import (
     process_working_root,
     reaches_private_key,
     reaches_text,
-    record_signed_tokens,
-    tool_names_with_the_last_of_length,
 )
 
-from agent_client.tools import ToolEffect
 from agent_providers.secret_file import UnsoundSecretFile, read_token_file
 from agent_service import app as app_module
 from agent_service.cli import EXIT_BAD_CONFIG, main
@@ -99,7 +95,6 @@ api_alias = "assistant-api"
 
 [apps.songmaker]
 workload_client = "songmaker-test"
-{TOOLS_LINE}
 {SONGMAKER_ORIGIN_LINE}"""
 
 
@@ -151,18 +146,14 @@ def test_a_valid_file_loads_with_its_configured_identity_and_the_documented_defa
     assert config.app_of_workload_client("songmaker-test") == "songmaker"
 
 
-def test_an_installation_without_tools_needs_no_signing_section(tmp_path):
-    assert load_config(_written(tmp_path, _without_tools_origin_and_signing())).signing is None
+def test_an_installation_without_an_origin_needs_no_signing_section(tmp_path):
+    assert load_config(_written(tmp_path, _without_origin_and_signing())).signing is None
 
 
-@pytest.mark.parametrize(
-    ("tool", "effect"),
-    [("read_song", ToolEffect.READ_ONLY), ("unlisted_tool", ToolEffect.SIDE_EFFECTING)],
-)
-def test_an_unlisted_tool_counts_as_side_effecting(tmp_path, tool, effect):
-    config = load_config(_written(tmp_path, VALID_CONFIG))
+def test_a_leftover_tools_table_of_an_app_stops_startup_naming_the_field(tmp_path, capsys):
+    text = _with(SONGMAKER_ORIGIN_LINE, f"{TOOLS_LINE}\n{SONGMAKER_ORIGIN_LINE}")
 
-    assert config.apps["songmaker"].tool_effect(tool) is effect
+    assert _refused_on_one_line(_written(tmp_path, text), capsys).startswith("apps.songmaker.tools")
 
 
 SECOND_CLAUDE_PROFILE = f'\n[profiles.claude-spare]\nprovider = "claude"\n{TOKEN_FILE_LINE}\n'
@@ -174,9 +165,9 @@ def _with(old: str, new: str) -> str:
     return VALID_CONFIG.replace(old, new)
 
 
-def _without_tools_origin_and_signing() -> str:
+def _without_origin_and_signing() -> str:
     return (
-        _with(SIGNING_SECTION, "").replace(TOOLS_LINE + "\n", "").replace(SONGMAKER_ORIGIN_LINE, "")
+        _with(SIGNING_SECTION, "").replace(SONGMAKER_ORIGIN_LINE, "")
     )
 
 
@@ -319,11 +310,6 @@ def _with_key_set_url(url: str) -> str:
             _with_key_set_url("https://keycloak.test:99999/certs"),
             "identity.jwks_url",
             id="key-set-url-with-an-invalid-port",
-        ),
-        pytest.param(
-            _with('read_song = "read_only"', 'read_song = "harmless"'),
-            "apps.songmaker.tools.read_song",
-            id="unknown-tool-effect",
         ),
         pytest.param(
             _with('issuer = "https://keycloak.test/realms/agent-test"\n', ""),
@@ -512,14 +498,14 @@ def test_an_app_with_a_canonical_https_origin_and_a_signing_key_loads(tmp_path, 
     config = load_config(_with_origin(tmp_path, origin))
 
     assert config.apps["songmaker"].mcp_origin == origin
-    assert config.capability_scope("songmaker").origin == origin
+    assert config.capability_scope("songmaker", []).origin == origin
 
 
 def test_an_app_without_an_origin_and_without_signing_has_no_capability_scope(tmp_path):
-    config = load_config(_written(tmp_path, _without_tools_origin_and_signing()))
+    config = load_config(_written(tmp_path, _without_origin_and_signing()))
 
     assert config.apps["songmaker"].mcp_origin is None
-    assert config.capability_scope("songmaker") is None
+    assert config.capability_scope("songmaker", ["read_song"]) is None
 
 
 @pytest.mark.parametrize(
@@ -563,16 +549,6 @@ def test_two_apps_on_one_origin_stop_startup_naming_the_second(tmp_path, capsys)
     )
 
 
-def _tools_line_of_the_tuned_app(last_tool_name_length: int) -> str:
-    names = tool_names_with_the_last_of_length(last_tool_name_length)
-    return "tools = { " + ", ".join(f'"{name}" = "read_only"' for name in names) + " }"
-
-
-def _tuned_app_config(last_tool_name_length: int = LAST_TOOL_NAME_LENGTH_AT_THE_LIMIT):
-    tools_line = _tools_line_of_the_tuned_app(last_tool_name_length)
-    return _with(TOOLS_LINE, tools_line)
-
-
 PROFILES_WITH_NEWLINES = (
     VALID_CONFIG.replace("[profiles.claude-main]", '[profiles."claude\\nmain"]')
     + '\n[profiles."claude\\nspare"]\nprovider = "claude"\n'
@@ -611,14 +587,6 @@ SECOND_APP_ON_THE_SAME_CLIENT = '\n[apps."pres\\nentator"]\nworkload_client = "s
             " the MCP origin of app 'song\\nmaker'",
             id="origin-of-two-apps",
         ),
-        pytest.param(
-            _tuned_app_config(LAST_TOOL_NAME_LENGTH_AT_THE_LIMIT + 1).replace(
-                "[apps.songmaker]", '[apps."song\\nmaker"]'
-            ),
-            "apps.song\\nmaker.tools: the capability for a purpose of 64 characters"
-            " would be 8196 characters; the limit is 8192",
-            id="capability-too-large",
-        ),
     ],
 )
 def test_a_name_with_a_newline_is_shown_escaped_once_on_one_line(tmp_path, capsys, text, refusal):
@@ -638,7 +606,7 @@ def test_an_origin_without_a_signing_section_stops_startup_naming_the_field(tmp_
     assert _refused_on_one_line(config_file, capsys) == ORIGIN_WITHOUT_SIGNING_REFUSAL
 
 
-NO_ORIGIN = VALID_CONFIG.replace(TOOLS_LINE + "\n", "").replace(SONGMAKER_ORIGIN_LINE, "")
+NO_ORIGIN = VALID_CONFIG.replace(SONGMAKER_ORIGIN_LINE, "")
 ORIGIN_WITHOUT_CA_FILE_REFUSAL = (
     "mcp.ca_file: required because apps.songmaker declares an mcp_origin"
 )
@@ -684,66 +652,6 @@ def test_a_missing_mcp_ca_file_stops_startup_naming_the_key(tmp_path, capsys):
     assert "mcp.ca_file: cannot be loaded" in capsys.readouterr().err
 
 
-def test_an_app_whose_capability_is_exactly_8192_characters_at_the_preflight_loads(tmp_path):
-    load_config(_written(tmp_path, _tuned_app_config()))
-
-
-SHORT_PURPOSE_LAST_TOOL_NAME_LENGTH_AT_THE_LIMIT = 55
-
-CAPABILITY_TOO_LARGE_FOR_A_LONGEST_PURPOSE = pytest.mark.parametrize(
-    ("text", "length"),
-    [
-        pytest.param(
-            _tuned_app_config(LAST_TOOL_NAME_LENGTH_AT_THE_LIMIT + 1),
-            8193,
-            id="C6-one-more-character-in-a-tool-name",
-        ),
-        pytest.param(
-            _tuned_app_config(SHORT_PURPOSE_LAST_TOOL_NAME_LENGTH_AT_THE_LIMIT),
-            None,
-            id="C6-tools-that-fit-only-a-shorter-purpose",
-        ),
-        pytest.param(
-            _tuned_app_config().replace("agent-test", "agent-testx"),
-            8193,
-            id="an-issuer-one-character-longer",
-        ),
-        pytest.param(
-            _with(TOOLS_LINE + "\n", "tools = {}\n").replace(
-                "https://keycloak.test/realms/agent-test", "https://keycloak.test/" + "x" * 8200, 1
-            ),
-            None,
-            id="C7-an-origin-without-tools",
-        ),
-    ],
-)
-
-
-@CAPABILITY_TOO_LARGE_FOR_A_LONGEST_PURPOSE
-def test_an_app_whose_capability_would_exceed_8192_characters_stops_startup_naming_its_tools(
-    tmp_path, capsys, text, length
-):
-    refusal = _refused_on_one_line(_written(tmp_path, text), capsys)
-
-    assert refusal.startswith(
-        "apps.songmaker.tools: the capability for a purpose of 64 characters would be "
-    )
-    assert refusal.endswith(" characters; the limit is 8192")
-    if length is not None:
-        assert f"would be {length} characters" in refusal
-
-
-def test_an_oversized_capability_refusal_holds_no_token_anywhere(tmp_path, monkeypatch):
-    signed = record_signed_tokens(monkeypatch)
-    config_file = _written(tmp_path, _tuned_app_config(LAST_TOOL_NAME_LENGTH_AT_THE_LIMIT + 1))
-
-    with pytest.raises(ConfigError) as refusal:
-        load_config(config_file)
-
-    assert signed
-    assert not reaches_text(everything_a_refusal_holds(refusal.value), signed)
-
-
 CANARY = "canary-token-value-7f3a91"
 API_KEY_SHAPE = "sk-ant-" + "api03-" + CANARY
 WHITESPACE_REASON = "holds whitespace; a setup token holds none"
@@ -759,7 +667,7 @@ def _token_file_with(tmp_path: Path, contents: bytes, mode: int = 0o600) -> Path
 
 
 def _token_config(token_file: str) -> str:
-    return _without_tools_origin_and_signing().replace(
+    return _without_origin_and_signing().replace(
         TOKEN_FILE_LINE, f"token_file = {json.dumps(token_file)}"
     )
 
@@ -1004,13 +912,6 @@ PROFILE_TABLE = '[profiles.claude-main]\nprovider = "claude"\n' + TOKEN_FILE_LIN
 NO_PROFILE = _with(PROFILE_TABLE, "")
 WITHOUT_TOKEN_FILE = _with(TOKEN_FILE_LINE + "\n", "")
 WITHOUT_ORIGIN = _with(SONGMAKER_ORIGIN_LINE, "")
-SECOND_APP_LISTING_TOOLS_WITHOUT_ORIGIN = (
-    VALID_CONFIG
-    + '\n[apps.presentator]\nworkload_client = "presentator-test"\n'
-    + 'tools = { read_song = "read_only" }\n'
-)
-
-
 @pytest.fixture
 def served_apps(monkeypatch, logging_state_restored):
     served = []
@@ -1029,7 +930,7 @@ def _with_profile_of(provider: str, name: str = '"codex-main"', token: bool = Fa
     "text",
     [
         pytest.param(
-            _without_tools_origin_and_signing().replace(PROFILE_TABLE, ""), id="no-profile"
+            _without_origin_and_signing().replace(PROFILE_TABLE, ""), id="no-profile"
         ),
         pytest.param(VALID_CONFIG, id="one-claude-profile-with-its-token"),
     ],
@@ -1056,7 +957,7 @@ def test_an_installation_without_a_profile_has_none_and_still_scopes_its_apps(tm
     config = load_config(_written(tmp_path, NO_PROFILE))
 
     assert config.profiles == {}
-    assert config.capability_scope("songmaker") is not None
+    assert config.capability_scope("songmaker", []) is not None
 
 
 PROFILE_RULE_REFUSALS = [
@@ -1125,38 +1026,11 @@ def test_a_profile_the_service_cannot_serve_stops_startup_naming_the_field(
     assert _refused_on_one_line(_written(tmp_path, text), capsys).startswith(refusal)
 
 
-TOOLS_WITHOUT_ORIGIN_REFUSALS = [
-    pytest.param(
-        WITHOUT_ORIGIN,
-        "apps.songmaker.mcp_origin: required because the app lists tools",
-        id="with-a-profile",
-    ),
-    pytest.param(
-        _with(PROFILE_TABLE, "").replace(SONGMAKER_ORIGIN_LINE, ""),
-        "apps.songmaker.mcp_origin: required because the app lists tools",
-        id="without-a-profile",
-    ),
-    pytest.param(
-        SECOND_APP_LISTING_TOOLS_WITHOUT_ORIGIN,
-        "apps.presentator.mcp_origin: required because the app lists tools",
-        id="only-the-second-app",
-    ),
-]
-
-
-@pytest.mark.parametrize(("text", "refusal"), TOOLS_WITHOUT_ORIGIN_REFUSALS)
-def test_an_app_that_lists_tools_without_an_origin_stops_startup_naming_the_field(
-    tmp_path, capsys, text, refusal
-):
-    assert _refused_on_one_line(_written(tmp_path, text), capsys) == refusal
-
-
 @pytest.mark.parametrize("inside_active_handler", CALLED_PLAINLY_OR_FROM_AN_ACTIVE_HANDLER)
 @pytest.mark.parametrize(
     ("text", "refusal"),
     [
         *PROFILE_RULE_REFUSALS,
-        *TOOLS_WITHOUT_ORIGIN_REFUSALS,
         pytest.param(
             ORIGIN_WITHOUT_SIGNING, ORIGIN_WITHOUT_SIGNING_REFUSAL, id="origin-without-signing"
         ),
@@ -1172,19 +1046,6 @@ def test_a_refused_relationship_holds_no_token_or_key_in_what_the_refusal_holds(
     assert refusal in str(refused.value)
     assert not reaches_text(held, [PROCESS_TOKEN])
     assert not reaches_private_key(held)
-
-
-@pytest.mark.parametrize(
-    "app_without_tools_rule",
-    [
-        pytest.param(WITHOUT_ORIGIN.replace(TOOLS_LINE, "tools = {}"), id="empty-tools-table"),
-        pytest.param(WITHOUT_ORIGIN.replace(TOOLS_LINE + "\n", ""), id="no-tools-key"),
-    ],
-)
-def test_an_app_that_lists_no_tools_needs_no_origin(tmp_path, app_without_tools_rule):
-    config = load_config(_written(tmp_path, app_without_tools_rule))
-
-    assert config.apps["songmaker"].mcp_origin is None
 
 
 @pytest.mark.parametrize(
@@ -1209,8 +1070,8 @@ def test_an_app_that_lists_no_tools_needs_no_origin(tmp_path, app_without_tools_
             id="token-file",
         ),
         pytest.param(
-            lambda name: WITHOUT_ORIGIN.replace("[apps.songmaker]", f"[apps.{name}]"),
-            "mcp_origin: required because the app lists tools",
+            lambda name: ORIGIN_WITHOUT_SIGNING.replace("[apps.songmaker]", f"[apps.{name}]"),
+            "mcp_origin: needs a [signing] section",
             id="mcp-origin",
         ),
     ],
@@ -1630,7 +1491,6 @@ def _profiles_edit(profiles: dict[Any, Any]) -> Callable[[dict[str, Any]], None]
 
 
 NO_ROUTE_REFUSAL = "has no subscription route yet; only claude can have a profile"
-TOOLS_WITHOUT_ORIGIN_REFUSAL = "apps.songmaker.mcp_origin: required because the app lists tools"
 UNIQUE_CLAUDE_PROFILE_REFUSAL = "claude already has profile"
 
 REFUSED_REPRESENTATIONS = [
@@ -1661,18 +1521,6 @@ REFUSED_REPRESENTATIONS = [
     ),
     pytest.param(
         _profiles_edit({b"p": {"provider": "codex"}}), "profiles", id="bytes-profile-name"
-    ),
-    pytest.param(
-        _app_edit(signing=False, mcp_origin=None),
-        TOOLS_WITHOUT_ORIGIN_REFUSAL,
-        id="tools-with-origin-none-and-signing-none",
-    ),
-    pytest.param(
-        lambda document: document.update(
-            signing=None, apps={"songmaker": _songmaker(tools={"read_song": "read_only"})}
-        ),
-        TOOLS_WITHOUT_ORIGIN_REFUSAL,
-        id="tools-without-origin-instance",
     ),
     pytest.param(
         lambda document: document.update(
@@ -1706,11 +1554,11 @@ def test_every_representation_pydantic_accepts_of_a_refused_relationship_is_refu
     assert not reaches_private_key(held)
 
 
-def test_an_app_without_tools_may_name_no_origin_explicitly_and_needs_no_signing():
+def test_an_app_may_name_no_origin_explicitly_and_needs_no_signing():
     document = _edited(
         lambda document: (
             document.pop("signing"),
-            document["apps"]["songmaker"].update(tools={}, mcp_origin=None),
+            document["apps"]["songmaker"].update(mcp_origin=None),
         )
     )
 

@@ -22,7 +22,6 @@ from bounds import TEST_WAIT_SECONDS, within_the_bound
 from service_support import (
     API_GROUP,
     LONGEST_PURPOSE,
-    SONGMAKER,
     SONGMAKER_GROUP,
     SUBSCRIPTION_GROUP,
     ClientSocket,
@@ -131,7 +130,7 @@ def service(request, tmp_path, monkeypatch) -> Iterator[_Service]:
     api = ScriptedRunner(FINAL)
     signed = record_signed_tokens(monkeypatch)
     runs = getattr(request, "param", RunConfig(max_parallel_cli_runs=PLACES))
-    config = capable_service_config(tmp_path, songmaker=TUNED_AT_THE_LIMIT).model_copy(
+    config = capable_service_config(tmp_path).model_copy(
         update={"runs": runs}
     )
     app = create_app(config, runners=Runners(cli=held, api=api), fetch_key_set=MINT.fetch_key_set)
@@ -213,7 +212,11 @@ def test_an_api_run_while_every_cli_place_is_taken_is_admitted_and_takes_nothing
 def test_a_capability_too_large_after_the_take_releases_its_place(service):
     for _ in range(PLACES):
         assert_rejected(
-            service.run(MINT.user(sub=QUOTATION_MARKS_256), purpose=LONGEST_PURPOSE),
+            service.run(
+                MINT.user(sub=QUOTATION_MARKS_256),
+                purpose=LONGEST_PURPOSE,
+                tools=TUNED_AT_THE_LIMIT,
+            ),
             RejectionCode.CAPABILITY_TOO_LARGE,
             422,
         )
@@ -300,7 +303,6 @@ def _consumed(runner: Runner | None, lease, *, recorder_fails: bool = False) -> 
         frames = run_frames(
             alice_admitted_run(uuid.uuid4()),
             runner,
-            SONGMAKER,
             RunConfig(),
             LoopClock(),
             RunRecords(),

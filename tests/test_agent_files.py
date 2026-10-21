@@ -436,7 +436,7 @@ def test_offered_to_refuses_a_role_outside_the_two(tmp_path: Path, role: str) ->
         agent.offered_to(role)  # type: ignore[arg-type]
 
 
-def test_request_is_the_v1_body_with_purpose_and_prompt(tmp_path: Path) -> None:
+def test_request_is_the_v2_body_with_purpose_prompt_and_tool_effects(tmp_path: Path) -> None:
     agent = load(tmp_path, agent_text())
 
     request = agent.request([TurnMessage(role=TurnRole.USER, text="hi")])
@@ -445,7 +445,18 @@ def test_request_is_the_v1_body_with_purpose_and_prompt(tmp_path: Path) -> None:
     assert request.turn.system == PROMPT
     assert [message.text for message in request.turn.messages] == ["hi"]
     assert RunRequest.model_validate(request.model_dump(mode="json")) == request
-    assert set(request.model_dump()) == {"v", "purpose", "turn"}
+    assert request.v == 2
+    assert request.tools == {
+        "read_note": ToolEffect.READ_ONLY,
+        "edit_note": ToolEffect.SIDE_EFFECTING,
+    }
+    assert set(request.model_dump()) == {"v", "purpose", "turn", "tools"}
+
+
+def test_request_of_an_agent_without_tools_names_none(tmp_path: Path) -> None:
+    agent = load(tmp_path, agent_text(tools="[]"))
+
+    assert agent.request([TurnMessage(role=TurnRole.USER, text="hi")]).tools == {}
 
 
 def test_request_without_messages_is_refused(tmp_path: Path) -> None:

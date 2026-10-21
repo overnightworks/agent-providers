@@ -24,6 +24,7 @@ from provider_test_support import (
     grok_tool_round_lines,
 )
 from service_support import (
+    SONGMAKER_TOOLS,
     ScriptedRunner,
     decoded_events,
     get_run,
@@ -69,15 +70,13 @@ from agent_service.run_liveness import LoopClock
 from agent_service.run_records import RunRecords
 from agent_service.runners import AdmittedRun, Runner
 
-SONGMAKER = service_config().apps["songmaker"]
-
 
 def _streamed(runner: Runner | None, records: RunRecords | None = None) -> bytes:
     admitted = AdmittedRun(
         run_id=uuid.uuid4(),
         app="songmaker",
         principal=Principal("https://keycloak.test/realms/agent-test", "user-alice"),
-        request=RunRequest.model_validate(run_body()),
+        request=RunRequest.model_validate(run_body(tools=SONGMAKER_TOOLS)),
         route=Cli("claude-main"),
         capability=None,
     )
@@ -87,7 +86,6 @@ def _streamed(runner: Runner | None, records: RunRecords | None = None) -> bytes
         frames = run_frames(
             admitted,
             runner,
-            SONGMAKER,
             RunConfig(),
             LoopClock(),
             store,
@@ -122,18 +120,18 @@ SCRIPT = (
 RUN = "00000000-0000-4000-8000-000000000000"
 SCRIPT_FRAMES = (
     "id: 0\nevent: run_started\n"
-    f'data: {{"v":1,"run_id":"{RUN}","seq":0,"type":"run_started","heartbeat_interval_s":15}}\n\n'
+    f'data: {{"v":2,"run_id":"{RUN}","seq":0,"type":"run_started","heartbeat_interval_s":15}}\n\n'
     "id: 1\nevent: assistant_text\n"
-    f'data: {{"v":1,"run_id":"{RUN}","seq":1,"type":"assistant_text",'
+    f'data: {{"v":2,"run_id":"{RUN}","seq":1,"type":"assistant_text",'
     '"text":"Let me read the song."}\n\n'
     "id: 2\nevent: tool_call\n"
-    f'data: {{"v":1,"run_id":"{RUN}","seq":2,"type":"tool_call","tool_use_id":"call-1",'
+    f'data: {{"v":2,"run_id":"{RUN}","seq":2,"type":"tool_call","tool_use_id":"call-1",'
     '"name":"read_song","input":{"song_id":7},"effect":"read_only"}\n\n'
     "id: 3\nevent: tool_result\n"
-    f'data: {{"v":1,"run_id":"{RUN}","seq":3,"type":"tool_result","tool_use_id":"call-1",'
+    f'data: {{"v":2,"run_id":"{RUN}","seq":3,"type":"tool_result","tool_use_id":"call-1",'
     '"content":"Verse one","is_error":false}\n\n'
     "id: 4\nevent: succeeded\n"
-    f'data: {{"v":1,"run_id":"{RUN}","seq":4,"type":"succeeded",'
+    f'data: {{"v":2,"run_id":"{RUN}","seq":4,"type":"succeeded",'
     '"text":"Here is a second verse."}\n\n'
 ).encode()
 
@@ -174,7 +172,7 @@ def test_events_after_the_final_answer_never_reach_the_wire():
         ("unlisted_tool", ToolEffect.SIDE_EFFECTING),
     ],
 )
-def test_a_tool_calls_effect_comes_from_the_apps_tool_list(tool, effect):
+def test_a_tool_calls_effect_comes_from_the_requests_tools(tool, effect):
     events = decoded_events(
         _scripted(ToolCallEvent(tool_use_id="c", name=tool, input={}), FinalEvent(text="Done."))
     )

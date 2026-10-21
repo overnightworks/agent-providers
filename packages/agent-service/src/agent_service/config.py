@@ -3,12 +3,11 @@
 The service accepts at most one subscription profile, for Claude, which needs its
 token file and a ``[cli.claude]`` table naming the absolute program and the exact version
 it must report, beside the ``[cli]`` section's private ``working_root``, checked at load. An
-app that lists tools names its one https MCP origin; an origin is never shared between apps
-and needs the signing key. At load, every such app's capability is measured against the
-8,192-character limit with a reserved subject size and timestamp width, so an app whose tools
-do not fit stops startup instead of failing its users. The ``[mcp]`` section names the one
-CA bundle (``ca_file``, an absolute path) the service trusts for those origins; it is required
-as soon as any app declares an origin, and otherwise optional and unused.
+app that offers tools names its one https MCP origin, and signs a capability for each run
+that grants the tools its request names; an origin is never shared between apps and needs the
+signing key. The ``[mcp]`` section names the one CA bundle (``ca_file``, an absolute path) the
+service trusts for those origins; it is required as soon as any app declares an origin, and
+otherwise optional and unused.
 
 A TOML file is read once at startup into frozen models that forbid unknown
 fields. A file the models refuse stops the service with an error naming the
@@ -22,7 +21,7 @@ from __future__ import annotations
 
 import re
 import tomllib
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from enum import StrEnum
 from functools import cached_property
 from pathlib import Path
@@ -42,17 +41,11 @@ from pydantic import (
 )
 from webauth.https_client import is_https_url
 
-from agent_client.capability import MAX_CAPABILITY_CHARACTERS, McpOrigin
-from agent_client.tools import ToolEffect
-from agent_client.wire import MAX_EVENT_BYTES, MAX_PURPOSE_LENGTH
+from agent_client.capability import McpOrigin
+from agent_client.wire import MAX_EVENT_BYTES
 from agent_providers.config import PrivateWorkingRoot, WorkingRootNotPrivateError
 from agent_providers.secret_file import read_token_file, shown_text
-from agent_service.capability import (
-    CapabilityScope,
-    CapabilityTooLarge,
-    preflight_claims,
-    signed_capability,
-)
+from agent_service.capability import CapabilityScope
 from agent_service.signing import SigningKey, load_signing_key
 
 NonEmptyText = Annotated[str, Field(min_length=1, strict=True)]
@@ -272,21 +265,13 @@ class RouteConfig(_Section):
 
 
 class AppConfig(_Section):
-    """One app: its workload client, its MCP origin and its tools' effects.
+    """One app: its workload client and its MCP origin.
 
-    A tool the app does not list is treated as side-effecting. The keys of the tools
-    table are the tools a capability permits; an empty table permits none.
+    The app's tools and their effects arrive with each run request.
     """
 
     workload_client: NonEmptyText
-    tools: dict[NonEmptyText, ToolEffect] = Field(default_factory=dict)
     mcp_origin: McpOrigin | None = None
-
-    def granted_tools(self) -> tuple[str, ...]:
-        return tuple(sorted(self.tools))
-
-    def tool_effect(self, tool_name: str) -> ToolEffect:
-        return self.tools.get(tool_name, ToolEffect.SIDE_EFFECTING)
 
 
 def _named_tables(
@@ -361,15 +346,6 @@ def _refuse_an_origin_without_signing(document: object) -> None:
             )
 
 
-def _refuse_tools_without_an_origin(document: object) -> None:
-    for app_name, app in _named_tables(document, "apps", AppConfig):
-        tools = _value(app, "tools")
-        if isinstance(tools, Mapping) and tools and _value(app, "mcp_origin") is None:
-            raise ValueError(
-                f"apps.{shown_text(app_name)}.mcp_origin: required because the app lists tools"
-            )
-
-
 def _declares_an_origin(app: object) -> bool:
     return _value(app, "mcp_origin") is not None
 
@@ -391,7 +367,6 @@ RULES_ON_THE_RAW_DOCUMENT: Final = (
     _refuse_a_claude_profile_without_its_token_file,
     _refuse_a_claude_profile_without_its_program_table,
     _refuse_an_origin_without_signing,
-    _refuse_tools_without_an_origin,
     _refuse_an_origin_without_a_ca_bundle,
 )
 
@@ -450,32 +425,12 @@ class ServiceConfig(_Section):
                 )
         return self
 
-    @model_validator(mode="after")
-    def _every_capability_fits(self) -> Self:
-        for app_name, app in self.apps.items():
-            if (scope := self.capability_scope(app_name)) is None:
-                continue
-            claims = preflight_claims(
-                scope,
-                app=app_name,
-                issuer=self.identity.issuer,
-                max_duration_s=self.runs.max_duration_s,
-            )
-            try:
-                signed_capability(scope, claims)
-            except CapabilityTooLarge as too_large:
-                raise ValueError(
-                    f"apps.{shown_text(app_name)}.tools: the capability for a purpose of"
-                    f" {MAX_PURPOSE_LENGTH} characters would be {too_large.length} characters;"
-                    f" the limit is {MAX_CAPABILITY_CHARACTERS}"
-                ) from None
-        return self
-
-    def capability_scope(self, app_name: str) -> CapabilityScope | None:
+    def capability_scope(self, app_name: str, tools: Iterable[str]) -> CapabilityScope | None:
+        """What the app's capability is bound to, granting exactly ``tools`` sorted."""
         app = self.apps[app_name]
         if app.mcp_origin is None or self.signing is None:
             return None
-        return CapabilityScope(app.mcp_origin, app.granted_tools(), self.signing.key)
+        return CapabilityScope(app.mcp_origin, tuple(sorted(tools)), self.signing.key)
 
     def mcp_trust_bundle(self) -> Path | None:
         """The CA bundle for the apps' MCP origins; ``None`` while no app declares an origin."""

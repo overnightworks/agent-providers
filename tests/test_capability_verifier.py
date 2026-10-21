@@ -25,7 +25,6 @@ from agent_client.mcp_server import (
 from agent_service.capability import (
     CapabilityScope,
     capability_claims,
-    preflight_claims,
     signed_capability,
 )
 from agent_service.signing import SigningKey
@@ -132,20 +131,6 @@ def test_a_capability_is_valid_until_the_second_it_expires(now, outcome):
 
 def test_a_capability_is_refused_before_the_second_it_is_issued():
     assert _verified(_minted_token(), now=ISSUED_AT - 1) is CapabilityRefusal.ISSUED_IN_FUTURE
-
-
-def test_the_preflight_capability_is_refused_as_issued_in_the_future():
-    token = signed_capability(
-        SCOPE,
-        preflight_claims(
-            SCOPE,
-            app="notes",
-            issuer="https://k.test",
-            max_duration_s=60,
-        ),
-    ).token
-
-    assert _verified(token) is CapabilityRefusal.ISSUED_IN_FUTURE
 
 
 def test_a_capability_signed_by_another_key_is_refused_for_its_signature():

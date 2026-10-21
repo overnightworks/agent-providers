@@ -39,7 +39,7 @@ from agent_service.run_records import RunRecorder, RunRecords
 ALICE = Principal(TEST_ISSUER, "user-alice")
 BOB = Principal(TEST_ISSUER, "user-bob")
 ALICE_ELSEWHERE = Principal("https://elsewhere.test/realms/x", "user-alice")
-NOT_FOUND_BODY = b'{"v":1,"code":"not_found","message":"No such run."}'
+NOT_FOUND_BODY = b'{"v":2,"code":"not_found","message":"No such run."}'
 
 
 @dataclass(frozen=True)

@@ -45,7 +45,6 @@ from relay_support import (
     yield_until,
 )
 from service_support import (
-    SONGMAKER,
     alice_admitted_run,
     decoded_events,
     failure_lines,
@@ -406,7 +405,6 @@ def streamed(runner: BarrierRunner, runs: RunConfig | None = None) -> asyncio.Ta
     frames = run_frames(
         alice_admitted_run(uuid.uuid4()),
         runner,
-        SONGMAKER,
         runs or RunConfig(),
         LoopClock(),
         RunRecords(),
@@ -1580,7 +1578,6 @@ def test_a_result_is_released_only_after_the_service_resumed_the_runner_past_it(
         frames = run_frames(
             alice_admitted_run(uuid.uuid4()),
             BarrierRunner(rig.barrier, final_after=1),
-            SONGMAKER,
             RunConfig(),
             LoopClock(),
             RunRecords(),

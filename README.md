@@ -310,7 +310,9 @@ whose required keys have no default; startup names the field of any unknown or
 missing one and exits 2. `agent_service.config` documents the file, and the
 decision record owns the rulings behind it.
 
-**Routes.** `POST /runs` takes a `RunRequest` and answers with the run's event
+**Routes.** `POST /runs` takes a `RunRequest` (wire version 2: `v`, `purpose`,
+`turn` and `tools`, a map from each tool the run may call to its effect; a body
+with any other `v` answers 400 `unsupported_version`) and answers with the run's event
 stream (SSE), ending every run with exactly one terminal event except the cut
 stream of a dropped client. `GET /runs/{id}` returns the run's status, readable
 only by the app and user that started it (the record is in memory, kept up to an
@@ -325,7 +327,8 @@ subscription_groups`) takes the CLI route under the subscription profile; a memb
 of an API group (`api_groups`, set together with `[route] api_alias`) who also
 holds the app's own group takes the paid API route; anyone else is not enabled.
 `RunRequest.purpose` (`[a-z][a-z0-9-]{0,63}`) labels the run and its capability
-and routes nothing. At most `[runs] max_parallel_cli_runs` (default 5) CLI runs
+and routes nothing. An app without an MCP origin that names a tool answers 403
+`forbidden`, before the route. At most `[runs] max_parallel_cli_runs` (default 5) CLI runs
 are admitted; one beyond gets 429 `busy` with `Retry-After` and never falls back
 to the API route. Today only the CLI runner is installed, with Claude as its only
 provider; the version of each pinned CLI is checked at startup.
@@ -339,9 +342,12 @@ file and the field. `offered_to(role)` is a display filter, not the security
 boundary: the service checks the role.
 
 **App tools through MCP.** An app that offers tools declares one canonical https
-MCP origin in the service's configuration; the service mints each admitted run a
-capability (an RS256 token signed with the service's one RSA-3072 key,
-`[signing] key_file`, at most 8,192 characters) and trusts the CA bundle
+MCP origin in the service's configuration (`[apps.<app>]` holds `workload_client` and
+`mcp_origin`); the app names the tools of each run in its request, and the service
+mints each admitted run a capability that grants exactly those names, and stamps the
+request's effects onto the run's tool calls (a tool outside the map counts as
+side-effecting). The capability is an RS256 token signed with the service's one RSA-3072 key,
+`[signing] key_file`, at most 8,192 characters); the service trusts the CA bundle
 `[mcp] ca_file` names for those origins alone. The app installs the client with
 `[mcp-server]` and serves `McpServer.in_front_of(app)` as its outermost ASGI app,
 never a `Route` or `Mount` in its router (the service refuses their slash

@@ -96,7 +96,10 @@ class AgentDefinition(BaseModel):
     def request(self, messages: list[TurnMessage]) -> RunRequest:
         """The body that starts a run of this agent over these messages."""
         return RunRequest(
-            v=1, purpose=self.name, turn=Turn(system=self.prompt, messages=messages)
+            v=2,
+            purpose=self.name,
+            turn=Turn(system=self.prompt, messages=messages),
+            tools={declaration.name: declaration.effect for declaration in self.tools},
         )
 
 

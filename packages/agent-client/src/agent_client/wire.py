@@ -36,7 +36,7 @@ from pydantic import (
 
 from agent_client.tools import ToolEffect
 
-PROTOCOL_VERSION: Final = 1
+PROTOCOL_VERSION: Final = 2
 MAX_EVENT_BYTES: Final = 1_048_576
 MAX_TOOL_INPUT_DEPTH: Final = 128
 MAX_MESSAGE_LENGTH: Final = 500
@@ -93,7 +93,7 @@ def _json_integer(value: object) -> object:
     return value
 
 
-ProtocolVersion = Annotated[Literal[1], BeforeValidator(_json_integer)]
+ProtocolVersion = Annotated[Literal[2], BeforeValidator(_json_integer)]
 """The one decider of whether a ``v`` is the version this package speaks."""
 
 
@@ -345,6 +345,10 @@ class RunStatus(_WireModel):
         return self
 
 
+ToolName = Annotated[UnicodeText, Field(min_length=1)]
+"""The one decider of a tool's name on the wire, the type of a capability's ``tools`` entries."""
+
+
 class TurnRole(StrEnum):
     USER = "user"
     ASSISTANT = "assistant"
@@ -367,7 +371,13 @@ class Turn(_StrictModel):
 
 
 class RunRequest(_WireModel):
-    """The HTTP body a client sends to start a run."""
+    """The HTTP body a client sends to start a run.
+
+    ``tools`` maps each tool the run may call to its effect. The service signs
+    exactly those names into the run's capability and stamps the effects onto
+    the run's tool calls; it grants nothing else.
+    """
 
     purpose: Purpose
     turn: Turn
+    tools: dict[ToolName, Annotated[ToolEffect, Field(strict=False)]]

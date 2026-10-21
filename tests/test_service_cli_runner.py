@@ -20,8 +20,9 @@ import struct
 import threading
 import time
 import uuid
-from collections.abc import AsyncGenerator, Callable, Coroutine, Iterator
+from collections.abc import AsyncGenerator, Callable, Coroutine, Iterator, Mapping
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any, NamedTuple
 from urllib.parse import urlsplit
@@ -57,7 +58,7 @@ from service_support import (
     CLI_PROFILE,
     PINNED_CLAUDE_VERSION,
     PROCESS_TOKEN,
-    SONGMAKER,
+    SONGMAKER_TOOLS,
     TEST_ISSUER,
     ClientSocket,
     Drive,
@@ -118,7 +119,7 @@ from agent_service.runners import Runners
 
 MINT = TokenMint()
 CANARY = "cli-text-" + uuid.uuid4().hex
-PLAIN_APP = {"tools": {}, "mcp_origin": None}
+PLAIN_APP = {"mcp_origin": None}
 VERSION_LINE = f"{PINNED_CLAUDE_VERSION} (Claude Code)"
 THREE_MESSAGE_TURN = {
     "system": SYSTEM_TEXT,
@@ -197,8 +198,8 @@ def headers() -> dict[str, str]:
     return run_headers(MINT.workload(), MINT.user())
 
 
-def post_a_run(base_url: str) -> list[RunEvent]:
-    body = run_body(turn=THREE_MESSAGE_TURN)
+def post_a_run(base_url: str, tools: Mapping[str, str] | None = None) -> list[RunEvent]:
+    body = run_body(turn=THREE_MESSAGE_TURN, tools=dict(tools or {}))
     return decoded_events(post_run(base_url, headers(), body).content)
 
 
@@ -299,7 +300,7 @@ def test_a_capability_never_reaches_the_tool_free_cli(
 ) -> None:
     capture = tmp_path / "capture"
     signed = record_signed_tokens(monkeypatch)
-    config = a_config(tmp_path, a_fake_claude(tmp_path, capture=capture), songmaker={"tools": {}})
+    config = a_config(tmp_path, a_fake_claude(tmp_path, capture=capture), songmaker={})
 
     events = drive_over_http(child_cleanup, monkeypatch, config, post_a_run)
 
@@ -315,7 +316,9 @@ def test_without_a_cli_section_a_tool_app_is_provider_unavailable(
     config = a_config(tmp_path, a_fake_claude(tmp_path, capture=capture), songmaker={})
     without_cli = config.model_copy(update={"cli": None})
 
-    events = drive_over_http(child_cleanup, monkeypatch, without_cli, post_a_run)
+    events = drive_over_http(
+        child_cleanup, monkeypatch, without_cli, partial(post_a_run, tools=SONGMAKER_TOOLS)
+    )
 
     terminal = events[-1]
     assert isinstance(terminal, Failed)
@@ -978,7 +981,6 @@ def a_scripted_run(
     frames = run_frames(
         dataclasses.replace(alice_admitted_run(run_id), capability=capability),
         CliRunner(config, tls_context=tls_context, clock=clock),
-        SONGMAKER,
         config.runs,
         clock,
         records,

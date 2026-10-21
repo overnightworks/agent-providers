@@ -1,0 +1,8 @@
+claim_id = "47ba257f3d39480fbaeb22aaac5bd340"
+agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
+role = "builder"
+base = "df571cbed4737a5747cd917a1118b53d53544d6f"
+branch = "docs/readme-cleanup"
+scope = ["AGENTS.md", "README.md", "scripts"]
+opened_commit = "d7bfde860b62ec1d7473034cfd081372f9404ede"
+whole_reason = "One README cleanup: command sequences become shipped scripts and the README keeps concepts; the scripts and the README rows that name them change together."

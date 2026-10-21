@@ -470,12 +470,12 @@ def test_codex_image_preflight_says_the_cli_is_unavailable_when_an_image_depende
     assert failure.code is SafeRouteReasonCode.CLI_UNAVAILABLE
 
 
-README = Path(__file__).resolve().parents[1] / "README.md"
+MIGRATING = Path(__file__).resolve().parents[1] / "docs" / "MIGRATING.md"
 DOTTED_NAME = re.compile(r"`((?:[a-z_]+\.)+[A-Za-z_]+)`")
 
 
 def names_table_rows() -> list[tuple[str, str]]:
-    names_section = README.read_text().split("### Names and values", 1)[1].split("\n## ", 1)[0]
+    names_section = MIGRATING.read_text().split("### Names and values", 1)[1].split("\n## ", 1)[0]
     table_lines = [line for line in names_section.splitlines() if line.startswith("|")]
     rows = []
     for line in table_lines[2:]:

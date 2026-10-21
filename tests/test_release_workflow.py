@@ -12,7 +12,7 @@ _WORKFLOW = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "rel
 _REPOSITORY = "overnightworks/agent-providers"
 _MIGRATION_LINK = (
     "**Breaking release.** Read [Migrating to 0.3.0]"
-    f"(https://github.com/{_REPOSITORY}/blob/v0.3.0/README.md#migrating-to-030)"
+    f"(https://github.com/{_REPOSITORY}/blob/v0.3.0/docs/MIGRATING.md#migrating-to-030)"
     " before you bump your pin."
 )
 
@@ -26,8 +26,9 @@ def _run_script(step_name: str) -> str:
     return "\n".join(line[10:] for line in step.group(1).splitlines())
 
 
-def _notice_for(tag: str, readme: str, tmp_path: Path) -> str:
-    (tmp_path / "README.md").write_text(readme, encoding="utf-8")
+def _notice_for(tag: str, migrating: str, tmp_path: Path) -> str:
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "MIGRATING.md").write_text(migrating, encoding="utf-8")
     output = tmp_path / "github_output"
     output.touch()
     subprocess.run(
@@ -45,7 +46,7 @@ def _notice_for(tag: str, readme: str, tmp_path: Path) -> str:
 
 
 @pytest.mark.parametrize(
-    ("tag", "readme_heading", "notice"),
+    ("tag", "heading", "notice"),
     [
         ("v0.3.0", "## Migrating to 0.3.0", _MIGRATION_LINK),
         ("v0.3.1", "## Migrating to 0.3.0", ""),
@@ -55,9 +56,9 @@ def _notice_for(tag: str, readme: str, tmp_path: Path) -> str:
     ids=["tag with its section", "tag of another version", "no section", "section one level down"],
 )
 def test_the_release_notice_exists_only_for_a_tag_with_its_migration_section(
-    tmp_path, tag, readme_heading, notice
+    tmp_path, tag, heading, notice
 ):
-    assert _notice_for(tag, f"# Title\n\n{readme_heading}\n\ntext\n", tmp_path) == notice
+    assert _notice_for(tag, f"# Title\n\n{heading}\n\ntext\n", tmp_path) == notice
 
 
 @pytest.mark.parametrize(

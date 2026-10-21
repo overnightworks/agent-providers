@@ -44,9 +44,9 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME#v}"
           notice=""
-          if grep -qxF "## Migrating to ${version}" README.md; then
+          if grep -qxF "## Migrating to ${version}" docs/MIGRATING.md; then
             anchor="migrating-to-${version//./}"
-            notice="**Breaking release.** Read [Migrating to ${version}](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/README.md#${anchor}) before you bump your pin."
+            notice="**Breaking release.** Read [Migrating to ${version}](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/docs/MIGRATING.md#${anchor}) before you bump your pin."
           fi
           echo "notice=${notice}" >> "$GITHUB_OUTPUT"
 

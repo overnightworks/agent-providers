@@ -480,7 +480,7 @@ compromise.
     refusal names `apps.<app>.tools`, that length, the measured length and the limit.
     Authority: „wir bauen das entsprechend“.
 15a. **Documents.** This ruling, H3's registry bullet, the A0b codes table and the
-    README rows `agent_client.capability`, `agent_service.config` and
+    the modules `agent_client.capability`, `agent_service.config` and
     `agent_service.capability`.
 
 **A1a4-2b rulings (operator and head, 16. and 17.10.2026).**
@@ -545,7 +545,7 @@ compromise.
     returns its generator (`runners.py` states the contract); and a recorder failure
     whose chain carries a yielded event.
 15b. **Documents.** This ruling, H3's capability bullet and Consequence, the A1a1
-    order table and the README rows `agent_service.app`, `agent_service.signing`,
+    order table and the modules `agent_service.app`, `agent_service.signing`,
     `agent_service.capability` and `agent_service.runners`.
 
 ### A1b MCP transport (head decision HD1, 17.10.2026)

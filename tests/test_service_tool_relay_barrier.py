@@ -99,7 +99,7 @@ from agent_service.tool_relay import (
 )
 
 SUPPORTED = "2025-11-25"
-CLAIMED = ("edit_song", "read_song", "list_songs")
+CLAIMED = ("edit_song", "read_song")
 OFFERED = ("edit_song", "read_song", "delete_song")
 REFUSAL = {"code": -32602, "message": "Invalid params"}
 UPSTREAM_TEXT = "ran edit_song"

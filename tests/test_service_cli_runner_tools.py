@@ -190,6 +190,7 @@ def a_tool_run(
     *,
     calls: Sequence[ClaudeCall] = (),
     tools: Mapping[str, str] = TOOLS,
+    offered: Sequence[str] | None = None,
     runs: dict[str, object] | None = None,
     overrides: Mapping[str, Responder] | None = None,
     serving_authority: TestAuthority | None = None,
@@ -211,7 +212,11 @@ def a_tool_run(
     )
     with ExitStack() as running:
         app = running.enter_context(
-            a_tool_app(serving_authority or authority, list(tools), overrides=overrides)
+            a_tool_app(
+                serving_authority or authority,
+                list(tools if offered is None else offered),
+                overrides=overrides,
+            )
         )
         if not app_stays_up:
             running.close()
@@ -576,6 +581,33 @@ def test_a_cli_that_never_connects_the_relay_ends_at_the_start_check(
         [("failed", FailureCode.PROVIDER_ERROR)],
         [],
     )
+
+
+@pytest.mark.parametrize(
+    ("signed", "offered"),
+    [
+        pytest.param(["read_note"], ["edit_note"], id="none-signed-offered"),
+        pytest.param(["read_note", "edit_note"], ["read_note"], id="partial-overlap"),
+    ],
+)
+def test_a_signed_tool_the_app_does_not_offer_ends_the_run_before_any_child(
+    tmp_path, authority, child_cleanup, monkeypatch, caplog, signed, offered
+):
+    caplog.set_level("DEBUG")
+
+    run = a_tool_run(
+        tmp_path,
+        authority,
+        child_cleanup,
+        monkeypatch,
+        calls=[READ_NOTE],
+        tools=dict.fromkeys(signed, "read_only"),
+        offered=offered,
+    )
+
+    assert (ended_as(run), run.capture.started, held_claude_slots()) == (PROVIDER_ERROR, False, 0)
+    assert "UnofferedTool" in [kind for _event, kind, _function in failure_lines(caplog)]
+    assert not [name for name in signed if name in caplog.text]
 
 
 def test_a_call_to_a_tool_outside_the_apps_grant_ends_the_run_and_never_reaches_the_app(

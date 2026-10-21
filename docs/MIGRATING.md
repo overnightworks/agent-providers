@@ -13,6 +13,7 @@ A host migrates at its pin bump to 0.6.0.
 | (absent) | `[identity] api_groups` and `[route] api_alias`, optional and set together; without them nobody reaches the paid route |
 | `RunRequest.purpose`, any non-empty text the app's `purposes` list names | `agent_client.wire.Purpose`: `[a-z][a-z0-9-]{0,63}`, matched against the whole string; anything else answers 422 `invalid_request`. Any valid purpose from any registered app is admitted; it labels the run and its capability and routes nothing |
 | `agent_client.mcp_wire.object_without_duplicate_members` | removed, no alias remains; `agent_client.mcp_wire.read_strict_json(text)` reads JSON that repeats no member and holds no `NaN` or infinity, and raises only `ValueError` |
+| A signed tool the app's `tools/list` does not offer is dropped from the run | the run ends as `failed: provider_error` before any model execution; an app's `tools/list` must cover every name its requests are signed for. An offered tool that is not signed stays out of the run, as before |
 
 ## Migrating to 0.5.0
 

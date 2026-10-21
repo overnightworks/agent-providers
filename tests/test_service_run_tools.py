@@ -71,6 +71,7 @@ from agent_service.tool_relay import (
     Relay,
     RepeatedToolOffer,
     ToolCallBarrier,
+    UnofferedTool,
 )
 
 SUPPORTED = "2025-11-25"
@@ -755,7 +756,7 @@ class FailedOpen:
     expected: type[BaseException]
     lines: list[tuple[str, str]]
     refuses_listing: bool = False
-    offers_twice: bool = False
+    listed: tuple[str, ...] | None = None
     fails_transport_close: bool = False
     stalls_cleanup: bool = False
     raised_by: tuple[type, str] | None = None
@@ -768,9 +769,12 @@ FAILED_OPENS = {
     "an allowed tool is offered twice and the client's exit fails": FailedOpen(
         RepeatedToolOffer,
         [(CLIENT_EVENT, "UpstreamCallLost")],
-        offers_twice=True,
+        listed=("edit_song", "edit_song"),
         fails_transport_close=True,
         raised_by=(McpRelayOwner, "__init__"),
+    ),
+    "a signed tool is missing from the listing": FailedOpen(
+        UnofferedTool, [], listed=("delete_song",), raised_by=(McpRelayOwner, "__init__")
     ),
     "the relay cannot listen and the client's cleanup stalls": FailedOpen(
         OSError, [(CLIENT_EVENT, "UpstreamCleanupIncomplete")], stalls_cleanup=True
@@ -815,8 +819,9 @@ def test_a_failed_open_leaves_the_client_and_keeps_its_own_failure(
         await scene.assert_nothing_left()
         await scene.app_saw_every_connection_end()
         assert scene.logged() == case.lines
+        assert "edit_song" not in caplog.text
 
-    pages = [tool_listing(["edit_song", "edit_song"])] if case.offers_twice else None
+    pages = [tool_listing(list(case.listed))] if case.listed else None
     run_scene(scenario, authority, monkeypatch, caplog, refusing_the_listing, pages)
 
 

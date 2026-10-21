@@ -1,8 +1,0 @@
-claim_id = "b63174533573401e95638374a2c3b65d"
-agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
-role = "builder"
-base = "ca79cbe06aca27bac0e1210e7adeef16ec3ffe86"
-branch = "claude/issue-383-a4-p3-agent-files"
-scope = ["AGENTS.md", "README.md", "docs/decisions/0001-agent-service.md", "packages/agent-client/pyproject.toml", "packages/agent-client/src/agent_client/__init__.py", "packages/agent-client/src/agent_client/agents.py", "packages/agent-client/src/agent_client/mcp_server/__init__.py", "packages/agent-client/src/agent_client/wire.py", "tests/test_agent_files.py", "tests/test_wire_protocol.py", "uv.lock"]
-opened_commit = "e80d2b96633215b462d6df835bef63fc30dcbdea"
-whole_reason = "One new client module, its three shared wire types, one dependency pin and their docs; the module and its types are one contract and do not split."

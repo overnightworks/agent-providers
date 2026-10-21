@@ -40,6 +40,7 @@ from service_support import (
     assert_rejected,
     decoded_events,
     post_run,
+    record_signed_tokens,
     run_body,
     run_headers,
     served,
@@ -498,13 +499,15 @@ SUBSCRIBER = [SUBSCRIPTION_GROUP, SONGMAKER_GROUP]
 API_MEMBER = [API_GROUP, SONGMAKER_GROUP]
 
 
-def _routed_run(config, groups, **body):
+def _routed_run(config, groups, *, afterwards=None, **body):
+    """Post one run; ``afterwards(base_url)`` may probe the same app before it is discarded."""
     runners = Runners(cli=ScriptedRunner(CLI_SCRIPT), api=ScriptedRunner(API_SCRIPT))
     app = create_app(config, runners=runners, fetch_key_set=MINT.fetch_key_set)
     with served(app) as base_url:
-        response = post_run(
-            base_url, run_headers(MINT.workload(), MINT.user(groups=groups)), run_body(**body)
-        )
+        headers = run_headers(MINT.workload(), MINT.user(groups=groups))
+        response = post_run(base_url, headers, run_body(**body))
+        if afterwards is not None:
+            afterwards(base_url, headers)
     return response, runners
 
 
@@ -860,18 +863,38 @@ def test_o9_a_malformed_request_model_is_invalid_even_when_an_override_would_rep
     ],
 )
 def test_the_routing_table_applies_unchanged_to_the_overridden_model(
-    override, groups, route, configure
+    override, groups, route, configure, monkeypatch
 ):
-    config = _songmaker_models(cowriter=override)
+    signed = record_signed_tokens(monkeypatch)
+    config = service_config(
+        models={"songmaker": {"cowriter": override}}, runs={"max_parallel_cli_runs": 1}
+    )
+    at_the_refusal = {}
+
+    def probe_the_refused_app(base_url, headers):
+        at_the_refusal["signed"] = list(signed)
+        if configure is None and route is None:
+            at_the_refusal["place"] = post_run(
+                base_url, headers, run_body(purpose="summarizer", model=LISTED)
+            )
 
     response, runners = _routed_run(
-        (configure or (lambda built: built))(config), groups, model=None
+        (configure or (lambda built: built))(config),
+        groups,
+        model=None,
+        tools=SONGMAKER_TOOLS,
+        afterwards=probe_the_refused_app,
     )
 
     admitted = runners.cli.admitted + runners.api.admitted
     if route is None:
         assert_rejected(response, RejectionCode.NOT_ENABLED, 403)
-        assert admitted == []
+        assert at_the_refusal["signed"] == []
+        if configure is None:
+            assert _admitted_events(at_the_refusal["place"])
+            assert [run.route for run in admitted] == [CLI_ON_SONNET]
+        else:
+            assert admitted == []
     else:
         assert _admitted_events(response)
         assert [run.route for run in admitted] == [route]

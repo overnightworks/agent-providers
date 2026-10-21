@@ -14,12 +14,13 @@ Apps stop talking to language models themselves. An app sends a **purpose** (the
 name of its agent, such as `cowriter`; it labels the run and routes nothing), the turn data, and two tokens — the
 end user's and its own.
 
-*Amendment (22.10.2026, #382, #406).* The purpose still labels the run and its capability and now
-also keys the model override of its app (H5); it chooses no route itself.
- One agent service decides who is asking, whether they may
+One agent service decides who is asking, whether they may
 use the operator's subscription, and which route serves the caller. The app
 never names a provider, a model, a route or a user id, and never holds an LLM or
 subscription credential.
+
+*Amendment (22.10.2026, #382, #406).* The purpose still labels the run and its capability and now
+also keys the model override of its app (H5); it chooses no route itself.
 
 There are exactly two routes:
 

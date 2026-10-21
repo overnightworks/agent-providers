@@ -391,7 +391,9 @@ class RunRequest(_WireModel):
     ``tools`` maps each tool the run may call to its effect. The service signs
     exactly those names into the run's capability and stamps the effects onto
     the run's tool calls; it grants nothing else. ``model``, when present, is the
-    model the run must use; the service never substitutes another. ``roles`` is
+    model the run asks for; the service runs exactly that model unless the
+    installation overrides the model of the run's purpose
+    (``[apps.<app>.models]``), and never substitutes any other. ``roles`` is
     what the agent file offers the agent to, never what the caller is: the
     service answers ``forbidden`` unless the person's own role is in it.
     """

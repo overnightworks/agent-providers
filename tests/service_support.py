@@ -214,7 +214,13 @@ def with_listed_models(config: ServiceConfig, models: Iterable[str]) -> ServiceC
 
 
 def without_cli(config: ServiceConfig) -> ServiceConfig:
-    return config.model_copy(update={"cli": None})
+    """``config`` as a service without the subscription route starts: no ``[cli]``, no profiles."""
+    kept = {
+        name: getattr(config, name)
+        for name in ServiceConfig.model_fields
+        if name not in {"cli", "profiles"}
+    }
+    return ServiceConfig.model_validate(kept)
 
 
 def without_profiles(config: ServiceConfig) -> ServiceConfig:

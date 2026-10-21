@@ -354,8 +354,10 @@ boundary: the service checks the role.
 **App tools through MCP.** An app that offers tools declares one canonical https
 MCP origin in the service's configuration (`[apps.<app>]` holds `workload_client` and
 `mcp_origin`, and optionally `[apps.<app>.models]`, which maps an agent's name to the model
-it runs on, such as `cowriter = "claude/sonnet"`; a restart applies a change, and a name the
-app never sends matches nothing, with no error); the app names the tools of each run in its request, and the service
+it runs on, such as `summarizer = "claude/sonnet"`; a restart applies a change, and a name the
+app never sends matches nothing, with no error; a model the subscription does not list sends
+that agent to the paid API for every caller with API rights, and gives subscription-only
+callers `not_enabled`); the app names the tools of each run in its request, and the service
 mints each admitted run a capability that grants exactly those names, and stamps the
 request's effects onto the run's tool calls (a tool outside the map counts as
 side-effecting). The capability is an RS256 token signed with the service's one RSA-3072 key,

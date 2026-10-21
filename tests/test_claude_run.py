@@ -86,6 +86,7 @@ def a_run(**overrides: object) -> ClaudeRun:
         "history": HISTORY,
         "relay": None,
         "tool_timeout_seconds": 600.0,
+        "model": None,
     }
     return ClaudeRun(**{**fields, **overrides})  # type: ignore[arg-type]
 
@@ -116,8 +117,11 @@ def expected_arguments(tmp_path: Path, max_turns: str = "31") -> tuple[str, ...]
     )
 
 
+def model_options(arguments: tuple[str, ...]) -> list[str]:
+    return [a for a in arguments if a == "--model" or a.startswith("--model=")]
+
+
 FORBIDDEN_FLAGS = (
-    "--model",
     "--permission-mode",
     "--dangerously-skip-permissions",
     "--resume",
@@ -131,6 +135,7 @@ def test_a_tool_free_run_has_the_exact_isolated_command_line(tmp_path: Path) -> 
 
     assert arguments == expected_arguments(tmp_path)
     assert not set(FORBIDDEN_FLAGS) & set(arguments)
+    assert model_options(arguments) == []
     assert "--mcp-config" not in arguments
     assert "--allowedTools" not in arguments
 
@@ -146,6 +151,7 @@ def test_a_run_with_a_relay_attaches_only_the_relay_server(tmp_path: Path) -> No
         "mcp__relay__*",
     )
     assert not set(FORBIDDEN_FLAGS) & set(arguments)
+    assert model_options(arguments) == []
 
 
 def test_the_run_files_hold_only_the_system_text_and_never_the_token() -> None:
@@ -822,3 +828,36 @@ def test_a_refused_init_ends_the_run_when_it_is_read(
         [child_cleanup.state(owned) is GONE for owned in child_cleanup.listed()],
         thread_failures,
     ) == ([SurfaceVerdict.TOOL_BESIDE_RELAY], [], [], 0, [True], [])
+
+
+def test_a_run_requires_its_model_by_keyword() -> None:
+    with pytest.raises(TypeError, match="model"):
+        ClaudeRun(*POSITIONAL_FIELDS, relay=None, tool_timeout_seconds=600.0)  # type: ignore[call-arg]
+
+
+def test_a_run_refuses_its_model_by_position() -> None:
+    with pytest.raises(TypeError, match="positional argument"):
+        ClaudeRun(  # type: ignore[misc]
+            *POSITIONAL_FIELDS, "sonnet", relay=None, tool_timeout_seconds=600.0
+        )
+
+
+@pytest.mark.parametrize("relay", [None, ACCESS], ids=["relay-absent", "relay-present"])
+@pytest.mark.parametrize("model", ["sonnet", "--help", "-p", ".."])
+def test_a_model_is_one_equals_argument_and_the_only_change(
+    tmp_path: Path, model: str, relay: RelayAccess | None
+) -> None:
+    arguments = started(tmp_path, model=model, relay=relay).child.arguments
+    without_model = started(tmp_path, relay=relay).child.arguments
+
+    assert model_options(arguments) == [f"--model={model}"]
+    assert sorted(arguments) == sorted((*without_model, f"--model={model}"))
+    assert arguments.count("-p") == 1
+    assert arguments.count(model) == without_model.count(model)
+
+
+@pytest.mark.parametrize("relay", [None, ACCESS], ids=["relay-absent", "relay-present"])
+def test_a_run_without_a_model_passes_no_model_option(
+    tmp_path: Path, relay: RelayAccess | None
+) -> None:
+    assert model_options(started(tmp_path, model=None, relay=relay).child.arguments) == []

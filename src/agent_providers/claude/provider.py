@@ -776,6 +776,7 @@ class ClaudeRun:
     history: tuple[TurnMessage, ...] = field(repr=False)
     relay: RelayAccess | None = field(kw_only=True)
     tool_timeout_seconds: float = field(kw_only=True)
+    model: str | None = field(kw_only=True)
 
     def __post_init__(self) -> None:
         if not isinstance(self.token, SecretStr):
@@ -843,6 +844,10 @@ class ClaudeRun:
         line = {"type": "user", "message": {"role": "user", "content": transcript}}
         return (json.dumps(line) + "\n").encode()
 
+    def _model_option(self) -> tuple[str, ...]:
+        # One `--model=<name>` argument, so no name can be read as another option.
+        return () if self.model is None else (f"--model={self.model}",)
+
     def _arguments(self, home: Path) -> tuple[str, ...]:
         arguments = (
             "-p",
@@ -857,6 +862,7 @@ class ClaudeRun:
             str(self.max_tool_calls + TURNS_BEYOND_TOOL_CALLS),
             "--system-prompt-file",
             str(home / _SYSTEM_PROMPT_FILE_NAME),
+            *self._model_option(),
         )
         if self.relay is None:
             return arguments

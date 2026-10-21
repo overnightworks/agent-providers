@@ -20,6 +20,7 @@ A host migrates at its pin bump to 0.6.0.
 | `[apps.<app>] tools` table (the tools a capability permits, with their effects) | removed; a leftover table stops startup naming `apps.<app>.tools`. The app names its tools in each request; `AppConfig.tools`, `granted_tools` and `tool_effect`, and the startup size check with its `preflight_claims`, are gone, and the 8,192-character check of the actual token (422 `capability_too_large`) is the only size check |
 | `agent_client.mcp_wire.object_without_duplicate_members` | removed, no alias remains; `agent_client.mcp_wire.read_strict_json(text)` reads JSON that repeats no member and holds no `NaN` or infinity, and raises only `ValueError` |
 | A signed tool the app's `tools/list` does not offer is dropped from the run | the run ends as `failed: provider_error` before any model execution; an app's `tools/list` must cover every name its requests are signed for. An offered tool that is not signed stays out of the run, as before |
+| `ClaudeRun(binary, token, system, max_tool_calls, history, *, relay, tool_timeout_seconds)` | the same with the required keyword `model: str \| None`: `None` runs the CLI's own default model and passes no option, a name runs as the one argument `--model=<name>`; a host that builds a `ClaudeRun` without `model=` gets a `TypeError` |
 
 ## Migrating to 0.5.0
 

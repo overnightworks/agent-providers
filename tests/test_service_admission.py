@@ -209,6 +209,7 @@ def test_a_user_on_an_admin_only_agent_with_every_place_taken_is_forbidden_not_b
     refused = service.run(MINT.user(groups=[SUBSCRIPTION_GROUP, SONGMAKER_GROUP]), roles=["admin"])
 
     assert_rejected(refused, RejectionCode.FORBIDDEN, 403)
+    assert_rejected(service.run(), RejectionCode.BUSY, 429)
     service.let_all_go(held)
     service.let_all_go(service.fill_the_places())
 

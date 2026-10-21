@@ -73,12 +73,17 @@ CLI_SECTION = cli_section(
 )
 TOOLS_LINE = 'tools = { read_song = "read_only" }'
 
+SUBSCRIPTION_GROUPS_LINE = (
+    'subscription_groups = ["/old-subscription-members", "/subscription-members"]'
+)
+
 VALID_CONFIG = f"""
 [identity]
 issuer = "https://keycloak.test/realms/agent-test"
 jwks_url = "https://keycloak.test/realms/agent-test/protocol/openid-connect/certs"
 audience = "agent-test-audience"
-subscription_group = "/subscription-members"
+{SUBSCRIPTION_GROUPS_LINE}
+api_groups = ["/api-members"]
 group_claim = "member-groups"
 
 [server]
@@ -89,13 +94,11 @@ port = 8099
 provider = "claude"
 {TOKEN_FILE_LINE}
 
-[purposes."songmaker.cowriter"]
-cli_provider = "claude"
-api_alias = "cowriter"
+[route]
+api_alias = "assistant-api"
 
 [apps.songmaker]
 workload_client = "songmaker-test"
-purposes = ["songmaker.cowriter"]
 {TOOLS_LINE}
 {SONGMAKER_ORIGIN_LINE}"""
 
@@ -132,7 +135,12 @@ def test_a_valid_file_loads_with_its_configured_identity_and_the_documented_defa
     config = load_config(_written(tmp_path, VALID_CONFIG))
 
     assert config.identity.audience == "agent-test-audience"
-    assert config.identity.subscription_group == "/subscription-members"
+    assert config.identity.subscription_groups == {
+        "/old-subscription-members",
+        "/subscription-members",
+    }
+    assert config.identity.api_groups == {"/api-members"}
+    assert config.route.api_alias == "assistant-api"
     assert config.identity.group_claim == "member-groups"
     assert config.profiles["claude-main"].provider is Provider.CLAUDE
     assert (config.runs.heartbeat_interval_s, config.runs.idle_timeout_s) == (15, 120.0)
@@ -158,9 +166,7 @@ def test_an_unlisted_tool_counts_as_side_effecting(tmp_path, tool, effect):
 
 
 SECOND_CLAUDE_PROFILE = f'\n[profiles.claude-spare]\nprovider = "claude"\n{TOKEN_FILE_LINE}\n'
-SECOND_APP_WITH_SAME_CLIENT = (
-    '\n[apps.presentator]\nworkload_client = "songmaker-test"\npurposes = []\n'
-)
+SECOND_APP_WITH_SAME_CLIENT = '\n[apps.presentator]\nworkload_client = "songmaker-test"\n'
 
 
 def _with(old: str, new: str) -> str:
@@ -249,9 +255,47 @@ def _with_key_set_url(url: str) -> str:
             id="second-profile-for-a-provider",
         ),
         pytest.param(
-            _with('purposes = ["songmaker.cowriter"]', 'purposes = ["songmaker.judge"]'),
+            _with("[route]", '[purposes.chat]\napi_alias = "assistant-api"\n\n[route]'),
+            "purposes",
+            id="C1-leftover-purposes-table",
+        ),
+        pytest.param(
+            _with(
+                'workload_client = "songmaker-test"\n',
+                'workload_client = "songmaker-test"\npurposes = ["chat"]\n',
+            ),
             "apps.songmaker.purposes",
-            id="app-purpose-not-configured",
+            id="C2-leftover-app-purposes",
+        ),
+        pytest.param(
+            _with(SUBSCRIPTION_GROUPS_LINE, 'subscription_group = "/ki-abo"'),
+            "identity.subscription_group:",
+            id="C3-the-singular-subscription-group",
+        ),
+        pytest.param(
+            _with(SUBSCRIPTION_GROUPS_LINE, "subscription_groups = []"),
+            "identity.subscription_groups",
+            id="C4-no-subscription-group",
+        ),
+        pytest.param(
+            _with(SUBSCRIPTION_GROUPS_LINE, 'subscription_groups = ["ki-abo"]'),
+            "identity.subscription_groups",
+            id="C4-a-subscription-group-without-a-slash",
+        ),
+        pytest.param(
+            _with('api_groups = ["/api-members"]', 'api_groups = ["api-members"]'),
+            "identity.api_groups",
+            id="an-api-group-without-a-slash",
+        ),
+        pytest.param(
+            _with('[route]\napi_alias = "assistant-api"\n', ""),
+            "route.api_alias: required because identity.api_groups is set",
+            id="C5-api-groups-without-an-alias",
+        ),
+        pytest.param(
+            _with('api_groups = ["/api-members"]\n', ""),
+            "identity.api_groups: required because route.api_alias is set",
+            id="C5-an-alias-without-api-groups",
         ),
         pytest.param(
             VALID_CONFIG + SECOND_APP_WITH_SAME_CLIENT,
@@ -292,7 +336,7 @@ def _with_key_set_url(url: str) -> str:
             )
             for field, line in (
                 ("audience", 'audience = "agent-test-audience"\n'),
-                ("subscription_group", 'subscription_group = "/subscription-members"\n'),
+                ("subscription_groups", SUBSCRIPTION_GROUPS_LINE + "\n"),
                 ("group_claim", 'group_claim = "member-groups"\n'),
             )
         ),
@@ -446,8 +490,7 @@ def test_a_config_path_with_a_newline_is_shown_escaped_on_one_line_in_every_refu
 
 
 PRESENTATOR_ON_SONGMAKERS_ORIGIN = (
-    '\n[apps.presentator]\nworkload_client = "presentator-test"\npurposes = []\n'
-    + SONGMAKER_ORIGIN_LINE
+    '\n[apps.presentator]\nworkload_client = "presentator-test"\n' + SONGMAKER_ORIGIN_LINE
 )
 
 
@@ -535,9 +578,7 @@ PROFILES_WITH_NEWLINES = (
     + '\n[profiles."claude\\nspare"]\nprovider = "claude"\n'
 )
 APPS_WITH_NEWLINES = VALID_CONFIG.replace("[apps.songmaker]", '[apps."song\\nmaker"]')
-SECOND_APP_ON_THE_SAME_CLIENT = (
-    '\n[apps."pres\\nentator"]\nworkload_client = "songmaker-test"\npurposes = []\n'
-)
+SECOND_APP_ON_THE_SAME_CLIENT = '\n[apps."pres\\nentator"]\nworkload_client = "songmaker-test"\n'
 
 
 @pytest.mark.parametrize(
@@ -547,13 +588,6 @@ SECOND_APP_ON_THE_SAME_CLIENT = (
             PROFILES_WITH_NEWLINES,
             "profiles.claude\\nspare.provider: claude already has profile 'claude\\nmain'",
             id="second-profile-for-a-provider",
-        ),
-        pytest.param(
-            APPS_WITH_NEWLINES.replace(
-                'purposes = ["songmaker.cowriter"]', 'purposes = ["no\\npurpose"]'
-            ),
-            "apps.song\\nmaker.purposes: unknown purpose 'no\\npurpose'",
-            id="unknown-purpose",
         ),
         pytest.param(
             APPS_WITH_NEWLINES + SECOND_APP_ON_THE_SAME_CLIENT,
@@ -571,7 +605,7 @@ SECOND_APP_ON_THE_SAME_CLIENT = (
             (
                 APPS_WITH_NEWLINES
                 + '\n[apps."pres\\nentator"]\nworkload_client = "presentator-test"\n'
-                "purposes = []\n" + SONGMAKER_ORIGIN_LINE
+                + SONGMAKER_ORIGIN_LINE
             ),
             "apps.pres\\nentator.mcp_origin: https://songmaker.internal is already"
             " the MCP origin of app 'song\\nmaker'",
@@ -581,7 +615,7 @@ SECOND_APP_ON_THE_SAME_CLIENT = (
             _tuned_app_config(LAST_TOOL_NAME_LENGTH_AT_THE_LIMIT + 1).replace(
                 "[apps.songmaker]", '[apps."song\\nmaker"]'
             ),
-            "apps.song\\nmaker.tools: the capability for purpose 'songmaker.cowriter'"
+            "apps.song\\nmaker.tools: the capability for a purpose of 64 characters"
             " would be 8196 characters; the limit is 8192",
             id="capability-too-large",
         ),
@@ -654,45 +688,49 @@ def test_an_app_whose_capability_is_exactly_8192_characters_at_the_preflight_loa
     load_config(_written(tmp_path, _tuned_app_config()))
 
 
-@pytest.mark.parametrize(
-    ("text", "purpose"),
+SHORT_PURPOSE_LAST_TOOL_NAME_LENGTH_AT_THE_LIMIT = 55
+
+CAPABILITY_TOO_LARGE_FOR_A_LONGEST_PURPOSE = pytest.mark.parametrize(
+    ("text", "length"),
     [
         pytest.param(
             _tuned_app_config(LAST_TOOL_NAME_LENGTH_AT_THE_LIMIT + 1),
-            "songmaker.cowriter",
-            id="one-more-character-in-a-tool-name",
+            8193,
+            id="C6-one-more-character-in-a-tool-name",
         ),
         pytest.param(
-            (
-                _tuned_app_config()
-                .replace(
-                    'purposes = ["songmaker.cowriter"]',
-                    'purposes = ["songmaker.cowriter", "songmaker.cowriterx"]',
-                )
-                .replace(
-                    "[apps.songmaker]",
-                    '[purposes."songmaker.cowriterx"]\napi_alias = "cowriter"\n\n[apps.songmaker]',
-                )
-            ),
-            "songmaker.cowriterx",
-            id="a-second-purpose-one-character-longer",
+            _tuned_app_config(SHORT_PURPOSE_LAST_TOOL_NAME_LENGTH_AT_THE_LIMIT),
+            None,
+            id="C6-tools-that-fit-only-a-shorter-purpose",
         ),
         pytest.param(
             _tuned_app_config().replace("agent-test", "agent-testx"),
-            "songmaker.cowriter",
+            8193,
             id="an-issuer-one-character-longer",
+        ),
+        pytest.param(
+            _with(TOOLS_LINE + "\n", "tools = {}\n").replace(
+                "https://keycloak.test/realms/agent-test", "https://keycloak.test/" + "x" * 8200, 1
+            ),
+            None,
+            id="C7-an-origin-without-tools",
         ),
     ],
 )
-def test_an_app_whose_capability_would_be_8193_characters_stops_startup_naming_its_tools(
-    tmp_path, capsys, text, purpose
-):
-    config_file = _written(tmp_path, text)
 
-    assert _refused_on_one_line(config_file, capsys) == (
-        f"apps.songmaker.tools: the capability for purpose {purpose!r}"
-        " would be 8193 characters; the limit is 8192"
+
+@CAPABILITY_TOO_LARGE_FOR_A_LONGEST_PURPOSE
+def test_an_app_whose_capability_would_exceed_8192_characters_stops_startup_naming_its_tools(
+    tmp_path, capsys, text, length
+):
+    refusal = _refused_on_one_line(_written(tmp_path, text), capsys)
+
+    assert refusal.startswith(
+        "apps.songmaker.tools: the capability for a purpose of 64 characters would be "
     )
+    assert refusal.endswith(" characters; the limit is 8192")
+    if length is not None:
+        assert f"would be {length} characters" in refusal
 
 
 def test_an_oversized_capability_refusal_holds_no_token_anywhere(tmp_path, monkeypatch):
@@ -968,7 +1006,7 @@ WITHOUT_TOKEN_FILE = _with(TOKEN_FILE_LINE + "\n", "")
 WITHOUT_ORIGIN = _with(SONGMAKER_ORIGIN_LINE, "")
 SECOND_APP_LISTING_TOOLS_WITHOUT_ORIGIN = (
     VALID_CONFIG
-    + '\n[apps.presentator]\nworkload_client = "presentator-test"\npurposes = []\n'
+    + '\n[apps.presentator]\nworkload_client = "presentator-test"\n'
     + 'tools = { read_song = "read_only" }\n'
 )
 
@@ -983,7 +1021,7 @@ def served_apps(monkeypatch, logging_state_restored):
 def _with_profile_of(provider: str, name: str = '"codex-main"', token: bool = False) -> str:
     extra = TOKEN_FILE_LINE + "\n" if token else ""
     return NO_PROFILE.replace(
-        "[purposes", f'[profiles.{name}]\nprovider = "{provider}"\n{extra}\n[purposes', 1
+        "[route]", f'[profiles.{name}]\nprovider = "{provider}"\n{extra}\n[route]', 1
     )
 
 
@@ -1103,11 +1141,6 @@ TOOLS_WITHOUT_ORIGIN_REFUSALS = [
         _with(PROFILE_TABLE, "").replace(SONGMAKER_ORIGIN_LINE, ""),
         "apps.songmaker.mcp_origin: required because the app lists tools",
         id="without-a-profile",
-    ),
-    pytest.param(
-        _with('cli_provider = "claude"\n', "").replace(SONGMAKER_ORIGIN_LINE, ""),
-        "apps.songmaker.mcp_origin: required because the app lists tools",
-        id="purposes-with-only-an-api-alias",
     ),
     pytest.param(
         SECOND_APP_LISTING_TOOLS_WITHOUT_ORIGIN,
@@ -1345,7 +1378,9 @@ NOT_PRIVATE_ROOTS = (
     pytest.param(_a_link_to_a_private_directory, "symlink", id="symlink"),
     pytest.param(_a_root_open_to_the_group, "wrong_mode", id="mode-0750"),
     pytest.param(
-        _a_private_root_written_with_a_parent_component, "parent_component", id="parent-component",
+        _a_private_root_written_with_a_parent_component,
+        "parent_component",
+        id="parent-component",
     ),
 )
 
@@ -1574,7 +1609,7 @@ def test_a_second_signing_table_is_refused_as_a_duplicate_table(tmp_path, capsys
 
 
 def _songmaker(**members: Any) -> AppConfig:
-    return AppConfig(workload_client="songmaker-test", purposes=("songmaker.cowriter",), **members)
+    return AppConfig(workload_client="songmaker-test", **members)
 
 
 def _edited(edit: Callable[[dict[str, Any]], None]) -> dict[str, Any]:

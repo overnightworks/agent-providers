@@ -23,11 +23,13 @@ from agent_client.capability import (
     CapabilityPrincipal,
     carries_signature_of,
 )
+from agent_client.wire import MAX_PURPOSE_LENGTH
 from agent_service.signing import SigningKey
 
 PREFLIGHT_SUBJECT: Final = '"' * 255
 PREFLIGHT_ISSUED_AT: Final = 9_999_999_999
 PREFLIGHT_RUN_ID: Final = UUID(int=0)
+PREFLIGHT_PURPOSE: Final = "a" * MAX_PURPOSE_LENGTH
 
 
 class CapabilityTooLarge(Exception):
@@ -91,7 +93,7 @@ def signed_capability(scope: CapabilityScope, claims: CapabilityClaims) -> Capab
 
 
 def preflight_claims(
-    scope: CapabilityScope, *, app: str, purpose: str, issuer: str, max_duration_s: float
+    scope: CapabilityScope, *, app: str, issuer: str, max_duration_s: float
 ) -> CapabilityClaims:
     return capability_claims(
         scope,
@@ -99,7 +101,7 @@ def preflight_claims(
         app=app,
         issuer=issuer,
         subject=PREFLIGHT_SUBJECT,
-        purpose=purpose,
+        purpose=PREFLIGHT_PURPOSE,
         now=PREFLIGHT_ISSUED_AT,
         max_duration_s=max_duration_s,
     )

@@ -20,9 +20,12 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from service_support import (
+    ADMITTED_PURPOSES,
+    API_ALIAS,
+    API_GROUP,
     COWRITER,
+    MALFORMED_PURPOSES,
     PRESENTATOR_CLIENT,
-    PRESENTER,
     SONGMAKER_CLIENT,
     SONGMAKER_GROUP,
     ScriptedRunner,
@@ -89,6 +92,15 @@ def test_a_runner_that_offers_tools_serves_an_app_with_tools(service):
     assert decoded_events(response.content)[-1].text == "CLI answer"
 
 
+@pytest.mark.parametrize("purpose", ADMITTED_PURPOSES)
+def test_a_purpose_in_the_grammar_is_admitted_from_any_app(service, purpose):
+    response = post_run(
+        service, run_headers(MINT.workload(), MINT.user()), run_body(purpose=purpose)
+    )
+
+    assert _admitted_events(response) == ["run_started", "assistant_text", "succeeded"]
+
+
 def test_a_run_request_body_with_a_utf8_byte_order_mark_is_admitted(service):
     body = b"\xef\xbb\xbf" + json.dumps(run_body()).encode()
 
@@ -97,13 +109,16 @@ def test_a_run_request_body_with_a_utf8_byte_order_mark_is_admitted(service):
     assert _admitted_events(response) == ["run_started", "assistant_text", "succeeded"]
 
 
-def test_an_app_group_member_runs_on_the_api_route(service, runners):
+def test_an_api_group_member_of_the_app_runs_on_the_api_route(service, runners):
     response = post_run(
-        service, run_headers(MINT.workload(), MINT.user(groups=[SONGMAKER_GROUP], sub="user-bob"))
+        service,
+        run_headers(
+            MINT.workload(), MINT.user(groups=[SONGMAKER_GROUP, API_GROUP], sub="user-bob")
+        ),
     )
 
     assert decoded_events(response.content)[-1].text == "API answer"
-    assert runners.api.admitted[-1].route == Api("cowriter")
+    assert runners.api.admitted[-1].route == Api(API_ALIAS)
 
 
 def test_a_member_of_neither_group_is_not_enabled_and_starts_no_run(service, runners):
@@ -436,7 +451,7 @@ def _too_large() -> bytes:
 BODY_REJECTIONS = [
     pytest.param(b'{"v": 1, "purpose": NaN}', RejectionCode.INVALID_REQUEST, 422, id="nan"),
     pytest.param(
-        json.dumps(run_body())[:-1].encode() + b', "purpose": "songmaker.cowriter"}',
+        json.dumps(run_body())[:-1].encode() + b', "purpose": "cowriter"}',
         RejectionCode.INVALID_REQUEST,
         422,
         id="a-member-named-twice",
@@ -492,17 +507,14 @@ BODY_REJECTIONS = [
         422,
         id="a-member-named-twice-is-checked-before-the-version",
     ),
-    pytest.param(
-        json.dumps(run_body(purpose=PRESENTER)).encode(),
-        FORBIDDEN,
-        403,
-        id="another-apps-purpose",
-    ),
-    pytest.param(
-        json.dumps(run_body(purpose="songmaker.unknown")).encode(),
-        FORBIDDEN,
-        403,
-        id="unknown-purpose",
+    *(
+        pytest.param(
+            json.dumps(run_body(purpose=purpose)).encode(),
+            RejectionCode.INVALID_REQUEST,
+            422,
+            id=f"purpose-outside-the-grammar-{purpose!r}",
+        )
+        for purpose in MALFORMED_PURPOSES
     ),
 ]
 

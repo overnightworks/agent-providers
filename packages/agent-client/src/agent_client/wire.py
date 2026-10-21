@@ -369,5 +369,5 @@ class Turn(_StrictModel):
 class RunRequest(_WireModel):
     """The HTTP body a client sends to start a run."""
 
-    purpose: Annotated[UnicodeText, Field(min_length=1)]
+    purpose: Purpose
     turn: Turn

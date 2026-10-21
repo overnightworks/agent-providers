@@ -21,8 +21,11 @@ from capability_support import capability_carrying, constructed_token
 from jwt.algorithms import RSAAlgorithm
 from provider_test_support import formatted_log_text
 from service_support import (
+    API_GROUP,
     COWRITER,
     LAST_TOOL_NAME_LENGTH_AT_THE_LIMIT,
+    LONGEST_PURPOSE,
+    MALFORMED_PURPOSES,
     PRESENTATOR_CLIENT,
     PRESENTER,
     SONGMAKER_GROUP,
@@ -64,11 +67,12 @@ from agent_client.capability import (
     MAX_CAPABILITY_CHARACTERS,
     CapabilityClaims,
 )
-from agent_client.wire import Failed, FailureCode, RejectionCode, RunStarted
+from agent_client.wire import MAX_PURPOSE_LENGTH, Failed, FailureCode, RejectionCode, RunStarted
 from agent_providers.events import AssistantTextEvent, FinalEvent
 from agent_service.app import create_app
 from agent_service.capability import (
     PREFLIGHT_ISSUED_AT,
+    PREFLIGHT_PURPOSE,
     PREFLIGHT_SUBJECT,
     CapabilityScope,
     CapabilityTooLarge,
@@ -238,9 +242,7 @@ def test_a_verifier_refuses_a_capability_at_its_expiry_and_for_another_origin(tm
 def test_the_preflight_claims_reserve_the_subject_and_the_widest_timestamps(tmp_path):
     scope = _scope(tmp_path)
 
-    claims = preflight_claims(
-        scope, app="songmaker", purpose=COWRITER, issuer=TEST_ISSUER, max_duration_s=600.5
-    )
+    claims = preflight_claims(scope, app="songmaker", issuer=TEST_ISSUER, max_duration_s=600.5)
 
     assert PREFLIGHT_SUBJECT == '"' * 255
     assert (claims.principal.sub, claims.iat, claims.exp) == (
@@ -249,19 +251,18 @@ def test_the_preflight_claims_reserve_the_subject_and_the_widest_timestamps(tmp_
         10_000_000_599,
     )
     assert len(claims.sub) == 36
+    assert len(PREFLIGHT_PURPOSE) == MAX_PURPOSE_LENGTH
     assert (claims.aud, claims.app, claims.purpose, claims.tools) == (
         SONGMAKER_ORIGIN,
         "songmaker",
-        COWRITER,
+        PREFLIGHT_PURPOSE,
         ("edit_song", "read_song"),
     )
 
 
 def test_a_token_with_the_preflight_claims_is_refused_as_issued_in_the_future_today(tmp_path):
     scope = _scope(tmp_path)
-    claims = preflight_claims(
-        scope, app="songmaker", purpose=COWRITER, issuer=TEST_ISSUER, max_duration_s=600.0
-    )
+    claims = preflight_claims(scope, app="songmaker", issuer=TEST_ISSUER, max_duration_s=600.0)
     token = signed_capability(scope, claims).token
 
     verdict = _verifier_of(scope.key, NOW_IN_2026, SONGMAKER_ORIGIN).verify(token)
@@ -282,9 +283,7 @@ def _scope_with_the_last_tool_named_to(
 
 
 def _preflight_token_of(scope: CapabilityScope) -> str:
-    claims = preflight_claims(
-        scope, app="songmaker", purpose=COWRITER, issuer=TEST_ISSUER, max_duration_s=600.0
-    )
+    claims = preflight_claims(scope, app="songmaker", issuer=TEST_ISSUER, max_duration_s=600.0)
     return signed_capability(scope, claims).token
 
 
@@ -477,7 +476,7 @@ def _claims_for(admitted: AdmittedRun, subject: str, **overrides: object) -> Cap
     return CapabilityClaims.model_validate(values)
 
 
-BOB_ON_THE_API_ROUTE = {"groups": [SONGMAKER_GROUP], "sub": "user-bob"}
+BOB_ON_THE_API_ROUTE = {"groups": [SONGMAKER_GROUP, API_GROUP], "sub": "user-bob"}
 
 
 @pytest.mark.parametrize(
@@ -501,6 +500,21 @@ def test_the_runner_receives_a_capability_that_verifies_with_the_callers_princip
         assert CapabilityClaims.from_claims(verdict.claims) == claims
         assert admitted.capability.claims == claims
         assert admitted.principal.subject == subject
+
+
+def test_a_purpose_of_another_apps_agents_changes_only_the_label_of_the_capability(serving):
+    with serving() as service:
+        service.run()
+        service.run(purpose=PRESENTER)
+
+        own, relabelled = (admitted.capability.claims for admitted in service.cli.admitted)
+        assert relabelled.purpose == PRESENTER
+        assert (relabelled.aud, relabelled.app, relabelled.principal, relabelled.tools) == (
+            own.aud,
+            own.app,
+            own.principal,
+            own.tools,
+        )
 
 
 def test_two_runs_get_two_capabilities_each_bound_to_its_own_run_id_and_signed_by_one_key(serving):
@@ -544,7 +558,7 @@ def test_an_app_without_an_origin_gets_no_capability_and_signs_nothing(serving):
         run = {"purpose": PRESENTER}
         headers = {
             "workload": MINT.workload(client=PRESENTATOR_CLIENT),
-            "user": MINT.user(azp=PRESENTATOR_CLIENT, groups=["/apps/presentator"]),
+            "user": MINT.user(azp=PRESENTATOR_CLIENT, groups=["/apps/presentator", API_GROUP]),
         }
         with_origins = service.run(**headers, **run)
         without_origins = plain.run(**headers, **run)
@@ -582,7 +596,6 @@ def _unreachable_issuer(_url: str) -> bytes:
     [
         pytest.param(MINT.fetch_key_set, {"sub": None}, {}, id="unauthorized"),
         pytest.param(_unreachable_issuer, {}, {}, id="unavailable"),
-        pytest.param(MINT.fetch_key_set, {}, {"purpose": PRESENTER}, id="purpose-not-granted"),
         pytest.param(MINT.fetch_key_set, {"groups": []}, {}, id="not-enabled"),
         pytest.param(MINT.fetch_key_set, {}, {"v": 2}, id="unsupported-version"),
         pytest.param(MINT.fetch_key_set, {}, {"turn": {"system": "x", "messages": []}}, id="shape"),
@@ -614,7 +627,7 @@ def test_a_capability_over_8192_characters_is_refused_before_any_runner_stream_o
     monkeypatch.setattr("agent_service.app.uuid.uuid4", lambda: pinned)
     user = MINT.user(sub=QUOTATION_MARKS_256)
     with _on_the_tuned_app(serving) as service:
-        refusal = service.run(user)
+        refusal = service.run(user, purpose=LONGEST_PURPOSE)
 
         assert_rejected(refusal, RejectionCode.CAPABILITY_TOO_LARGE, 422)
         assert refusal.headers["content-type"] == "application/json"
@@ -638,7 +651,7 @@ def test_a_capability_over_8192_characters_is_refused_at_a_wall_clock_past_2286(
     with _on_the_tuned_app(serving) as service:
         service.clock.set_to(YEAR_2286)
 
-        refusal = service.run(MINT.user(sub=QUOTATION_MARKS_255))
+        refusal = service.run(MINT.user(sub=QUOTATION_MARKS_255), purpose=LONGEST_PURPOSE)
 
         assert_rejected(refusal, RejectionCode.CAPABILITY_TOO_LARGE, 422)
         assert service.cli.admitted == []
@@ -646,7 +659,7 @@ def test_a_capability_over_8192_characters_is_refused_at_a_wall_clock_past_2286(
 
 def test_the_widest_admitted_capability_is_the_preflights_reserve_with_a_short_subject(serving):
     with _on_the_tuned_app(serving) as service:
-        response = service.run()
+        response = service.run(purpose=LONGEST_PURPOSE)
 
         assert response.status_code == 200
         assert len(service.capability_of_last_cli_run().token) == 7_524
@@ -838,7 +851,7 @@ def test_nothing_logged_over_an_admitted_run_the_refusals_and_the_guard_carries_
         service.run()
         service.run(MINT.user(sub=QUOTATION_MARKS_256))
         service.run(MINT.user(sub=None))
-        service.run(purpose=PRESENTER)
+        service.run(purpose=MALFORMED_PURPOSES[1])
         service.run(MINT.user(groups=[]))
         service.run(v=2)
         service.run(turn={"system": "x", "messages": []})

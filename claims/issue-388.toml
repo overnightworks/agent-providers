@@ -1,0 +1,8 @@
+claim_id = "ebf28d072b304214a0a1eeb9b0dc6ef4"
+agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
+role = "builder"
+base = "a65e4dd93464190f6a71fb923ba80713fa997eca"
+branch = "claude/issue-388-a4-p2b-unoffered-tool-fails"
+scope = ["README.md", "docs/MIGRATING.md", "docs/decisions/0001-agent-service.md", "packages/agent-service/src/agent_service/tool_relay.py", "tests/test_service_cli_runner_tools.py", "tests/test_service_run_tools.py", "tests/test_service_tool_relay.py", "tests/test_service_tool_relay_barrier.py", "tests/test_service_tool_relay_protocol.py"]
+opened_commit = "ce09aaf3cd78ef3a1188b66ba48474fe2d6417d4"
+whole_reason = "One exception in tool_relay.py with its tests and the two document amendments; the test modules (including the barrier fixture sweep) and documents are the only extra paths."

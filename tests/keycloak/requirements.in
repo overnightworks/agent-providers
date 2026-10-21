@@ -2,4 +2,4 @@
 # no workspace package, so they run with --noconftest from these pins alone.
 pytest>=7,<10
 httpx>=0.27,<1
-overnightworks-webauth[jwt] @ https://github.com/overnightworks/webauth/releases/download/v0.15.0/overnightworks_webauth-0.15.0-py3-none-any.whl
+overnightworks-webauth @ https://github.com/overnightworks/webauth/releases/download/v0.20.1/overnightworks_webauth-0.20.1-py3-none-any.whl

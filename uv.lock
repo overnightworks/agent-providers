@@ -729,7 +729,7 @@ dependencies = [
     { name = "httpx" },
     { name = "overnightworks-agent-client" },
     { name = "overnightworks-agent-providers" },
-    { name = "overnightworks-webauth", extra = ["jwt"] },
+    { name = "overnightworks-webauth" },
     { name = "pydantic" },
     { name = "pyjwt", extra = ["crypto"] },
     { name = "starlette" },
@@ -745,7 +745,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27,<1" },
     { name = "overnightworks-agent-client", editable = "packages/agent-client" },
     { name = "overnightworks-agent-providers", editable = "." },
-    { name = "overnightworks-webauth", extras = ["jwt"], url = "https://github.com/overnightworks/webauth/releases/download/v0.15.0/overnightworks_webauth-0.15.0-py3-none-any.whl" },
+    { name = "overnightworks-webauth", url = "https://github.com/overnightworks/webauth/releases/download/v0.20.1/overnightworks_webauth-0.20.1-py3-none-any.whl" },
     { name = "pydantic", specifier = ">=2.7,<3" },
     { name = "pyjwt", extras = ["crypto"], specifier = ">=2.15.1,<3" },
     { name = "starlette", specifier = ">=1,<2" },
@@ -754,44 +754,33 @@ requires-dist = [
 
 [[package]]
 name = "overnightworks-webauth"
-version = "0.15.0"
-source = { url = "https://github.com/overnightworks/webauth/releases/download/v0.15.0/overnightworks_webauth-0.15.0-py3-none-any.whl" }
+version = "0.20.1"
+source = { url = "https://github.com/overnightworks/webauth/releases/download/v0.20.1/overnightworks_webauth-0.20.1-py3-none-any.whl" }
 dependencies = [
     { name = "anyio" },
+    { name = "cryptography" },
     { name = "fastapi" },
     { name = "pydantic" },
+    { name = "pyjwt", extra = ["crypto"] },
     { name = "starlette" },
+    { name = "urllib3" },
 ]
 wheels = [
-    { url = "https://github.com/overnightworks/webauth/releases/download/v0.15.0/overnightworks_webauth-0.15.0-py3-none-any.whl", hash = "sha256:e715edf1ca65440522ae11e0c87d25344ce06eb185e919acade4f342ec6da6d8" },
-]
-
-[package.optional-dependencies]
-jwt = [
-    { name = "cryptography" },
-    { name = "pyjwt", extra = ["crypto"] },
-    { name = "urllib3" },
+    { url = "https://github.com/overnightworks/webauth/releases/download/v0.20.1/overnightworks_webauth-0.20.1-py3-none-any.whl", hash = "sha256:8826d20b033a0443963719b1261a466072be1ddf0a18e823640c1571742c6fd3" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "anyio", specifier = ">=4.12,<5" },
-    { name = "cryptography", marker = "extra == 'jwt'", specifier = ">=50.0.2,<51" },
-    { name = "fakeredis", extras = ["lua"], marker = "extra == 'dev'", specifier = ">=2.20,<3" },
+    { name = "anyio", specifier = ">=4.0,<5" },
+    { name = "cryptography", specifier = ">=50.0.2,<51" },
     { name = "fastapi", specifier = ">=0.123.7,<1" },
-    { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27,<1" },
-    { name = "import-linter", marker = "extra == 'dev'", specifier = ">=2,<3" },
-    { name = "overnightworks-webauth", extras = ["jwt"], marker = "extra == 'dev'" },
     { name = "pydantic", specifier = ">=2.6,<3" },
-    { name = "pyjwt", extras = ["crypto"], marker = "extra == 'jwt'", specifier = ">=2.15.1,<3" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7,<10" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=7,<8" },
+    { name = "pyjwt", extras = ["crypto"], specifier = ">=2.15.1,<3" },
     { name = "redis", marker = "extra == 'redis'", specifier = ">=5.0,<9" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4,<1" },
     { name = "starlette", specifier = ">=0.46,<2" },
-    { name = "urllib3", marker = "extra == 'jwt'", specifier = ">=2.6.3,<3" },
+    { name = "urllib3", specifier = ">=2.6.3,<3" },
 ]
-provides-extras = ["redis", "jwt", "dev"]
+provides-extras = ["redis"]
 
 [[package]]
 name = "packaging"

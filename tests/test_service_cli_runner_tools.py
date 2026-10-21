@@ -65,6 +65,7 @@ from relay_support import (
     yield_until,
 )
 from service_support import (
+    LISTED_MODEL,
     PINNED_CLAUDE_VERSION,
     SteppedLoop,
     assert_rejected,
@@ -179,8 +180,8 @@ def settled_status(base_url: str, events: Sequence[RunEvent]) -> RunStatus:
     return status_of(base_url, list(events))
 
 
-def post_a_run(base_url: str) -> list[RunEvent]:
-    return post_a_run_naming(base_url, TOOLS)
+def post_a_run(base_url: str, model: str | None = None) -> list[RunEvent]:
+    return post_a_run_naming(base_url, TOOLS, model)
 
 
 def a_plain_run(base_url: str, _app: ToolApp) -> list[RunEvent]:
@@ -461,6 +462,32 @@ def test_a_capability_never_reaches_the_child_of_a_tool_run(
         False,
     )
     assert secret not in run.capture.text_of("environment") + run.capture.stdin
+
+
+@pytest.mark.parametrize(
+    ("requested", "expected"),
+    [
+        pytest.param(f"claude/{LISTED_MODEL}", [f"--model={LISTED_MODEL}"], id="M3-listed-model"),
+        pytest.param(None, [], id="M4-no-model"),
+    ],
+)
+def test_the_relay_run_gets_the_listed_model_as_one_argument_and_its_relay_arguments(
+    tmp_path, authority, child_cleanup, monkeypatch, requested, expected
+):
+    run = a_tool_run(
+        tmp_path,
+        authority,
+        child_cleanup,
+        monkeypatch,
+        scenario=lambda base_url, _app: post_a_run(base_url, requested),
+    )
+
+    arguments = run.capture.text_of("argv").splitlines()
+    assert (
+        [a for a in arguments if a == "--model" or a.startswith("--model=")],
+        "--mcp-config" in arguments,
+        arguments[arguments.index("--allowedTools") + 1],
+    ) == (expected, True, "mcp__relay__*")
 
 
 def test_a_capability_reflected_in_an_upstream_result_fails_the_run(

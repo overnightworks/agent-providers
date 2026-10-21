@@ -1537,12 +1537,20 @@ Abos.“, verbatim from #115's body) holds for a subscription run with no reques
 named `claude/<name>` that the installation lists in `[cli.claude] models` takes the
 subscription route; an unlisted one takes the API for a caller with API rights and is
 otherwise refused with `not_enabled`, never replaced. The list is the required key
-`[cli.claude] models`, an array that may be empty. That a listed name runs as
-`--model <name>` is written when the CLI route passes the flag. A fixed model per profile
-stays avoided. Authority: „agents.md hat auch provider + model“, „in 1 will ich dass es
-funktioniert => und dass wir es später ausbauen können ohne dass die apps dann wieder all
-zu viel ändern müssen“ and the operator's word „a“ on #390; the list as the required key
-and the existing `not_enabled` as the refusal are the head's decisions on #382.
+`[cli.claude] models`, an array that may be empty. A listed `claude/<name>` runs as the
+single argument `--model=<name>` of the Claude run, so no name can be read as another
+option, and a run with no requested model passes no `--model`; the model comes from the
+route, never from the request. A fixed model per profile stays avoided. Authority:
+„agents.md hat auch provider + model“, „in 1 will ich dass es funktioniert => und dass wir
+es später ausbauen können ohne dass die apps dann wieder all zu viel ändern müssen“ and
+the operator's word „a“ on #390 are the operator's own; "never replaced" is #390's recorded
+rule (the head's record of „a“, a paraphrase there). The list as the required key and the
+existing `not_enabled` as the refusal are the head's decisions on #382; the form
+`--model=<name>` and its flag-injection reasoning are the head's design decision from the
+second gate's finding on PR #394 (#395), not the operator's words. How a logged-in CLI
+treats a model name it does not know (refuse, warn or fall back) is unverified until the
+live smoke (edge#214, edge#218); before login the pinned 2.1.302 only warns
+(`unrecognized_model`).
 
 
 #### Inherited constraints (settled; A1b makes them true and does not reopen them)

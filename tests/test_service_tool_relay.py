@@ -98,6 +98,7 @@ def head_from_the_claude_run_file(relay: Relay) -> bytes:
         (TurnMessage(role=TurnRole.USER, text="hi"),),
         relay=relay.access,
         tool_timeout_seconds=600.0,
+        model=None,
     )
     server = json.loads(run.run_files()["relay-mcp.json"])["mcpServers"]["relay"]
     return (

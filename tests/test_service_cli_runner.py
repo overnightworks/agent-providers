@@ -52,10 +52,11 @@ from provider_test_support import (
     own_real_children,
     the_only_tree,
 )
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 from service_support import (
     ALICE,
     CLI_PROFILE,
+    LISTED_MODEL,
     PINNED_CLAUDE_VERSION,
     PROCESS_TOKEN,
     SONGMAKER_TOOLS,
@@ -92,6 +93,7 @@ from agent_client.wire import (
     Failed,
     FailureCode,
     RunEvent,
+    RunRequest,
     RunState,
     RunStatus,
 )
@@ -104,9 +106,10 @@ from agent_service.admission import AdmissionSlot
 from agent_service.app import create_app
 from agent_service.capability import Capability
 from agent_service.cli import main
-from agent_service.cli_runner import RUN_ADAPTERS, CliRunner, installed_runners
+from agent_service.cli_runner import RUN_ADAPTERS, CliRunner, ProfileLaunch, installed_runners
 from agent_service.config import McpConfig, Provider, ServiceConfig
 from agent_service.quarantine import Quarantine
+from agent_service.routing import Cli
 from agent_service.run_events import (
     INVALID_EVENT_MESSAGE,
     NO_RUNNER_MESSAGE,
@@ -198,8 +201,12 @@ def headers() -> dict[str, str]:
     return run_headers(MINT.workload(), MINT.user())
 
 
-def post_a_run(base_url: str, tools: Mapping[str, str] | None = None) -> list[RunEvent]:
+def post_a_run(
+    base_url: str, tools: Mapping[str, str] | None = None, model: str | None = None
+) -> list[RunEvent]:
     body = run_body(turn=THREE_MESSAGE_TURN, tools=dict(tools or {}))
+    if model is not None:
+        body["model"] = model
     return decoded_events(post_run(base_url, headers(), body).content)
 
 
@@ -268,6 +275,53 @@ def test_the_cli_receives_the_turns_system_history_token_and_bound(
     assert [
         name for name, text in carriers.items() if name != "environment" and PROCESS_TOKEN in text
     ] == []
+
+
+def model_options_of(argv: str) -> list[str]:
+    return [a for a in argv.splitlines() if a == "--model" or a.startswith("--model=")]
+
+
+@pytest.mark.parametrize(
+    ("requested", "expected"),
+    [
+        pytest.param(f"claude/{LISTED_MODEL}", [f"--model={LISTED_MODEL}"], id="M1-listed-model"),
+        pytest.param(None, [], id="M2-no-model"),
+    ],
+)
+def test_the_cli_run_gets_the_listed_model_as_one_argument_or_none(
+    tmp_path: Path,
+    child_cleanup: ChildCleanup,
+    monkeypatch: pytest.MonkeyPatch,
+    requested: str | None,
+    expected: list[str],
+) -> None:
+    capture = tmp_path / "capture"
+    config = a_config(tmp_path, a_fake_claude(tmp_path, capture=capture))
+
+    events = drive_over_http(
+        child_cleanup, monkeypatch, config, partial(post_a_run, model=requested)
+    )
+
+    assert (shown(events)[-1], model_options_of((capture / "argv").read_text())) == (
+        ("succeeded", "done"),
+        expected,
+    )
+
+
+def test_the_run_adapter_passes_the_routes_model_and_not_the_requests(tmp_path: Path) -> None:
+    admitted = dataclasses.replace(
+        alice_admitted_run(uuid.uuid4()),
+        request=RunRequest.model_validate(run_body(model="claude/opus")),
+        route=Cli("claude-main", LISTED_MODEL),
+    )
+    launch = ProfileLaunch(
+        Provider.CLAUDE, tmp_path / "claude", tmp_path / "token", 7, 600.0
+    )
+
+    adapter = RUN_ADAPTERS[Provider.CLAUDE](launch, SecretStr("token"), admitted, None)
+
+    arguments = adapter.start(tmp_path / "home", tmp_path / "work").child.arguments
+    assert [a for a in arguments if a.startswith("--model")] == [f"--model={LISTED_MODEL}"]
 
 
 def test_each_run_leaves_no_directory_slot_or_place_behind(

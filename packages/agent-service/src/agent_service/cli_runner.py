@@ -62,6 +62,7 @@ def claude_run(
         history=tuple(turn.messages),
         relay=relay,
         tool_timeout_seconds=launch.tool_timeout_seconds,
+        model=admitted.route.model,
     )
 
 

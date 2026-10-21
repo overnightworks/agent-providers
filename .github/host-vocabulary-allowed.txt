@@ -8,3 +8,4 @@
 ^tests/fixtures/codex-image-no-image-events\.jsonl:
 ^tests/test_grok_cli_adapter\.py:[0-9]+:.*(get_song|song_id|"songmaker"|<songmaker_tool_call>|state of a song)
 ^tests/test_codex_cli_adapter\.py:[0-9]+:.*The open song is Midnight Drive\.
+^docs/MIGRATING\.md:

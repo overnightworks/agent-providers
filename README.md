@@ -100,7 +100,10 @@ binary path. `claude`, `grok` and `codex` blocks (`ClaudeCliRuntime`,
 `GrokCliRuntime`, `CodexCliRuntime`: binary, login `token_file`, for Claude also
 the binary search globs) describe the providers the host runs through their CLI;
 a provider left `None` raises `ProviderNotConfiguredError(provider, block)` from
-turns and catalog alike, and the catalog never reports it as not logged in. A host
+turns and from the catalog's CLI paths, and the catalog never reports it as not
+logged in; an API route needs no block, so with an API key
+`catalog.provider_configuration()` answers `ProviderReady` (or
+`ProviderCapabilityMissing` when the Anthropic extra is missing) before any CLI check. A host
 that also runs turns adds `TurnRuntimeConfig` as `turns` (an optional
 `McpServerSpec`, `turns.codex`, `turns.grok`); a turn path reached without its
 block raises `TurnRuntimeNotConfiguredError` or `ProviderNotConfiguredError`
@@ -110,7 +113,9 @@ and `dispatch.stream_turn`, `dispatch.call_provider_once` and
 configuration (`McpServerSpec.config_file_prefix`,
 `GrokTurnRuntime.prompt_file_prefix`) are 1 to 64 characters from
 `A-Z a-z 0-9 . _ -`; the library appends random characters and creates the file
-directly in the working root. The field docstrings in `agent_providers.config` are
+directly in the working root. Pydantic hides an invalid value only in the rendered
+error text: `ValidationError.errors()` and `.json()` still contain it unless called
+with `include_input=False`, which matters to a host that logs configuration errors. The field docstrings in `agent_providers.config` are
 the reference.
 
 The subscription run the agent service drives (`cli_run.astream_cli_run(root,
@@ -237,7 +242,8 @@ reads no installed configuration. `root` is a `PrivateWorkingRoot`; the names in
 gets one tree, `agent-run-XXXXXXXX/`, with `home/` (the child's `HOME` and
 `TMPDIR`) and a separate empty `work/`, each 0700, and each file is written
 exclusively into `home/` at 0600. The modes keep a run's files from other users,
-not from another process of the same user or from root. The tree is removed once,
+not from another process of the same user or from root, and the removal gives no
+containment against concurrent moves by processes of the same Unix user. The tree is removed once,
 after the context ended and the last reservation was released, so a retained group
 keeps its directories until `confirm_group_gone` returns `True`. Removal reads the
 mount table once and refuses a tree with a mount point at or below it, because a
@@ -372,7 +378,7 @@ mode that gives nothing to group or others (0600 or 0400), at most 16 KiB. JSON
 (a credentials file) and API keys (`sk-ant-api...`) are refused; a link is
 followed and its target checked. Run `claude setup-token` once, sign in with the
 subscription, and write the printed token into the file. The token lasts a year
-and renewing it is the operator's: `scripts/replace_token_file.py PATH` reads the
+and renewing it is the operator's: `uv run python scripts/replace_token_file.py PATH` reads the
 new token on standard input, checks it by the service's rules and swaps it in
 atomically. The next turn or run reads the file again, so no restart is needed.
 On expiry a streaming turn ends with the safe code `cli_auth_rejected` ("CLI login

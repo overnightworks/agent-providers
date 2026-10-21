@@ -567,9 +567,8 @@ def everything_a_refusal_holds(refusal: BaseException) -> list[object]:
     return held
 
 
-# 1024 bits only so that this key's public half fits an embedded ``jwk`` header member inside
-# the verifier's 512-character header bound; generated per run, never written, never published.
-ATTACKER_KEY: Final = rsa.generate_private_key(public_exponent=65537, key_size=1024)
+# Generated per run, never written, never published.
+ATTACKER_KEY: Final = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 
 
 class TokenMint:

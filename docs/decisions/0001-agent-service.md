@@ -1433,9 +1433,9 @@ A run's relay reaches its CLI only as the run's MCP config: one http server name
 Measured on 18.10.2026 on the installed `grok-1.0.60-linux-x86_64` (191,294,880
 bytes, sha256 prefix `10e6af64b247`; the hash was the same after the last run,
 so the self-updater never touched the binary). Operator ruling 18.10.2026: G0a
-uses no login. No cell read, copied, hashed or printed an auth file or a token,
+uses no login. No A1b-G0a cell read, copied, hashed or printed an auth file or a token,
 and none ran `login`, `logout` or `update` without `--check`. No model turn was
-possible, so no quota was used. Cells that need a login are listed under
+possible, so no quota was used. A1b-K0 below reads the Grok login through the library, under the 21.10.2026 rulings. Cells that need a login are listed under
 "Deferred to G0b / G0c" below.
 
 #### A1b-G0a the Grok CLI without a login
@@ -2098,11 +2098,11 @@ renewal member (#255 S4g, branch (a)); the access token's lifetime is unmeasured
 ### A1b measured: codex 0.163.0
 
 Measured on 18.10.2026 on the installed `codex`, whose native executable prints
-`codex-cli 0.163.0` (V1). No cell used a login, a token, an auth file or a model
-turn; the probe never ran `login` or `logout`, never opened any auth file, and
+`codex-cli 0.163.0` (V1). No A1b-C0a cell used a login, a token, an auth file or a model
+turn; the C0a probe never ran `login` or `logout`, never opened any auth file, and
 each cell's home started empty, and every `codex` run inside the harness used a
 scratch `CODEX_HOME`. One possible run of the shim in the ordinary environment is
-unrecorded (see the V1 caveat); the probe itself never opened `~/.codex`. Operator ruling 18.10.2026: C0a uses no login.
+unrecorded (see the V1 caveat); the probe itself never opened `~/.codex`. A1b-K0, recorded above, reads the Codex login through the library, under the 21.10.2026 rulings. Operator ruling 18.10.2026: C0a uses no login.
 
 #### A1b-C0a the Codex CLI without a login (flags, stream, MCP client, files, egress)
 

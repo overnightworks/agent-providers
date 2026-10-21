@@ -1,0 +1,8 @@
+claim_id = "2447f6bd03e349ec80958daf8a2c00a1"
+agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
+role = "builder"
+base = "3e424f7dad96120b3c5193260339672e01685ac6"
+branch = "claude/issue-406-a4-p4-model-override"
+scope = ["README.md", "docs/MIGRATING.md", "docs/decisions/0001-agent-service.md", "packages/agent-service/src/agent_service/app.py", "packages/agent-service/src/agent_service/config.py", "tests/service_support.py", "tests/test_service_admission.py", "tests/test_service_config.py", "tests/test_service_entrance.py"]
+opened_commit = "be1aa933327c1ccec1861c38a2f37896231e1b71"
+whole_reason = "The table, its startup refusals, the one resolution method and the one expression in admission are a single path: without any of them the override is read but not applied, or applied unchecked; the documentation and tests ride with the two production files."

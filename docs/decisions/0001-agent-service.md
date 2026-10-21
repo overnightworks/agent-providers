@@ -487,6 +487,9 @@ compromise.
    from 1 to 65535 without leading zeros, and nothing else. Origins are unique, and an
    origin needs `[signing]`, and an app that lists tools needs an origin. A refusal names `apps.<app>.mcp_origin` and gives the
    canonical form where one exists and would itself load.
+   *Amendment (21.10.2026, #389):* the rule "an app that lists tools needs an origin" is
+   gone from startup; an app without an origin that names tools in a request is `forbidden`
+   at request time (H3 amendment).
 9. **The format.** `CapabilityClaims` (frozen, strict, `extra="forbid"`) with token
    type `agent-capability+jwt`; `principal.sub` is the exact verified subject, never
    truncated, normalized or substituted. A changed claim set gets a new token type.
@@ -941,9 +944,12 @@ tools: {name: effect}, model?}` once P2d and P2a have landed; this slice carries
 `v: 2`; a body with any other `v` is `unsupported_version`, and so is a v1 frame
 read by a v2 `RunStream`. The effects from the request decide `cancelled` versus
 `failed: interrupted`; a tool outside the map counts as side-effecting. Authority
-(#382): „Per run, wire v2: {v: 2, purpose, turn, roles, tools: {name: effect}}“ and „in 1
-will ich dass es funktioniert => und dass wir es später ausbauen können ohne dass die
-apps dann wieder all zu viel ändern müssen“. P2d and P2a add their fields to this block.
+(#382, 21.10.2026): the wire shape is the design's line on #382, „Per run, wire v2: `{v: 2,
+purpose, turn, roles, tools: {name: effect}}`“, shown to the operator with the design and
+accepted with „wir bauen das entsprechend“; `roles` is the design's and not a separate
+operator ruling. The operator's own words on model choice, for `model?` only: „in 1 will ich
+dass es funktioniert => und dass wir es später ausbauen können ohne dass die apps dann
+wieder all zu viel ändern müssen“. P2d and P2a add their fields to this block.
 
 ### A0b wire ruling (head, 15.10.2026)
 

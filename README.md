@@ -347,7 +347,7 @@ MCP origin in the service's configuration (`[apps.<app>]` holds `workload_client
 mints each admitted run a capability that grants exactly those names, and stamps the
 request's effects onto the run's tool calls (a tool outside the map counts as
 side-effecting). The capability is an RS256 token signed with the service's one RSA-3072 key,
-`[signing] key_file`, at most 8,192 characters); the service trusts the CA bundle
+`[signing] key_file`, at most 8,192 characters; the service trusts the CA bundle
 `[mcp] ca_file` names for those origins alone. The app installs the client with
 `[mcp-server]` and serves `McpServer.in_front_of(app)` as its outermost ASGI app,
 never a `Route` or `Mount` in its router (the service refuses their slash

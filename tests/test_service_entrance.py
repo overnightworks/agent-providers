@@ -490,7 +490,7 @@ def _too_large() -> bytes:
 
 
 BODY_REJECTIONS = [
-    pytest.param(b'{"v": 1, "purpose": NaN}', RejectionCode.INVALID_REQUEST, 422, id="nan"),
+    pytest.param(b'{"v": 2, "purpose": NaN}', RejectionCode.INVALID_REQUEST, 422, id="nan"),
     pytest.param(
         json.dumps(run_body())[:-1].encode() + b', "purpose": "cowriter"}',
         RejectionCode.INVALID_REQUEST,
@@ -498,7 +498,7 @@ BODY_REJECTIONS = [
         id="a-member-named-twice",
     ),
     pytest.param(b"[1]", RejectionCode.INVALID_REQUEST, 422, id="not-an-object"),
-    pytest.param(b'{"v": 1,', RejectionCode.INVALID_REQUEST, 422, id="not-json"),
+    pytest.param(b'{"v": 2,', RejectionCode.INVALID_REQUEST, 422, id="not-json"),
     pytest.param(_too_large(), RejectionCode.INVALID_REQUEST, 422, id="over-256-kib"),
     *(
         pytest.param(
@@ -591,7 +591,7 @@ def test_a_body_that_is_not_an_allowed_run_request_is_refused(service, content, 
 
 def test_an_oversized_body_without_a_declared_length_is_refused_while_read(service):
     def chunks() -> Iterator[bytes]:
-        yield b'{"v": 1, "purpose": "'
+        yield b'{"v": 2, "purpose": "'
         for _ in range(MAX_REQUEST_BYTES // 1024 + 1):
             yield b"x" * 1024
         yield b'"}'

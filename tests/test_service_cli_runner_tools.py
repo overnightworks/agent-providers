@@ -317,6 +317,8 @@ def test_the_effect_a_request_names_changes_the_ending_and_nothing_the_child_is_
     ]
     assert read_only.capture.stdin
     assert read_only.capture.stdin == side_effecting.capture.stdin
+    assert read_only.capture.listing_replies
+    assert read_only.capture.listing_replies == side_effecting.capture.listing_replies
     assert read_only.capture.replies == side_effecting.capture.replies
 
 

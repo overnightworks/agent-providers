@@ -49,6 +49,7 @@ from agent_providers import lost_groups
 from agent_service.admission import AdmissionSlot, Lease
 from agent_service.capability import (
     Capability,
+    CapabilityScope,
     CapabilityTooLarge,
     capability_claims,
     signed_capability,
@@ -200,7 +201,8 @@ def _admitted(
     caller: Caller,
     run_request: RunRequest,
 ) -> Response:
-    if run_request.tools and config.apps[caller.app].mcp_origin is None:
+    scope = config.capability_scope(caller.app, run_request.tools)
+    if run_request.tools and scope is None:
         return rejection(RejectionCode.FORBIDDEN)
     served = route(config.identity, config.route, config.profiles, caller.groups, caller.app)
     if isinstance(served, NotEnabled):
@@ -212,7 +214,16 @@ def _admitted(
             return rejection(RejectionCode.BUSY)
     try:
         response = _admitted_response(
-            config, runners, records, lease, quarantine, wall_clock, caller, run_request, served
+            config,
+            runners,
+            records,
+            lease,
+            quarantine,
+            wall_clock,
+            caller,
+            run_request,
+            served,
+            scope,
         )
     except BaseException:
         _release(lease)
@@ -238,10 +249,11 @@ def _admitted_response(
     caller: Caller,
     run_request: RunRequest,
     served: ServedRoute,
+    scope: CapabilityScope | None,
 ) -> _RunResponse | RejectionCode:
     run_id = uuid.uuid4()
     try:
-        capability = _capability_of(config, caller, run_request, run_id, wall_clock)
+        capability = _capability_of(config, scope, caller, run_request, run_id, wall_clock)
     except CapabilityTooLarge as too_large:
         _log.warning(
             "The capability of a run of app %s is %d characters; the limit is %d.",
@@ -274,12 +286,12 @@ def _admitted_response(
 
 def _capability_of(
     config: ServiceConfig,
+    scope: CapabilityScope | None,
     caller: Caller,
     run_request: RunRequest,
     run_id: UUID,
     wall_clock: Callable[[], datetime],
 ) -> Capability | None:
-    scope = config.capability_scope(caller.app, run_request.tools)
     if scope is None:
         return None
     claims = capability_claims(

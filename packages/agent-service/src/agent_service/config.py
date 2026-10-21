@@ -3,11 +3,11 @@
 The service accepts at most one subscription profile, for Claude, which needs its
 token file and a ``[cli.claude]`` table naming the absolute program and the exact version
 it must report, beside the ``[cli]`` section's private ``working_root``, checked at load. An
-app that offers tools names its one https MCP origin, and signs a capability for each run
-that grants the tools its request names; an origin is never shared between apps and needs the
-signing key. The ``[mcp]`` section names the one CA bundle (``ca_file``, an absolute path) the
-service trusts for those origins; it is required as soon as any app declares an origin, and
-otherwise optional and unused.
+app that offers tools names its one https MCP origin, and the service signs a capability for
+each run that grants the tools its request names; an origin is never shared between apps and
+needs the signing key. The ``[mcp]`` section names the one CA bundle (``ca_file``, an absolute
+path) the service trusts for those origins; it is required as soon as any app declares an
+origin, and otherwise optional and unused.
 
 A TOML file is read once at startup into frozen models that forbid unknown
 fields. A file the models refuse stops the service with an error naming the

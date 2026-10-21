@@ -300,7 +300,7 @@ _RUN_EVENT_TYPES: Final = frozenset(get_args(_RunEventVariant))
 
 def is_run_event(value: object) -> TypeGuard[RunEvent]:
     # The exact type, not isinstance: a subclass may add fields the closed
-    # v1 union does not carry.
+    # union does not carry.
     return type(value) in _RUN_EVENT_TYPES
 
 
@@ -345,8 +345,8 @@ class RunStatus(_WireModel):
         return self
 
 
-ToolName = Annotated[UnicodeText, Field(min_length=1)]
-"""The one decider of a tool's name on the wire, the type of a capability's ``tools`` entries."""
+NonEmptyUnicodeText = Annotated[UnicodeText, Field(min_length=1)]
+"""The one owner of non-empty wire text: a tool's name, a capability's identifying claims."""
 
 
 class TurnRole(StrEnum):
@@ -380,4 +380,4 @@ class RunRequest(_WireModel):
 
     purpose: Purpose
     turn: Turn
-    tools: dict[ToolName, Annotated[ToolEffect, Field(strict=False)]]
+    tools: dict[NonEmptyUnicodeText, Annotated[ToolEffect, Field(strict=False)]]

@@ -12,9 +12,7 @@ going, not what exists; each slice below makes its part true when it lands.
 
 Apps stop talking to language models themselves. An app sends a **purpose** (the
 name of its agent, such as `cowriter`; it labels the run and routes nothing), the turn data, and two tokens — the
-end user's and its own.
-
-One agent service decides who is asking, whether they may
+end user's and its own. One agent service decides who is asking, whether they may
 use the operator's subscription, and which route serves the caller. The app
 never names a provider, a model, a route or a user id, and never holds an LLM or
 subscription credential.

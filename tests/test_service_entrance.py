@@ -500,7 +500,7 @@ API_MEMBER = [API_GROUP, SONGMAKER_GROUP]
 
 
 def _routed_run(config, groups, *, afterwards=None, **body):
-    """Post one run; ``afterwards(base_url)`` may probe the same app before it is discarded."""
+    """Post one run; ``afterwards(base_url, headers)`` may probe the same app before it is discarded."""
     runners = Runners(cli=ScriptedRunner(CLI_SCRIPT), api=ScriptedRunner(API_SCRIPT))
     app = create_app(config, runners=runners, fetch_key_set=MINT.fetch_key_set)
     with served(app) as base_url:

@@ -31,7 +31,7 @@ URL and hash from the tag's GitHub release give byte-exact, hash-checked wheels
 with no PyPI name to race for; their dependencies still resolve from PyPI. The
 release page lists each wheel as a pinnable requirement ([README](../README.md#install)).
 A host that runs turns itself installs the core and the client: the core pins the
-client to its own version exactly and neither is on PyPI, so the host pins both
+client to its own version exactly, so the host pins both
 wheel URLs from the same release. An app that only starts runs
 through the service installs the client alone ([ARCHITECTURE.md](ARCHITECTURE.md)
 says which distribution serves whom).

@@ -28,12 +28,15 @@ def _run_script(step_name: str) -> str:
     return "\n".join(line[10:] for line in step.group(1).splitlines())
 
 
+def _release_steps() -> list[dict[str, object]]:
+    jobs = YAML(typ="safe").load(_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+    return [step for job in jobs.values() for step in job["steps"]]
+
+
 def _publish_environment() -> dict[str, str]:
-    steps = YAML(typ="safe").load(_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
-    for job in steps.values():
-        for step in job["steps"]:
-            if step.get("name") == "Publish the release with the wheels the check admitted":
-                return step["env"]
+    for step in _release_steps():
+        if step.get("name") == "Publish the release with the wheels the check admitted":
+            return step["env"]
     raise AssertionError("release.yml has no publish step")
 
 
@@ -162,6 +165,18 @@ def test_the_publish_step_takes_the_notice_and_the_install_lines_from_the_steps_
 
     assert environment["NOTICE"] == "${{ steps.notice.outputs.notice }}"
     assert environment["INSTALL"] == "${{ steps.install.outputs.install }}"
+
+
+def test_the_release_job_has_the_steps_the_publish_step_reads_from():
+    step_ids = {step.get("id") for step in _release_steps()}
+
+    assert {"notice", "install"} <= step_ids
+
+
+def test_the_install_step_writes_its_lines_under_the_install_output_key():
+    install_step = next(step for step in _release_steps() if step.get("id") == "install")
+
+    assert "echo 'install<<" in install_step["run"]
 
 
 def test_the_release_is_created_with_generated_notes_and_the_three_wheels(tmp_path):

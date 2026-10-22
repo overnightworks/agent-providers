@@ -874,7 +874,7 @@ class AnchoredChild:
     cannot shorten either.
 
     Host obligations, each answered by stopping the use of the library and ending
-    the process (README, Interruptions): an allocation failure in the leader's
+    the process (docs/host.md, Interruptions): an allocation failure in the leader's
     construction after ``Popen`` leaves a child nobody signals; a resource failure
     in the start's hand-over or rollback, or an asynchronous interruption during
     the start, can leave a parked watcher holding the leader and the child; a

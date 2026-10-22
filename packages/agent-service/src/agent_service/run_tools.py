@@ -129,7 +129,7 @@ class RunTools:
     Only the reap's exception, of any class, is raised, as the same object, after step 5 and
     never logged; steps 3 to 5 run whatever the reap raised. ``KeyboardInterrupt`` and
     ``SystemExit`` are not contained, for any step or the reap: asyncio propagates them out of
-    the event loop and the process ends as README "Interruptions" says.
+    the event loop and the process ends as docs/host.md "Interruptions" says.
     A caller's cancellation, direct or AnyIO's level one, never cuts the attempt short: the
     close waits for the attempt, raises its exception, otherwise the direct cancellation,
     otherwise delivers the level cancellation, otherwise returns. ``close`` is called once.

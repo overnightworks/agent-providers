@@ -1,7 +1,8 @@
-"""The release page points a breaking release at its migration section."""
+"""The release page points a breaking release at its migration section and lists the wheels."""
 
 from __future__ import annotations
 
+import hashlib
 import re
 import subprocess
 from pathlib import Path
@@ -61,10 +62,41 @@ def test_the_release_notice_exists_only_for_a_tag_with_its_migration_section(
     assert _notice_for(tag, f"# Title\n\n{heading}\n\ntext\n", tmp_path) == notice
 
 
+def test_the_release_page_lists_each_wheel_with_its_url_and_sha256(tmp_path):
+    wheels = {
+        "overnightworks_agent_client-0.3.0-py3-none-any.whl": b"client",
+        "overnightworks_agent_providers-0.3.0-py3-none-any.whl": b"core",
+        "overnightworks_agent_service-0.3.0-py3-none-any.whl": b"service",
+    }
+    (tmp_path / "dist").mkdir()
+    for name, content in wheels.items():
+        (tmp_path / "dist" / name).write_bytes(content)
+    output = tmp_path / "github_output"
+    output.touch()
+    subprocess.run(
+        ["/bin/bash", "-e", "-c", _run_script("List the wheels with their hashes")],
+        cwd=tmp_path,
+        env={
+            "PATH": "/usr/bin:/bin",
+            "GITHUB_REF_NAME": "v0.3.0",
+            "GITHUB_REPOSITORY": _REPOSITORY,
+            "GITHUB_OUTPUT": str(output),
+        },
+        check=True,
+    )
+    install = output.read_text(encoding="utf-8")
+    for name, content in wheels.items():
+        distribution = name.split("-")[0].replace("_", "-")
+        url = f"https://github.com/{_REPOSITORY}/releases/download/v0.3.0/{name}"
+        digest = hashlib.sha256(content).hexdigest()
+        assert f"{distribution} @ {url}#sha256={digest}\n" in install
+
+
 @pytest.mark.parametrize(
     "step_name",
     [
         "Point a breaking release at its migration section",
+        "List the wheels with their hashes",
         "Publish the release with the wheels the check admitted",
     ],
 )

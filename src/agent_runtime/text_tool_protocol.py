@@ -15,10 +15,10 @@ from typing import Final, NamedTuple, NoReturn
 
 from pydantic import SecretStr
 
-from agent_runtime_client.tools import ToolDeclaration
-from agent_runtime_client.wire import refuse_non_json_constant
 from agent_runtime.errors import raise_without_chain
 from agent_runtime.tools import ToolCatalog, ToolProtocolMarkup
+from agent_runtime_client.tools import ToolDeclaration
+from agent_runtime_client.wire import refuse_non_json_constant
 
 _CALL_EXAMPLE = '{"name":"tool_name","arguments":{}}'
 

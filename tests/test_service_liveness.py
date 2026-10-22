@@ -28,6 +28,7 @@ from service_support import (
     service_config,
 )
 
+from agent_runtime.events import AssistantTextEvent, FinalEvent, ToolCallEvent
 from agent_runtime_client.wire import (
     Failed,
     FailureCode,
@@ -35,7 +36,6 @@ from agent_runtime_client.wire import (
     RunStarted,
     Succeeded,
 )
-from agent_runtime.events import AssistantTextEvent, FinalEvent, ToolCallEvent
 from agent_runtime_service.app import create_app
 from agent_runtime_service.config import RunConfig
 from agent_runtime_service.run_liveness import (

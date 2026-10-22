@@ -45,9 +45,9 @@ from service_support import (
 )
 from wire_builders import started
 
+from agent_runtime.events import AssistantTextEvent, FinalEvent
 from agent_runtime_client.agents import load_agent
 from agent_runtime_client.wire import RejectionCode, TurnMessage, TurnRole
-from agent_runtime.events import AssistantTextEvent, FinalEvent
 from agent_runtime_service.admission import AdmissionSlot
 from agent_runtime_service.app import create_app
 from agent_runtime_service.config import ServiceConfig

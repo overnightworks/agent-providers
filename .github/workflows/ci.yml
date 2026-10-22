@@ -165,7 +165,7 @@ jobs:
           uvx pyright@1.1.414 --pythonpath "$proof/venv/bin/python" relay_consumer.py
           printf '[identity]\nissuer = "https://issuer.test"\n' > bad.toml
           status=0
-          "$proof/venv/bin/agent-service" --config bad.toml 2> refused.txt || status=$?
+          "$proof/venv/bin/agent-runtime-service" --config bad.toml 2> refused.txt || status=$?
           cat refused.txt
           test "$status" -eq 2
           grep -q 'identity.jwks_url' refused.txt

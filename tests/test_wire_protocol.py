@@ -27,6 +27,12 @@ from wire_builders import (
     wire,
 )
 
+from agent_runtime.text_tool_protocol import render_tool_catalog
+from agent_runtime.tools import (
+    ToolCatalog,
+    anthropic_tool_schemas,
+    openai_tool_schemas,
+)
 from agent_runtime_client.run_stream import RunStream, StreamViolation, ViolationKind, parse_event
 from agent_runtime_client.tools import ToolDeclaration, ToolEffect
 from agent_runtime_client.wire import (
@@ -45,12 +51,6 @@ from agent_runtime_client.wire import (
     RunStatus,
     TurnRole,
     is_run_event,
-)
-from agent_runtime.text_tool_protocol import render_tool_catalog
-from agent_runtime.tools import (
-    ToolCatalog,
-    anthropic_tool_schemas,
-    openai_tool_schemas,
 )
 
 

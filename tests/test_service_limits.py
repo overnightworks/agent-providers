@@ -21,7 +21,6 @@ from service_support import (
     service_config,
 )
 
-from agent_runtime_client.wire import MAX_EVENT_BYTES, Failed, FailureCode, Succeeded
 from agent_runtime.events import (
     AssistantTextEvent,
     FinalEvent,
@@ -29,6 +28,7 @@ from agent_runtime.events import (
     ToolCallEvent,
     ToolResultEvent,
 )
+from agent_runtime_client.wire import MAX_EVENT_BYTES, Failed, FailureCode, Succeeded
 from agent_runtime_service.app import create_app
 from agent_runtime_service.config import RunConfig
 from agent_runtime_service.run_events import TOO_MANY_TOOL_CALLS_MESSAGE, TOO_MUCH_DATA_MESSAGE

@@ -57,8 +57,8 @@ from service_support import (
     fake_app_authority,  # noqa: F401 - a fixture, requested by name
 )
 
-from agent_runtime_client.mcp_wire import CallToolParams
 from agent_runtime.errors import ContainmentLost, RetainedGroup
+from agent_runtime_client.mcp_wire import CallToolParams
 from agent_runtime_service.app_tools import AppToolsSession, UpstreamRefused, open_app_tools
 from agent_runtime_service.run_tools import (
     UPSTREAM_ABORT_SECONDS,

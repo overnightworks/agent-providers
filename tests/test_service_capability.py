@@ -62,6 +62,7 @@ from webauth.jwt_verification import (
     VerifiedClaims,
 )
 
+from agent_runtime.events import AssistantTextEvent, FinalEvent
 from agent_runtime_client.capability import (
     CAPABILITY_ISSUER,
     CAPABILITY_TOKEN_TYPE,
@@ -69,7 +70,6 @@ from agent_runtime_client.capability import (
     CapabilityClaims,
 )
 from agent_runtime_client.wire import Failed, FailureCode, RejectionCode, RunStarted
-from agent_runtime.events import AssistantTextEvent, FinalEvent
 from agent_runtime_service.app import create_app
 from agent_runtime_service.capability import (
     CapabilityScope,

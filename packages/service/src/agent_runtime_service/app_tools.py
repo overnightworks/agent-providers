@@ -30,6 +30,7 @@ from typing import Any, Final, NoReturn
 
 import httpx
 
+from agent_runtime.errors import raise_without_chain
 from agent_runtime_client.capability import MCP_ENDPOINT_PATH, McpOrigin
 from agent_runtime_client.mcp_wire import (
     LATEST_PROTOCOL_VERSION,
@@ -56,7 +57,6 @@ from agent_runtime_client.mcp_wire import (
     require_supported_version,
 )
 from agent_runtime_client.wire import MAX_EVENT_BYTES, JsonObject
-from agent_runtime.errors import raise_without_chain
 from agent_runtime_service.capability import Capability
 
 UPSTREAM_IO_SECONDS: Final = 10.0

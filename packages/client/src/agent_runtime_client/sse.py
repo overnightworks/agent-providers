@@ -20,7 +20,12 @@ from enum import Enum, auto
 from typing import Any, Final
 
 from agent_runtime_client.run_stream import RunStream, StreamViolation, ViolationKind, parse_event
-from agent_runtime_client.wire import MAX_EVENT_BYTES, RunEvent, is_run_event, refuse_non_json_constant
+from agent_runtime_client.wire import (
+    MAX_EVENT_BYTES,
+    RunEvent,
+    is_run_event,
+    refuse_non_json_constant,
+)
 
 _BYTE_ORDER_MARK: Final = b"\xef\xbb\xbf"
 _LINE_END: Final = re.compile(rb"[\r\n]")

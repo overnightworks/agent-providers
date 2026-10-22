@@ -7,9 +7,9 @@ from collections.abc import Awaitable, Callable, Coroutine
 from contextlib import AsyncExitStack
 from typing import Any, Final, Self
 
-from agent_runtime_client.capability import McpOrigin
 from agent_runtime.cli_run import RelayAccess
 from agent_runtime.outlasting import outlast, wait_outlasting_cancellation
+from agent_runtime_client.capability import McpOrigin
 from agent_runtime_service.app_tools import open_app_tools
 from agent_runtime_service.capability import Capability
 from agent_runtime_service.run_liveness import (

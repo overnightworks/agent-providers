@@ -68,6 +68,13 @@ from service_support import (
 )
 from starlette.requests import ClientDisconnect
 
+from agent_runtime.events import (
+    AssistantTextEvent,
+    FinalEvent,
+    StreamEvent,
+    ToolCallEvent,
+    ToolResultEvent,
+)
 from agent_runtime_client.wire import (
     ClientLoss,
     FailureCode,
@@ -75,13 +82,6 @@ from agent_runtime_client.wire import (
     RunStarted,
     RunState,
     RunStatus,
-)
-from agent_runtime.events import (
-    AssistantTextEvent,
-    FinalEvent,
-    StreamEvent,
-    ToolCallEvent,
-    ToolResultEvent,
 )
 from agent_runtime_service.app import create_app
 from agent_runtime_service.config import RunConfig

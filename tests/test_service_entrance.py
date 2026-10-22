@@ -53,8 +53,8 @@ from service_support import (
 from webauth.https_client import KeySetFetchError
 from webauth.jwt_verification import KEY_SET_REFRESH_COOLDOWN_SECONDS
 
-from agent_runtime_client.wire import Failed, FailureCode, RejectionCode, RunRejection
 from agent_runtime.events import AssistantTextEvent, FinalEvent
+from agent_runtime_client.wire import Failed, FailureCode, RejectionCode, RunRejection
 from agent_runtime_service.app import create_app, rejection
 from agent_runtime_service.config import load_config
 from agent_runtime_service.routing import Api, Cli

@@ -26,7 +26,12 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field, ValidationErr
 from pydantic.alias_generators import to_camel
 
 from agent_runtime_client.errors import raise_without_chain
-from agent_runtime_client.wire import MAX_EVENT_BYTES, JsonObject, UnicodeText, refuse_non_json_constant
+from agent_runtime_client.wire import (
+    MAX_EVENT_BYTES,
+    JsonObject,
+    UnicodeText,
+    refuse_non_json_constant,
+)
 
 JSON_MEDIA_TYPE: Final = "application/json"
 EVENT_STREAM_MEDIA_TYPE: Final = "text/event-stream"

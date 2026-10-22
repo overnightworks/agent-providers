@@ -256,7 +256,7 @@ def test_an_unsound_key_file_stops_startup_with_one_line_naming_its_path_and_no_
 
     assert exit_status == EXIT_BAD_CONFIG
     assert capsys.readouterr().err == (
-        f"agent-service: refusing to start: {config_file}: signing.key_file: "
+        f"agent-runtime-service: refusing to start: {config_file}: signing.key_file: "
         f"{shown_key_file} {reason}\n"
     )
 

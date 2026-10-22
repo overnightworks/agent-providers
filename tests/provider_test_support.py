@@ -55,7 +55,6 @@ from anchored_kernel import join_watcher, recorded_watcher_starts
 from anchored_support import ChildCleanup
 from bounds import TEST_WAIT_SECONDS
 
-from agent_runtime_client.tools import ToolDeclaration
 from agent_runtime import anchored_turn, lost_groups, process, spawn
 from agent_runtime.anchored_turn import CliProcessPool, ReapBounds
 from agent_runtime.catalog import ProviderRoute
@@ -104,6 +103,7 @@ from agent_runtime.tool_loop import (
     ToolResultBatch,
 )
 from agent_runtime.tools import ToolCatalog, ToolProtocolMarkup
+from agent_runtime_client.tools import ToolDeclaration
 
 _fake_cli_processes: list[FakeBlockingChild] = []
 

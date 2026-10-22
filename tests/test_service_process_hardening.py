@@ -26,8 +26,8 @@ from agent_runtime_service.cli import main
 REAL_SET_NOT_DUMPABLE = hardening.set_not_dumpable
 REAL_LOAD_LIBC = hardening.load_libc
 
-MISSING_CONFIG_ARGUMENTS = ["--config", "/nonexistent/agent-service.toml"]
-REFUSAL_PREFIX = "agent-service: refusing to start: "
+MISSING_CONFIG_ARGUMENTS = ["--config", "/nonexistent/agent-runtime-service.toml"]
+REFUSAL_PREFIX = "agent-runtime-service: refusing to start: "
 ROOT_REFUSAL = (
     REFUSAL_PREFIX + "running as root (effective uid 0); run the service as an unprivileged user\n"
 )

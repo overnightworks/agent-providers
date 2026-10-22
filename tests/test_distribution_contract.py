@@ -5,11 +5,11 @@ from __future__ import annotations
 import tomllib
 from pathlib import Path
 
-import agent_runtime_client.errors
-import agent_runtime_client.tools
 import agent_runtime
 import agent_runtime.errors
 import agent_runtime.tools
+import agent_runtime_client.errors
+import agent_runtime_client.tools
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 _CLIENT_DISTRIBUTION = "overnightworks-agent-runtime-client"

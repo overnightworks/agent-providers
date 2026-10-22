@@ -56,6 +56,9 @@ from provider_test_support import fake_cli_executable
 from pydantic import ValidationError
 
 import agent_runtime_service.signing as signing
+from agent_runtime.config import PrivateWorkingRoot
+from agent_runtime.errors import RetainedGroup
+from agent_runtime.events import AssistantTextEvent, StreamEvent, ToolCallEvent
 from agent_runtime_client.run_stream import StreamViolation, ViolationKind
 from agent_runtime_client.sse import RunStreamDecoder
 from agent_runtime_client.wire import (
@@ -66,9 +69,6 @@ from agent_runtime_client.wire import (
     RunRequest,
     RunStatus,
 )
-from agent_runtime.config import PrivateWorkingRoot
-from agent_runtime.errors import RetainedGroup
-from agent_runtime.events import AssistantTextEvent, StreamEvent, ToolCallEvent
 from agent_runtime_service.admission import AdmissionSlot
 from agent_runtime_service.app import create_app
 from agent_runtime_service.config import RunConfig, ServiceConfig
@@ -169,14 +169,14 @@ def logging_state_snapshot() -> Iterator[None]:
 
 @functools.cache
 def _process_secret_directory() -> Path:
-    directory = Path(tempfile.mkdtemp(prefix="agent-service-tests-"))
+    directory = Path(tempfile.mkdtemp(prefix="agent-runtime-service-tests-"))
     atexit.register(shutil.rmtree, directory, ignore_errors=True)
     return directory
 
 
 @functools.cache
 def process_working_root() -> PrivateWorkingRoot:
-    directory = Path(tempfile.mkdtemp(prefix="agent-service-working-root-"))
+    directory = Path(tempfile.mkdtemp(prefix="agent-runtime-service-working-root-"))
     atexit.register(shutil.rmtree, directory, ignore_errors=True)
     return PrivateWorkingRoot(directory)
 
@@ -321,7 +321,7 @@ def service_config_file(
     """The test configuration written as the TOML file ``load_config`` reads."""
     document = _service_config_document(TEST_ISSUER, None, None, models=models)
     document["identity"]["subscription_groups"] = subscription_groups
-    path = directory / "agent-service.toml"
+    path = directory / "agent-runtime-service.toml"
     path.write_text("\n".join(_toml_lines(document)) + "\n", encoding="utf-8")
     return path
 

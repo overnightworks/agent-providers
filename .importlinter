@@ -20,7 +20,7 @@ root_packages =
     agent_runtime
     agent_runtime_client
 
-[importlinter:contract:agent-providers-reaches-back-into-no-host]
+[importlinter:contract:agent-runtime-reaches-back-into-no-host]
 name = agent_runtime and agent_runtime_client reach back into no host
 type = forbidden
 source_modules =
@@ -30,7 +30,7 @@ forbidden_modules =
     songmaker_cli
     webauth
 
-[importlinter:contract:agent-service-reaches-back-into-no-host]
+[importlinter:contract:agent-runtime-service-reaches-back-into-no-host]
 name = agent_runtime_service reaches back into no host
 type = forbidden
 source_modules =
@@ -38,7 +38,7 @@ source_modules =
 forbidden_modules =
     songmaker_cli
 
-[importlinter:contract:agent-service-builds-on-core-builds-on-client]
+[importlinter:contract:agent-runtime-service-builds-on-core-builds-on-client]
 name = agent_runtime_service builds on agent_runtime, which builds on agent_runtime_client, never the reverse
 type = layers
 layers =

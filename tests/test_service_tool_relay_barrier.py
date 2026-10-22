@@ -52,6 +52,7 @@ from service_support import (
     quarantine_on,
 )
 
+from agent_runtime.events import FinalEvent, ToolCallEvent, ToolResultEvent
 from agent_runtime_client.mcp_wire import (
     CallToolParams,
     JsonRpcError,
@@ -70,7 +71,6 @@ from agent_runtime_client.wire import (
     ToolCall,
     ToolResult,
 )
-from agent_runtime.events import FinalEvent, ToolCallEvent, ToolResultEvent
 from agent_runtime_service.app_tools import UpstreamCallLost, open_app_tools
 from agent_runtime_service.config import RunConfig
 from agent_runtime_service.run_events import (

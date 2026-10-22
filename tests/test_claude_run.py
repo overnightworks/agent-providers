@@ -31,7 +31,6 @@ from provider_test_support import (
 )
 from pydantic import SecretStr
 
-from agent_runtime_client.wire import TurnMessage, TurnRole
 from agent_runtime.claude.provider import (
     CLAUDE_CLI_LOGIN_REFUSED_DETAIL,
     CLAUDE_CLI_UNAVAILABLE_DETAIL,
@@ -57,6 +56,7 @@ from agent_runtime.events import (
     ToolResultEvent,
 )
 from agent_runtime.spawn import INHERITED_MACHINE_VARIABLES, ChildProcessSpecificationError
+from agent_runtime_client.wire import TurnMessage, TurnRole
 
 CANARY_MARKER = "canary-" + uuid.uuid4().hex
 CANARY_TOKEN = "sk-ant-oat01-" + CANARY_MARKER

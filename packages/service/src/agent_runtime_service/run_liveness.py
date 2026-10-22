@@ -50,10 +50,10 @@ from types import TracebackType
 from typing import Any, Final, Protocol
 from uuid import UUID
 
-from agent_runtime_client.wire import ClientLoss, FailureCode
 from agent_runtime.errors import ContainmentLost, RetainedGroup
 from agent_runtime.events import StreamEvent
 from agent_runtime.outlasting import level_cancellation, wait_outlasting_cancellation
+from agent_runtime_client.wire import ClientLoss, FailureCode
 from agent_runtime_service.config import RunConfig
 
 log = logging.getLogger(__name__)

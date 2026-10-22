@@ -24,7 +24,6 @@ from typing import Final, Literal
 
 from pydantic import SecretStr, ValidationError
 
-from agent_runtime_client.wire import TurnMessage
 from agent_runtime import process
 from agent_runtime.anchored_turn import (
     CliProcessPool,
@@ -100,6 +99,7 @@ from agent_runtime.spawn import (
     run_capturing,
 )
 from agent_runtime.transcript import flatten_messages, stdin_prompt
+from agent_runtime_client.wire import TurnMessage
 
 log = logging.getLogger(__name__)
 

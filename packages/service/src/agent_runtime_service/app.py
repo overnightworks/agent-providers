@@ -49,9 +49,9 @@ from starlette.types import Receive, Scope, Send
 from webauth.https_client import fetch_key_set_over_https
 from webauth.jwt_verification import KeySetFetch, MonotonicClock
 
+from agent_runtime import lost_groups
 from agent_runtime_client.capability import MAX_CAPABILITY_CHARACTERS
 from agent_runtime_client.wire import PROTOCOL_VERSION, RejectionCode, RunRejection, RunRequest
-from agent_runtime import lost_groups
 from agent_runtime_service.admission import AdmissionSlot, Lease
 from agent_runtime_service.capability import (
     Capability,

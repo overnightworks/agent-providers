@@ -19,6 +19,7 @@ import pytest
 from bounds import TEST_WAIT_SECONDS, within_the_bound
 from service_support import StepClock, SteppedLoop
 
+from agent_runtime.cli_run import RelayAccess
 from agent_runtime_client.mcp_wire import (
     JSON_MEDIA_TYPE,
     PROTOCOL_VERSION_HEADER,
@@ -30,7 +31,6 @@ from agent_runtime_client.mcp_wire import (
     ToolOutcome,
 )
 from agent_runtime_client.wire import JsonObject
-from agent_runtime.cli_run import RelayAccess
 from agent_runtime_service.run_liveness import LoopClock, RunClock
 from agent_runtime_service.tool_relay import (
     LOOPBACK_HOST,

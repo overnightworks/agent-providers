@@ -38,6 +38,15 @@ from service_support import (
 )
 from test_service_entrance import MINT
 
+from agent_runtime.errors import TextToolCallRejectedError
+from agent_runtime.events import (
+    AssistantTextEvent,
+    FinalEvent,
+    StreamEvent,
+    ToolCallEvent,
+    ToolResultEvent,
+)
+from agent_runtime.grok import transport as grok_cli_adapter
 from agent_runtime_client.tools import ToolEffect
 from agent_runtime_client.wire import (
     MAX_EVENT_BYTES,
@@ -51,15 +60,6 @@ from agent_runtime_client.wire import (
     Succeeded,
     ToolCall,
 )
-from agent_runtime.errors import TextToolCallRejectedError
-from agent_runtime.events import (
-    AssistantTextEvent,
-    FinalEvent,
-    StreamEvent,
-    ToolCallEvent,
-    ToolResultEvent,
-)
-from agent_runtime.grok import transport as grok_cli_adapter
 from agent_runtime_service import run_events
 from agent_runtime_service.app import create_app
 from agent_runtime_service.config import RunConfig

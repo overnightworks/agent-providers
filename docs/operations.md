@@ -10,7 +10,7 @@ the system is [ARCHITECTURE.md](ARCHITECTURE.md); what an app sends is
 
 ## Starting the service
 
-`agent-service --config PATH` takes a TOML file whose required keys have no
+`agent-runtime-service --config PATH` takes a TOML file whose required keys have no
 default; startup names the field of any unknown or missing one and exits 2. The
 service runs only on Linux, as an unprivileged effective user, and makes itself
 non-dumpable at startup before it reads its configuration; it refuses to start

@@ -48,7 +48,7 @@ flowchart TB
 - The **core** depends on the client, `pydantic`, `httpx` and `anyio`, and on
   nothing else: no host application, no web framework, no database. A host
   that runs turns itself installs it.
-- The **service** builds on both, runs as `agent-service --config PATH`, and
+- The **service** builds on both, runs as `agent-runtime-service --config PATH`, and
   alone depends on a web framework.
 
 The service's wire has one owner, `agent_runtime_client.wire`. The core's in-process

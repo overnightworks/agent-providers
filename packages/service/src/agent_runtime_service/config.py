@@ -45,10 +45,10 @@ from pydantic import (
 from webauth.https_client import is_https_url
 from webauth.oidc_login import AdmissionConfig
 
-from agent_runtime_client.capability import McpOrigin
-from agent_runtime_client.wire import MAX_EVENT_BYTES, MODEL_PART_PATTERN, ModelName, Purpose
 from agent_runtime.config import PrivateWorkingRoot, WorkingRootNotPrivateError
 from agent_runtime.secret_file import read_token_file, shown_text
+from agent_runtime_client.capability import McpOrigin
+from agent_runtime_client.wire import MAX_EVENT_BYTES, MODEL_PART_PATTERN, ModelName, Purpose
 from agent_runtime_service.capability import CapabilityScope
 from agent_runtime_service.signing import SigningKey, load_signing_key
 

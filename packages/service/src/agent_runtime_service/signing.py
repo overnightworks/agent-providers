@@ -21,8 +21,8 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from jwt.algorithms import RSAAlgorithm
 
-from agent_runtime_client.capability import SIGNING_KEY_BITS, SIGNING_KEY_EXPONENT
 from agent_runtime.secret_file import UnsoundSecretFile, read_secret_file, shown_text
+from agent_runtime_client.capability import SIGNING_KEY_BITS, SIGNING_KEY_EXPONENT
 
 _PEM_BLOCK_START: Final = b"-----BEGIN "
 

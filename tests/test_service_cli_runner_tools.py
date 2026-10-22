@@ -102,6 +102,11 @@ from test_service_cli_runner import (
 from test_service_run_tools import Stall
 
 import agent_runtime_service.cli_runner as cli_runner_module
+from agent_runtime import spawn
+from agent_runtime.cli_run import CliRunAdapter, RelayAccess
+from agent_runtime.config import PrivateWorkingRoot
+from agent_runtime.events import FinalEvent, StreamEvent
+from agent_runtime.procfs import GroupCensus
 from agent_runtime_client.mcp_wire import (
     LATEST_PROTOCOL_VERSION,
     JsonRpcErrorCode,
@@ -120,11 +125,6 @@ from agent_runtime_client.wire import (
     ToolCall,
     ToolResult,
 )
-from agent_runtime import spawn
-from agent_runtime.cli_run import CliRunAdapter, RelayAccess
-from agent_runtime.config import PrivateWorkingRoot
-from agent_runtime.events import FinalEvent, StreamEvent
-from agent_runtime.procfs import GroupCensus
 from agent_runtime_service.capability import Capability
 from agent_runtime_service.cli_runner import CliRunner, mcp_tls_context
 from agent_runtime_service.config import ServiceConfig

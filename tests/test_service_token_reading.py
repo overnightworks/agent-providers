@@ -35,8 +35,8 @@ from service_support import (
 from webauth.https_client import KeySetFetchError
 from webauth.jwt_verification import JwtVerifier, Rejected, RejectionReason, VerifiedClaims
 
-from agent_runtime_client.wire import RejectionCode
 from agent_runtime.events import AssistantTextEvent, FinalEvent
+from agent_runtime_client.wire import RejectionCode
 from agent_runtime_service.app import create_app
 from agent_runtime_service.identity import build_verifier
 from agent_runtime_service.runners import Runners

@@ -40,6 +40,14 @@ from typing import Final
 from pydantic import ValidationError
 from pydantic_core import PydanticSerializationError
 
+from agent_runtime.errors import RetainedGroup
+from agent_runtime.events import (
+    AssistantTextEvent,
+    FinalEvent,
+    StreamEvent,
+    ToolCallEvent,
+    ToolResultEvent,
+)
 from agent_runtime_client.run_stream import RunStream
 from agent_runtime_client.sse import EventTooLarge, encode_event
 from agent_runtime_client.tools import ToolEffect
@@ -55,14 +63,6 @@ from agent_runtime_client.wire import (
     Succeeded,
     ToolCall,
     ToolResult,
-)
-from agent_runtime.errors import RetainedGroup
-from agent_runtime.events import (
-    AssistantTextEvent,
-    FinalEvent,
-    StreamEvent,
-    ToolCallEvent,
-    ToolResultEvent,
 )
 from agent_runtime_service.admission import Lease
 from agent_runtime_service.config import RunConfig

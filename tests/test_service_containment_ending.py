@@ -36,6 +36,8 @@ from service_support import (
     tool_call,
 )
 
+from agent_runtime.errors import ContainmentLost, RetainedGroup
+from agent_runtime.events import AssistantTextEvent, FinalEvent, StreamEvent
 from agent_runtime_client.run_stream import ViolationKind
 from agent_runtime_client.wire import (
     ClientLoss,
@@ -45,8 +47,6 @@ from agent_runtime_client.wire import (
     RunStatus,
     Succeeded,
 )
-from agent_runtime.errors import ContainmentLost, RetainedGroup
-from agent_runtime.events import AssistantTextEvent, FinalEvent, StreamEvent
 from agent_runtime_service.config import RunConfig
 from agent_runtime_service.run_events import INVALID_EVENT_MESSAGE, RUNNER_FAILED_MESSAGE
 from agent_runtime_service.run_liveness import (

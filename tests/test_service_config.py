@@ -110,7 +110,7 @@ def _never_really_serve(monkeypatch):
 
 
 def _written(tmp_path: Path, text: str) -> Path:
-    path = tmp_path / "agent-service.toml"
+    path = tmp_path / "agent-runtime-service.toml"
     path.write_text(text, encoding="utf-8")
     return path
 
@@ -404,7 +404,8 @@ def _refused_on_one_line(config_file: Path, capsys) -> str:
     assert main(["--config", str(config_file)]) == EXIT_BAD_CONFIG
     refusal = capsys.readouterr().err
     assert refusal.count("\n") == 1
-    return refusal.removeprefix(f"agent-service: refusing to start: {config_file}: ").rstrip("\n")
+    prefix = f"agent-runtime-service: refusing to start: {config_file}: "
+    return refusal.removeprefix(prefix).rstrip("\n")
 
 
 MEMBER_NAMED_WITH_A_NEWLINE = '"extra\\nfield" = 1'
@@ -473,7 +474,8 @@ def test_a_config_path_with_a_newline_is_shown_escaped_on_one_line_in_every_refu
     shown = capsys.readouterr().err
     assert shown.count("\n") == 1
     assert shown.startswith(
-        f"agent-service: refusing to start: {str(config_file).replace(chr(10), chr(92) + 'n')}:"
+        "agent-runtime-service: refusing to start: "
+        f"{str(config_file).replace(chr(10), chr(92) + 'n')}:"
         f" {refusal}"
     )
 

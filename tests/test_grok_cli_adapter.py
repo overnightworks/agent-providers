@@ -48,7 +48,6 @@ from provider_test_support import (
     override_turn_runtime,
 )
 
-from agent_runtime_client.tools import ToolDeclaration
 from agent_runtime import process
 from agent_runtime.catalog import ProviderRoute
 from agent_runtime.config import (
@@ -77,6 +76,7 @@ from agent_runtime.tool_loop import (
     stream_tool_loop,
 )
 from agent_runtime.tools import ToolCatalog, ToolProtocolMarkup
+from agent_runtime_client.tools import ToolDeclaration
 
 failure_watch = provider_test_support.failure_watch
 

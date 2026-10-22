@@ -1,4 +1,4 @@
-"""``agent-service --config PATH``: harden the process, load the configuration, then serve.
+"""``agent-runtime-service --config PATH``: harden the process, load the configuration, then serve.
 
 A platform other than Linux, a root process, a process that cannot be made non-dumpable (so the
 Claude program and anything it starts could read the service's memory), a configuration the
@@ -36,13 +36,13 @@ def close_transport_loggers() -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="agent-service", description=__doc__)
+    parser = argparse.ArgumentParser(prog="agent-runtime-service", description=__doc__)
     parser.add_argument("--config", type=Path, required=True, help="the service's TOML file")
     arguments = parser.parse_args(argv)
     try:
         harden_process()
     except StartupHardeningRefused as error:
-        print(f"agent-service: refusing to start: {error}", file=sys.stderr)
+        print(f"agent-runtime-service: refusing to start: {error}", file=sys.stderr)
         return EXIT_BAD_CONFIG
     # Imported only now: the application modules need Unix-only os constants at import, so
     # importing them first would crash a non-Linux start before the refusal line.
@@ -58,14 +58,15 @@ def main(argv: list[str] | None = None) -> int:
     try:
         config = load_config(arguments.config)
     except ConfigError as error:
-        print(f"agent-service: refusing to start: {error}", file=sys.stderr)
+        print(f"agent-runtime-service: refusing to start: {error}", file=sys.stderr)
         return EXIT_BAD_CONFIG
     try:
         if config.cli is not None:
             require_pinned_versions(config.cli)
     except ProgramVersionRefused as error:
         print(
-            f"agent-service: refusing to start: {shown_text(str(arguments.config))}: {error}",
+            "agent-runtime-service: refusing to start: "
+            f"{shown_text(str(arguments.config))}: {error}",
             file=sys.stderr,
         )
         return EXIT_BAD_CONFIG
@@ -74,7 +75,7 @@ def main(argv: list[str] | None = None) -> int:
         tls_context = None if trust_bundle is None else mcp_tls_context(trust_bundle)
     except OSError as error:
         print(
-            "agent-service: refusing to start: mcp.ca_file: cannot be loaded:"
+            "agent-runtime-service: refusing to start: mcp.ca_file: cannot be loaded:"
             f" {shown_text(str(error))}",
             file=sys.stderr,
         )

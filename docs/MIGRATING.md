@@ -36,7 +36,7 @@ Per consumer:
 - edge: the lock writer, the image tests, the probe anchor and the `ENTRYPOINT` name the new
   distributions, imports and command.
 - presentator: the pin, the imports and the import-linter contracts.
-- every other host: at its next bump.
+- songmaker: at its next bump, the distribution, the import and the wheel URL.
 
 ## Migrating to 0.6.0
 

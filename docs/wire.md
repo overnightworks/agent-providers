@@ -121,17 +121,16 @@ protocol version and the status.
 
 **Tokens.** The end user's token and the app's workload token are checked on the
 request and neither stored nor passed to the CLI. The CLI is handed the profile's
-subscription login ([host.md](host.md), "The child environment is closed") and the
-per-run relay secret. The proxy variables set in the service's environment reach
-the CLI too; they are the deployment's.
+subscription login and the deployment's proxy variables ([host.md](host.md), "The
+child environment is closed") and the per-run relay secret.
 
 **What the CLI writes.** Every subscription run passes switches that limit what the
 CLI keeps and sends ([host.md](host.md), "The child environment is closed"). Measured
-without a login and without those switches and the system prompt file
-([decision record 0001](decisions/0001-agent-service.md), A1b-0a c5), the CLI wrote
-into its home and created an empty `/tmp/cc-socks-<uid>/` outside it. Neither that
-flag set nor a logged-in turn is measured yet; issue #115, step 12b, owns
-that measurement.
+with `--no-session-persistence` but without a login, without the telemetry switches
+and without the system prompt file ([decision record 0001](decisions/0001-agent-service.md),
+A1b-0a c5), the CLI wrote into its home and created an empty `/tmp/cc-socks-<uid>/`
+outside it. Neither the run's full set of flags and switches nor a logged-in turn is
+measured yet; issue #115, step 12b, owns that measurement.
 
 **The provider.** The turn's text, and the results of the app's tools the run calls,
 reach the provider (Anthropic for Claude) under the operator's subscription. What

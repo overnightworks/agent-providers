@@ -1,8 +1,0 @@
-claim_id = "aadd48a8bb8e4917bc459822dc3d26a4"
-agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
-role = "builder"
-base = "a3b3f49a368fe90b34c84d478a97b3ebc7a0ee00"
-branch = "docs/migrating-060-p4"
-scope = ["AGENTS.md", "README.md", "docs/MIGRATING.md", "docs/decisions/0001-agent-service.md"]
-opened_commit = "0db22f9febf57b3bd7e4e6e42504f3e0bf12ca75"
-whole_reason = "One docs pass that folds P4 into the 0.6.0 release notes before the tag: the migration rows, the version references in README and the ADR, and AGENTS.md naming docs/MIGRATING.md."

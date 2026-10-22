@@ -5,6 +5,10 @@
 # client stays installable without the provider machinery. Only the service
 # verifies user and workload tokens, so only the service may import webauth; an
 # app verifies run capabilities through agent_client.mcp_server.
+# Only the service serves HTTP, so neither the core nor the client imports a web
+# framework. The mcp_server extra stays an extra, so neither the core nor a
+# client base module imports it, PyJWT or cryptography. The neutral core modules
+# name no provider package.
 # CI runs `lint-imports` over the real import graph, so an indirect chain is
 # caught as well as a direct import.
 [importlinter]
@@ -41,14 +45,59 @@ layers =
     agent_client
 
 [importlinter:contract:neutral-run-modules-name-no-provider]
-name = the neutral run modules import no provider package
+name = the neutral core modules import no provider package
 type = forbidden
 source_modules =
     agent_providers.cli_run
     agent_providers.anchored_turn
     agent_providers.lost_groups
     agent_providers.transcript
+    agent_providers.process
+    agent_providers.spawn
+    agent_providers.procfs
+    agent_providers.config
+    agent_providers.constants
+    agent_providers.errors
+    agent_providers.events
+    agent_providers.tools
+    agent_providers.tool_loop
+    agent_providers.text_tool_protocol
+    agent_providers.outlasting
+    agent_providers.secret_file
+    agent_providers.codex_login
+    agent_providers.openai_adapter
+    agent_providers.images
+    agent_providers.sandbox
 forbidden_modules =
     agent_providers.claude
     agent_providers.codex
     agent_providers.grok
+
+[importlinter:contract:only-the-service-serves-http]
+name = agent_providers and agent_client import no web framework
+type = forbidden
+source_modules =
+    agent_providers
+    agent_client
+forbidden_modules =
+    fastapi
+    starlette
+    uvicorn
+
+[importlinter:contract:mcp-server-stays-an-extra]
+name = the core and the client base modules import neither mcp_server nor its extras
+type = forbidden
+source_modules =
+    agent_providers
+    agent_client.agents
+    agent_client.capability
+    agent_client.errors
+    agent_client.mcp_wire
+    agent_client.run_stream
+    agent_client.sse
+    agent_client.tools
+    agent_client.wire
+forbidden_modules =
+    agent_client.mcp_server
+    jwt
+    cryptography

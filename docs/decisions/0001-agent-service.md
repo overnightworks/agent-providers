@@ -5,8 +5,9 @@
   that answered the independent architecture review (Codex, three rounds).
 - **Harvested from:** [#18](https://github.com/overnightworks/agent-providers/issues/18).
 
-This record states decisions and their reasons. It describes where the system is
-going, not what exists; each slice below makes its part true when it lands.
+This record states the agent service's decisions and the reasons and evidence
+behind them, with the ruled text kept as decided. What is built is the code's to
+say, and what remains open is on [#18](https://github.com/overnightworks/agent-providers/issues/18).
 
 ## Mental model
 
@@ -4203,9 +4204,7 @@ its maximum cost still fits the budget. Provider-side caps sit behind it.
 **Consequence.** No in-flight overrun is possible; some requests that would have
 fit are refused.
 
-## H11 Interim, until the migrations land
-
-**Context.** Until the apps move, subscription logins remain in containers.
+## H11 Subscription use outside the service
 
 **Decision.** Presentator's copresenter is operator-only or offline, a gate in
 overnightworks/agent-presentator#197. Songmaker's AI paths (co-writer, judge,
@@ -4215,9 +4214,6 @@ on 15.10.2026:
 - Songmaker gets no interim AI gate.
 - Songmaker gets no friend accounts until A1s and A2c have landed.
 - After that, the operator keeps only his own accounts in `/ki-abo`.
-
-**Consequence.** No document claims the subscription has left the containers
-until every mount is gone.
 
 ## H12 Background work (job tickets)
 
@@ -4235,36 +4231,6 @@ capability, H3) and A1a5 (job tickets); one service-owned signing key covers bot
 
 **Consequence.** Background runs carry the same verified identity as the live
 request that started them, for at most a day.
-
-## Slice order
-
-Each slice becomes its own work item when it is dispatched; its plan review
-settles the open points named here.
-
-| Slice | Repo | Done when | Open points its plan settles | Depends on |
-|---|---|---|---|---|
-| #19 A0r Decision record (docs only) | agent-providers | see #19 (this record) | — | none |
-| A0a Packages and tool contract | agent-providers | A uv workspace with core at the root and `packages/agent-client`. Lockstep 0.2.0. One tag publishes both wheels. `ToolDeclaration` lives in the client and is re-exported identically. Import gates run in CI. Existing tag pins are unchanged. | settled by the A0a plan (15.10.2026), recorded by #19 | #19 |
-| A0b Wire protocol | agent-providers | The protocol is fully enumerated: every non-terminal and terminal variant with its payload, protocol version and rejection of unknown versions, sequence rules, SSE framing, and an SSE codec/state machine that validates a stream. The run id is delivered before any fallible body. A tool's effect class (read-only or side-effecting) is part of `ToolDeclaration`, and `failed: interrupted` is defined by it. The existing `agent_providers.events` is either the core's internal event type or replaced, never a second wire owner. | settled by the A0b wire ruling (15.10.2026) | A0a |
-| #28 A1a0 Wire additions | agent-providers | see #28 | — | A0b |
-| #30 A1a1k Real Keycloak token shapes | agent-providers | see #30; its facts stand under H1 "Token shapes" | — | — |
-| A1a1 Thin authenticated run | agent-providers | `packages/agent-service` exists with its entry point. `POST /runs` checks the workload token (realm role `agent-workload`, `azp == client_id ==` the registered workload client, `exp - iat` ≤ 300 s) and then the user token, applies H5 routing as one pure function, refuses every forbidden field, and streams from a scripted fake runner. The end-to-end proof uses real Keycloak tokens from #30. | Recorded with the slice | A1a0, A1a1k, webauth#51 |
-| A1a2 Run records | agent-providers | In-memory records for 1 h. `GET /runs/{id}` requires the run's exact workload client and principal and answers `not_found` otherwise. Disconnect is handled, and the loss on restart is documented. | — | A1a1 |
-| A1a3 Liveness and limits | agent-providers | Heartbeat, idle timeout, maximum duration, tool-call and byte limits, and slow clients. This row owns H6's limits. | — | A1a1 |
-| A1a4 Signing key and capability | agent-providers | An RS256 capability is minted at admission and handed to the runner, with one key, its `kid` and a documented rotation. The registry gains the MCP origin. | — | A1a1 |
-| A1a5 Job tickets | agent-providers | `POST /job-tickets` (own audience, at most 24 h), ticket runs and the `background` flag. The ticket binds `/ki-abo` and the app group (H12). | — | A1a4 |
-| A1b CLI runner | agent-providers | H7 isolation, and only the selected profile's login is visible to its run. The service-wide limit of parallel subscription runs (default 5) is taken, and a request beyond it gets 429 `busy` with `Retry-After`. Cancel and disconnect kill and reap the process group. The run's MCP config names only the relay, which owns the run's tool events; the capability reaches only the app, and no token appears in argv or logs. | — | A1a1 |
-| A1m MCP helper | agent-providers | The `agent-client` Streamable HTTP MCP server helper verifies the capability (format from A1a4), denies redirects, validates Host/Origin, and refuses a bad audience, an expired capability, a capability whose signed run id is malformed, or a tool off the allowlist, and hands each handler the verified claims of its own request. | — | A0b, A1a4 |
-| A1d Deployment | edge | A tagged service image is built from the agent-providers release. It runs in edge compose on an internal network with egress limited to the registered origins, LiteLLM, the CLI route's provider endpoint (Anthropic for the Claude CLI; A1b refinement, 17.10.2026) and the identity issuer's https JWKS host (`[identity] jwks_url`; edge#184, 20.10.2026). The profile config is code; each profile's login is a read-only **directory** bind from `~/.secrets` (for example `~/.secrets/agent-service/claude/`; a file bind pins the inode, so a swap would never reach the container; the service re-reads the token path on every run, #347), and Keycloak has the `agent-service` audience plus the workload clients. A live smoke test with the operator's account reaches a terminal event. **MCP origins are https only (operator ruling O3, 16.10.2026):** edge runs **step-ca** as a container in compose.yaml (operator ruling 16.10.2026). Traefik fetches short-lived certificates for its internal TLS entrypoint from it via ACME. The root key lives in `~/.secrets` and is part of the backup. Every app's MCP server gets a certificate for its own internal name, and the service trusts that CA's root. **A1b's container conditions** (pinned CLI, one replica, init with the service as its only child, egress, and under Q3 (d) the bubblewrap profiles) stand in #115, section "A1d conditions". With a token the CLI contacts a Datadog log intake (`http-intake.logs.us5.datadoghq.com`) unless the telemetry switches are set (agent-providers A1b-0b1, PR #148); the run's child environment sets them (agent-providers A1b-4a, PR #210), because the closed child environment never inherits a switch set in the image. The container sets `no-new-privileges`: the group reap (agent-providers #115 A1b-3) can only signal members that keep the service uid. The service runs under an init (`init: true`), not as PID 1, so orphaned leavers are reaped by init; the container mounts nothing over `/proc`, and its credentials and LSM policy let the service SIGKILL its own same-uid descendants (agent-providers A1b-3 preconditions). | — | A1b, edge#12 live; built as overnightworks/edge#184 |
-| A1s Songmaker co-writer moves | songmaker | The co-writer runs through the service with the operator's real login, and its tools work over MCP with ownership checks. The in-process co-writer route is removed, along with the local provider/model/route choice. | — | A1d, A1m (#354), Songmaker on Keycloak (K12) |
-| A1r1 Judge moves | songmaker | The judge runs with job tickets (H12). | — | A1s |
-| A1r2 Probes | songmaker | Decided at its pull: move or retire. | move/retire | A1s |
-| A1r3 Cover image | songmaker, agent-providers | The service gains a Codex image route (the first non-Claude provider), and covers run through it. | — | A1s |
-| A1r4 Credential mounts removed | songmaker | No Songmaker container mounts a subscription credential (checked in CI). | — | A1r1–A1r3 |
-| A2a Gateway | edge | LiteLLM is up with H10 and H10b proven, including the canary. | — | edge#12 live |
-| A2b API route | agent-providers | The service's API route and tool loop serve API-eligible principals. | — | A1a1, A2a |
-| A2c "KI noch nicht freigeschaltet" | songmaker | A `not_enabled` result renders the message, and a UI test pins it. | — | A2b, A1s |
-| A3 Presentator copresenter moves | agent-presentator | The copresenter goes through the service, and the H11 gate is lifted. | — | A2b, K13 |
 
 ## Out of scope at this size
 

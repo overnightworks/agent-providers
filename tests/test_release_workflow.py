@@ -75,7 +75,7 @@ def test_the_release_notice_exists_only_for_a_tag_with_its_migration_section(
     assert _notice_for(tag, f"# Title\n\n{heading}\n\ntext\n", tmp_path) == notice
 
 
-def test_the_release_page_lists_each_wheel_with_its_url_and_sha256(tmp_path):
+def _wheel_list_output(tmp_path: Path) -> tuple[dict[str, bytes], str]:
     wheels = {
         "overnightworks_agent_client-0.3.0-py3-none-any.whl": b"client",
         "overnightworks_agent_providers-0.3.0-py3-none-any.whl": b"core",
@@ -97,7 +97,11 @@ def test_the_release_page_lists_each_wheel_with_its_url_and_sha256(tmp_path):
         },
         check=True,
     )
-    install = output.read_text(encoding="utf-8")
+    return wheels, output.read_text(encoding="utf-8")
+
+
+def test_the_release_page_lists_each_wheel_with_its_url_and_sha256(tmp_path):
+    wheels, install = _wheel_list_output(tmp_path)
     for name, content in wheels.items():
         distribution = name.split("-")[0].replace("_", "-")
         url = f"https://github.com/{_REPOSITORY}/releases/download/v0.3.0/{name}"
@@ -173,10 +177,13 @@ def test_the_release_job_has_the_steps_the_publish_step_reads_from():
     assert {"notice", "install"} <= step_ids
 
 
-def test_the_install_step_writes_its_lines_under_the_install_output_key():
-    install_step = next(step for step in _release_steps() if step.get("id") == "install")
+def test_the_wheel_list_is_written_as_a_multiline_output_named_install(tmp_path):
+    _, install = _wheel_list_output(tmp_path)
+    lines = install.splitlines()
 
-    assert "echo 'install<<" in install_step["run"]
+    opening, delimiter = lines[0].split("<<")
+    assert opening == "install"
+    assert lines[-1] == delimiter
 
 
 def test_the_release_is_created_with_generated_notes_and_the_three_wheels(tmp_path):

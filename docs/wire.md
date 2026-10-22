@@ -92,21 +92,15 @@ the capability's token or signature is replaced by an empty 500.
 ## What a run keeps
 
 The service has no database. The messages, the tool calls and results, and the
-answer pass through its memory only. The system prompt is the one part of a turn it
-writes to disk, into the run's place below.
-
-**The run's place.** Each subscription run gets a private tree below the operator's
-working root, with the CLI's home, its temporary directory and an empty working
-directory. It holds the system prompt, the tool relay's connection file with a
-per-run secret when the run offers tools, and whatever the CLI writes there.
-[host.md](host.md), "A subscription run's directories", owns the layout, the file
-modes and the removal. The service removes the tree when the run ends and its
-process group is confirmed gone. When it cannot confirm that, it quarantines the
-place: the whole tree stays, system prompt included, and the service asks again
-every five seconds without a limit until the group is confirmed gone, then removes
-it. If the service process ends before a tree is removed, mid-run or in quarantine,
-nothing removes the tree, and the same holds for a tree whose removal fails: it stays
-until the host clears the working root.
+answer pass through its memory only. A turn reaches disk in three ways: the system
+prompt, the tool relay's connection file with its per-run secret (when the run
+offers tools), and whatever the CLI writes. All of it lives in the run's private
+tree ([host.md](host.md), "A subscription run's directories", owns the layout, the
+modes and the removal), which is removed once the run's process group is confirmed
+gone. When that cannot be confirmed, the service quarantines the place: the whole
+tree stays, system prompt included, and the service asks again every five seconds
+without a limit. If the service process ends first, the tree stays until the host
+clears the working root.
 
 **The run record.** The record behind `GET /runs/{id}` holds the run's owner (the
 app and the person's token issuer and subject), its start and end timestamps, the
@@ -119,21 +113,19 @@ so an idle service may hold one longer, but never returns it. At most 10,000 end
 records are kept; beyond that the oldest go first.
 
 **The logs.** The service's own log lines carry classes, source positions, counts,
-ids and process-group numbers, never a prompt, an answer or CLI output; the CLI's
+ids, process-group numbers and closed reason codes, never a prompt, an answer or CLI output; the CLI's
 error stream is read and discarded. The HTTP server adds one access line per
-request: the caller's address, the method and path, and the status.
+request: the caller's address, the method, the path including its query string, and
+the status.
 
 **Tokens.** The end user's token and the app's workload token are checked on the
-request and neither stored nor passed to the CLI. The service hands the CLI the
-profile's subscription login, read from the operator's file at every run
-([host.md](host.md), "The child environment is closed";
-[operations.md](operations.md), "The subscription login"), and the per-run relay
-secret. Proxy variables the deployment allows reach the CLI too; they are the
-deployment's.
+request and neither stored nor passed to the CLI. The CLI is handed the profile's
+subscription login ([host.md](host.md), "The child environment is closed") and the
+per-run relay secret. The proxy variables set in the service's environment reach
+the CLI too; they are the deployment's.
 
-**What the CLI writes.** Every subscription run passes `--no-session-persistence`
-and the switches that turn off the CLI's telemetry and nonessential traffic
-([host.md](host.md), "The child environment is closed"). Measured without a login
+**What the CLI writes.** Every subscription run limits what the CLI keeps and
+sends ([host.md](host.md), "The child environment is closed"). Measured without a login
 and without the run's switches and system prompt file
 ([decision record 0001](decisions/0001-agent-service.md), A1b-0a c5), the CLI wrote
 into its home and created an empty `/tmp/cc-socks-<uid>/` outside it. Neither the

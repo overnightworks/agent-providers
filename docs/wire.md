@@ -2,7 +2,8 @@
 
 For the developer of an app that starts agent runs through the agent service:
 the request an app sends, the events it reads back, the agent files it ships,
-the tool contract it declares and the MCP endpoint it serves. This is a
+the tool contract it declares, the MCP endpoint it serves and what the service
+keeps of a run. This is a
 reference; `agent_client.wire` owns the wire (its stream rules sit in
 `agent_client.run_stream` and `agent_client.sse`), `agent_client.agents` the agent
 file, `agent_client.tools` the tool contract and `agent_client.mcp_server` the
@@ -30,8 +31,7 @@ workload token in the `Agent-Workload-Token` header.
 | `model` | Optional, `<provider>/<model>` such as `claude/sonnet`. |
 
 `GET /runs/{id}` returns the run's `RunStatus`, readable only by the app and
-user that started it. The record is in memory, kept up to an hour after the run
-ended, and gone after a restart.
+user that started it ([What a run keeps](#what-a-run-keeps) says what the record holds).
 
 The stream's events are `run_started`, `assistant_text`, `tool_call`,
 `tool_result`, `heartbeat` and one terminal event: `succeeded`, `failed`
@@ -88,3 +88,51 @@ database session. `verify_capability` returns the claims or one closed
 `CapabilityRefusal` and never raises for token content; a body that carries
 the capability's token or signature is replaced by an empty 500.
 `agent_client.mcp_server` documents the order of the checks.
+
+## What a run keeps
+
+The service has no database. The messages, the tool calls and results, and the
+answer pass through its memory only. The service writes the system prompt and,
+when the run offers tools, the tool relay's connection file with its per-run secret
+into the run's private tree ([host.md](host.md), "A subscription run's
+directories", owns the layout, the modes and when the tree is removed). What the
+CLI may write, inside the tree or outside it, is under "What the CLI writes" below.
+When the service cannot confirm that the run's process group is gone, it
+quarantines the place: the whole tree stays, system prompt included, and the
+service asks again every five seconds without a limit. If the service process ends
+before the tree is removed, mid-run or in quarantine, the tree stays until the host
+clears the working root.
+
+**The run record.** The record behind `GET /runs/{id}` holds the run's owner (the
+app and the person's token issuer and subject), its start and end timestamps, the
+number of events, its terminal state and failure code, and whether the client was
+lost. It holds no prompt, answer, tool input or result, failure message, token or
+process group. It lives in memory only and no record survives a restart. A running
+record never expires. An ended record answers a lookup for one hour after the run
+ends; the service drops expired records from memory when it next handles a record,
+so an idle service may hold one longer, but never returns it. At most 10,000 ended
+records are kept; beyond that the oldest go first.
+
+**The logs.** The service's own log lines carry classes, source positions, counts,
+ids, process-group numbers and closed reason codes, never a prompt, an answer or CLI output; the CLI's
+error stream is read and discarded. The HTTP server adds one access line per
+request: the caller's address, the method, the path including its query string, the
+protocol version and the status.
+
+**Tokens.** The end user's token and the app's workload token are checked on the
+request and neither stored nor passed to the CLI. The CLI is handed the profile's
+subscription login and the deployment's proxy variables ([host.md](host.md), "The
+child environment is closed") and the per-run relay secret.
+
+**What the CLI writes.** Every subscription run passes switches that limit what the
+CLI keeps and sends ([host.md](host.md), "The child environment is closed").
+[Decision record 0001](decisions/0001-agent-service.md) measured the CLI's own
+writes with `--no-session-persistence` and without the telemetry switches: without
+a login (A1b-0a c5), which also found an empty `/tmp/cc-socks-<uid>/` outside the
+home, and with a login (A1b-0b1 c3), which lists the home only. A turn with the
+run's full flags and switches in the real deployment, inside its home and outside
+it, is not measured yet; issue #115, step 12b, owns that measurement.
+
+**The provider.** The turn's text, and the results of the app's tools the run calls,
+reach the provider (Anthropic for Claude) under the operator's subscription. What
+the provider keeps follows its terms, not this service.

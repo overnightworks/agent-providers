@@ -5,10 +5,12 @@
 # client stays installable without the provider machinery. Only the service
 # verifies user and workload tokens, so only the service may import webauth; an
 # app verifies run capabilities through agent_client.mcp_server.
-# Only the service serves HTTP, so neither the core nor the client imports a web
-# framework. The mcp_server extra stays an extra, so neither the core nor a
-# client base module imports it, PyJWT or cryptography. The neutral core modules
-# name no provider package.
+# Only the service builds on a web framework, so neither the core nor the
+# client imports one; the client's MCP server is plain ASGI. The mcp-server
+# extra stays an extra, so neither the core nor a client base module (the
+# package __init__ included) imports agent_client.mcp_server, PyJWT or
+# cryptography. Only the routers (catalog, dispatch) import a provider package;
+# the machinery the provider packages build on never reaches back into one.
 # CI runs `lint-imports` over the real import graph, so an indirect chain is
 # caught as well as a direct import.
 [importlinter]
@@ -45,7 +47,7 @@ layers =
     agent_client
 
 [importlinter:contract:neutral-run-modules-name-no-provider]
-name = the neutral core modules import no provider package
+name = only the routers import a provider package; the machinery below them never does
 type = forbidden
 source_modules =
     agent_providers.cli_run
@@ -73,8 +75,8 @@ forbidden_modules =
     agent_providers.codex
     agent_providers.grok
 
-[importlinter:contract:only-the-service-serves-http]
-name = agent_providers and agent_client import no web framework
+[importlinter:contract:only-the-service-imports-a-web-framework]
+name = only the service imports a web framework
 type = forbidden
 source_modules =
     agent_providers
@@ -85,10 +87,23 @@ forbidden_modules =
     uvicorn
 
 [importlinter:contract:mcp-server-stays-an-extra]
-name = the core and the client base modules import neither mcp_server nor its extras
+name = the core imports neither agent_client.mcp_server nor its extras
 type = forbidden
 source_modules =
     agent_providers
+forbidden_modules =
+    agent_client.mcp_server
+    jwt
+    cryptography
+
+# as_packages = False keeps agent_client itself (its __init__) a source without
+# making the mcp_server package inside it one.
+[importlinter:contract:client-base-stays-free-of-mcp-server]
+name = the client base modules import neither agent_client.mcp_server nor its extras
+type = forbidden
+as_packages = False
+source_modules =
+    agent_client
     agent_client.agents
     agent_client.capability
     agent_client.errors

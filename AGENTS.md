@@ -9,8 +9,7 @@ proves it. The traps it cannot show:
 
 - The service's wire has one owner, `agent_client.wire`.
 - `agent_providers.events` is the core's in-process turn event, never a second wire.
-- Only the service imports a web framework.
-- The `[api]`, `[image]` and `[mcp-server]` extras stay optional: their libraries are imported only inside the route or module that needs them, and no base module imports `agent_client.mcp_server`.
+- The `[api]`, `[image]` and `[mcp-server]` extras stay optional: their libraries are imported only inside the route or module that needs them.
 
 ## Code patterns
 

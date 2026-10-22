@@ -1,0 +1,7 @@
+claim_id = "3b55828565254a15a76ef510b5f26ce8"
+agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
+role = "builder"
+base = "f8eb51b345913672de809020a8fb3a19dbef3daa"
+branch = "fix/bump-fastapi-starlette"
+scope = ["uv.lock"]
+opened_commit = "1de8bacb05ce182becc292fc27bccd46a8fc903e"

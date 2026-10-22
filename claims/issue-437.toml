@@ -1,0 +1,8 @@
+claim_id = "96cfece3f5564d65b950eb0b08654045"
+agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
+role = "builder"
+base = "d7cd5957e63a1bb730ec310acfd1345ddb06ef92"
+branch = "claude/issue-437-s3-agent-runtime-sonar-key-und-repo-link"
+scope = ["AGENTS.md", "README.md", "packages/client/pyproject.toml", "packages/service/pyproject.toml", "pyproject.toml", "sonar-project.properties", "tests/conftest.py", "tests/test_release_workflow.py"]
+opened_commit = "1028f3af8f17702bf9d7c815e320de5db02424df"
+whole_reason = "The Sonar key and every forge link move in one PR, because quality's preflight compares the key with the repository name and a split leaves main red."

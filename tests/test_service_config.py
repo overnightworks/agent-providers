@@ -400,12 +400,11 @@ def test_an_explicit_parallel_run_limit_loads_and_gives_that_many_places(tmp_pat
     assert runs.max_parallel_cli_runs == 2
 
 
-def _refused_on_one_line(config_file: Path, capsys) -> str:
-    assert main(["--config", str(config_file)]) == EXIT_BAD_CONFIG
+def _refused_on_one_line(path: Path, capsys) -> str:
+    assert main(["--config", str(path)]) == EXIT_BAD_CONFIG
     refusal = capsys.readouterr().err
     assert refusal.count("\n") == 1
-    prefix = f"agent-runtime-service: refusing to start: {config_file}: "
-    return refusal.removeprefix(prefix).rstrip("\n")
+    return refusal.removeprefix(f"agent-runtime-service: refusing to start: {path}: ").rstrip("\n")
 
 
 MEMBER_NAMED_WITH_A_NEWLINE = '"extra\\nfield" = 1'
@@ -475,8 +474,7 @@ def test_a_config_path_with_a_newline_is_shown_escaped_on_one_line_in_every_refu
     assert shown.count("\n") == 1
     assert shown.startswith(
         "agent-runtime-service: refusing to start: "
-        f"{str(config_file).replace(chr(10), chr(92) + 'n')}:"
-        f" {refusal}"
+        f"{str(config_file).replace(chr(10), chr(92) + 'n')}: {refusal}"
     )
 
 

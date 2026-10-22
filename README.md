@@ -9,14 +9,14 @@ authenticated entrance through which apps start agent runs.
 
 Three distributions are released together from one tag: the provider core
 `overnightworks-agent-providers`, the light client `overnightworks-agent-client`
-that an app installs, and the agent service `overnightworks-agent-service`.
+for apps, and the agent service `overnightworks-agent-service`.
 
 ## Install
 
 No distribution is on PyPI. Install the wheels that the
 [latest release](https://github.com/overnightworks/agent-providers/releases/latest)
 lists: its page gives each as a `name @ URL#sha256=…` requirement for `pip install`
-or `uv add`; an app installs the client and the core.
+or `uv add`.
 
 ## Where to read
 

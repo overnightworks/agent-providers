@@ -55,7 +55,7 @@ jobs:
         run: |
           {
             echo 'install<<INSTALL_LINES'
-            echo '**Install.** Pin each wheel by URL and hash; an app installs the client and the core.'
+            echo '**Install.** Pin each wheel by URL and hash.'
             echo
             echo '```'
             for wheel in dist/*.whl; do

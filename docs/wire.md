@@ -3,7 +3,8 @@
 For the developer of an app that starts agent runs through the agent service:
 the request an app sends, the events it reads back, the agent files it ships,
 the tool contract it declares and the MCP endpoint it serves. This is a
-reference; `agent_client.wire` owns the wire, `agent_client.agents` the agent
+reference; `agent_client.wire` owns the wire (its stream rules sit in
+`agent_client.run_stream` and `agent_client.sse`), `agent_client.agents` the agent
 file, `agent_client.tools` the tool contract and `agent_client.mcp_server` the
 tool endpoint, and their docstrings are exact where this file is short. The
 decision record [0001](decisions/0001-agent-service.md) owns the rulings behind
@@ -21,7 +22,7 @@ workload token in the `Agent-Workload-Token` header.
 
 | Field | Meaning |
 |---|---|
-| `v` | The protocol version, `2`. Any other body answers 400 `unsupported_version`; a 0.5.0 app and a 0.6.0 service refuse each other. |
+| `v` | The protocol version, `2`. Any other body answers 400 `unsupported_version`. |
 | `purpose` | The agent's name, `[a-z][a-z0-9-]{0,63}`. It labels the run and its capability and keys the app's model override; it chooses no route. |
 | `turn` | The system prompt and the messages (`Turn`, `TurnMessage`). |
 | `roles` | The agent's allowed roles, exactly `["admin"]` or `["admin", "user"]`; `AgentDefinition.request` fills it from the agent file. |
@@ -43,7 +44,7 @@ A request the service refuses answers a `RunRejection` with one `RejectionCode`:
 | Code | Status | Meaning |
 |---|---|---|
 | `unauthorized` | 401 | A user token and a workload token are both required and must be valid. |
-| `forbidden` | 403 | The user is no member of the app, the request's `roles` lack the caller's role, or the request names a tool while the app has no MCP origin. |
+| `forbidden` | 403 | The user is no member of the app, the request's `roles` lack the caller's role, the request names a tool while the app has no MCP origin, or the two tokens do not belong together (`agent_service.identity` lists every cause). |
 | `not_enabled` | 403 | No route is enabled for this caller and model. |
 | `unsupported_version` | 400 | `v` is not 2. |
 | `invalid_request` | 422 | The body is not a valid `RunRequest`. |

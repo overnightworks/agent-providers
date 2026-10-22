@@ -92,6 +92,68 @@ def test_the_release_page_lists_each_wheel_with_its_url_and_sha256(tmp_path):
         assert f"{distribution} @ {url}#sha256={digest}\n" in install
 
 
+_INSTALL_LINES = [
+    f"overnightworks-agent-{name} @ https://example.test/{name}.whl#sha256={digest}"
+    for name, digest in (("client", "aa"), ("providers", "bb"), ("service", "cc"))
+]
+
+
+def _publish(notice: str, tmp_path: Path) -> list[str]:
+    """Run the publish step with a `gh` that records its arguments, one per line."""
+    (tmp_path / "dist").mkdir()
+    wheels = ["a.whl", "b.whl", "c.whl"]
+    for wheel in wheels:
+        (tmp_path / "dist" / wheel).touch()
+    bin_directory = tmp_path / "bin"
+    bin_directory.mkdir()
+    recorded = tmp_path / "recorded"
+    fake_gh = bin_directory / "gh"
+    fake_gh.write_text(f'#!/bin/sh\nprintf \'%s\\n\' "$@" > "{recorded}"\n', encoding="utf-8")
+    fake_gh.chmod(0o755)
+    subprocess.run(
+        [
+            "/bin/bash",
+            "-e",
+            "-c",
+            _run_script("Publish the release with the wheels the check admitted"),
+        ],
+        cwd=tmp_path,
+        env={
+            "PATH": f"{bin_directory}:/usr/bin:/bin",
+            "GITHUB_REF_NAME": "v0.3.0",
+            "NOTICE": notice,
+            "INSTALL": "\n".join(_INSTALL_LINES),
+        },
+        check=True,
+    )
+    return recorded.read_text(encoding="utf-8").splitlines()
+
+
+def _notes_of(arguments: list[str]) -> list[str]:
+    return arguments[arguments.index("--notes") + 1 :]
+
+
+def test_the_published_notes_open_with_the_migration_link_then_the_three_requirements(tmp_path):
+    notes = _notes_of(_publish(_MIGRATION_LINK, tmp_path))
+
+    assert notes == [_MIGRATION_LINK, "", *_INSTALL_LINES]
+
+
+def test_the_published_notes_without_a_migration_section_are_the_three_requirements_only(tmp_path):
+    notes = _notes_of(_publish("", tmp_path))
+
+    assert notes == _INSTALL_LINES
+
+
+@pytest.mark.parametrize("notice", [_MIGRATION_LINK, ""], ids=["with migration", "without"])
+def test_the_release_is_created_with_generated_notes_and_the_three_wheels(tmp_path, notice):
+    arguments = _publish(notice, tmp_path)
+
+    assert arguments[:3] == ["release", "create", "v0.3.0"]
+    assert arguments[3:6] == ["dist/a.whl", "dist/b.whl", "dist/c.whl"]
+    assert "--generate-notes" in arguments
+
+
 @pytest.mark.parametrize(
     "step_name",
     [

@@ -29,10 +29,11 @@ releases in [MIGRATING.md](MIGRATING.md).
 No distribution is published on PyPI, and PyPI is not planned: wheels pinned by
 URL and hash from the tag's GitHub release give byte-exact, hash-checked wheels
 with no PyPI name to race for; their dependencies still resolve from PyPI. The
-release page lists each wheel as a `name @ URL#sha256=HASH` requirement. An app
-installs the client and the core; the core pins the client to its own version
-exactly, so both URLs name the same tag. An app that needs only the tool contract
-installs the client wheel alone.
+release page lists each wheel as a `name @ URL#sha256=HASH` requirement. A host
+that runs turns itself installs the core; the core pins the client to its own
+version exactly, so both URLs name the same tag. An app that only starts runs
+through the service installs the client alone ([ARCHITECTURE.md](ARCHITECTURE.md)
+says which distribution serves whom).
 
 A uv host lists the same URLs in its `pyproject.toml`; `uv lock` records each
 wheel's sha256 in the host's own `uv.lock`, and `uv sync` checks it. A host that
@@ -169,10 +170,11 @@ subscription run gets a fresh private home below the working root (directories
 opened only for reading. Grok and Codex copy the host-named file into the home. A
 Claude turn gets no copy: the setup token in `claude.token_file` reaches the child
 only as `CLAUDE_CODE_OAUTH_TOKEN`, never in its arguments, and is read through
-`secret_file` at every child start. A file that is missing, open to group or
-others, over 16 KiB or holding JSON fails the turn with `CLI_LOGIN_NOT_CONFIGURED`
+`secret_file` at every child start. A file that [operations.md](operations.md) refuses (missing, open to group or
+others, over 16 KiB, JSON) fails the turn with `CLI_LOGIN_NOT_CONFIGURED`
 and leaves no home behind (the error is `CliLoginNotConfiguredError`); a token the provider
-rejects ends a streaming turn with the safe code `cli_auth_rejected`. Every Claude child also gets the run switches
+rejects ends a streaming turn with the safe code `cli_auth_rejected`. The model list asks the
+Claude CLI without a login and names no default. Every Claude child also gets the run switches
 (`constants.CLAUDE_RUN_SWITCHES`) and every `-p` run passes
 `--no-session-persistence`, so no Claude child keeps a session on disk and its
 telemetry and nonessential traffic stay off; the model request itself still

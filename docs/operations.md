@@ -33,20 +33,16 @@ bound to one principal (`agent_service.identity`). The checks run in this order:
    request whose `roles` lacks it gets 403 `forbidden`.
 3. An app without an MCP origin whose request names a tool gets 403
    `forbidden`.
-4. `agent_service.routing.route` decides the route (the second picture in
-   [ARCHITECTURE.md](ARCHITECTURE.md)). It reads the caller's groups and the
-   model the agent runs on, never the purpose. That model is the app's override
-   (`[apps.<app>.models]`, the agent's name to `<provider>/<model>`) when one
-   exists, else the requested model; a requested model is never replaced by
-   another. A member of a subscription group (`[identity] subscription_groups`)
-   takes the CLI route under the subscription profile when no model is requested
-   or the subscription can run exactly that model (the names in `[cli.claude]
-   models`). A member of an API group (`api_groups`, set together with `[route]
-   api_alias`) takes the paid API route otherwise. Anyone else gets 403
-   `not_enabled`. A model name the subscription does not list sends that agent
-   to the paid API for every caller with API rights and gives subscription-only
-   callers `not_enabled`; an override for a name the app never sends matches
-   nothing, with no error.
+4. `agent_service.routing.route` decides the route; the second picture in
+   [ARCHITECTURE.md](ARCHITECTURE.md) owns the order. The keys that feed it: the
+   app's model override (`[apps.<app>.models]`, the agent's name to
+   `<provider>/<model>`), the subscription groups (`[identity]
+   subscription_groups`), the profiles (`[profiles.<name>]`), the names the
+   subscription lists (`[cli.claude] models`), and the API groups (`api_groups`,
+   set together with `[route] api_alias`). A model name the subscription does not
+   list sends that agent to the paid API for every caller with API rights and
+   gives subscription-only callers `not_enabled`; an override for a name the app
+   never sends matches nothing, with no error.
 
 At most `[runs] max_parallel_cli_runs` (default 5) CLI runs are admitted; one
 beyond gets 429 `busy` with `Retry-After` and never falls back to the API
@@ -59,9 +55,8 @@ provider_unavailable`.
 
 An app that offers tools has `[apps.<app>]` with `workload_client` and
 `mcp_origin`, one canonical https origin that no other app shares. The service
-mints each admitted run a capability that grants exactly the tools the request
-names. The capability is an RS256 token signed with the service's one RSA-3072
-key, `[signing] key_file`, at most 8,192 characters. The service trusts the CA
+mints each admitted run a capability ([wire.md](wire.md)), signed with the
+service's one RSA-3072 key, `[signing] key_file`. The service trusts the CA
 bundle `[mcp] ca_file` names for these origins alone. The service never makes
 its key; generation and rotation are the A1a4 ruling in the decision record.
 
@@ -97,4 +92,4 @@ also fails the run as `provider_error`.
 
 An app that still calls the core directly names the same file in the provider's
 block of its `ProviderRuntimeConfig`; that interim path reads Codex and Grok
-login files under weaker rules than the service's, and #18 A1r5 deletes it.
+login files under weaker rules than the service's.

@@ -15,7 +15,8 @@ transport, the tool loop, a bounded subprocess runner and the sandbox
 directory-name constants. The service is the one authenticated entrance through
 which apps start agent runs: one agent service decides who is asking, whether
 they may use the operator's subscription, and which route serves them. An app
-never holds an LLM or subscription credential, and its tools stay with the app.
+that starts runs through the service holds no LLM or subscription credential, and
+its tools stay with the app.
 
 ## The three distributions
 
@@ -68,13 +69,16 @@ flowchart TB
     role -->|yes| tools{"tools named but app<br/>has no MCP origin?"}
     tools -->|yes| forbidden
     tools -->|no| model["resolved model =<br/>app override for the purpose,<br/>else the requested model"]
-    model --> subscription{"subscription group member,<br/>and no model asked or model<br/>listed in cli.claude models?"}
+    model --> subscription{"subscription group member,<br/>and a profile serves it?<br/>(no model asked: any profile;<br/>model asked: a profile of that<br/>provider lists the name)"}
     subscription -->|yes| slot{"CLI place free?"}
     slot -->|yes| cli["CLI route<br/>claude under the subscription profile"]
     slot -->|no| busy["429 busy"]
     subscription -->|no| api{"API group member<br/>and route.api_alias set?"}
-    api -->|yes| paid["API route<br/>paid, no runner built yet"]
+    api -->|yes| paid["API route<br/>paid, no runner built"]
     api -->|no| notenabled["403 not_enabled"]
+    cli --> size{"app has an MCP origin and<br/>capability over 8,192 characters?"}
+    paid --> size
+    size -->|yes| toolarge["422 capability_too_large"]
 ```
 
 *Question: which route serves this caller? Source:
@@ -107,13 +111,15 @@ service's container ([host.md](host.md)).
   tokens, against the one configured issuer; identity is the verified `(iss,
   sub)`, never a field of the request body.
 - *The service decides, the browser supplies nothing.* The user's browser reaches
-  the service only as the access token its app forwards. The request carries no
-  MCP URL, MCP token, route or user id; the route, the role and the app gate are
-  decided from verified tokens and configuration.
+  the service only as the access token its app forwards. The app gate and the
+  caller's role come from the verified tokens. The request, sent by the app under
+  its workload token, supplies the agent's allowed roles, its tools and the
+  requested model; configuration decides the rest. It carries no MCP URL, MCP
+  token, route or user id.
 - *The app owns its tools and their effects.* Tools run in the app, behind its one
   registered MCP origin. The request names the tools and their effects; the
-  service signs a per-run capability that grants exactly those names (RS256, one
-  RSA-3072 key), and the app verifies it with the public key. A tool outside the
-  request's map counts as side-effecting.
+  service signs a per-run capability that grants exactly those names, and the app
+  verifies it with the public key ([wire.md](wire.md) has the details).
 - *No credential in an app.* The subscription login is one file the operator
-  names; apps hold none.
+  names; an app that starts runs through the service holds none (the interim core
+  path in [operations.md](operations.md) is the exception).

@@ -2,6 +2,42 @@
 
 Read by a host bumping its pin; each release that breaks a host has one section, newest first.
 
+## Migrating to 0.7.0
+
+A host migrates at its pin bump to 0.7.0, by renaming. Nothing behaves differently: the wire
+(`PROTOCOL_VERSION` 2), the configuration file and every identity below are the same bytes as
+in 0.6.0, so a 0.6.0 app and a 0.7.0 service (or the reverse) still exchange the same
+messages. The wheel URLs are now under
+`https://github.com/overnightworks/agent-runtime/releases/download/v0.7.0/`.
+
+| Before | Now |
+|---|---|
+| distribution `overnightworks-agent-providers` | `overnightworks-agent-runtime` |
+| distribution `overnightworks-agent-client` | `overnightworks-agent-runtime-client` |
+| distribution `overnightworks-agent-service` | `overnightworks-agent-runtime-service` |
+| import `agent_providers` | `agent_runtime` |
+| import `agent_client` | `agent_runtime_client` |
+| import `agent_service` | `agent_runtime_service` |
+| wheel files `overnightworks_agent_providers-…`, `…_agent_client-…`, `…_agent_service-…` | `overnightworks_agent_runtime-…`, `…_agent_runtime_client-…`, `…_agent_runtime_service-…` |
+| command `agent-service --config PATH` | `agent-runtime-service --config PATH`; a refusal starts with `agent-runtime-service: refusing to start:` |
+| extras such as `overnightworks-agent-client[mcp-server]` | the same extras on the new names |
+
+Logger names follow the imports, because they are `__name__`: `agent_client.mcp_server` is now
+`agent_runtime_client.mcp_server`, and a log filter or handler keyed on an old name moves with
+it.
+
+What stays, because peers and tokens carry it: the capability issuer `agent-service`, the MCP
+`serverInfo` and `clientInfo` name `agent-service`, the Keycloak client and audience
+`agent-service`, and every service configuration key and table, so a service configuration
+loads unchanged.
+
+Per consumer:
+
+- edge: the lock writer, the image tests, the probe anchor and the `ENTRYPOINT` name the new
+  distributions, imports and command.
+- presentator: the pin, the imports and the import-linter contracts.
+- every other host: at its next bump.
+
 ## Migrating to 0.6.0
 
 A host migrates at its pin bump to 0.6.0. Prepare the realm first: give every user the

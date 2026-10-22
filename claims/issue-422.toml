@@ -1,7 +1,0 @@
-claim_id = "3961d3e212e4444a8cf116f0327acd08"
-agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
-role = "builder"
-base = "f788347595d35d705a21a8b4ca217a0a124206f8"
-branch = "claude/issue-422-gr-en-und-klon-ratchet-bernehmen-quality"
-scope = ["quality/baseline.toml"]
-opened_commit = "57de07255e0f1a387c2b9dc9df23b49f6e9015fa"

@@ -92,14 +92,15 @@ the capability's token or signature is replaced by an empty 500.
 ## What a run keeps
 
 The service has no database. The messages, the tool calls and results, and the
-answer pass through its memory only. A turn reaches disk in three ways: the system
-prompt, the tool relay's connection file with its per-run secret (when the run
-offers tools), and whatever the CLI writes. All of it lives in the run's private
-tree ([host.md](host.md), "A subscription run's directories", owns the layout, the
-modes and the removal), which is removed once the run's process group is confirmed
-gone. When that cannot be confirmed, the service quarantines the place: the whole
-tree stays, system prompt included, and the service asks again every five seconds
-without a limit. If the service process ends first, the tree stays until the host
+answer pass through its memory only. The service writes the system prompt and,
+when the run offers tools, the tool relay's connection file with its per-run secret
+into the run's private tree ([host.md](host.md), "A subscription run's
+directories", owns the layout, the modes and when the tree is removed). What the
+CLI may write, inside the tree or outside it, is under "What the CLI writes" below.
+When the service cannot confirm that the run's process group is gone, it
+quarantines the place: the whole tree stays, system prompt included, and the
+service asks again every five seconds without a limit. If the service process ends
+before the tree is removed, mid-run or in quarantine, the tree stays until the host
 clears the working root.
 
 **The run record.** The record behind `GET /runs/{id}` holds the run's owner (the
@@ -115,8 +116,8 @@ records are kept; beyond that the oldest go first.
 **The logs.** The service's own log lines carry classes, source positions, counts,
 ids, process-group numbers and closed reason codes, never a prompt, an answer or CLI output; the CLI's
 error stream is read and discarded. The HTTP server adds one access line per
-request: the caller's address, the method, the path including its query string, and
-the status.
+request: the caller's address, the method, the path including its query string, the
+protocol version and the status.
 
 **Tokens.** The end user's token and the app's workload token are checked on the
 request and neither stored nor passed to the CLI. The CLI is handed the profile's
@@ -124,12 +125,12 @@ subscription login ([host.md](host.md), "The child environment is closed") and t
 per-run relay secret. The proxy variables set in the service's environment reach
 the CLI too; they are the deployment's.
 
-**What the CLI writes.** Every subscription run limits what the CLI keeps and
-sends ([host.md](host.md), "The child environment is closed"). Measured without a login
-and without the run's switches and system prompt file
+**What the CLI writes.** Every subscription run passes switches that limit what the
+CLI keeps and sends ([host.md](host.md), "The child environment is closed"). Measured
+without a login and without those switches and the system prompt file
 ([decision record 0001](decisions/0001-agent-service.md), A1b-0a c5), the CLI wrote
-into its home and created an empty `/tmp/cc-socks-<uid>/` outside it. Neither the
-run's own flag set nor a logged-in turn is measured yet; issue #115, step 12b, owns
+into its home and created an empty `/tmp/cc-socks-<uid>/` outside it. Neither that
+flag set nor a logged-in turn is measured yet; issue #115, step 12b, owns
 that measurement.
 
 **The provider.** The turn's text, and the results of the app's tools the run calls,

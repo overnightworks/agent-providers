@@ -152,11 +152,13 @@ A host migrates at its pin bump; [MIGRATING.md](MIGRATING.md) has one section pe
 
 Every child this library starts is one immutable `ChildProcess` (created only in
 `agent_providers.spawn`): an absolute binary, an explicit working directory, and
-the child's *complete* environment. Nothing is inherited and nothing is merged onto
-a host baseline, because an optional set of extras on an inherited environment is
-a denylist seen from the other side. `HOME` is always set — an agent CLI with no
-`HOME` falls back to the passwd home, which is worse than a wrong one. Its `repr`
-omits the environment, since it can hold a token.
+the child's *complete* environment. Only `PATH` and the named locale, proxy and
+certificate variables (`spawn.INHERITED_MACHINE_VARIABLES`) are copied from the host
+process, and nothing is merged onto a host baseline, because an optional set of
+extras on an inherited environment is a denylist seen from the other side. `HOME`
+is always set — an agent CLI with no `HOME` falls back to the passwd home, which is
+worse than a wrong one. Its `repr` omits the environment, since it can hold a
+token.
 
 **This is process configuration, not access control.** A closed environment stops
 discovery by convention — `HOME`, `PATH`, `CODEX_HOME`, `GROK_HOME`, `XDG_*` — and

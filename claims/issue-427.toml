@@ -1,7 +1,0 @@
-claim_id = "d47aa047892846f2b903fbe696e7671a"
-agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
-role = "builder"
-base = "6cb3cd6f3ce72f46116f8fb40c4e479f2d5d53ca"
-branch = "claude/issue-427-release-test-pinnt-die-install-step-id-h"
-scope = ["docs/host.md", "tests/test_release_workflow.py"]
-opened_commit = "6cc006fe8e780baa0600063531928ec5abe53436"

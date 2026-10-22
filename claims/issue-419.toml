@@ -3,6 +3,6 @@ agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
 role = "builder"
 base = "3ca75b72622e18c5bb0bbb959645f826acc2fdda"
 branch = "claude/issue-419-docs-pass-readme-split"
-scope = [".github/workflows/release.yml", "README.md", "docs/ARCHITECTURE.md", "docs/host.md", "docs/operations.md", "docs/wire.md", "tests/test_release_workflow.py"]
+scope = [".github/workflows/release.yml", "README.md", "docs/ARCHITECTURE.md", "docs/MIGRATING.md", "docs/host.md", "docs/operations.md", "docs/wire.md", "packages/agent-service/src/agent_service/run_tools.py", "src/agent_providers/process.py", "src/agent_providers/spawn.py", "tests/test_release_workflow.py"]
 opened_commit = "c55d7991d7b7aae42416e86a48b6f0d147451c8f"
 whole_reason = "One README split: the overview moves to ARCHITECTURE.md and the two references and the how-to to their own documents, together, so no fact is lost or doubled in between."

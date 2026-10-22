@@ -13,15 +13,10 @@ that an app installs, and the agent service `overnightworks-agent-service`.
 
 ## Install
 
-No distribution is on PyPI. Each release page lists the wheels with their URL and
-sha256; an app installs the client and the core:
-
-```bash
-pip install "overnightworks-agent-client @ <client wheel URL>#sha256=<hash>" "overnightworks-agent-providers @ <core wheel URL>#sha256=<hash>"
-```
-
-The URLs and hashes are on the
-[latest release page](https://github.com/overnightworks/agent-providers/releases/latest).
+No distribution is on PyPI. Install the wheels that the
+[latest release](https://github.com/overnightworks/agent-providers/releases/latest)
+lists: its page gives each as a `name @ URL#sha256=…` requirement for `pip install`
+or `uv add`; an app installs the client and the core.
 
 ## Where to read
 

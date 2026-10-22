@@ -9,8 +9,8 @@
 # client imports one; the client's MCP server is plain ASGI. The mcp-server
 # extra stays an extra, so neither the core nor a client base module (the
 # package __init__ included) imports agent_client.mcp_server, PyJWT or
-# cryptography. Only the routers (catalog, dispatch) import a provider package;
-# the machinery the provider packages build on never reaches back into one.
+# cryptography. Inside the core, only the routers (catalog, dispatch) import a
+# provider package; the machinery below them never does.
 # CI runs `lint-imports` over the real import graph, so an indirect chain is
 # caught as well as a direct import.
 [importlinter]
@@ -47,7 +47,7 @@ layers =
     agent_client
 
 [importlinter:contract:neutral-run-modules-name-no-provider]
-name = only the routers import a provider package; the machinery below them never does
+name = inside the core, only the routers import a provider package; the machinery below them never does
 type = forbidden
 source_modules =
     agent_providers.cli_run
@@ -97,7 +97,8 @@ forbidden_modules =
     cryptography
 
 # as_packages = False keeps agent_client itself (its __init__) a source without
-# making the mcp_server package inside it one.
+# making the mcp_server package inside it one; the ** wildcard keeps every
+# mcp_server module forbidden.
 [importlinter:contract:client-base-stays-free-of-mcp-server]
 name = the client base modules import neither agent_client.mcp_server nor its extras
 type = forbidden
@@ -114,5 +115,6 @@ source_modules =
     agent_client.wire
 forbidden_modules =
     agent_client.mcp_server
+    agent_client.mcp_server.**
     jwt
     cryptography

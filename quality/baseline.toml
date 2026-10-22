@@ -87,3 +87,45 @@
 
 [function_lines."tests/test_service_run_recording.py"]
 "_end_a_run" = 94
+
+[clones."src/agent_providers/codex/protocol.py"]
+event_item = [["src/agent_providers/codex/transport.py", "_completed_agent_message"]]
+top_level_error_message = [["src/agent_providers/codex/transport.py", "_completed_agent_message"]]
+
+[clones."src/agent_providers/codex/transport.py"]
+_log_codex_tool_round = [["src/agent_providers/grok/transport.py", "_log_tool_round"]]
+_tool_transport_prompt = [["src/agent_providers/grok/transport.py", "_tool_transport_prompt"]]
+
+[clones."tests/test_anchored_kill_until_gone.py"]
+test_a_late_wait_never_starts_an_attempt_at_or_after_the_deadline = [["tests/test_blocking_anchored_child.py", "test_a_late_wait_never_starts_an_attempt_at_or_after_the_deadline"]]
+test_an_unavailable_count_ends_the_call_unchanged_and_never_confirms = [["tests/test_blocking_anchored_child.py", "test_an_unavailable_count_ends_the_call_unchanged_and_never_confirms"]]
+test_the_first_empty_count_in_time_confirms_and_ends_the_call = [["tests/test_blocking_anchored_child.py", "test_the_first_empty_count_in_time_confirms_and_ends_the_call"]]
+
+[clones."tests/test_codex_cli_adapter.py"]
+_codex_tool_events = [["tests/test_grok_cli_adapter.py", "_tool_transport_events"]]
+test_a_codex_call_nested_too_deeply_is_refused_not_a_failed_route = [["tests/test_grok_cli_adapter.py", "test_a_grok_call_nested_too_deeply_is_refused_not_a_failed_route"]]
+"test_a_codex_event_line_nested_too_deeply_is_refused_as_a_cli_protocol_error.collect" = [["tests/test_grok_cli_adapter.py", "test_a_grok_event_line_nested_too_deeply_is_refused_as_a_cli_protocol_error.collect"], ["tests/test_grok_cli_adapter.py", "test_grok_tool_transport_rejects_a_second_end_event.collect"], ["tests/test_grok_cli_adapter.py", "test_grok_tool_transport_rejects_unknown_events_without_logging_the_protocol.collect"]]
+"test_a_codex_tool_result_nested_too_deeply_is_passed_on_in_the_next_prompt.collect" = [["tests/test_grok_cli_adapter.py", "test_a_grok_tool_result_nested_too_deeply_is_passed_on_in_the_next_prompt.collect"]]
+test_a_refused_codex_call_hands_its_text_only_to_the_host = [["tests/test_grok_cli_adapter.py", "test_a_refused_grok_call_hands_its_text_only_to_the_host"]]
+"test_a_tool_consumer_ends_at_the_settle_instant.stream_and_close" = [["tests/test_grok_cli_adapter.py", "test_a_grok_tool_turn_whose_runner_fails_ends_promptly_and_removes_its_home.fail_and_close"], ["tests/test_grok_cli_adapter.py", "test_a_tool_consumer_ends_at_the_settle_instant.stream_and_close"]]
+test_codex_transport_refuses_an_empty_model_before_any_home = [["tests/test_grok_cli_adapter.py", "test_grok_transport_refuses_an_empty_model_before_any_home"]]
+
+[clones."tests/test_codex_process_pool.py"]
+test_the_process_wide_pool_without_a_turns_codex_block_is_refused_naming_it = [["tests/test_config.py", "test_a_codex_turn_without_a_codex_turn_block_names_the_provider"], ["tests/test_config.py", "test_a_grok_turn_without_a_grok_turn_block_names_the_provider"], ["tests/test_grok_cli_adapter.py", "test_grok_turn_without_a_grok_block_is_refused_naming_the_provider"]]
+
+[clones."tests/test_config.py"]
+test_a_codex_turn_without_a_codex_turn_block_names_the_provider = [["tests/test_grok_cli_adapter.py", "test_grok_turn_without_a_grok_block_is_refused_naming_the_provider"]]
+test_a_grok_turn_without_a_grok_turn_block_names_the_provider = [["tests/test_grok_cli_adapter.py", "test_grok_turn_without_a_grok_block_is_refused_naming_the_provider"]]
+
+[clones."tests/test_service_admission.py"]
+"_Service.run" = [["tests/test_service_capability.py", "_Service.run"]]
+
+[clones."tests/test_service_capability.py"]
+_header_of = [["tests/test_service_signing.py", "_header_of"]]
+
+[clones."tests/test_service_config.py"]
+_token_file_with = [["tests/test_service_signing.py", "_file_with"]]
+"test_a_path_swapped_after_the_open_is_judged_by_the_opened_token_file.open_then_swap" = [["tests/test_service_signing.py", "test_a_path_swapped_after_the_open_still_loads_the_opened_file.open_then_swap"]]
+
+[clones."tests/test_service_containment_ending.py"]
+test_a_client_leaving_behind_a_decided_answer_still_ends_provider_error_on_a_loss = [["tests/test_service_run_recording.py", "test_a_run_whose_terminal_was_decided_is_recorded_when_the_held_close_is_released"]]

@@ -1,4 +1,4 @@
-# agent-providers
+# agent-runtime
 
 The reusable agent provider layer: it routes a turn to Claude, Grok or Codex —
 over each provider's CLI or its HTTP API — and owns the machinery a host
@@ -14,7 +14,7 @@ for apps, and the agent service `overnightworks-agent-runtime-service`.
 ## Install
 
 No distribution is on PyPI. Install the wheels that the
-[latest release](https://github.com/overnightworks/agent-providers/releases/latest)
+[latest release](https://github.com/overnightworks/agent-runtime/releases/latest)
 lists: its page gives each as a `name @ URL#sha256=…` requirement for `pip install`
 or `uv add`.
 

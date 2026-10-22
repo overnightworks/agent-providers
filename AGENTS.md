@@ -1,6 +1,6 @@
 # Repository agent guidance
 
-`agent-providers` is a library and the agent service built on it; every change here is a change to a public contract that a tag has already frozen elsewhere. Overview: README; decisions: `docs/decisions/`; breaking changes: `docs/MIGRATING.md`.
+`agent-runtime` is a library and the agent service built on it; every change here is a change to a public contract that a tag has already frozen elsewhere. Overview: README; decisions: `docs/decisions/`; breaking changes: `docs/MIGRATING.md`.
 
 ## Boundaries
 

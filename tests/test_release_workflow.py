@@ -11,7 +11,7 @@ import pytest
 from ruamel.yaml import YAML
 
 _WORKFLOW = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "release.yml"
-_REPOSITORY = "overnightworks/agent-providers"
+_REPOSITORY = "overnightworks/agent-runtime"
 _MIGRATION_LINK = (
     "**Breaking release.** Read [Migrating to 0.3.0]"
     f"(https://github.com/{_REPOSITORY}/blob/v0.3.0/docs/MIGRATING.md#migrating-to-030)"

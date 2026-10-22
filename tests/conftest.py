@@ -52,7 +52,7 @@ from agent_runtime.config import (
 
 PR_GET_DUMPABLE = 3
 
-_SAMPLE_ROOT = Path("/tmp/agent-providers-tests")
+_SAMPLE_ROOT = Path("/tmp/agent-runtime-tests")
 
 _SAMPLE_MCP_SERVER = McpServerSpec(
     name="notes",

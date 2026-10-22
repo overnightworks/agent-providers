@@ -25,7 +25,7 @@ dev = [
 ]
 
 [project.urls]
-Repository = "https://github.com/overnightworks/agent-providers"
+Repository = "https://github.com/overnightworks/agent-runtime"
 
 [tool.uv.workspace]
 members = ["packages/client", "packages/service"]

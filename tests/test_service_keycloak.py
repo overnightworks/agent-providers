@@ -49,13 +49,13 @@ from webauth.https_client import KeySetFetchError
 from webauth.jwt_verification import KEY_SET_REFRESH_COOLDOWN_SECONDS
 from wire_builders import started
 
-from agent_client.wire import RejectionCode, RunState, RunStatus
-from agent_providers.events import AssistantTextEvent, FinalEvent
-from agent_service.app import create_app
-from agent_service.identity import Principal
-from agent_service.routing import Api, Cli
-from agent_service.run_records import RunRecords
-from agent_service.runners import Runners
+from agent_runtime_client.wire import RejectionCode, RunState, RunStatus
+from agent_runtime.events import AssistantTextEvent, FinalEvent
+from agent_runtime_service.app import create_app
+from agent_runtime_service.identity import Principal
+from agent_runtime_service.routing import Api, Cli
+from agent_runtime_service.run_records import RunRecords
+from agent_runtime_service.runners import Runners
 
 pytestmark = [
     pytest.mark.keycloak,

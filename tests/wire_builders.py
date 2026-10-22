@@ -5,8 +5,8 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
-from agent_client.tools import ToolEffect
-from agent_client.wire import (
+from agent_runtime_client.tools import ToolEffect
+from agent_runtime_client.wire import (
     PROTOCOL_VERSION,
     AssistantText,
     Cancelled,

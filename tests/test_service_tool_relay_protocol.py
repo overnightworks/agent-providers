@@ -25,7 +25,7 @@ from relay_support import (
 )
 from service_support import failure_lines
 
-from agent_client.mcp_wire import (
+from agent_runtime_client.mcp_wire import (
     ACKNOWLEDGEMENT,
     CallToolParams,
     HttpAnswer,
@@ -35,7 +35,7 @@ from agent_client.mcp_wire import (
     ToolDefinition,
     answer_for,
 )
-from agent_service.tool_relay import (
+from agent_runtime_service.tool_relay import (
     UNANSWERED,
     CapabilityReflected,
     McpRelayOwner,

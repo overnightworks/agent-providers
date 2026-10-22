@@ -50,17 +50,17 @@ from starlette.requests import ClientDisconnect
 from test_service_capability import QUOTATION_MARKS_256, TUNED_AT_THE_LIMIT
 from webauth.https_client import KeySetFetchError
 
-from agent_client.wire import Failed, FailureCode, RejectionCode, RunStarted
-from agent_providers.errors import ContainmentLost, RetainedGroup
-from agent_providers.events import AssistantTextEvent, FinalEvent
-from agent_service.admission import AdmissionSlot
-from agent_service.app import create_app
-from agent_service.config import RunConfig
-from agent_service.routing import Api
-from agent_service.run_events import run_frames
-from agent_service.run_liveness import LoopClock
-from agent_service.run_records import RunRecords
-from agent_service.runners import Runner, Runners
+from agent_runtime_client.wire import Failed, FailureCode, RejectionCode, RunStarted
+from agent_runtime.errors import ContainmentLost, RetainedGroup
+from agent_runtime.events import AssistantTextEvent, FinalEvent
+from agent_runtime_service.admission import AdmissionSlot
+from agent_runtime_service.app import create_app
+from agent_runtime_service.config import RunConfig
+from agent_runtime_service.routing import Api
+from agent_runtime_service.run_events import run_frames
+from agent_runtime_service.run_liveness import LoopClock
+from agent_runtime_service.run_records import RunRecords
+from agent_runtime_service.runners import Runner, Runners
 
 PLACES: Final = 2
 MINT = TokenMint()
@@ -176,7 +176,7 @@ def test_a_cli_request_with_every_place_taken_answers_busy_before_a_run_id_or_a_
         run_ids.append(mint_run_id())
         return run_ids[-1]
 
-    monkeypatch.setattr("agent_service.app.uuid.uuid4", counting_run_id)
+    monkeypatch.setattr("agent_runtime_service.app.uuid.uuid4", counting_run_id)
     held = service.fill_the_places()
     run_ids_before, signed_before = len(run_ids), len(service.signed)
 
@@ -332,7 +332,7 @@ def test_a_failure_before_the_response_exists_releases_its_place(
         raise RuntimeError("the hand-over broke")
 
     with monkeypatch.context() as broken_hand_over:
-        broken_hand_over.setattr(f"agent_service.app.{failing_step}", broken)
+        broken_hand_over.setattr(f"agent_runtime_service.app.{failing_step}", broken)
         for _ in range(PLACES):
             assert service.run().status_code == 500
 
@@ -393,7 +393,7 @@ class _FailingRecorderOver:
         def over(recorder, fallback=None):
             raise RuntimeError("the recorder broke")
 
-        self._monkeypatch.setattr("agent_service.run_records.RunRecorder.over", over)
+        self._monkeypatch.setattr("agent_runtime_service.run_records.RunRecorder.over", over)
 
 
 def _consumed(runner: Runner | None, lease, *, recorder_fails: bool = False) -> None:
@@ -642,7 +642,7 @@ async def test_a_place_whose_group_is_not_confirmed_gone_refuses_cli_runs_until_
     loses_at_the_close, monkeypatch
 ):
     clock = StepClock()
-    monkeypatch.setattr("agent_service.app.LoopClock", lambda: clock)
+    monkeypatch.setattr("agent_runtime_service.app.LoopClock", lambda: clock)
     runner = LosingRunner(loses_at_the_close=loses_at_the_close)
     confirmation = ScriptedConfirmation({LOST_GROUP: [False, True]}, clock)
     app = create_app(

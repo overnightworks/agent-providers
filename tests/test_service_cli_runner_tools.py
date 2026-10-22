@@ -101,13 +101,13 @@ from test_service_cli_runner import (
 )
 from test_service_run_tools import Stall
 
-import agent_service.cli_runner as cli_runner_module
-from agent_client.mcp_wire import (
+import agent_runtime_service.cli_runner as cli_runner_module
+from agent_runtime_client.mcp_wire import (
     LATEST_PROTOCOL_VERSION,
     JsonRpcErrorCode,
 )
-from agent_client.sse import RunStreamDecoder
-from agent_client.wire import (
+from agent_runtime_client.sse import RunStreamDecoder
+from agent_runtime_client.wire import (
     MAX_EVENT_BYTES,
     ClientLoss,
     Failed,
@@ -120,19 +120,19 @@ from agent_client.wire import (
     ToolCall,
     ToolResult,
 )
-from agent_providers import spawn
-from agent_providers.cli_run import CliRunAdapter, RelayAccess
-from agent_providers.config import PrivateWorkingRoot
-from agent_providers.events import FinalEvent, StreamEvent
-from agent_providers.procfs import GroupCensus
-from agent_service.capability import Capability
-from agent_service.cli_runner import CliRunner, mcp_tls_context
-from agent_service.config import ServiceConfig
-from agent_service.run_events import RUNNER_FAILED_MESSAGE
-from agent_service.run_liveness import LoopClock
-from agent_service.run_tools import UPSTREAM_ABORT_SECONDS, RunTools
-from agent_service.runners import Runners
-from agent_service.tool_relay import ToolCallBarrier
+from agent_runtime import spawn
+from agent_runtime.cli_run import CliRunAdapter, RelayAccess
+from agent_runtime.config import PrivateWorkingRoot
+from agent_runtime.events import FinalEvent, StreamEvent
+from agent_runtime.procfs import GroupCensus
+from agent_runtime_service.capability import Capability
+from agent_runtime_service.cli_runner import CliRunner, mcp_tls_context
+from agent_runtime_service.config import ServiceConfig
+from agent_runtime_service.run_events import RUNNER_FAILED_MESSAGE
+from agent_runtime_service.run_liveness import LoopClock
+from agent_runtime_service.run_tools import UPSTREAM_ABORT_SECONDS, RunTools
+from agent_runtime_service.runners import Runners
+from agent_runtime_service.tool_relay import ToolCallBarrier
 
 SAVE_NOTE = ClaudeCall("save_note", {"text": "la la"})
 READ_NOTE = ClaudeCall("read_note")

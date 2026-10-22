@@ -3,7 +3,7 @@
 The agent service reads a profile's ``token_file`` at the start of every run, so a
 renewed token serves the next run. This script writes the new token (read from
 standard input, never from an argument) into a file beside the old one at mode 0600,
-checks it by the rules the service applies (``agent_providers.secret_file``), and
+checks it by the rules the service applies (``agent_runtime.secret_file``), and
 moves it over the old file in one atomic rename. A refused token leaves the old file
 untouched and the new file removed.
 
@@ -19,7 +19,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import TextIO
 
-from agent_providers.secret_file import UnsoundSecretFile, read_token_file
+from agent_runtime.secret_file import UnsoundSecretFile, read_token_file
 
 NEW_FILE_MODE = 0o600
 

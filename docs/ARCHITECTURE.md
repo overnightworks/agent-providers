@@ -25,9 +25,9 @@ enforced by `.importlinter`, which `lint-imports` proves in CI.
 
 ```mermaid
 flowchart TB
-    service["agent_service<br/>overnightworks-agent-service<br/>the agent service"]
-    core["agent_providers<br/>overnightworks-agent-providers<br/>the provider core"]
-    client["agent_client<br/>overnightworks-agent-client<br/>wire, agent files, tool contract"]
+    service["agent_runtime_service<br/>overnightworks-agent-runtime-service<br/>the agent service"]
+    core["agent_runtime<br/>overnightworks-agent-runtime<br/>the provider core"]
+    client["agent_runtime_client<br/>overnightworks-agent-runtime-client<br/>wire, agent files, tool contract"]
     webauth["webauth<br/>(external)"]
 
     service -->|imports| core
@@ -51,8 +51,8 @@ flowchart TB
 - The **service** builds on both, runs as `agent-service --config PATH`, and
   alone depends on a web framework.
 
-The service's wire has one owner, `agent_client.wire`. The core's in-process
-turn event (`agent_providers.events`) is never a second wire; `agent_service.run_events`
+The service's wire has one owner, `agent_runtime_client.wire`. The core's in-process
+turn event (`agent_runtime.events`) is never a second wire; `agent_runtime_service.run_events`
 maps it onto the wire.
 
 ## How a run is routed
@@ -83,8 +83,8 @@ flowchart TB
 ```
 
 *Question: which route serves this caller? Source:
-`agent_service.app._admitted`, `agent_service.routing.route`,
-`agent_service.config.ServiceConfig.model_for`. The groups and models are
+`agent_runtime_service.app._admitted`, `agent_runtime_service.routing.route`,
+`agent_runtime_service.config.ServiceConfig.model_for`. The groups and models are
 operator configuration ([operations.md](operations.md)).*
 
 Keycloak decides who may use the subscription and who the paid route, through
@@ -102,7 +102,7 @@ invents a default for a host fact, and an unconfigured path fails loud.
 
 **One spawn owner, one bounded runner.** Every child is a `ChildProcess` with a
 complete environment, an absolute binary and an explicit working directory,
-created only in `agent_providers.spawn`. The environment is closed by
+created only in `agent_runtime.spawn`. The environment is closed by
 convention, not access control; containment is the host's sandbox and the
 service's container ([host.md](host.md)).
 

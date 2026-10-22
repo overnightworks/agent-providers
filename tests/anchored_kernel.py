@@ -1,7 +1,7 @@
 """Protocol models for the kernel's ``waitid`` and ``waitpid`` as the anchored leader sees them.
 
 They replace ``os.waitid`` (and, through ``waitpid``, ``os.waitpid``) for
-``agent_providers.spawn`` only; the child owner binds its own ``waitid`` at import and never
+``agent_runtime.spawn`` only; the child owner binds its own ``waitid`` at import and never
 passes through them. They forward the code under test's numeric
 calls, so they live outside the support module that names no pid number. Each model owns its
 call log, its holds and its violation list: a protocol break is recorded, never raised inside
@@ -25,7 +25,7 @@ from typing import Literal
 import pytest
 from bounds import TEST_WAIT_SECONDS
 
-from agent_providers.procfs import GroupCensus, ProcView, group_census
+from agent_runtime.procfs import GroupCensus, ProcView, group_census
 
 real_waitid = os.waitid
 real_waitpid = os.waitpid

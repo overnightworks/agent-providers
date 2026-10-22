@@ -34,7 +34,7 @@ from unittest import mock
 
 from bounds import TEST_WAIT_SECONDS
 
-from agent_providers.spawn import ChildProcess
+from agent_runtime.spawn import ChildProcess
 
 P_PIDFD = 3
 SIGKILLED = -9

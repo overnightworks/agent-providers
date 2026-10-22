@@ -24,13 +24,13 @@ from provider_test_support import (
 )
 from pydantic import ValidationError
 
-from agent_providers.catalog import (
+from agent_runtime.catalog import (
     ProviderRoute,
     ProviderRouteReadinessState,
     probe_provider_route,
 )
-from agent_providers.claude import provider as claude_provider
-from agent_providers.config import (
+from agent_runtime.claude import provider as claude_provider
+from agent_runtime.config import (
     GrokTurnRuntime,
     McpServerSpec,
     PrivateWorkingRoot,
@@ -52,7 +52,7 @@ from agent_providers.config import (
     current_turn_config,
     reset_config,
 )
-from agent_providers.process import run_cli_bounded
+from agent_runtime.process import run_cli_bounded
 
 
 def _catalog_only_runtime(tmp_path: Path) -> ProviderRuntimeConfig:

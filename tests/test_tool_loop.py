@@ -12,16 +12,16 @@ import pytest
 from provider_test_support import A_CANARY, A_TOOL_FAILURE_MESSAGE, formatted_log_text
 from pydantic import SecretStr
 
-from agent_providers import tool_loop
-from agent_providers.errors import TextToolCallRejectedError
-from agent_providers.events import (
+from agent_runtime import tool_loop
+from agent_runtime.errors import TextToolCallRejectedError
+from agent_runtime.events import (
     AssistantTextEvent,
     FinalEvent,
     ToolCallEvent,
     ToolResultEvent,
 )
-from agent_providers.text_tool_protocol import TextToolRejection, TextToolRejectionRule
-from agent_providers.tool_loop import (
+from agent_runtime.text_tool_protocol import TextToolRejection, TextToolRejectionRule
+from agent_runtime.tool_loop import (
     FinalText,
     InitialTurn,
     TextDelta,
@@ -155,7 +155,7 @@ def test_executor_failure_returns_a_named_error_to_the_model(caplog) -> None:
     def executor(_name: str, _arguments: dict[str, Any]) -> ToolOutcome:
         raise RuntimeError("secret")
 
-    caplog.set_level("INFO", logger="agent_providers.tool_loop")
+    caplog.set_level("INFO", logger="agent_runtime.tool_loop")
     events = asyncio.run(_events(transport, executor))
 
     assert "RuntimeError" in caplog.text
@@ -219,7 +219,7 @@ def test_logs_never_include_tool_input_or_result(caplog) -> None:
         }),))],
         [FinalText()],
     ])
-    caplog.set_level("INFO", logger="agent_providers.tool_loop")
+    caplog.set_level("INFO", logger="agent_runtime.tool_loop")
 
     asyncio.run(
         _events(transport, lambda _name, _arguments: ToolOutcome(call_json, True)),
@@ -302,7 +302,7 @@ def test_a_refused_second_response_writes_one_line_with_its_round_and_correlatio
     assert transport.closed
     [line] = [r for r in caplog.records if "rejected" in r.getMessage()]
     assert (line.name, line.levelno, line.exc_info) == (
-        "agent_providers.tool_loop", logging.WARNING, None,
+        "agent_runtime.tool_loop", logging.WARNING, None,
     )
     assert line.getMessage() == (
         "Tool call rejected provider=grok route=api round=1 correlation_id=job-42 "
@@ -357,7 +357,7 @@ def test_the_per_call_record_carries_the_documented_fields(caplog, is_error) -> 
         [ToolCallBatch((ToolCall("call-7", "read", {}),))],
         [FinalText()],
     ])
-    caplog.set_level("INFO", logger="agent_providers.tool_loop")
+    caplog.set_level("INFO", logger="agent_runtime.tool_loop")
 
     asyncio.run(_events(
         transport,

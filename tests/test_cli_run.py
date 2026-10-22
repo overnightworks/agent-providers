@@ -36,10 +36,10 @@ from provider_test_support import (
     the_only_tree,
 )
 
-from agent_providers import lost_groups
-from agent_providers.anchored_turn import CliProcessPool, CliProcessPoolSaturated
-from agent_providers.claude.provider import CLAUDE_CLI_PROCESS_POOL
-from agent_providers.cli_run import (
+from agent_runtime import lost_groups
+from agent_runtime.anchored_turn import CliProcessPool, CliProcessPoolSaturated
+from agent_runtime.claude.provider import CLAUDE_CLI_PROCESS_POOL
+from agent_runtime.cli_run import (
     CliRunStart,
     CliStreamLineTooLong,
     RelayState,
@@ -51,16 +51,16 @@ from agent_providers.cli_run import (
     examine_announcement,
     verdict_of,
 )
-from agent_providers.config import PrivateWorkingRoot, reset_config
-from agent_providers.errors import ContainmentLost
-from agent_providers.events import (
+from agent_runtime.config import PrivateWorkingRoot, reset_config
+from agent_runtime.errors import ContainmentLost
+from agent_runtime.events import (
     AssistantTextEvent,
     FinalEvent,
     StreamEvent,
     ToolCallEvent,
 )
-from agent_providers.procfs import GroupCensus
-from agent_providers.spawn import ChildProcess, KillUntilGoneResult, closed_environment
+from agent_runtime.procfs import GroupCensus
+from agent_runtime.spawn import ChildProcess, KillUntilGoneResult, closed_environment
 
 SHELL = Path("/bin/sh")
 ABSENT_BINARY = Path("/nonexistent/cli-binary")

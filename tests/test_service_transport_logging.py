@@ -39,14 +39,14 @@ from service_support import (
 )
 from test_service_cli_version import PRINTS_THE_PIN, _config_file_naming, _printing
 
-import agent_service.app as app_module
-from agent_service.app import create_app
-from agent_service.app_tools import (
+import agent_runtime_service.app as app_module
+from agent_runtime_service.app import create_app
+from agent_runtime_service.app_tools import (
     UpstreamRefused,
     UpstreamUnreachable,
     open_app_tools,
 )
-from agent_service.cli import (
+from agent_runtime_service.cli import (
     CLOSED_LOGGER_LEVEL,
     EXIT_BAD_CONFIG,
     close_transport_loggers,
@@ -201,9 +201,9 @@ def test_closing_twice_changes_only_the_levels_of_the_transport_loggers(logging_
 @pytest.mark.parametrize(
     "name",
     [
-        "agent_service.run_liveness",
-        "agent_providers.catalog",
-        "agent_providers.core_probe",
+        "agent_runtime_service.run_liveness",
+        "agent_runtime.catalog",
+        "agent_runtime.core_probe",
         "uvicorn.error",
     ],
 )
@@ -295,7 +295,7 @@ def test_importing_the_service_modules_opens_no_transport_logger_level():
         import json, logging, os, sys
 
         sys.path[:0] = sys.argv[1].split(os.pathsep)
-        import agent_service.app_tools, agent_service.cli
+        import agent_runtime_service.app_tools, agent_runtime_service.cli
 
         print(json.dumps({
             name: logger.level
@@ -325,7 +325,7 @@ import json, logging, logging.config, os, sys
 
 sys.path[:0] = sys.argv[1].split(os.pathsep)
 import uvicorn
-from agent_service.cli import close_transport_loggers
+from agent_runtime_service.cli import close_transport_loggers
 
 STEPS = {
     "uvicorn-config": lambda: uvicorn.Config(lambda scope, receive, send: None, log_level="debug"),

@@ -8,8 +8,8 @@ sandbox directory-name constants. It also hosts the agent service, the one
 authenticated entrance through which apps start agent runs.
 
 Three distributions are released together from one tag: the provider core
-`overnightworks-agent-providers`, the light client `overnightworks-agent-client`
-for apps, and the agent service `overnightworks-agent-service`.
+`overnightworks-agent-runtime`, the light client `overnightworks-agent-runtime-client`
+for apps, and the agent service `overnightworks-agent-runtime-service`.
 
 ## Install
 

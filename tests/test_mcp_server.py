@@ -30,15 +30,15 @@ from starlette.applications import Starlette
 from starlette.responses import PlainTextResponse
 from starlette.routing import Route
 
-from agent_client.mcp_server import HandlerFailureWithheld, McpServer, McpTool
-from agent_client.mcp_wire import ToolOutcome
-from agent_client.tools import ToolEffect
-from agent_client.wire import MAX_EVENT_BYTES
+from agent_runtime_client.mcp_server import HandlerFailureWithheld, McpServer, McpTool
+from agent_runtime_client.mcp_wire import ToolOutcome
+from agent_runtime_client.tools import ToolEffect
+from agent_runtime_client.wire import MAX_EVENT_BYTES
 
 ORIGIN = "https://notes.internal"
 HOST = b"notes.internal"
 VERSION = "2025-11-25"
-LOGGER = "agent_client.mcp_server"
+LOGGER = "agent_runtime_client.mcp_server"
 INVALID_PARAMS = {"code": -32602, "message": "Invalid params"}
 Headers = list[tuple[bytes, bytes]]
 
@@ -647,7 +647,7 @@ def test_every_answer_after_verification_leaves_through_the_exit_check(
     body_size: int,
     status: int,
 ) -> None:
-    monkeypatch.setattr("agent_client.mcp_server.app.carries_signature_of", lambda *_: True)
+    monkeypatch.setattr("agent_runtime_client.mcp_server.app.carries_signature_of", lambda *_: True)
     unverified = served.request(request_headers(None), path=path, method=method)
 
     reply = served.request(

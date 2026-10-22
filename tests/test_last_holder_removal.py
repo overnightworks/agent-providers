@@ -12,7 +12,7 @@ import pytest
 from bounds import TEST_WAIT_SECONDS
 from provider_test_support import ThreadedOperation, code_of
 
-from agent_providers.process import HolderReservation, LastHolderRemoval
+from agent_runtime.process import HolderReservation, LastHolderRemoval
 
 RESERVATIONS_CLOSED = "reservations are closed"
 PROTOCOL_CODE = code_of(

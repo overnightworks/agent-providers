@@ -1,4 +1,4 @@
-"""``agent_providers.outlasting``: what a waiter that must outlast its cancellation raises."""
+"""``agent_runtime.outlasting``: what a waiter that must outlast its cancellation raises."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import anyio
 import pytest
 from service_support import in_loop
 
-from agent_providers.outlasting import level_cancellation, outlast, wait_outlasting_cancellation
+from agent_runtime.outlasting import level_cancellation, outlast, wait_outlasting_cancellation
 
 
 class _Gate:

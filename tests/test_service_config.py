@@ -33,10 +33,10 @@ from service_support import (
     reaches_text,
 )
 
-from agent_providers.secret_file import UnsoundSecretFile, read_token_file
-from agent_service import app as app_module
-from agent_service.cli import EXIT_BAD_CONFIG, main
-from agent_service.config import (
+from agent_runtime.secret_file import UnsoundSecretFile, read_token_file
+from agent_runtime_service import app as app_module
+from agent_runtime_service.cli import EXIT_BAD_CONFIG, main
+from agent_runtime_service.config import (
     AppConfig,
     ConfigError,
     ProfileConfig,
@@ -1303,7 +1303,7 @@ NOT_PRIVATE_ROOTS = (
 
 
 def _core_config_seeing(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> None:
-    from agent_providers import config as core_config
+    from agent_runtime import config as core_config
 
     seen = types.SimpleNamespace(**{"lstat": os.lstat, "geteuid": os.geteuid, **overrides})
     monkeypatch.setattr(core_config, "os", seen)
@@ -1638,8 +1638,8 @@ def no_secret_is_read(monkeypatch):
     def fail_instead_of_reading(*_arguments, **_where):
         raise AssertionError("a secret file was read before the models table was refused")
 
-    monkeypatch.setattr("agent_service.config.load_signing_key", fail_instead_of_reading)
-    monkeypatch.setattr("agent_service.config.read_token_file", fail_instead_of_reading)
+    monkeypatch.setattr("agent_runtime_service.config.load_signing_key", fail_instead_of_reading)
+    monkeypatch.setattr("agent_runtime_service.config.read_token_file", fail_instead_of_reading)
 
 
 @pytest.mark.parametrize(

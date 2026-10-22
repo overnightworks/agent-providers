@@ -24,21 +24,21 @@ from capability_support import canary_token, capability_carrying
 from relay_support import RUN_ID, RecordingApp, yield_until
 from service_support import alice_admitted_run, failure_lines, service_config
 
-import agent_service.cli_runner as cli_runner_module
-from agent_client.mcp_wire import CallToolParams, ToolDefinition, ToolOutcome
-from agent_providers.errors import ContainmentLost, RetainedGroup
-from agent_providers.events import (
+import agent_runtime_service.cli_runner as cli_runner_module
+from agent_runtime_client.mcp_wire import CallToolParams, ToolDefinition, ToolOutcome
+from agent_runtime.errors import ContainmentLost, RetainedGroup
+from agent_runtime.events import (
     AssistantTextEvent,
     FinalEvent,
     StreamEvent,
     ToolCallEvent,
     ToolResultEvent,
 )
-from agent_service.cli_runner import CliRunner
-from agent_service.relayed_events import RelayedEvents
-from agent_service.run_liveness import LoopClock
-from agent_service.run_tools import RunTools
-from agent_service.tool_relay import (
+from agent_runtime_service.cli_runner import CliRunner
+from agent_runtime_service.relayed_events import RelayedEvents
+from agent_runtime_service.run_liveness import LoopClock
+from agent_runtime_service.run_tools import RunTools
+from agent_runtime_service.tool_relay import (
     CapabilityReflected,
     McpRelayOwner,
     Relay,

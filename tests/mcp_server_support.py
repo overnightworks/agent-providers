@@ -9,18 +9,18 @@ from uuid import UUID
 from cryptography.hazmat.primitives import serialization
 from service_support import generated_rsa_key
 
-from agent_client.capability import CapabilityClaims
-from agent_client.mcp_server import CapabilityVerificationKey, McpTool
-from agent_client.mcp_wire import ToolOutcome
-from agent_client.tools import ToolDeclaration, ToolEffect
-from agent_client.wire import JsonObject
-from agent_service.capability import (
+from agent_runtime_client.capability import CapabilityClaims
+from agent_runtime_client.mcp_server import CapabilityVerificationKey, McpTool
+from agent_runtime_client.mcp_wire import ToolOutcome
+from agent_runtime_client.tools import ToolDeclaration, ToolEffect
+from agent_runtime_client.wire import JsonObject
+from agent_runtime_service.capability import (
     Capability,
     CapabilityScope,
     capability_claims,
     signed_capability,
 )
-from agent_service.signing import SigningKey
+from agent_runtime_service.signing import SigningKey
 
 ISSUED_AT = 1_792_152_000
 LIFETIME = 600

@@ -29,9 +29,9 @@ from service_support import (
 from test_service_config import SIGNING_KEY_LINE, VALID_CONFIG, _written
 from webauth.jwt_verification import JwtVerifier, Rejected, RejectionReason, VerifiedClaims
 
-from agent_service.cli import EXIT_BAD_CONFIG, main
-from agent_service.config import ConfigError, ServiceConfig, load_config
-from agent_service.signing import (
+from agent_runtime_service.cli import EXIT_BAD_CONFIG, main
+from agent_runtime_service.config import ConfigError, ServiceConfig, load_config
+from agent_runtime_service.signing import (
     EmptyTokenType,
     SigningKey,
     UnsoundSigningKey,

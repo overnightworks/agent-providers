@@ -27,9 +27,9 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME#v}"
           expected="$(printf '%s\n' \
-            "overnightworks_agent_client-${version}-py3-none-any.whl" \
-            "overnightworks_agent_providers-${version}-py3-none-any.whl" \
-            "overnightworks_agent_service-${version}-py3-none-any.whl")"
+            "overnightworks_agent_runtime_client-${version}-py3-none-any.whl" \
+            "overnightworks_agent_runtime-${version}-py3-none-any.whl" \
+            "overnightworks_agent_runtime_service-${version}-py3-none-any.whl")"
           built="$(cd dist && ls -- *.whl | sort)"
           if [ "$built" != "$expected" ]; then
             echo "Tag $GITHUB_REF_NAME expects exactly:" >&2

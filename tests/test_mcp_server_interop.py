@@ -22,17 +22,17 @@ from service_support import (
     served,
 )
 
-from agent_client.mcp_server import McpServer
-from agent_client.mcp_wire import ToolOutcome
-from agent_client.tools import ToolEffect
-from agent_service.app_tools import (
+from agent_runtime_client.mcp_server import McpServer
+from agent_runtime_client.mcp_wire import ToolOutcome
+from agent_runtime_client.tools import ToolEffect
+from agent_runtime_service.app_tools import (
     AppToolsSession,
     ProtocolFailure,
     UpstreamProtocolError,
     UpstreamRefused,
     open_app_tools,
 )
-from agent_service.capability import Capability
+from agent_runtime_service.capability import Capability
 
 CERTIFICATE_HOST = "localhost"
 

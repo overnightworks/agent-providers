@@ -1,4 +1,4 @@
-"""The SSE framing of a run's events, owned by ``agent_client.sse``.
+"""The SSE framing of a run's events, owned by ``agent_runtime_client.sse``.
 
 These tests pin the A0b sub-ruling of decision record 0001: one frame per
 event, decoded the same however the bytes arrive, and the first frame or
@@ -13,16 +13,16 @@ import pytest
 from pydantic import ValidationError
 from wire_builders import call, heartbeat, result, started, succeeded, text
 
-from agent_client import sse as sse_module
-from agent_client.run_stream import StreamViolation, ViolationKind
-from agent_client.sse import (
+from agent_runtime_client import sse as sse_module
+from agent_runtime_client.run_stream import StreamViolation, ViolationKind
+from agent_runtime_client.sse import (
     Decoded,
     DecoderClosed,
     EventTooLarge,
     RunStreamDecoder,
     encode_event,
 )
-from agent_client.wire import (
+from agent_runtime_client.wire import (
     MAX_EVENT_BYTES,
     MAX_TOOL_INPUT_DEPTH,
     PROTOCOL_VERSION,

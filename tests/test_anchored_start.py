@@ -13,7 +13,7 @@ import pytest
 from anchored_support import IMPORT_ROOT_PRELUDE, ChildCleanup, absolute_import_roots
 from bounds import TEST_WAIT_SECONDS
 
-from agent_providers.spawn import ChildProcess, closed_environment
+from agent_runtime.spawn import ChildProcess, closed_environment
 
 CASES_MODULE = Path(__file__).with_name("anchored_start_cases.py")
 ROW_INTERPRETER_SECONDS = 8 * TEST_WAIT_SECONDS

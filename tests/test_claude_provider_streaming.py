@@ -20,8 +20,8 @@ from provider_test_support import (
     run_bounded,
 )
 
-from agent_providers.claude import provider
-from agent_providers.claude.provider import (
+from agent_runtime.claude import provider
+from agent_runtime.claude.provider import (
     _STREAM_BUFFER_LIMIT,
     CLAUDE_CLI_LOGIN_REFUSED_DETAIL,
     CLAUDE_CLI_UNAVAILABLE_DETAIL,
@@ -32,8 +32,8 @@ from agent_providers.claude.provider import (
     _safe_json_loads,
     acall_claude_with_mcp_stream,
 )
-from agent_providers.errors import ProviderUnavailableError, SafeRouteReasonCode
-from agent_providers.events import (
+from agent_runtime.errors import ProviderUnavailableError, SafeRouteReasonCode
+from agent_runtime.events import (
     AssistantTextEvent,
     FinalEvent,
     StreamEvent,
@@ -627,8 +627,8 @@ def test_malformed_stream_log_does_not_include_line_content(caplog) -> None:
 
 
 def test_stream_cmd_uses_stream_json_and_verbose() -> None:
-    from agent_providers.claude.provider import _mcp_cli_arguments
-    from agent_providers.config import current_turn_config
+    from agent_runtime.claude.provider import _mcp_cli_arguments
+    from agent_runtime.config import current_turn_config
 
     cmd = _mcp_cli_arguments(
         "opus", "/tmp/mcp.json", current_turn_config().mcp_server, stream=True,
@@ -640,8 +640,8 @@ def test_stream_cmd_uses_stream_json_and_verbose() -> None:
 
 
 def test_stream_cmd_non_stream_keeps_json() -> None:
-    from agent_providers.claude.provider import _mcp_cli_arguments
-    from agent_providers.config import current_turn_config
+    from agent_runtime.claude.provider import _mcp_cli_arguments
+    from agent_runtime.config import current_turn_config
 
     cmd = _mcp_cli_arguments(
         "opus", "/tmp/mcp.json", current_turn_config().mcp_server,
@@ -652,7 +652,7 @@ def test_stream_cmd_non_stream_keeps_json() -> None:
 
 
 def test_iter_lines_returns_immediately_when_stdout_missing() -> None:
-    from agent_providers.claude.provider import _iter_lines
+    from agent_runtime.claude.provider import _iter_lines
 
     async def _run() -> list[bytes]:
         out: list[bytes] = []
@@ -745,7 +745,7 @@ def _chain_text(failure: BaseException | None) -> str:
 
 
 def _drive_over_the_turn_transport(monkeypatch, lines: list[bytes], returncode: int, **script):
-    from agent_providers.claude.adapter import stream_claude_turn
+    from agent_runtime.claude.adapter import stream_claude_turn
 
     monkeypatch.setattr(provider, "_require_claude_binary", lambda: "/bin/claude")
 

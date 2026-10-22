@@ -31,8 +31,8 @@ from provider_test_support import (
 )
 from pydantic import SecretStr
 
-from agent_client.wire import TurnMessage, TurnRole
-from agent_providers.claude.provider import (
+from agent_runtime_client.wire import TurnMessage, TurnRole
+from agent_runtime.claude.provider import (
     CLAUDE_CLI_LOGIN_REFUSED_DETAIL,
     CLAUDE_CLI_UNAVAILABLE_DETAIL,
     ClaudeRun,
@@ -41,22 +41,22 @@ from agent_providers.claude.provider import (
     UnavailableError,
     _ClaudeLineDecoder,
 )
-from agent_providers.cli_run import (
+from agent_runtime.cli_run import (
     RelayAccess,
     RunSurfaceRefused,
     SurfaceVerdict,
     astream_cli_run,
     relay_authorization,
 )
-from agent_providers.config import PrivateWorkingRoot, reset_config
-from agent_providers.events import (
+from agent_runtime.config import PrivateWorkingRoot, reset_config
+from agent_runtime.events import (
     AssistantTextEvent,
     FinalEvent,
     StreamEvent,
     ToolCallEvent,
     ToolResultEvent,
 )
-from agent_providers.spawn import INHERITED_MACHINE_VARIABLES, ChildProcessSpecificationError
+from agent_runtime.spawn import INHERITED_MACHINE_VARIABLES, ChildProcessSpecificationError
 
 CANARY_MARKER = "canary-" + uuid.uuid4().hex
 CANARY_TOKEN = "sk-ant-oat01-" + CANARY_MARKER

@@ -48,27 +48,27 @@ from provider_test_support import (
     override_turn_runtime,
 )
 
-from agent_client.tools import ToolDeclaration
-from agent_providers import process
-from agent_providers.catalog import ProviderRoute
-from agent_providers.config import (
+from agent_runtime_client.tools import ToolDeclaration
+from agent_runtime import process
+from agent_runtime.catalog import ProviderRoute
+from agent_runtime.config import (
     ProviderNotConfiguredError,
     current_config,
     current_grok_runtime,
     current_grok_turn_runtime,
 )
-from agent_providers.errors import (
+from agent_runtime.errors import (
     ProviderUnavailableError,
     SafeRouteReasonCode,
     TextToolCallRejectedError,
 )
-from agent_providers.events import AssistantTextEvent, FinalEvent, ToolCallEvent
-from agent_providers.grok import transport as grok_cli_adapter
-from agent_providers.process import CliRunOutcome, CliRunReason
-from agent_providers.procfs import GroupCensus
-from agent_providers.spawn import KillUntilGoneResult
-from agent_providers.text_tool_protocol import TextToolRejectionRule
-from agent_providers.tool_loop import (
+from agent_runtime.events import AssistantTextEvent, FinalEvent, ToolCallEvent
+from agent_runtime.grok import transport as grok_cli_adapter
+from agent_runtime.process import CliRunOutcome, CliRunReason
+from agent_runtime.procfs import GroupCensus
+from agent_runtime.spawn import KillUntilGoneResult
+from agent_runtime.text_tool_protocol import TextToolRejectionRule
+from agent_runtime.tool_loop import (
     InitialTurn,
     ToolCallBatch,
     ToolOutcome,
@@ -76,7 +76,7 @@ from agent_providers.tool_loop import (
     ToolResultBatch,
     stream_tool_loop,
 )
-from agent_providers.tools import ToolCatalog, ToolProtocolMarkup
+from agent_runtime.tools import ToolCatalog, ToolProtocolMarkup
 
 failure_watch = provider_test_support.failure_watch
 
@@ -739,7 +739,7 @@ def test_grok_tool_transport_rejects_missing_or_invalid_session_id(
         assert raised.value.reason.code is SafeRouteReasonCode.CLI_PROTOCOL_ERROR
         await transport.aclose()
 
-    caplog.set_level("WARNING", logger="agent_providers.grok.transport")
+    caplog.set_level("WARNING", logger="agent_runtime.grok.transport")
     asyncio.run(collect())
     assert "cli_stream_response_invalid" in caplog.text
     assert "text_tool_response_invalid" not in caplog.text
@@ -768,7 +768,7 @@ def test_grok_tool_transport_normalizes_malformed_json_without_its_document(
         assert document not in str(raised.value)
         await transport.aclose()
 
-    caplog.set_level("WARNING", logger="agent_providers.grok.transport")
+    caplog.set_level("WARNING", logger="agent_runtime.grok.transport")
     asyncio.run(collect())
     assert "cli_stream_response_invalid" in caplog.text
     assert "text_tool_response_invalid" not in caplog.text
@@ -790,7 +790,7 @@ def test_grok_text_tool_parser_rejection_carries_its_rule_and_writes_no_line(
         "run_cli_bounded",
         cli_rounds_runner([grok_tool_round_lines(malformed_tool_call)], grok_cli_outcome(), calls),
     )
-    caplog.set_level("WARNING", logger="agent_providers.grok.transport")
+    caplog.set_level("WARNING", logger="agent_runtime.grok.transport")
     transport = _transport()
 
     async def collect() -> None:
@@ -868,7 +868,7 @@ def test_a_grok_event_line_nested_too_deeply_is_refused_as_a_cli_protocol_error(
         grok_cli_adapter, "run_cli_bounded",
         cli_rounds_runner([[nested_line]], grok_cli_outcome(), calls),
     )
-    caplog.set_level("WARNING", logger="agent_providers.grok.transport")
+    caplog.set_level("WARNING", logger="agent_runtime.grok.transport")
     transport = _transport()
 
     async def collect() -> None:
@@ -1096,7 +1096,7 @@ def test_grok_tool_transport_aborts_native_calls_before_the_loop_executes(
         assert raised.value.reason.code is SafeRouteReasonCode.TOOL_PROTOCOL_ERROR
         assert not isinstance(raised.value, TextToolCallRejectedError)
 
-    caplog.set_level("WARNING", logger="agent_providers.grok.transport")
+    caplog.set_level("WARNING", logger="agent_runtime.grok.transport")
     asyncio.run(collect())
     assert aborted.is_set()
     assert not executed
@@ -1190,7 +1190,7 @@ def test_grok_tool_transport_removes_its_private_session_tree_and_redacts_logs(
             on_child=create_session_tree,
         ),
     )
-    caplog.set_level("INFO", logger="agent_providers.grok.transport")
+    caplog.set_level("INFO", logger="agent_runtime.grok.transport")
     transport = _transport()
 
     async def collect_and_close() -> None:

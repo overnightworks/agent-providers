@@ -18,8 +18,8 @@ from provider_test_support import (
 )
 from pydantic import BaseModel, SecretStr
 
-from agent_providers import dispatch
-from agent_providers.errors import (
+from agent_runtime import dispatch
+from agent_runtime.errors import (
     CodexProcessPoolSaturatedError,
     ContainmentLost,
     ProviderError,
@@ -31,7 +31,7 @@ from agent_providers.errors import (
     ToolProtocolRejectionCode,
     normalize_route_failure,
 )
-from agent_providers.text_tool_protocol import (
+from agent_runtime.text_tool_protocol import (
     TextToolProtocolError,
     TextToolRejection,
     TextToolRejectionRule,
@@ -118,7 +118,7 @@ def test_terminal_tool_loop_rejection_logs_a_closed_code_without_input(caplog) -
                 pass
         assert raised.value.reason.code is SafeRouteReasonCode.TOOL_PROTOCOL_ERROR
 
-    caplog.set_level("WARNING", logger="agent_providers.dispatch")
+    caplog.set_level("WARNING", logger="agent_runtime.dispatch")
     asyncio.run(collect())
     assert (
         f"Tool protocol rejection provider=grok route=cli code="

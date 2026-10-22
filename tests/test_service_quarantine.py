@@ -1,7 +1,7 @@
 """A run whose process group is not confirmed gone keeps its place until it is (A1b-3f2).
 
 Decision record 0001, line 20: when a runner's pump met a ``ContainmentLost``, the run's
-admission place passes to ``agent_service.quarantine`` at the run's one end. The quarantine
+admission place passes to ``agent_runtime_service.quarantine`` at the run's one end. The quarantine
 asks ``confirm_group_gone`` at a fixed interval for every group the pump met and frees exactly
 that place once each answered ``True``. The ``Quarantine`` cells run it on a step clock with a
 real slot; the routing cells drive ``run_frames`` through ``driven`` with a real lease.
@@ -46,17 +46,17 @@ from service_support import (
     the_app_on,
 )
 
-from agent_client.run_stream import ViolationKind
-from agent_client.wire import FailureCode, RunState, RunStatus
-from agent_providers.errors import ContainmentLost, RetainedGroup
-from agent_providers.events import AssistantTextEvent, FinalEvent
-from agent_providers.lost_groups import confirm_group_gone, retain_lost_group
-from agent_providers.procfs import GroupCensus
-from agent_providers.spawn import ChildIdentityLost
-from agent_service.admission import AdmissionSlot, Lease
-from agent_service.config import RunConfig
-from agent_service.quarantine import QUARANTINE_RETRY_SECONDS, Quarantine
-from agent_service.run_records import RunRecords
+from agent_runtime_client.run_stream import ViolationKind
+from agent_runtime_client.wire import FailureCode, RunState, RunStatus
+from agent_runtime.errors import ContainmentLost, RetainedGroup
+from agent_runtime.events import AssistantTextEvent, FinalEvent
+from agent_runtime.lost_groups import confirm_group_gone, retain_lost_group
+from agent_runtime.procfs import GroupCensus
+from agent_runtime.spawn import ChildIdentityLost
+from agent_runtime_service.admission import AdmissionSlot, Lease
+from agent_runtime_service.config import RunConfig
+from agent_runtime_service.quarantine import QUARANTINE_RETRY_SECONDS, Quarantine
+from agent_runtime_service.run_records import RunRecords
 
 FIRST = RetainedGroup(pgid=4242, generation=777)
 SECOND = RetainedGroup(pgid=4343, generation=888)
@@ -737,7 +737,7 @@ class _RecorderFailsOver:
         def over(recorder, fallback=None):
             raise RuntimeError("the recorder broke")
 
-        monkeypatch.setattr("agent_service.run_records.RunRecorder.over", over)
+        monkeypatch.setattr("agent_runtime_service.run_records.RunRecorder.over", over)
 
 
 @in_loop

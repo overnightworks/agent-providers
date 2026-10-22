@@ -38,8 +38,8 @@ from anchored_support import GONE, ChildCleanup, Exited, OwnedChild
 from bounds import TEST_WAIT_SECONDS
 from provider_test_support import call_within_deadline
 
-from agent_providers import spawn
-from agent_providers.spawn import AnchorState, AnchorStateError, ChildIdentityLost
+from agent_runtime import spawn
+from agent_runtime.spawn import AnchorState, AnchorStateError, ChildIdentityLost
 
 EXIT_CODE = 3
 

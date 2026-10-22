@@ -68,7 +68,7 @@ from service_support import (
 )
 from starlette.requests import ClientDisconnect
 
-from agent_client.wire import (
+from agent_runtime_client.wire import (
     ClientLoss,
     FailureCode,
     RejectionCode,
@@ -76,26 +76,26 @@ from agent_client.wire import (
     RunState,
     RunStatus,
 )
-from agent_providers.events import (
+from agent_runtime.events import (
     AssistantTextEvent,
     FinalEvent,
     StreamEvent,
     ToolCallEvent,
     ToolResultEvent,
 )
-from agent_service.app import create_app
-from agent_service.config import RunConfig
-from agent_service.identity import Principal
-from agent_service.run_events import run_frames
-from agent_service.run_liveness import (
+from agent_runtime_service.app import create_app
+from agent_runtime_service.config import RunConfig
+from agent_runtime_service.identity import Principal
+from agent_runtime_service.run_events import run_frames
+from agent_runtime_service.run_liveness import (
     FailedPart,
     LoopClock,
     RunFailures,
     RunStepCancelled,
     log_failure,
 )
-from agent_service.run_records import RunRecorder, RunRecords, utc_now
-from agent_service.runners import Runners
+from agent_runtime_service.run_records import RunRecorder, RunRecords, utc_now
+from agent_runtime_service.runners import Runners
 
 TEXT = AssistantTextEvent(text="Let me read the song.")
 FINAL = FinalEvent(text="Done.")

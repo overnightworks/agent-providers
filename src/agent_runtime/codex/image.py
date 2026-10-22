@@ -1,0 +1,594 @@
+"""The Codex CLI's image route.
+
+What counts as an acceptable image is the host's decision, so every bound
+this route enforces arrives as an :class:`~agent_runtime.images.ImagePolicy`.
+
+Pillow is imported only where an image is actually produced, so every
+container can import this module for its error names while only the ones
+that install the ``image`` extra ever run a turn.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import logging
+import os
+import re
+import threading
+from collections import deque
+from dataclasses import dataclass, field
+from enum import StrEnum
+from io import BytesIO
+from pathlib import Path
+from typing import Final
+
+from agent_runtime.codex.pool import (
+    CodexProcessKind,
+    CodexProcessPool,
+    CodexProcessReservation,
+    get_codex_process_pool,
+)
+from agent_runtime.codex.protocol import (
+    BLOCKED_ITEM_TYPES,
+    CODEX_APPROVAL_POLICY_NEVER_CONFIG,
+    CODEX_CLI_LINE_CHANNEL_CAPACITY,
+    CODEX_EMPTY_MCP_SERVERS_CONFIG,
+    CODEX_ITEM_COMPLETED_EVENT,
+    INFORMATIONAL_EVENT_TYPES,
+    INFORMATIONAL_ITEM_TYPES,
+    ITEM_EVENT_TYPES,
+    CodexCliStreamFailure,
+    CodexTurnHome,
+    codex_child_process,
+    codex_cli_failure_reason,
+    codex_model_arguments,
+    create_codex_turn_home,
+    error_item_message,
+    event_item_type,
+    failed_turn_message,
+    parse_codex_line,
+    release_turn_reservations,
+    run_reserved_codex_cli,
+    top_level_error_message,
+)
+from agent_runtime.config import current_codex_runtime, current_codex_turn_runtime
+from agent_runtime.errors import (
+    ProviderUnavailableError,
+    SafeRouteReasonCode,
+    raise_without_chain,
+    refuse_empty_model,
+)
+from agent_runtime.images import ImagePolicy
+from agent_runtime.process import (
+    ClaimedStartThread,
+    CliEnvironmentUnavailableError,
+    CliLineChannel,
+    CliLoginUnusableError,
+    CliRunOutcome,
+    CliRunReason,
+    PrivateHomeReservation,
+    cli_settle_deadline,
+    resolve_cli_binary,
+)
+from agent_runtime.sandbox.paths import CODEX_IMAGE_TURN_DIRECTORY_PREFIX
+from agent_runtime.spawn import ChildProcess
+
+_IMAGE_ENCODER_PACKAGE: Final = "PIL"
+log = logging.getLogger(__name__)
+
+_CHANNEL_POLL_SECONDS: Final = 0.05
+_IMAGE_ENCODER_MISSING_DETAIL: Final = (
+    "This deployment cannot encode an image: install the 'image' extra."
+)
+_USAGE_LIMIT_MARKER: Final = "usage limit"
+# Codex's own wording for the retry hint, e.g. "... try again at Sep 7th, 2026 8:45 PM."
+_USAGE_LIMIT_RETRY_AT_PATTERN: Final = re.compile(r"try again at (?P<retry_at>.+)")
+
+_IMAGE_ITEM_KIND: Final = "image_gen"
+_ERROR_ITEM_KIND: Final = "error"
+_ERROR_EVENT: Final = "error"
+_TURN_COMPLETED_EVENT: Final = "turn.completed"
+_TURN_FAILED_EVENT: Final = "turn.failed"
+_OTHER_TOKEN: Final = "other"
+_OBSERVED_WINDOW_SIZE: Final = 32
+_EVENT_TYPE_VOCABULARY: Final = (
+    INFORMATIONAL_EVENT_TYPES
+    | ITEM_EVENT_TYPES
+    | {_TURN_COMPLETED_EVENT, _TURN_FAILED_EVENT, _ERROR_EVENT}
+)
+_ITEM_KIND_VOCABULARY: Final = (
+    BLOCKED_ITEM_TYPES | INFORMATIONAL_ITEM_TYPES | {_IMAGE_ITEM_KIND, _ERROR_ITEM_KIND}
+)
+
+_CODEX_IMAGE_ISOLATION_ARGS: Final = (
+    "--skip-git-repo-check",
+    "--ignore-user-config",
+    "--ignore-rules",
+    "--ephemeral",
+    "--enable",
+    "code_mode_host",
+    "--disable",
+    "code_mode",
+    "--disable",
+    "code_mode_only",
+    "-c",
+    CODEX_APPROVAL_POLICY_NEVER_CONFIG,
+    "-c",
+    CODEX_EMPTY_MCP_SERVERS_CONFIG,
+    "-c",
+    'web_search="disabled"',
+)
+
+
+class CodexImageError(Exception):
+    """A redacted failure while producing an image."""
+
+
+class CodexImageLoginError(CodexImageError):
+    """The isolated Codex CLI home has no usable login copy."""
+
+
+class ImageToolBlockedReason(StrEnum):
+    UNEXPECTED_EVENT = "unexpected_event"
+    BLOCKED_ITEM = "blocked_item"
+    UNEXPECTED_ITEM = "unexpected_item"
+
+
+class ImageToolBlockedError(CodexImageError):
+    """The CLI reported a tool other than the sole permitted image tool."""
+
+    def __init__(self, reason: ImageToolBlockedReason) -> None:
+        self.reason = reason
+        self.observed: tuple[str, ...] = ()
+        super().__init__()
+
+
+class CodexImageArtifactError(CodexImageError):
+    """The isolated run did not leave one usable PNG artifact."""
+
+
+class CodexImageNotCreatedError(CodexImageError):
+    """The completed Codex turn did not create an image artifact."""
+
+
+class CodexImageTimeoutError(CodexImageError):
+    """The bounded CLI call exceeded its image-generation deadline."""
+
+
+class CodexImageCliError(CodexImageError):
+    """The CLI could not be run, or ended without a verified successful image result."""
+
+
+class CodexImageEncoderUnavailableError(CodexImageError):
+    """This deployment has no image encoder, so no image turn can produce an image."""
+
+
+class CodexImageQuotaError(CodexImageError):
+    """The Codex account hit its usage limit for this turn."""
+
+    def __init__(self, message: str, *, retry_at: str | None) -> None:
+        super().__init__(message)
+        self.retry_at = retry_at
+
+
+def codex_image_turn_is_available() -> bool:
+    """Whether this process has every dependency for an image turn."""
+    turns = current_codex_turn_runtime()
+    code_mode_host = turns.code_mode_host_binary
+    resources = turns.resources_directory
+    return (
+        resolve_cli_binary(current_codex_runtime().binary) is not None
+        and code_mode_host.is_file()
+        and os.access(code_mode_host, os.X_OK)
+        and resources.is_dir()
+        and image_encoder_is_installed()
+    )
+
+
+def image_encoder_is_installed() -> bool:
+    """Whether this deployment installed the optional image encoder.
+
+    A turn that reaches the encoder has already been paid for, so this is
+    asked before the capability is offered and again before a process is
+    spawned, never only where the encoder is imported.
+    """
+    return importlib.util.find_spec(_IMAGE_ENCODER_PACKAGE) is not None
+
+
+def generate_codex_image(
+    prompt: str,
+    *,
+    policy: ImagePolicy,
+    deadline: float,
+    abort_signal: threading.Event | None = None,
+    model: str | None = None,
+) -> bytes:
+    """Run one isolated Codex image turn and return its normalized PNG.
+
+    The image route deliberately owns neither credentials nor process control:
+    its caller has already selected the Codex CLI route, and every process is
+    spawned through ``run_cli_bounded``.  Its temporary ``CODEX_HOME`` is the
+    only place where a generated artifact may be discovered.
+    """
+    try:
+        refuse_empty_model("codex", "cli", model)
+    except ProviderUnavailableError:
+        raise_without_chain(CodexImageCliError())
+    process_pool = get_codex_process_pool()
+    if not image_encoder_is_installed():
+        raise CodexImageEncoderUnavailableError(_IMAGE_ENCODER_MISSING_DETAIL)
+    try:
+        turn_home = create_codex_turn_home(CODEX_IMAGE_TURN_DIRECTORY_PREFIX)
+    except CliEnvironmentUnavailableError:
+        raise_without_chain(CodexImageCliError("could not create a private CLI home"))
+    except CliLoginUnusableError:
+        raise_without_chain(CodexImageLoginError())
+    try:
+        try:
+            outcome = _run_codex_image_cli(
+                prompt=prompt,
+                deadline=deadline,
+                turn_home=turn_home,
+                abort_signal=abort_signal,
+                model=model,
+                process_pool=process_pool,
+            )
+            _raise_for_codex_image_outcome(outcome)
+            observed = _validate_codex_image_events(
+                outcome.stdout,
+                codex_home=turn_home.codex_home,
+            )
+            artifact = _find_only_generated_png(turn_home.codex_home)
+        except ImageToolBlockedError as exc:
+            log.warning(
+                "Codex image tool rejected route=cli code=%s types=[%s]",
+                exc.reason,
+                ", ".join(exc.observed),
+            )
+            raise
+        except CodexImageNotCreatedError:
+            log.warning("Codex image not created route=cli types=[%s]", ", ".join(observed))
+            raise
+        return _normalize_generated_png(artifact, policy)
+    finally:
+        turn_home.home.close()
+
+
+def _run_codex_image_cli(
+    *,
+    prompt: str,
+    deadline: float,
+    turn_home: CodexTurnHome,
+    abort_signal: threading.Event | None = None,
+    model: str | None = None,
+    process_pool: CodexProcessPool,
+) -> CliRunOutcome:
+    """Reap the CLI promptly when its streamed events leave the image gate."""
+    channel = CliLineChannel(CODEX_CLI_LINE_CHANNEL_CAPACITY)
+    event_gate = _CodexImageEventGate(codex_home=turn_home.codex_home)
+    try:
+        child = codex_child_process(_codex_image_arguments(model), turn_home)
+    except CliEnvironmentUnavailableError as exc:
+        raise CodexImageCliError() from exc
+    try:
+        stdin_payload = prompt.encode("utf-8")
+    except UnicodeEncodeError:
+        raise CodexImageCliError() from None
+    home_reservation = turn_home.home.reserve()
+    try:
+        reservation = process_pool.reserve(CodexProcessKind.IMAGE)
+    except BaseException:  # NOSONAR(S5754) the home token is released, re-raises
+        home_reservation.release()
+        raise
+    _start_codex_image_runner(
+        process_pool=process_pool,
+        reservation=reservation,
+        home_reservation=home_reservation,
+        child=child,
+        stdin_payload=stdin_payload,
+        deadline=deadline,
+        channel=channel,
+    )
+    settle_by = cli_settle_deadline(deadline)
+    try:
+        return _read_codex_image_events(channel, event_gate, abort_signal, settle_by)
+    finally:
+        channel.request_abort()
+        _await_the_outcome(channel, settle_by)
+
+
+def _start_codex_image_runner(
+    *,
+    process_pool: CodexProcessPool,
+    reservation: CodexProcessReservation,
+    home_reservation: PrivateHomeReservation,
+    child: ChildProcess,
+    stdin_payload: bytes,
+    deadline: float,
+    channel: CliLineChannel,
+) -> None:
+    runner = ClaimedStartThread(
+        target=run_reserved_codex_cli,
+        args=(process_pool, reservation, home_reservation, child),
+        kwargs={
+            "stdin_payload": stdin_payload,
+            "deadline": deadline,
+            "channel": channel,
+        },
+        daemon=True,
+    )
+    try:
+        runner.start()
+    except BaseException as exc:  # NOSONAR(S5754) the reservations are released first
+        start_failure = exc
+    else:
+        return
+    if not runner.take_start_claim():
+        raise start_failure
+    release_turn_reservations(
+        home_reservation, lambda: process_pool.abandon_unspawned(reservation)
+    )
+    if not isinstance(start_failure, Exception):
+        raise start_failure
+    raise CodexImageCliError()
+
+
+def _read_codex_image_events(
+    channel: CliLineChannel,
+    event_gate: _CodexImageEventGate,
+    abort_signal: threading.Event | None,
+    settle_by: float,
+) -> CliRunOutcome:
+    while True:
+        if abort_signal is not None and abort_signal.is_set():
+            channel.request_abort()
+        line_or_outcome = _receive_within(channel, settle_by)
+        if line_or_outcome is None:
+            continue
+        if isinstance(line_or_outcome, CliRunOutcome):
+            return line_or_outcome
+        try:
+            event_gate.accept(line_or_outcome)
+        except CodexImageCliError:
+            # A valid partial stream has no completed turn yet. Its full
+            # transcript is checked below after the child has been reaped.
+            continue
+
+
+def _await_the_outcome(channel: CliLineChannel, settle_by: float) -> CliRunOutcome:
+    while True:
+        received = _receive_within(channel, settle_by)
+        if isinstance(received, CliRunOutcome):
+            return received
+
+
+def _receive_within(channel: CliLineChannel, settle_by: float) -> bytes | CliRunOutcome | None:
+    try:
+        return channel.receive(timeout=_CHANNEL_POLL_SECONDS, settle_by=settle_by)
+    except TimeoutError:
+        return None
+
+
+def _codex_image_arguments(model: str | None) -> tuple[str, ...]:
+    """Return the fixed arguments for the image-only Codex route."""
+    return (
+        "exec",
+        "--json",
+        "--sandbox",
+        "read-only",
+        *_CODEX_IMAGE_ISOLATION_ARGS,
+        *codex_model_arguments(model),
+        "-",
+    )
+
+
+def _raise_for_codex_image_outcome(outcome: CliRunOutcome) -> None:
+    if codex_cli_failure_reason(outcome.stderr) is SafeRouteReasonCode.CLI_AUTH_REJECTED:
+        raise CodexImageLoginError()
+    if outcome.reason in {
+        CliRunReason.DEADLINE_BEFORE_SPAWN,
+        CliRunReason.DEADLINE_WHILE_WRITING,
+        CliRunReason.DEADLINE_WHILE_READING,
+        CliRunReason.CLEANUP_OVERRAN,
+    }:
+        raise CodexImageTimeoutError()
+    if outcome.complete and outcome.returncode == 0:
+        return
+    message = _codex_image_turn_failure_message(outcome.stdout)
+    if message is None:
+        raise CodexImageCliError()
+    if codex_cli_failure_reason(message) is SafeRouteReasonCode.CLI_AUTH_REJECTED:
+        raise CodexImageLoginError()
+    if _USAGE_LIMIT_MARKER in message.lower():
+        raise CodexImageQuotaError(message, retry_at=_usage_limit_retry_at(message))
+    raise CodexImageCliError(message)
+
+
+def _usage_limit_retry_at(message: str) -> str | None:
+    match = _USAGE_LIMIT_RETRY_AT_PATTERN.search(message)
+    if match is None:
+        return None
+    return match.group("retry_at").rstrip().removesuffix(".") or None
+
+
+def _codex_image_turn_failure_message(stdout: str) -> str | None:
+    """Read the last turn-failure message the CLI reported on stdout, if any."""
+    message: str | None = None
+    for line in stdout.splitlines():
+        if not line.strip():
+            continue
+        try:
+            event_type, event = parse_codex_line(line.encode("utf-8"))
+            if event_type == _ERROR_EVENT:
+                message = top_level_error_message(event)
+            elif event_type == _TURN_FAILED_EVENT:
+                message = failed_turn_message(event)
+        except CodexCliStreamFailure:
+            continue
+    return message
+
+
+def _validate_codex_image_events(output: str, *, codex_home: Path) -> tuple[str, ...]:
+    """Accept only image generation and return the closed tokens of the transcript."""
+    event_gate = _CodexImageEventGate(codex_home=codex_home)
+    for line in output.splitlines():
+        event_gate.accept(line.encode("utf-8"))
+    event_gate.finish()
+    return event_gate.observed_tokens()
+
+
+class _ObservedTokens:
+    """The bounded record of a transcript: collapsed repeats, then a window."""
+
+    def __init__(self) -> None:
+        self._window: deque[tuple[str, int]] = deque(maxlen=_OBSERVED_WINDOW_SIZE)
+        self._dropped = 0
+
+    def record(self, token: str) -> None:
+        if self._window and self._window[-1][0] == token:
+            self._window[-1] = (token, self._window[-1][1] + 1)
+            return
+        if len(self._window) == _OBSERVED_WINDOW_SIZE:
+            self._dropped += 1
+        self._window.append((token, 1))
+
+    def snapshot(self) -> tuple[str, ...]:
+        dropped = (f"...+{self._dropped}",) if self._dropped else ()
+        return (
+            *dropped,
+            *(f"{token}*{count}" if count > 1 else token for token, count in self._window),
+        )
+
+
+def _observed_token(event_type: str, event: dict[str, object]) -> str:
+    """Name an event by the gate's own vocabulary, never by its contents."""
+    if event_type in ITEM_EVENT_TYPES:
+        try:
+            item_type = event_item_type(event)
+        except CodexCliStreamFailure:
+            item_type = _OTHER_TOKEN
+        if item_type not in _ITEM_KIND_VOCABULARY:
+            item_type = _OTHER_TOKEN
+        return f"{event_type}:{item_type}"
+    return event_type if event_type in _EVENT_TYPE_VOCABULARY else _OTHER_TOKEN
+
+
+@dataclass
+class _CodexImageEventGate:
+    """Validate one image-run transcript, whether streamed or complete."""
+
+    codex_home: Path
+    saw_completed_turn: bool = False
+    completed_error_item_message: str | None = None
+    _observed: _ObservedTokens = field(default_factory=_ObservedTokens)
+
+    def observed_tokens(self) -> tuple[str, ...]:
+        return self._observed.snapshot()
+
+    def accept(self, line: bytes) -> None:
+        """Accept one event, naming the tokens seen so far on a blocked one."""
+        try:
+            self._accept(line)
+        except ImageToolBlockedError as exc:
+            exc.observed = self.observed_tokens()
+            raise
+
+    def _accept(self, line: bytes) -> None:
+        try:
+            event_type, event = parse_codex_line(line)
+        except CodexCliStreamFailure as exc:
+            self._observed.record(_OTHER_TOKEN)
+            raise CodexImageCliError() from exc
+        self._observed.record(_observed_token(event_type, event))
+        try:
+            self._decide(event_type, event)
+        except CodexCliStreamFailure as exc:
+            raise CodexImageCliError() from exc
+
+    def _decide(self, event_type: str, event: dict[str, object]) -> None:
+        if event_type in INFORMATIONAL_EVENT_TYPES:
+            return
+        if event_type == _TURN_COMPLETED_EVENT:
+            if self.saw_completed_turn or not isinstance(event.get("usage"), dict):
+                raise CodexImageCliError()
+            self.saw_completed_turn = True
+            return
+        if event_type in {_ERROR_EVENT, _TURN_FAILED_EVENT}:
+            raise CodexImageCliError()
+        if event_type not in ITEM_EVENT_TYPES:
+            raise ImageToolBlockedError(ImageToolBlockedReason.UNEXPECTED_EVENT)
+        item_type = event_item_type(event)
+        if event_type == CODEX_ITEM_COMPLETED_EVENT and item_type == _ERROR_ITEM_KIND:
+            self.completed_error_item_message = error_item_message(event)
+            return
+        if item_type in BLOCKED_ITEM_TYPES:
+            raise ImageToolBlockedError(ImageToolBlockedReason.BLOCKED_ITEM)
+        if item_type in INFORMATIONAL_ITEM_TYPES or item_type == _IMAGE_ITEM_KIND:
+            return
+        raise ImageToolBlockedError(ImageToolBlockedReason.UNEXPECTED_ITEM)
+
+    def finish(self) -> None:
+        """Require a completed turn."""
+        if self.saw_completed_turn:
+            return
+        if (
+            self.completed_error_item_message is not None
+            and codex_cli_failure_reason(self.completed_error_item_message)
+            is SafeRouteReasonCode.CLI_AUTH_REJECTED
+        ):
+            raise CodexImageLoginError()
+        raise CodexImageCliError()
+
+
+def _find_only_generated_png(codex_home: Path) -> Path:
+    private_home = codex_home.resolve()
+    root = private_home / "generated_images"
+    if root.is_symlink():
+        raise CodexImageArtifactError()
+    candidates = [
+        path
+        for path in root.glob("**/*.png")
+        if path.is_file() and path.resolve().is_relative_to(root)
+    ]
+    if not candidates:
+        raise CodexImageNotCreatedError()
+    if len(candidates) != 1:
+        raise CodexImageArtifactError()
+    return candidates[0]
+
+
+def _normalize_generated_png(source: Path, policy: ImagePolicy) -> bytes:
+    image_module, operations = _require_pillow()
+    edge = (policy.output_edge_pixels, policy.output_edge_pixels)
+    try:
+        if source.stat().st_size > policy.maximum_source_bytes:
+            raise CodexImageArtifactError()
+        with image_module.open(source) as raw:
+            if raw.width < 1 or raw.height < 1 or raw.width * raw.height > policy.maximum_pixels:
+                raise CodexImageArtifactError()
+            raw.load()
+            image = operations.fit(
+                raw.convert("RGB"), edge, image_module.Resampling.LANCZOS,
+            )
+        output = BytesIO()
+        image.save(output, format=policy.output_format)
+        payload = output.getvalue()
+        if not payload.startswith(policy.output_signature):
+            raise CodexImageArtifactError()
+        return payload
+    except CodexImageArtifactError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise CodexImageArtifactError() from exc
+
+
+def _require_pillow():
+    """Import Pillow only where an image is actually produced.
+
+    Every container imports this module for its error names, but only the
+    ones that install the ``image`` extra ever reach this line — a turn
+    without it is refused before it spawns.
+    """
+    from PIL import Image, ImageOps
+
+    return Image, ImageOps

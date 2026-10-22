@@ -37,12 +37,12 @@ from relay_support import (
     yield_until,
 )
 
-from agent_client.mcp_wire import ACKNOWLEDGEMENT, JSON_MEDIA_TYPE, HttpAnswer
-from agent_client.wire import MAX_EVENT_BYTES, TurnMessage, TurnRole
-from agent_providers.claude.provider import ClaudeRun
-from agent_providers.cli_run import RelayAccess as CoreRelayAccess
-from agent_service.run_liveness import LoopClock
-from agent_service.tool_relay import (
+from agent_runtime_client.mcp_wire import ACKNOWLEDGEMENT, JSON_MEDIA_TYPE, HttpAnswer
+from agent_runtime_client.wire import MAX_EVENT_BYTES, TurnMessage, TurnRole
+from agent_runtime.claude.provider import ClaudeRun
+from agent_runtime.cli_run import RelayAccess as CoreRelayAccess
+from agent_runtime_service.run_liveness import LoopClock
+from agent_runtime_service.tool_relay import (
     LOOPBACK_HOST,
     MAX_PIPELINED_BYTES,
     MAX_RELAY_CONNECTIONS,
@@ -1232,7 +1232,7 @@ def test_an_unanswered_request_closes_its_connection_without_a_byte_and_frees_th
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """C3."""
-    caplog.set_level(logging.DEBUG, logger="agent_service")
+    caplog.set_level(logging.DEBUG, logger="agent_runtime_service")
     relay_writes = RelayWrites(monkeypatch)
     owner = ScriptedOwner([UNANSWERED])
 
@@ -1252,7 +1252,7 @@ def test_an_unanswered_request_closes_its_connection_without_a_byte_and_frees_th
         assert [relay_writes.to(other) for other in others] == [b""] * len(others)
 
     drive(scenario, owner=owner)
-    assert [r for r in caplog.records if r.name.startswith("agent_service")] == []
+    assert [r for r in caplog.records if r.name.startswith("agent_runtime_service")] == []
 
 
 def test_close_cancels_a_cooperating_owner_and_leaves_no_task(

@@ -4,9 +4,9 @@ For the developer of an app that starts agent runs through the agent service:
 the request an app sends, the events it reads back, the agent files it ships,
 the tool contract it declares, the MCP endpoint it serves and what the service
 keeps of a run. This is a
-reference; `agent_client.wire` owns the wire (its stream rules sit in
-`agent_client.run_stream` and `agent_client.sse`), `agent_client.agents` the agent
-file, `agent_client.tools` the tool contract and `agent_client.mcp_server` the
+reference; `agent_runtime_client.wire` owns the wire (its stream rules sit in
+`agent_runtime_client.run_stream` and `agent_runtime_client.sse`), `agent_runtime_client.agents` the agent
+file, `agent_runtime_client.tools` the tool contract and `agent_runtime_client.mcp_server` the
 tool endpoint, and their docstrings are exact where this file is short. The
 decision record [0001](decisions/0001-agent-service.md) owns the rulings behind
 them. Install the client as [host.md](host.md) describes; who may run what is the
@@ -44,7 +44,7 @@ A request the service refuses answers a `RunRejection` with one `RejectionCode`:
 | Code | Status | Meaning |
 |---|---|---|
 | `unauthorized` | 401 | A user token and a workload token are both required and must be valid. |
-| `forbidden` | 403 | The user is no member of the app, the request's `roles` lack the caller's role, the request names a tool while the app has no MCP origin, or the two tokens do not belong together (`agent_service.identity` lists every cause). |
+| `forbidden` | 403 | The user is no member of the app, the request's `roles` lack the caller's role, the request names a tool while the app has no MCP origin, or the two tokens do not belong together (`agent_runtime_service.identity` lists every cause). |
 | `not_enabled` | 403 | No route is enabled for this caller and model. |
 | `unsupported_version` | 400 | `v` is not 2. |
 | `invalid_request` | 422 | The body is not a valid `RunRequest`. |
@@ -56,7 +56,7 @@ A request the service refuses answers a `RunRejection` with one `RejectionCode`:
 ## Agent files
 
 An app declares its agents as Claude Code subagent files,
-`src/<pkg>/agents/<name>.md`, that `agent_client.agents.load_agent` reads into
+`src/<pkg>/agents/<name>.md`, that `agent_runtime_client.agents.load_agent` reads into
 an `AgentDefinition`: YAML front matter (`name`, `description`, `tools`, plus
 `model` as `<provider>/<model>` and the extension `appRoles`, exactly `[admin]`
 or `[admin, user]`) and the Markdown body as the prompt. `AgentFileError` names
@@ -65,7 +65,7 @@ security boundary: the service checks the role.
 
 ## The tool contract
 
-`agent_client.tools.ToolDeclaration` is the one declaration of a tool: name,
+`agent_runtime_client.tools.ToolDeclaration` is the one declaration of a tool: name,
 description, arguments and a `ToolEffect`, `read_only` or `side_effecting`. The
 effect is for the service and never reaches a prompt; it defaults to
 side-effecting, because a tool nobody classified must be assumed to change
@@ -87,7 +87,7 @@ with exponent 65537), and each `McpTool` handler checks ownership with a fresh
 database session. `verify_capability` returns the claims or one closed
 `CapabilityRefusal` and never raises for token content; a body that carries
 the capability's token or signature is replaced by an empty 500.
-`agent_client.mcp_server` documents the order of the checks.
+`agent_runtime_client.mcp_server` documents the order of the checks.
 
 ## What a run keeps
 

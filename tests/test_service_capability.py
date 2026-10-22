@@ -62,24 +62,24 @@ from webauth.jwt_verification import (
     VerifiedClaims,
 )
 
-from agent_client.capability import (
+from agent_runtime_client.capability import (
     CAPABILITY_ISSUER,
     CAPABILITY_TOKEN_TYPE,
     MAX_CAPABILITY_CHARACTERS,
     CapabilityClaims,
 )
-from agent_client.wire import Failed, FailureCode, RejectionCode, RunStarted
-from agent_providers.events import AssistantTextEvent, FinalEvent
-from agent_service.app import create_app
-from agent_service.capability import (
+from agent_runtime_client.wire import Failed, FailureCode, RejectionCode, RunStarted
+from agent_runtime.events import AssistantTextEvent, FinalEvent
+from agent_runtime_service.app import create_app
+from agent_runtime_service.capability import (
     CapabilityScope,
     CapabilityTooLarge,
     capability_claims,
     signed_capability,
 )
-from agent_service.config import ServiceConfig
-from agent_service.runners import AdmittedRun, Runners
-from agent_service.signing import SigningKey
+from agent_runtime_service.config import ServiceConfig
+from agent_runtime_service.runners import AdmittedRun, Runners
+from agent_runtime_service.signing import SigningKey
 
 RUN_ID = uuid.UUID("8c2f6c1e-3b5a-4d8e-9f10-2a7b4c6d8e01")
 NOW_IN_2026 = 1_792_152_000.0
@@ -601,7 +601,7 @@ def test_a_capability_over_8192_characters_is_refused_before_any_runner_stream_o
     serving, monkeypatch, caplog
 ):
     pinned = uuid.uuid4()
-    monkeypatch.setattr("agent_service.app.uuid.uuid4", lambda: pinned)
+    monkeypatch.setattr("agent_runtime_service.app.uuid.uuid4", lambda: pinned)
     user = MINT.user(sub=QUOTATION_MARKS_256)
     with serving() as service:
         refusal = service.run(user, purpose=LONGEST_PURPOSE, tools=TUNED_AT_THE_LIMIT)
@@ -614,7 +614,7 @@ def test_a_capability_over_8192_characters_is_refused_before_any_runner_stream_o
         assert not any(token in text or _segment_of(token) in text for text in answered)
         status = get_run(service.base_url, run_headers(MINT.workload(), user), str(pinned))
         assert_rejected(status, RejectionCode.NOT_FOUND, 404)
-    (warning,) = [record for record in caplog.records if record.name == "agent_service.app"]
+    (warning,) = [record for record in caplog.records if record.name == "agent_runtime_service.app"]
     assert warning.levelno == logging.WARNING
     assert warning.exc_info is None
     assert warning.args == ("songmaker", len(token), MAX_CAPABILITY_CHARACTERS)

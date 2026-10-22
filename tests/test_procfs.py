@@ -17,8 +17,8 @@ from typing import BinaryIO
 import pytest
 from provider_test_support import PROC_DEVICE, PROC_MOUNT_POINT, mountinfo_line
 
-from agent_providers import procfs
-from agent_providers.procfs import (
+from agent_runtime import procfs
+from agent_runtime.procfs import (
     GroupCensus,
     ProcessStat,
     RealProcView,
@@ -27,7 +27,7 @@ from agent_providers.procfs import (
     holds_mount_point,
     parse_stat,
 )
-from agent_providers.spawn import (
+from agent_runtime.spawn import (
     BlockingAnchoredChild,
     ChildProcess,
     closed_environment,

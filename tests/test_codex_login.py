@@ -14,7 +14,7 @@ from provider_test_support import (
     a_codex_login,
 )
 
-from agent_providers.codex_login import CodexLogin, CodexLoginVerdict, assess_codex_login
+from agent_runtime.codex_login import CodexLogin, CodexLoginVerdict, assess_codex_login
 
 A_DEEPLY_NESTED_DOCUMENT = b"[" * 100_000
 A_DOCUMENT_WITH_A_HUGE_INTEGER = b'{"tokens": {"account_id": ' + b"9" * 5_000 + b"}}"

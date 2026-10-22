@@ -38,8 +38,8 @@ from service_support import (
 )
 from test_service_entrance import MINT
 
-from agent_client.tools import ToolEffect
-from agent_client.wire import (
+from agent_runtime_client.tools import ToolEffect
+from agent_runtime_client.wire import (
     MAX_EVENT_BYTES,
     MAX_TOOL_INPUT_DEPTH,
     Failed,
@@ -51,24 +51,24 @@ from agent_client.wire import (
     Succeeded,
     ToolCall,
 )
-from agent_providers.errors import TextToolCallRejectedError
-from agent_providers.events import (
+from agent_runtime.errors import TextToolCallRejectedError
+from agent_runtime.events import (
     AssistantTextEvent,
     FinalEvent,
     StreamEvent,
     ToolCallEvent,
     ToolResultEvent,
 )
-from agent_providers.grok import transport as grok_cli_adapter
-from agent_service import run_events
-from agent_service.app import create_app
-from agent_service.config import RunConfig
-from agent_service.identity import Principal
-from agent_service.routing import Cli
-from agent_service.run_events import run_frames
-from agent_service.run_liveness import LoopClock
-from agent_service.run_records import RunRecords
-from agent_service.runners import AdmittedRun, Runner
+from agent_runtime.grok import transport as grok_cli_adapter
+from agent_runtime_service import run_events
+from agent_runtime_service.app import create_app
+from agent_runtime_service.config import RunConfig
+from agent_runtime_service.identity import Principal
+from agent_runtime_service.routing import Cli
+from agent_runtime_service.run_events import run_frames
+from agent_runtime_service.run_liveness import LoopClock
+from agent_runtime_service.run_records import RunRecords
+from agent_runtime_service.runners import AdmittedRun, Runner
 
 
 def _streamed(runner: Runner | None, records: RunRecords | None = None) -> bytes:

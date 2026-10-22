@@ -46,29 +46,29 @@ from provider_test_support import (
     tree_snapshot,
 )
 
-from agent_providers import lost_groups, process, procfs
-from agent_providers.anchored_turn import (
+from agent_runtime import lost_groups, process, procfs
+from agent_runtime.anchored_turn import (
     CliProcessPool,
     anchored_turn_child,
 )
-from agent_providers.claude.provider import CLAUDE_CLI_PROCESS_POOL
-from agent_providers.config import (
+from agent_runtime.claude.provider import CLAUDE_CLI_PROCESS_POOL
+from agent_runtime.config import (
     PrivateWorkingRoot,
     ProviderRuntimeNotConfiguredError,
     current_config,
     reset_config,
 )
-from agent_providers.errors import ContainmentLost
-from agent_providers.lost_groups import RetainedGroup
-from agent_providers.process import (
+from agent_runtime.errors import ContainmentLost
+from agent_runtime.lost_groups import RetainedGroup
+from agent_runtime.process import (
     CliEnvironmentCause,
     CliEnvironmentUnavailableError,
     HolderReservation,
     RunDirectories,
     run_directories,
 )
-from agent_providers.procfs import GroupCensus
-from agent_providers.spawn import ChildProcess, ChildProcessSpecificationError, closed_environment
+from agent_runtime.procfs import GroupCensus
+from agent_runtime.spawn import ChildProcess, ChildProcessSpecificationError, closed_environment
 
 PROMPT = "multi-line\nnon-ASCII text: grüße, 日本語\n".encode()
 FILES = {"prompt": PROMPT, "empty": b""}

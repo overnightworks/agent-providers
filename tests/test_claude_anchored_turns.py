@@ -33,8 +33,8 @@ from descendant_support import (
 )
 from provider_test_support import EventGate, ScenarioDeadline, held_claude_slots, run_bounded
 
-from agent_providers.claude import provider
-from agent_providers.events import FinalEvent, StreamEvent
+from agent_runtime.claude import provider
+from agent_runtime.events import FinalEvent, StreamEvent
 
 ANSWERS_ONCE = "printf '%s' '{\"result\":\"ok\"}'\n"
 STREAMS_A_RESULT = 'printf \'%s\\n\' \'{"type":"result","result":"ok"}\'\n'

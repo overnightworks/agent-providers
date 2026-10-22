@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import pytest
 
-from agent_service.config import IdentityConfig, ProfileConfig, Provider, RouteConfig
-from agent_service.routing import Api, Cli, NotEnabled, route
+from agent_runtime_service.config import IdentityConfig, ProfileConfig, Provider, RouteConfig
+from agent_runtime_service.routing import Api, Cli, NotEnabled, route
 
 IDENTITY = IdentityConfig(
     issuer="https://keycloak.test/realms/agent-test",

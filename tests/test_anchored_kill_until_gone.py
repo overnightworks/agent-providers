@@ -33,9 +33,9 @@ from anchored_support import (
 )
 from bounds import TEST_WAIT_SECONDS, within_the_bound
 
-from agent_providers import spawn
-from agent_providers.procfs import GroupCensus
-from agent_providers.spawn import (
+from agent_runtime import spawn
+from agent_runtime.procfs import GroupCensus
+from agent_runtime.spawn import (
     GROUP_CENSUS_INTERVAL_SECONDS,
     AnchoredChild,
     AnchorStateError,

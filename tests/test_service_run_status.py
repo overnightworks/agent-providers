@@ -31,10 +31,10 @@ from test_service_entrance import MINT, TOKEN_REJECTIONS
 from webauth.https_client import KeySetFetchError
 from wire_builders import started, succeeded
 
-from agent_client.wire import RejectionCode, RunState, RunStatus
-from agent_service.app import create_app
-from agent_service.identity import Principal
-from agent_service.run_records import RunRecorder, RunRecords
+from agent_runtime_client.wire import RejectionCode, RunState, RunStatus
+from agent_runtime_service.app import create_app
+from agent_runtime_service.identity import Principal
+from agent_runtime_service.run_records import RunRecorder, RunRecords
 
 ALICE = Principal(TEST_ISSUER, "user-alice")
 BOB = Principal(TEST_ISSUER, "user-bob")
@@ -225,7 +225,7 @@ def test_no_log_line_carries_token_text(service, seeded: Seeded, caplog):
             get_run(service, run_headers(workload, user), segment)
 
     logged = "\n".join(record.getMessage() for record in caplog.records)
-    assert not [r for r in caplog.records if r.name.startswith("agent_service")]
+    assert not [r for r in caplog.records if r.name.startswith("agent_runtime_service")]
     assert workload not in logged
     assert user not in logged
 

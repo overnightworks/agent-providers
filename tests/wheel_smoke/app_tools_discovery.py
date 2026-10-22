@@ -20,7 +20,7 @@ sys.path.insert(
 from capability_support import capability_carrying  # noqa: E402
 from mcp_app_fake import CERTIFICATE_HOST, ScriptedApp, TestAuthority, serving  # noqa: E402
 
-from agent_service.app_tools import open_app_tools  # noqa: E402
+from agent_runtime_service.app_tools import open_app_tools  # noqa: E402
 
 DISCOVERY_DEADLINE_SECONDS = 30
 EXPECTED_HTTPX_RANGE = {">=0.27", "<1"}
@@ -29,7 +29,7 @@ EXPECTED_HTTPX_RANGE = {">=0.27", "<1"}
 def declared_httpx_ranges() -> list[set[str]]:
     unconditional_httpx = (
         re.fullmatch(r"httpx\s*([^;\s]+)", text.strip())
-        for text in requires("overnightworks-agent-service") or []
+        for text in requires("overnightworks-agent-runtime-service") or []
     )
     return [
         {specifier.strip() for specifier in match.group(1).split(",")}

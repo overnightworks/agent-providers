@@ -55,10 +55,10 @@ from mcp_app_fake import TestAuthority, TlsCredentials
 from provider_test_support import fake_cli_executable
 from pydantic import ValidationError
 
-import agent_service.signing as signing
-from agent_client.run_stream import StreamViolation, ViolationKind
-from agent_client.sse import RunStreamDecoder
-from agent_client.wire import (
+import agent_runtime_service.signing as signing
+from agent_runtime_client.run_stream import StreamViolation, ViolationKind
+from agent_runtime_client.sse import RunStreamDecoder
+from agent_runtime_client.wire import (
     MAX_PURPOSE_LENGTH,
     RejectionCode,
     RunEvent,
@@ -66,19 +66,19 @@ from agent_client.wire import (
     RunRequest,
     RunStatus,
 )
-from agent_providers.config import PrivateWorkingRoot
-from agent_providers.errors import RetainedGroup
-from agent_providers.events import AssistantTextEvent, StreamEvent, ToolCallEvent
-from agent_service.admission import AdmissionSlot
-from agent_service.app import create_app
-from agent_service.config import RunConfig, ServiceConfig
-from agent_service.identity import Principal
-from agent_service.quarantine import GroupConfirmation, Quarantine
-from agent_service.routing import Cli
-from agent_service.run_events import run_frames
-from agent_service.run_liveness import LoopClock, RunClock
-from agent_service.run_records import RunRecords
-from agent_service.runners import AdmittedRun, Runners
+from agent_runtime.config import PrivateWorkingRoot
+from agent_runtime.errors import RetainedGroup
+from agent_runtime.events import AssistantTextEvent, StreamEvent, ToolCallEvent
+from agent_runtime_service.admission import AdmissionSlot
+from agent_runtime_service.app import create_app
+from agent_runtime_service.config import RunConfig, ServiceConfig
+from agent_runtime_service.identity import Principal
+from agent_runtime_service.quarantine import GroupConfirmation, Quarantine
+from agent_runtime_service.routing import Cli
+from agent_runtime_service.run_events import run_frames
+from agent_runtime_service.run_liveness import LoopClock, RunClock
+from agent_runtime_service.run_records import RunRecords
+from agent_runtime_service.runners import AdmittedRun, Runners
 
 TEST_ISSUER: Final = "https://keycloak.test/realms/agent-test"
 TEST_JWKS_URL: Final = "https://keycloak.test/realms/agent-test/protocol/openid-connect/certs"
@@ -1064,7 +1064,7 @@ QUIET = AssistantTextEvent(text="")
 
 FAILURE_LINE = re.compile(r"(?P<event>.+?): (?P<kind>\w+) at (?P<positions>.+)")
 POSITION = re.compile(r"[\w.]+\.py:\d+:[\w<>]+")
-QUARANTINE_LOGGER: Final = "agent_service.quarantine"
+QUARANTINE_LOGGER: Final = "agent_runtime_service.quarantine"
 QUARANTINE_LINE = re.compile(
     r"Not confirmed gone after SIGKILL: process (?P<noun>groups?) (?P<pgids>\d+(?:, \d+)*)"
     r" of run (?P<run_id>[0-9a-f-]{36}); the run's place stays taken until then"
@@ -1333,7 +1333,7 @@ def the_app_on(
     ``ScriptedConfirmation``, so a custom ``confirm`` and ``drive.quarantine_clock``
     do not reach it.
     """
-    monkeypatch.setattr("agent_service.app.LoopClock", lambda: drive.clock)
+    monkeypatch.setattr("agent_runtime_service.app.LoopClock", lambda: drive.clock)
     return create_app(
         config or service_config(runs=drive.runs.model_dump()),
         runners=runners or Runners(cli=drive.runner),

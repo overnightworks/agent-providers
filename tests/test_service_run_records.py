@@ -27,7 +27,7 @@ from wire_builders import (
     succeeded,
 )
 
-from agent_client.wire import (
+from agent_runtime_client.wire import (
     PROTOCOL_VERSION,
     AssistantText,
     ClientLoss,
@@ -36,8 +36,8 @@ from agent_client.wire import (
     RunState,
     RunStatus,
 )
-from agent_service.identity import Principal
-from agent_service.run_records import RunRecorder, RunRecords
+from agent_runtime_service.identity import Principal
+from agent_runtime_service.run_records import RunRecorder, RunRecords
 
 ISSUER = "https://keycloak.test/realms/agent-test"
 ALICE = Principal(ISSUER, "user-alice")

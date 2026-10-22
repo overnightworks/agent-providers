@@ -29,9 +29,9 @@ from provider_test_support import (
     write_claude_token_file,
 )
 
-from agent_providers.claude import adapter as claude_adapter
-from agent_providers.claude import provider as claude_provider
-from agent_providers.claude.provider import (
+from agent_runtime.claude import adapter as claude_adapter
+from agent_runtime.claude import provider as claude_provider
+from agent_runtime.claude.provider import (
     CLAUDE_CLI_LOGIN_NOT_CONFIGURED_DETAIL,
     CLAUDE_CLI_UNAVAILABLE_DETAIL,
     CliLoginNotConfiguredError,
@@ -40,12 +40,12 @@ from agent_providers.claude.provider import (
     CliUnavailableError,
     UnavailableError,
 )
-from agent_providers.config import current_claude_runtime
-from agent_providers.constants import CLAUDE_OAUTH_TOKEN_VARIABLE
-from agent_providers.errors import ContainmentLost, ProviderUnavailableError, SafeRouteReasonCode
-from agent_providers.events import AssistantTextEvent, StreamEvent
-from agent_providers.process import CliEnvironmentUnavailableError, CliLoginUnusableError
-from agent_providers.tool_loop import ToolOutcome
+from agent_runtime.config import current_claude_runtime
+from agent_runtime.constants import CLAUDE_OAUTH_TOKEN_VARIABLE
+from agent_runtime.errors import ContainmentLost, ProviderUnavailableError, SafeRouteReasonCode
+from agent_runtime.events import AssistantTextEvent, StreamEvent
+from agent_runtime.process import CliEnvironmentUnavailableError, CliLoginUnusableError
+from agent_runtime.tool_loop import ToolOutcome
 
 
 class _TrackingProviderStream(AsyncIterator[StreamEvent]):

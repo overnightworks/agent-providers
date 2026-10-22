@@ -34,8 +34,8 @@ from service_support import (
 )
 from uvicorn.logging import DefaultFormatter
 
-from agent_service.app_tools import UpstreamError, open_app_tools
-from agent_service.run_liveness import log_failure
+from agent_runtime_service.app_tools import UpstreamError, open_app_tools
+from agent_runtime_service.run_liveness import log_failure
 
 CAPABILITY = capability_carrying("canary.capability.sig")
 TOKEN = CAPABILITY.token

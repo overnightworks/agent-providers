@@ -45,16 +45,16 @@ from service_support import (
 )
 from wire_builders import started
 
-from agent_client.agents import load_agent
-from agent_client.wire import RejectionCode, TurnMessage, TurnRole
-from agent_providers.events import AssistantTextEvent, FinalEvent
-from agent_service.admission import AdmissionSlot
-from agent_service.app import create_app
-from agent_service.config import ServiceConfig
-from agent_service.identity import Principal
-from agent_service.routing import Api
-from agent_service.run_records import RunRecords
-from agent_service.runners import Runners
+from agent_runtime_client.agents import load_agent
+from agent_runtime_client.wire import RejectionCode, TurnMessage, TurnRole
+from agent_runtime.events import AssistantTextEvent, FinalEvent
+from agent_runtime_service.admission import AdmissionSlot
+from agent_runtime_service.app import create_app
+from agent_runtime_service.config import ServiceConfig
+from agent_runtime_service.identity import Principal
+from agent_runtime_service.routing import Api
+from agent_runtime_service.run_records import RunRecords
+from agent_runtime_service.runners import Runners
 
 MINT = TokenMint()
 ANSWER = (AssistantTextEvent(text="answer"), FinalEvent(text="done"))

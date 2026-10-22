@@ -17,9 +17,9 @@ from provider_test_support import (
     install_cli_door,
 )
 
-from agent_providers import process
-from agent_providers.config import PrivateWorkingRoot, current_config
-from agent_providers.process import (
+from agent_runtime import process
+from agent_runtime.config import PrivateWorkingRoot, current_config
+from agent_runtime.process import (
     CliRun,
     CliRunOutcome,
     CliRunReason,
@@ -28,8 +28,8 @@ from agent_providers.process import (
     run_claude_catalog_cli,
     run_directories,
 )
-from agent_providers.procfs import GroupCensus
-from agent_providers.spawn import ChildProcess, KillUntilGoneResult, closed_environment
+from agent_runtime.procfs import GroupCensus
+from agent_runtime.spawn import ChildProcess, KillUntilGoneResult, closed_environment
 
 failure_watch = provider_test_support.failure_watch
 held_bounded_groups = provider_test_support.held_bounded_groups

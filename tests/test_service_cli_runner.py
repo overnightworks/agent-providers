@@ -85,10 +85,10 @@ from service_support import (
     the_app_on,
 )
 
-import agent_service.app as app_module
-import agent_service.config as config_module
-from agent_client.sse import RunStreamDecoder
-from agent_client.wire import (
+import agent_runtime_service.app as app_module
+import agent_runtime_service.config as config_module
+from agent_runtime_client.sse import RunStreamDecoder
+from agent_runtime_client.wire import (
     ClientLoss,
     Failed,
     FailureCode,
@@ -97,28 +97,28 @@ from agent_client.wire import (
     RunState,
     RunStatus,
 )
-from agent_providers import lost_groups, spawn
-from agent_providers.config import PrivateWorkingRoot, reset_config
-from agent_providers.events import AssistantTextEvent
-from agent_providers.procfs import GroupCensus
-from agent_providers.spawn import KillUntilGoneResult
-from agent_service.admission import AdmissionSlot
-from agent_service.app import create_app
-from agent_service.capability import Capability
-from agent_service.cli import main
-from agent_service.cli_runner import RUN_ADAPTERS, CliRunner, ProfileLaunch, installed_runners
-from agent_service.config import McpConfig, Provider, ServiceConfig
-from agent_service.quarantine import Quarantine
-from agent_service.routing import Cli
-from agent_service.run_events import (
+from agent_runtime import lost_groups, spawn
+from agent_runtime.config import PrivateWorkingRoot, reset_config
+from agent_runtime.events import AssistantTextEvent
+from agent_runtime.procfs import GroupCensus
+from agent_runtime.spawn import KillUntilGoneResult
+from agent_runtime_service.admission import AdmissionSlot
+from agent_runtime_service.app import create_app
+from agent_runtime_service.capability import Capability
+from agent_runtime_service.cli import main
+from agent_runtime_service.cli_runner import RUN_ADAPTERS, CliRunner, ProfileLaunch, installed_runners
+from agent_runtime_service.config import McpConfig, Provider, ServiceConfig
+from agent_runtime_service.quarantine import Quarantine
+from agent_runtime_service.routing import Cli
+from agent_runtime_service.run_events import (
     INVALID_EVENT_MESSAGE,
     NO_RUNNER_MESSAGE,
     RUNNER_FAILED_MESSAGE,
     run_frames,
 )
-from agent_service.run_liveness import LoopClock
-from agent_service.run_records import RunRecords
-from agent_service.runners import Runners
+from agent_runtime_service.run_liveness import LoopClock
+from agent_runtime_service.run_records import RunRecords
+from agent_runtime_service.runners import Runners
 
 MINT = TokenMint()
 CANARY = "cli-text-" + uuid.uuid4().hex

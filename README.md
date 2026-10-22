@@ -70,8 +70,8 @@ installs the client wheel alone.
 
 ```bash
 pip install \
-  "overnightworks-agent-client @ https://github.com/overnightworks/agent-providers/releases/download/v0.5.0/overnightworks_agent_client-0.5.0-py3-none-any.whl#sha256=9019e18411e6338629a5397a4f58b0b3cbd70f4b2cbd8184b97a3d53ee8ed94a" \
-  "overnightworks-agent-providers @ https://github.com/overnightworks/agent-providers/releases/download/v0.5.0/overnightworks_agent_providers-0.5.0-py3-none-any.whl#sha256=16dd220515e00a45fdb00cb92f62a56e46a30d0cfdd7cfdf59529cd0b60d9789"
+  "overnightworks-agent-client @ https://github.com/overnightworks/agent-providers/releases/download/v0.6.0/overnightworks_agent_client-0.6.0-py3-none-any.whl#sha256=c402d87f5569b47f8a34b8205e33ca2011b003acb13ba89ec784004e5891df4e" \
+  "overnightworks-agent-providers @ https://github.com/overnightworks/agent-providers/releases/download/v0.6.0/overnightworks_agent_providers-0.6.0-py3-none-any.whl#sha256=5ca4d01e1a0c29186759dd9872e8bc69e2355cc82b3965f50c02b73fadc45478"
 ```
 
 A uv host lists the same URLs in its `pyproject.toml`; `uv lock` records each

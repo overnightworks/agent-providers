@@ -24,7 +24,7 @@ or `uv add`.
 |---|---|
 | anyone new | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): the three distributions, the route decision, trust |
 | a host developer integrating the library | [docs/host.md](docs/host.md): install, what the host supplies, the child environment, the sandbox |
-| an app author starting agent runs | [docs/wire.md](docs/wire.md): wire v2, agent files, the tool contract, the MCP endpoint |
+| an app author starting agent runs | [docs/wire.md](docs/wire.md): wire v2, agent files, the tool contract, the MCP endpoint, what a run keeps |
 | the operator running the service | [docs/operations.md](docs/operations.md): who may run what, the subscription login and its renewal |
 | bumping a pin | [docs/MIGRATING.md](docs/MIGRATING.md): one section per release |
 

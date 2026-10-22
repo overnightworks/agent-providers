@@ -8,6 +8,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from ruamel.yaml import YAML
 
 _WORKFLOW = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "release.yml"
 _REPOSITORY = "overnightworks/agent-providers"
@@ -25,6 +26,15 @@ def _run_script(step_name: str) -> str:
     )
     assert step, f"release.yml has no run script for {step_name}"
     return "\n".join(line[10:] for line in step.group(1).splitlines())
+
+
+def _publish_environment() -> dict[str, str]:
+    steps = YAML(typ="safe").load(_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+    for job in steps.values():
+        for step in job["steps"]:
+            if step.get("name") == "Publish the release with the wheels the check admitted":
+                return step["env"]
+    raise AssertionError("release.yml has no publish step")
 
 
 def _notice_for(tag: str, migrating: str, tmp_path: Path) -> str:
@@ -99,7 +109,7 @@ _INSTALL_LINES = [
 
 
 def _publish(notice: str, tmp_path: Path) -> list[str]:
-    """Run the publish step with a `gh` that records its arguments, one per line."""
+    """Run the publish step with a `gh` that records its arguments, NUL-terminated."""
     (tmp_path / "dist").mkdir()
     wheels = ["a.whl", "b.whl", "c.whl"]
     for wheel in wheels:
@@ -108,7 +118,7 @@ def _publish(notice: str, tmp_path: Path) -> list[str]:
     bin_directory.mkdir()
     recorded = tmp_path / "recorded"
     fake_gh = bin_directory / "gh"
-    fake_gh.write_text(f'#!/bin/sh\nprintf \'%s\\n\' "$@" > "{recorded}"\n', encoding="utf-8")
+    fake_gh.write_text(f'#!/bin/sh\nprintf \'%s\\0\' "$@" > "{recorded}"\n', encoding="utf-8")
     fake_gh.chmod(0o755)
     subprocess.run(
         [
@@ -126,28 +136,36 @@ def _publish(notice: str, tmp_path: Path) -> list[str]:
         },
         check=True,
     )
-    return recorded.read_text(encoding="utf-8").splitlines()
+    return recorded.read_text(encoding="utf-8").split("\0")[:-1]
 
 
-def _notes_of(arguments: list[str]) -> list[str]:
-    return arguments[arguments.index("--notes") + 1 :]
+def _notes_of(arguments: list[str]) -> str:
+    """The notes are the one argument after `--notes`, and the last one."""
+    assert arguments.index("--notes") == len(arguments) - 2
+    return arguments[-1]
 
 
 def test_the_published_notes_open_with_the_migration_link_then_the_three_requirements(tmp_path):
     notes = _notes_of(_publish(_MIGRATION_LINK, tmp_path))
 
-    assert notes == [_MIGRATION_LINK, "", *_INSTALL_LINES]
+    assert notes == "\n".join([_MIGRATION_LINK, "", *_INSTALL_LINES])
 
 
 def test_the_published_notes_without_a_migration_section_are_the_three_requirements_only(tmp_path):
     notes = _notes_of(_publish("", tmp_path))
 
-    assert notes == _INSTALL_LINES
+    assert notes == "\n".join(_INSTALL_LINES)
 
 
-@pytest.mark.parametrize("notice", [_MIGRATION_LINK, ""], ids=["with migration", "without"])
-def test_the_release_is_created_with_generated_notes_and_the_three_wheels(tmp_path, notice):
-    arguments = _publish(notice, tmp_path)
+def test_the_publish_step_takes_the_notice_and_the_install_lines_from_the_steps_that_wrote_them():
+    environment = _publish_environment()
+
+    assert environment["NOTICE"] == "${{ steps.notice.outputs.notice }}"
+    assert environment["INSTALL"] == "${{ steps.install.outputs.install }}"
+
+
+def test_the_release_is_created_with_generated_notes_and_the_three_wheels(tmp_path):
+    arguments = _publish("", tmp_path)
 
     assert arguments[:3] == ["release", "create", "v0.3.0"]
     assert arguments[3:6] == ["dist/a.whl", "dist/b.whl", "dist/c.whl"]

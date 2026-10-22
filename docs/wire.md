@@ -75,7 +75,7 @@ state. The core's `ToolCatalog` builds on the same class.
 
 An app that offers tools declares one canonical https MCP origin in the
 service's configuration. The app names the tools of each run in its request;
-the service mints each admitted run a capability that grants exactly those
+the service mints each admitted run a capability (an RS256 token) that grants exactly those
 names and stamps the request's effects onto the run's tool calls (a tool
 outside the map counts as side-effecting).
 

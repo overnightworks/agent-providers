@@ -29,9 +29,10 @@ releases in [MIGRATING.md](MIGRATING.md).
 No distribution is published on PyPI, and PyPI is not planned: wheels pinned by
 URL and hash from the tag's GitHub release give byte-exact, hash-checked wheels
 with no PyPI name to race for; their dependencies still resolve from PyPI. The
-release page lists each wheel as a `name @ URL#sha256=HASH` requirement. A host
-that runs turns itself installs the core; the core pins the client to its own
-version exactly, so both URLs name the same tag. An app that only starts runs
+release page lists each wheel as a pinnable requirement ([README](../README.md#install)).
+A host that runs turns itself installs the core and the client: the core pins the
+client to its own version exactly and neither is on PyPI, so the host pins both
+wheel URLs from the same release. An app that only starts runs
 through the service installs the client alone ([ARCHITECTURE.md](ARCHITECTURE.md)
 says which distribution serves whom).
 
@@ -170,8 +171,8 @@ subscription run gets a fresh private home below the working root (directories
 opened only for reading. Grok and Codex copy the host-named file into the home. A
 Claude turn gets no copy: the setup token in `claude.token_file` reaches the child
 only as `CLAUDE_CODE_OAUTH_TOKEN`, never in its arguments, and is read through
-`secret_file` at every child start. A file that [operations.md](operations.md) refuses (missing, open to group or
-others, over 16 KiB, JSON) fails the turn with `CLI_LOGIN_NOT_CONFIGURED`
+`secret_file` at every child start. A file `agent_providers.secret_file` refuses (how the operator writes it:
+[operations.md](operations.md)) fails the turn with `CLI_LOGIN_NOT_CONFIGURED`
 and leaves no home behind (the error is `CliLoginNotConfiguredError`); a token the provider
 rejects ends a streaming turn with the safe code `cli_auth_rejected`. The model list asks the
 Claude CLI without a login and names no default. Every Claude child also gets the run switches

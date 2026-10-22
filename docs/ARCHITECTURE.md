@@ -69,7 +69,7 @@ flowchart TB
     role -->|yes| tools{"tools named but app<br/>has no MCP origin?"}
     tools -->|yes| forbidden
     tools -->|no| model["resolved model =<br/>app override for the purpose,<br/>else the requested model"]
-    model --> subscription{"subscription group member,<br/>and a profile serves it?<br/>(no model asked: any profile;<br/>model asked: a profile of that<br/>provider lists the name)"}
+    model --> subscription{"subscription group member,<br/>and a profile serves it?<br/>(no model asked: any profile;<br/>model asked: a profile of that<br/>provider exists and<br/>[cli.&lt;provider&gt;] models lists it)"}
     subscription -->|yes| slot{"CLI place free?"}
     slot -->|yes| cli["CLI route<br/>claude under the subscription profile"]
     slot -->|no| busy["429 busy"]
@@ -79,6 +79,7 @@ flowchart TB
     cli --> size{"app has an MCP origin and<br/>capability over 8,192 characters?"}
     paid --> size
     size -->|yes| toolarge["422 capability_too_large"]
+    size -->|no| run["stream starts"]
 ```
 
 *Question: which route serves this caller? Source:

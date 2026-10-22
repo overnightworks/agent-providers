@@ -50,13 +50,32 @@ jobs:
           fi
           echo "notice=${notice}" >> "$GITHUB_OUTPUT"
 
+      - name: List the wheels with their hashes
+        id: install
+        run: |
+          {
+            echo 'install<<INSTALL_LINES'
+            echo '**Install.** Pin each wheel by URL and hash.'
+            echo
+            echo '```'
+            for wheel in dist/*.whl; do
+              file="$(basename "$wheel")"
+              name="${file%%-*}"
+              hash="$(sha256sum "$wheel" | cut -d ' ' -f 1)"
+              echo "${name//_/-} @ https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${file}#sha256=${hash}"
+            done
+            echo '```'
+            echo 'INSTALL_LINES'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Publish the release with the wheels the check admitted
         env:
           GH_TOKEN: ${{ github.token }}
           NOTICE: ${{ steps.notice.outputs.notice }}
+          INSTALL: ${{ steps.install.outputs.install }}
         run: |
-          notes=()
+          notes="$INSTALL"
           if [ -n "$NOTICE" ]; then
-            notes=(--notes "$NOTICE")
+            notes="${NOTICE}"$'\n\n'"${INSTALL}"
           fi
-          gh release create "$GITHUB_REF_NAME" dist/*.whl --title "$GITHUB_REF_NAME" --generate-notes "${notes[@]}"
+          gh release create "$GITHUB_REF_NAME" dist/*.whl --title "$GITHUB_REF_NAME" --generate-notes --notes "$notes"

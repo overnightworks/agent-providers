@@ -1749,7 +1749,7 @@ def _make_tree_removable(root: Path) -> None:
     failure's class only. An exception raised instead of the real close is not
     covered, because Linux releases the descriptor even when close fails. An
     asynchronous interruption between two statements is the host obligation
-    the README's Interruptions paragraph states, and no claim is made about it.
+    the Interruptions paragraph of docs/host.md states, and no claim is made about it.
     """
     acquisition_flags = _directory_flags("O_PATH", "O_NOFOLLOW", "O_DIRECTORY", "O_CLOEXEC")
     listing_flags = _directory_flags("O_DIRECTORY", "O_CLOEXEC") | os.O_RDONLY

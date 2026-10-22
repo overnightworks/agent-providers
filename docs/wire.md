@@ -125,12 +125,14 @@ subscription login and the deployment's proxy variables ([host.md](host.md), "Th
 child environment is closed") and the per-run relay secret.
 
 **What the CLI writes.** Every subscription run passes switches that limit what the
-CLI keeps and sends ([host.md](host.md), "The child environment is closed"). Measured
-with `--no-session-persistence` but without a login, without the telemetry switches
-and without the system prompt file ([decision record 0001](decisions/0001-agent-service.md),
-A1b-0a c5), the CLI wrote into its home and created an empty `/tmp/cc-socks-<uid>/`
-outside it. Neither the run's full set of flags and switches nor a logged-in turn is
-measured yet; issue #115, step 12b, owns that measurement.
+CLI keeps and sends ([host.md](host.md), "The child environment is closed").
+[Decision record 0001](decisions/0001-agent-service.md) measured the CLI's own
+writes twice, both times with `--no-session-persistence` and without the telemetry
+switches: without a login (A1b-0a c5), which also found an empty
+`/tmp/cc-socks-<uid>/` outside the home, and with a login (A1b-0b1 c3), which lists
+the home only. A turn with the run's full flags and switches in the real
+deployment, inside its home and outside it, is not measured yet; issue #115, step
+12b, owns that measurement.
 
 **The provider.** The turn's text, and the results of the app's tools the run calls,
 reach the provider (Anthropic for Claude) under the operator's subscription. What

@@ -6,8 +6,8 @@ import base64
 import json
 from collections.abc import Sequence
 
-from agent_client.capability import CAPABILITY_ISSUER, CapabilityClaims, CapabilityPrincipal
-from agent_service.capability import Capability
+from agent_runtime_client.capability import CAPABILITY_ISSUER, CapabilityClaims, CapabilityPrincipal
+from agent_runtime_service.capability import Capability
 
 _RUN_ID = "8c2f6c1e-3b5a-4d8e-9f10-2a7b4c6d8e01"
 _ISSUED_AT = 1_792_152_000

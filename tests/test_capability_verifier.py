@@ -15,19 +15,19 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
 from service_support import generated_rsa_key, pem_of
 
-from agent_client.capability import CAPABILITY_TOKEN_TYPE, MAX_CAPABILITY_CHARACTERS
-from agent_client.mcp_server import (
+from agent_runtime_client.capability import CAPABILITY_TOKEN_TYPE, MAX_CAPABILITY_CHARACTERS
+from agent_runtime_client.mcp_server import (
     CapabilityRefusal,
     CapabilityVerificationKey,
     UnsoundVerificationKey,
     verify_capability,
 )
-from agent_service.capability import (
+from agent_runtime_service.capability import (
     CapabilityScope,
     capability_claims,
     signed_capability,
 )
-from agent_service.signing import SigningKey
+from agent_runtime_service.signing import SigningKey
 
 ORIGIN = "https://notes.internal"
 OTHER_ORIGIN = "https://other.internal"

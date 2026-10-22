@@ -1,10 +1,10 @@
-"""Autouse fixtures for the ``agent_providers`` library tests.
+"""Autouse fixtures for the ``agent_runtime`` library tests.
 
 These install a library-only provider runtime and the probe patches every test
 needs, so the suite proves the provider layer against values the package owns —
 never a host's own — with no host application on the path.
 
-``agent_providers.config.configure()`` refuses a second, differing
+``agent_runtime.config.configure()`` refuses a second, differing
 installation, so ``_configure_agent_provider_runtime`` installs one sample
 runtime and resets it after each test.
 """
@@ -36,8 +36,8 @@ from anchored_support import ChildCleanup, ZombieAnchor, child_cleanup_scope, zo
 from descendant_support import Handshake, open_handshake
 from provider_test_support import MCP_TOOL_NAMES, close_fake_cli_pipes, write_claude_token_file
 
-from agent_providers import procfs
-from agent_providers.config import (
+from agent_runtime import procfs
+from agent_runtime.config import (
     ClaudeCliRuntime,
     CodexCliRuntime,
     CodexTurnRuntime,
@@ -169,8 +169,8 @@ def _service_hardening_never_touches_the_kernel():
     be undone after the other autouse patches and restore their mocks into later tests.
     """
     with (
-        patch("agent_service.process_hardening.set_not_dumpable", return_value=None),
-        patch("agent_service.process_hardening.effective_user_id", return_value=1000),
+        patch("agent_runtime_service.process_hardening.set_not_dumpable", return_value=None),
+        patch("agent_runtime_service.process_hardening.effective_user_id", return_value=1000),
     ):
         yield
     if sys.platform == "linux":
@@ -180,7 +180,7 @@ def _service_hardening_never_touches_the_kernel():
 @pytest.fixture(autouse=True)
 def _isolate_codex_process_pool():
     """Keep each test independent of Codex CLI process reservations."""
-    import agent_providers.codex.pool as pool_mod
+    import agent_runtime.codex.pool as pool_mod
 
     pool_mod._process_pool = None
     yield
@@ -193,15 +193,15 @@ def _no_claude_cli_tool_surface_probe():
     fake_binary = Path("/usr/bin/claude")
     with (
         patch(
-            "agent_providers.claude.provider.verify_cli_tool_surface",
+            "agent_runtime.claude.provider.verify_cli_tool_surface",
             AsyncMock(return_value=fake_binary),
         ),
         patch(
-            "agent_providers.claude.provider.averify_no_builtin_cli_tools",
+            "agent_runtime.claude.provider.averify_no_builtin_cli_tools",
             AsyncMock(return_value=fake_binary),
         ),
         patch(
-            "agent_providers.claude.provider.verify_no_builtin_cli_tools",
+            "agent_runtime.claude.provider.verify_no_builtin_cli_tools",
             MagicMock(return_value=fake_binary),
         ),
     ):

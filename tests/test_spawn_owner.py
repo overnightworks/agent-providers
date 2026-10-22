@@ -4,7 +4,7 @@ The rule is an import-and-name policy, not an import contract and not a call
 analysis. An import contract cannot see it: ``Popen(argv, env=None)`` inherits
 the whole host environment without naming ``os.environ`` once. A call analysis
 would have to rebuild Python's scoping. The policy needs neither: outside
-:mod:`agent_providers.spawn` nothing imports a spawning module (``subprocess``,
+:mod:`agent_runtime.spawn` nothing imports a spawning module (``subprocess``,
 ``pty``, ``multiprocessing``, ``posix``, ``_posixsubprocess``, AnyIO's
 ``to_process``, asyncio's ``base_subprocess`` and ``unix_events``,
 ``concurrent.futures.process``) in any form or scope, nothing re-imports one
@@ -13,7 +13,7 @@ imports a spawn name from ``os``, ``asyncio`` or AnyIO, and nothing reads a spaw
 name as an attribute: not a spawning module under any spelling of its owner
 (``spawn.subprocess``, ``asyncio.subprocess``), not a spawning ``os`` name read
 from ``os``, from an alias of it or from any ``<x>.os``, not an AnyIO
-``run_process`` or ``open_process``. The names outside :mod:`agent_providers.spawn`
+``run_process`` or ``open_process``. The names outside :mod:`agent_runtime.spawn`
 that type a child are ``spawn.AnchoredChild`` and ``spawn.BlockingAnchoredChild``. So every
 child is described by a :class:`ChildProcess` first, and that value refuses a relative binary, a
 missing working directory and an unset ``HOME``.
@@ -45,8 +45,8 @@ from anchored_kernel import join_watcher, watcher_thread
 from anchored_support import ChildCleanup
 from bounds import TEST_WAIT_SECONDS
 
-from agent_providers import spawn
-from agent_providers.spawn import (
+from agent_runtime import spawn
+from agent_runtime.spawn import (
     ChildProcess,
     ChildProcessSpecificationError,
     closed_environment,
@@ -58,7 +58,7 @@ from agent_providers.spawn import (
 
 REPOSITORY_ROOT = Path(spawn.__file__).parents[2]
 SOURCE_ROOTS = (
-    REPOSITORY_ROOT / "src" / "agent_providers",
+    REPOSITORY_ROOT / "src" / "agent_runtime",
     *sorted((REPOSITORY_ROOT / "packages").glob("*/src")),
 )
 SPAWN_OWNER = Path(spawn.__file__)
@@ -201,7 +201,7 @@ def test_only_the_spawn_owner_creates_a_child_process() -> None:
         )
     ]
     assert trespassers == [], (
-        "These sites reach a process-creation primitive outside agent_providers.spawn, "
+        "These sites reach a process-creation primitive outside agent_runtime.spawn, "
         f"so nothing makes them describe a complete environment: {trespassers}"
     )
 
@@ -209,7 +209,7 @@ def test_only_the_spawn_owner_creates_a_child_process() -> None:
 def test_the_call_site_check_scans_the_client_and_the_service() -> None:
     scanned = {root.parent.name for root in SOURCE_ROOTS}
 
-    assert {"agent-client", "agent-service"} <= scanned
+    assert {"client", "service"} <= scanned
 
 
 @pytest.mark.parametrize(
@@ -258,7 +258,7 @@ def test_the_call_site_check_scans_the_client_and_the_service() -> None:
         "import concurrent.futures.process",
         "from concurrent.futures import process",
         "from concurrent.futures.process import _ExecutorManagerThread",
-        "from agent_providers.spawn import subprocess",
+        "from agent_runtime.spawn import subprocess",
         "from asyncio import subprocess",
         "from . import subprocess",
         "import posix",
@@ -266,12 +266,12 @@ def test_the_call_site_check_scans_the_client_and_the_service() -> None:
         "import _posixsubprocess",
         "if True:\n    import os as operating\noperating.system('x')",
         "try:\n    import os as operating\nexcept ImportError:\n    pass\noperating.fork()",
-        "from agent_providers import os as operating\noperating.execv('x', [])",
-        "from agent_providers import spawn\nspawn.subprocess.Popen(['x'])",
-        "import agent_providers.spawn\nagent_providers.spawn.subprocess.run(['x'])",
-        "import agent_providers.spawn as s\ns.os.system('x')",
-        "from agent_providers import process\nprocess.os.system('x')",
-        "from agent_providers.spawn import *",
+        "from agent_runtime import os as operating\noperating.execv('x', [])",
+        "from agent_runtime import spawn\nspawn.subprocess.Popen(['x'])",
+        "import agent_runtime.spawn\nagent_runtime.spawn.subprocess.run(['x'])",
+        "import agent_runtime.spawn as s\ns.os.system('x')",
+        "from agent_runtime import process\nprocess.os.system('x')",
+        "from agent_runtime.spawn import *",
         "from json import *",
         "from . import *",
         "import asyncio\nasyncio.subprocess.subprocess.Popen(['x'])",
@@ -280,8 +280,8 @@ def test_the_call_site_check_scans_the_client_and_the_service() -> None:
         "import anyio\nanyio.run_process(['x'])",
         "import anyio\nanyio.open_process(['x'])",
         "import asyncio\ndef f(p: asyncio.subprocess.Process) -> None: ...",
-        "from agent_providers import spawn as asyncio\nasyncio.subprocess.Popen(['x'])",
-        "import agent_providers.spawn as asyncio\nasyncio.subprocess.Popen(['x'])",
+        "from agent_runtime import spawn as asyncio\nasyncio.subprocess.Popen(['x'])",
+        "import agent_runtime.spawn as asyncio\nasyncio.subprocess.Popen(['x'])",
         "import asyncio.subprocess as asyncio\nasyncio.create_subprocess_exec('x')",
         "import anyio.to_process",
         "from anyio import to_process",
@@ -291,7 +291,7 @@ def test_the_call_site_check_scans_the_client_and_the_service() -> None:
         "import os\noperating = os\noperating.system('x')",
         "import os\nfirst = os\nsecond = first\nsecond.system('x')",
         "import os\noperating: object = os\noperating.system('x')",
-        "from agent_providers import process\no = process.os\no.system('x')",
+        "from agent_runtime import process\no = process.os\no.system('x')",
         "import asyncio.base_subprocess",
         "import asyncio.unix_events",
         "from asyncio import unix_events",
@@ -321,9 +321,9 @@ def test_the_spawn_policy_flags_every_way_to_reach_a_process_primitive(source: s
         "import asyncio\nasyncio.run(main())",
         "import os\nos.getpid()\nos.environ",
         "from os import getpid",
-        "from agent_providers.spawn import BlockingAnchoredChild",
-        "from agent_providers.spawn import AnchoredChild",
-        "from agent_providers import spawn\ndef f(p: spawn.AnchoredChild) -> None: ...",
+        "from agent_runtime.spawn import BlockingAnchoredChild",
+        "from agent_runtime.spawn import AnchoredChild",
+        "from agent_runtime import spawn\ndef f(p: spawn.AnchoredChild) -> None: ...",
         "import os\noperating = os\noperating.getpid()",
         "from concurrent.futures import ThreadPoolExecutor",
         "import concurrent.futures\nconcurrent.futures.Future()",

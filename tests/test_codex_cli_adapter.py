@@ -73,19 +73,19 @@ from provider_test_support import (
     use_codex_process_pool,
 )
 
-from agent_providers import process
-from agent_providers.catalog import ProviderRoute, list_provider_models
-from agent_providers.codex import image as codex_image
-from agent_providers.codex import protocol as codex_protocol
-from agent_providers.codex import transport as codex_transport
-from agent_providers.codex.pool import (
+from agent_runtime import process
+from agent_runtime.catalog import ProviderRoute, list_provider_models
+from agent_runtime.codex import image as codex_image
+from agent_runtime.codex import protocol as codex_protocol
+from agent_runtime.codex import transport as codex_transport
+from agent_runtime.codex.pool import (
     CodexProcessKind,
     CodexProcessPool,
     get_codex_process_pool,
 )
-from agent_providers.codex_login import blanked_copy
-from agent_providers.config import ProviderNotConfiguredError, current_config
-from agent_providers.errors import (
+from agent_runtime.codex_login import blanked_copy
+from agent_runtime.config import ProviderNotConfiguredError, current_config
+from agent_runtime.errors import (
     CodexProcessPoolSaturatedError,
     ProviderModelCatalogUnavailableError,
     ProviderUnavailableError,
@@ -93,21 +93,21 @@ from agent_providers.errors import (
     TextToolCallRejectedError,
     normalize_route_failure,
 )
-from agent_providers.events import AssistantTextEvent, FinalEvent, ToolCallEvent
-from agent_providers.images import ImagePolicy
-from agent_providers.process import (
+from agent_runtime.events import AssistantTextEvent, FinalEvent, ToolCallEvent
+from agent_runtime.images import ImagePolicy
+from agent_runtime.process import (
     AgentCliUnavailableError,
     CliRunOutcome,
     CliRunReason,
     clear_agent_cli_caches,
 )
-from agent_providers.sandbox.paths import (
+from agent_runtime.sandbox.paths import (
     CODEX_HOME_DIRECTORY_NAME,
     CODEX_IMAGE_TURN_DIRECTORY_PREFIX,
     CODEX_TOOL_TURN_DIRECTORY_PREFIX,
 )
-from agent_providers.text_tool_protocol import TextToolRejectionRule
-from agent_providers.tool_loop import (
+from agent_runtime.text_tool_protocol import TextToolRejectionRule
+from agent_runtime.tool_loop import (
     InitialTurn,
     ToolCallBatch,
     ToolOutcome,
@@ -543,7 +543,7 @@ def test_codex_tool_transport_ignores_its_code_mode_host_isolation_notice(
             calls,
         ),
     )
-    caplog.set_level("INFO", logger="agent_providers.codex.transport")
+    caplog.set_level("INFO", logger="agent_runtime.codex.transport")
     transport = _transport()
 
     events = asyncio.run(_collect_tool_events(_codex_tool_events(
@@ -663,7 +663,7 @@ def test_codex_tool_transport_cleans_its_home_and_does_not_log_protocol_text(
         return outcome
 
     monkeypatch.setattr(codex_protocol, "run_cli_bounded", run_cli_bounded)
-    caplog.set_level("INFO", logger="agent_providers.codex.transport")
+    caplog.set_level("INFO", logger="agent_runtime.codex.transport")
     transport = _transport()
 
     async def collect_and_close() -> None:
@@ -916,7 +916,7 @@ def test_codex_image_names_terminal_cli_failures_without_logging_the_gate(
     expected_retry_at: str | None,
 ) -> None:
     monkeypatch.setattr(codex_protocol, "run_cli_bounded", _image_runner(outcome))
-    caplog.set_level("WARNING", logger="agent_providers.codex.image")
+    caplog.set_level("WARNING", logger="agent_runtime.codex.image")
 
     with pytest.raises(expected_error) as raised:
         _generate_image()
@@ -1034,7 +1034,7 @@ def _warnings(caplog) -> list[str]:
     return [
         record.getMessage()
         for record in caplog.records
-        if record.name == "agent_providers.codex.image" and record.levelname == "WARNING"
+        if record.name == "agent_runtime.codex.image" and record.levelname == "WARNING"
     ]
 
 
@@ -1240,7 +1240,7 @@ def test_a_runner_thread_that_cannot_start_reports_by_class_through_a_failing_lo
 ) -> None:
     fail_to_start_the_runner_thread(monkeypatch, SystemExit(A_RUNNER_FAILURE_CANARY))
     handler = FailingLogHandler()
-    library_logger = logging.getLogger("agent_providers")
+    library_logger = logging.getLogger("agent_runtime")
     library_logger.addHandler(handler)
     _the_child_plays(monkeypatch, ":")
     try:
@@ -1283,7 +1283,7 @@ def test_a_failed_runner_whose_report_raises_leaks_nothing_through_the_thread(
         codex_protocol, "run_cli_bounded", Mock(side_effect=OSError(A_RUNNER_FAILURE_CANARY)),
     )
     handler = RaisingLogHandler([RuntimeError(A_RUNNER_FAILURE_CANARY)])
-    process_logger = logging.getLogger("agent_providers.process")
+    process_logger = logging.getLogger("agent_runtime.process")
     process_logger.addHandler(handler)
     try:
         turn = image_turn.drive(_TURN_SECONDS)
@@ -1602,7 +1602,7 @@ def test_codex_image_reports_a_completed_turn_without_a_png_as_not_created(
     monkeypatch.setattr(
         codex_protocol, "run_cli_bounded", _image_runner(_outcome(stdout=stdout), create_artifacts),
     )
-    caplog.set_level("WARNING", logger="agent_providers.codex.image")
+    caplog.set_level("WARNING", logger="agent_runtime.codex.image")
 
     with pytest.raises(codex_image.CodexImageNotCreatedError):
         _generate_image(_A_PRIVATE_PROMPT_MARKER)
@@ -1626,7 +1626,7 @@ def test_codex_image_refuses_ambiguous_artifacts_without_logging_the_gate(
         "run_cli_bounded",
         _image_runner(_outcome(stdout=_MEASURED_STREAM), create_artifacts),
     )
-    caplog.set_level("WARNING", logger="agent_providers.codex.image")
+    caplog.set_level("WARNING", logger="agent_runtime.codex.image")
 
     with pytest.raises(codex_image.CodexImageArtifactError):
         _generate_image()
@@ -1714,7 +1714,7 @@ def test_codex_image_aborts_a_blocked_turn_and_logs_only_closed_names(
 ) -> None:
     state = {"aborted": False, "reaped": False}
     monkeypatch.setattr(codex_protocol, "run_cli_bounded", _streaming_runner(events, state))
-    caplog.set_level("WARNING", logger="agent_providers.codex.image")
+    caplog.set_level("WARNING", logger="agent_runtime.codex.image")
 
     with pytest.raises(codex_image.ImageToolBlockedError) as raised:
         _generate_image(_A_PRIVATE_PROMPT_MARKER)

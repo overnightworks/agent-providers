@@ -30,8 +30,8 @@ from anchored_leaders import ExitProbe, InstrumentedLock, Leaders, spawn_warning
 from anchored_support import GONE, ChildCleanup, OwnedChild, kill_children
 from bounds import TEST_WAIT_SECONDS
 
-from agent_providers import spawn
-from agent_providers.spawn import ChildIdentityLost
+from agent_runtime import spawn
+from agent_runtime.spawn import ChildIdentityLost
 
 START_WORKER_NAME = "bounded-start"
 STOP_STATUS = 0x57F

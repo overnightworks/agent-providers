@@ -29,13 +29,13 @@ from provider_test_support import (
 )
 from pydantic import SecretStr
 
-import agent_providers
-from agent_providers import dispatch
-from agent_providers.catalog import ProviderRoute, ProviderRouteReadinessState, probe_provider_route
-from agent_providers.claude import adapter as claude_adapter
-from agent_providers.claude import provider as claude_provider
-from agent_providers.claude.provider import ClaudeResponse
-from agent_providers.config import (
+import agent_runtime
+from agent_runtime import dispatch
+from agent_runtime.catalog import ProviderRoute, ProviderRouteReadinessState, probe_provider_route
+from agent_runtime.claude import adapter as claude_adapter
+from agent_runtime.claude import provider as claude_provider
+from agent_runtime.claude.provider import ClaudeResponse
+from agent_runtime.config import (
     ProviderNotConfiguredError,
     ProviderRuntimeConfig,
     ProviderRuntimeNotConfiguredError,
@@ -44,13 +44,13 @@ from agent_providers.config import (
     current_config,
     reset_config,
 )
-from agent_providers.constants import CLAUDE_NO_SESSION_PERSISTENCE_FLAG
-from agent_providers.dispatch import ImageCapability, call_provider_once, image_capability
-from agent_providers.errors import (
+from agent_runtime.constants import CLAUDE_NO_SESSION_PERSISTENCE_FLAG
+from agent_runtime.dispatch import ImageCapability, call_provider_once, image_capability
+from agent_runtime.errors import (
     ProviderUnavailableError,
     SafeRouteReasonCode,
 )
-from agent_providers.events import FinalEvent
+from agent_runtime.events import FinalEvent
 
 
 def test_stream_turn_refuses_an_unknown_provider_before_any_route_runs(monkeypatch):
@@ -194,7 +194,7 @@ def test_a_failing_route_logs_the_failed_turn_by_provider_route_and_class(monkey
         raise RuntimeError("synthetic-confidential-detail")
 
     monkeypatch.setattr(dispatch, "_stream_for_route", fail_route)
-    caplog.set_level("WARNING", logger="agent_providers.dispatch")
+    caplog.set_level("WARNING", logger="agent_runtime.dispatch")
 
     drive_turn("grok")
 
@@ -207,7 +207,7 @@ def test_a_failing_one_shot_completion_logs_its_provider_and_class(monkeypatch, 
         raise RuntimeError("synthetic-confidential-detail")
 
     monkeypatch.setattr(dispatch, "_api_connection", fail_connection)
-    caplog.set_level("WARNING", logger="agent_providers.dispatch")
+    caplog.set_level("WARNING", logger="agent_runtime.dispatch")
 
     with pytest.raises(ProviderUnavailableError):
         call_provider_once(provider="grok", model="any-model", prompt="hi", timeout=1)
@@ -498,8 +498,8 @@ def renamed_public_names() -> list[str]:
 def package_modules() -> list[object]:
     return [
         importlib.import_module(module_info.name)
-        for module_info in pkgutil.walk_packages(agent_providers.__path__, "agent_providers.")
-    ] + [agent_providers]
+        for module_info in pkgutil.walk_packages(agent_runtime.__path__, "agent_runtime.")
+    ] + [agent_runtime]
 
 
 def test_the_names_table_lists_the_renames_this_release_made():

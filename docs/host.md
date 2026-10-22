@@ -44,12 +44,12 @@ pip-based host pins both wheel URLs. Tags are never moved; a broken release gets
 the next patch tag.
 
 Optional extras sit between the name and the `@` in URL form
-(`overnightworks-agent-providers[api,image] @ …`):
+(`overnightworks-agent-runtime[api,image] @ …`):
 
 - `[api]` (core) pulls in the Anthropic SDK used by the Claude HTTP-API route.
 - `[image]` (core) pulls in Pillow, used by the Codex image path.
 - `[mcp-server]` (client) pulls in PyJWT with cryptography, used by
-  `agent_client.mcp_server` to verify a run capability.
+  `agent_runtime_client.mcp_server` to verify a run capability.
 
 ## What the host supplies
 
@@ -77,7 +77,7 @@ configuration (`McpServerSpec.config_file_prefix`,
 `A-Z a-z 0-9 . _ -`; the library appends random characters and creates the file
 directly in the working root. Pydantic hides an invalid value only in the rendered
 error text: `ValidationError.errors()` and `.json()` still contain it unless called
-with `include_input=False`, which matters to a host that logs configuration errors. The field docstrings in `agent_providers.config` are
+with `include_input=False`, which matters to a host that logs configuration errors. The field docstrings in `agent_runtime.config` are
 the reference.
 
 The subscription run the agent service drives (`cli_run.astream_cli_run(root,
@@ -96,13 +96,13 @@ only on a filesystem with POSIX ownership and modes, and the host keeps the
 root's owner, mode, path and the process's effective identity for the process
 lifetime.
 
-**Ports passed in.** `ToolExecutor` (`agent_providers.tool_loop`) runs one tool
-call; `ToolCatalog` (`agent_providers.tools`) holds the tool declarations and the
-host-declared `ToolProtocolMarkup`; `McpServerSpec` (`agent_providers.config`)
-says how the host's MCP server is launched; `ImagePolicy` (`agent_providers.images`)
+**Ports passed in.** `ToolExecutor` (`agent_runtime.tool_loop`) runs one tool
+call; `ToolCatalog` (`agent_runtime.tools`) holds the tool declarations and the
+host-declared `ToolProtocolMarkup`; `McpServerSpec` (`agent_runtime.config`)
+says how the host's MCP server is launched; `ImagePolicy` (`agent_runtime.images`)
 constrains an image turn. Their docstrings state what a failure is and what the
 loop logs. A turn emits the in-process `StreamEvent` union
-(`agent_providers.events`); the service's wire is `agent_client.wire`, not that
+(`agent_runtime.events`); the service's wire is `agent_runtime_client.wire`, not that
 union.
 
 **Rejected tool-call text.** `TextToolCallRejectedError` carries a `rejection`
@@ -113,20 +113,20 @@ library logs the rule and the numbers, never the text; whether the text is
 written anywhere is the host's decision.
 
 **Lost process groups.** An async Claude turn on the CLI route raises
-`ContainmentLost(group)` (`agent_providers.errors`, a plain `Exception`) when its
+`ContainmentLost(group)` (`agent_runtime.errors`, a plain `Exception`) when its
 reap cannot show the turn's process group gone and release its leader; members of
 the group may then still be alive, and the library keeps ownership of the group,
 its core pool slot and its home. The causes (expiry, uncountable, publication
 timeout, identity loss, failed leader release, reap failure) are the
 `ContainmentLost` docstring's. Through `dispatch.stream_turn` it arrives as
 `ProviderUnavailableError(ROUTE_FAILED)` with the `ContainmentLost` as
-`__cause__`. The host calls `agent_providers.lost_groups.confirm_group_gone(group)`
+`__cause__`. The host calls `agent_runtime.lost_groups.confirm_group_gone(group)`
 until it returns `True`; `False` or an exception means not confirmed. A group
 whose anchor was lost raises `ChildIdentityLost` on every call and stays held until
 the process exits. `group` is valid only in the process that minted it: never
 persist it or pass it to another process. If it never confirms, restart the
 container to stop the remaining run processes. The service's `Quarantine`
-(`agent_service.quarantine`) does this for the runs it admitted.
+(`agent_runtime_service.quarantine`) does this for the runs it admitted.
 
 **Interruptions.** Python can raise an exception asynchronously inside a library
 call: a signal handler raises one between two bytecode instructions of the main
@@ -151,7 +151,7 @@ A host migrates at its pin bump; [MIGRATING.md](MIGRATING.md) has one section pe
 ## The child environment is closed
 
 Every child this library starts is one immutable `ChildProcess` (created only in
-`agent_providers.spawn`): an absolute binary, an explicit working directory, and
+`agent_runtime.spawn`): an absolute binary, an explicit working directory, and
 the child's *complete* environment. Only `PATH` and the named locale, proxy and
 certificate variables (`spawn.INHERITED_MACHINE_VARIABLES`) are copied from the host
 process, and nothing is merged onto a host baseline, because an optional set of
@@ -173,7 +173,7 @@ subscription run gets a fresh private home below the working root (directories
 opened only for reading. Grok and Codex copy the host-named file into the home. A
 Claude turn gets no copy: the setup token in `claude.token_file` reaches the child
 only as `CLAUDE_CODE_OAUTH_TOKEN`, never in its arguments, and is read through
-`secret_file` at every child start. A file `agent_providers.secret_file` refuses (how the operator writes it:
+`secret_file` at every child start. A file `agent_runtime.secret_file` refuses (how the operator writes it:
 [operations.md](operations.md)) fails the turn with `CLI_LOGIN_NOT_CONFIGURED`
 and leaves no home behind (the error is `CliLoginNotConfiguredError`); a token the provider
 rejects ends a streaming turn with the safe code `cli_auth_rejected`. The model list asks the
@@ -224,7 +224,7 @@ docstrings carry the rest.
 
 ## Sandbox
 
-`agent_providers.sandbox.paths` holds directory-name prefix constants —
+`agent_runtime.sandbox.paths` holds directory-name prefix constants —
 `CODEX_IMAGE_TURN_DIRECTORY_PREFIX`, `CODEX_TOOL_TURN_DIRECTORY_PREFIX`,
 `CODEX_HOME_DIRECTORY_NAME`. They are the contract between this package and a
 host's kernel sandbox profile: every confined Codex run works inside Bubblewrap

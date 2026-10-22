@@ -27,9 +27,9 @@ from anchored_support import GONE, SIGKILLED, ChildCleanup, Exited
 from bounds import within_the_bound
 from provider_test_support import make_the_first_parent_close_of_a_door_fail
 
-from agent_providers import procfs, spawn
-from agent_providers.procfs import GroupCensus
-from agent_providers.spawn import (
+from agent_runtime import procfs, spawn
+from agent_runtime.procfs import GroupCensus
+from agent_runtime.spawn import (
     AnchoredChild,
     AnchorStateError,
     ChildIdentityLost,

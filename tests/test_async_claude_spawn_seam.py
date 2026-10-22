@@ -37,9 +37,9 @@ from provider_test_support import (
     scenario_holds,
 )
 
-from agent_providers import anchored_turn
-from agent_providers.procfs import GroupCensus
-from agent_providers.spawn import (
+from agent_runtime import anchored_turn
+from agent_runtime.procfs import GroupCensus
+from agent_runtime.spawn import (
     AnchorStateError,
     ChildProcess,
     KillUntilGoneResult,
@@ -109,7 +109,7 @@ def _names_a_door(argument: ast.expr) -> bool:
         'monkeypatch.setattr(provider.asyncio, "create_subprocess_exec", f)',
         'monkeypatch.setattr(\n    provider.asyncio,\n    "create_subprocess_exec",\n    f,\n)',
         'monkeypatch.setattr(provider, "open_anchored_pipes", f)',
-        'patch("agent_providers.claude.provider.open_anchored_pipes", f)',
+        'patch("agent_runtime.claude.provider.open_anchored_pipes", f)',
         'from unittest.mock import patch as replace\nreplace("asyncio.create_subprocess_exec", f)',
         'patch(target="asyncio.create_subprocess_exec", new=f)',
         'monkeypatch.setattr(target=provider, name="open_anchored_pipes", value=f)',

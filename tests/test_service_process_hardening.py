@@ -19,15 +19,15 @@ from service_support import logging_state_snapshot  # noqa: F401 - a fixture, re
 from test_service_cli_version import _config_file_naming, _logged_program
 from test_service_config import CLI_SECTION, NO_PROFILE, _written
 
-import agent_service.config as service_config
-import agent_service.process_hardening as hardening
-from agent_service.cli import main
+import agent_runtime_service.config as service_config
+import agent_runtime_service.process_hardening as hardening
+from agent_runtime_service.cli import main
 
 REAL_SET_NOT_DUMPABLE = hardening.set_not_dumpable
 REAL_LOAD_LIBC = hardening.load_libc
 
-MISSING_CONFIG_ARGUMENTS = ["--config", "/nonexistent/agent-service.toml"]
-REFUSAL_PREFIX = "agent-service: refusing to start: "
+MISSING_CONFIG_ARGUMENTS = ["--config", "/nonexistent/agent-runtime-service.toml"]
+REFUSAL_PREFIX = "agent-runtime-service: refusing to start: "
 ROOT_REFUSAL = (
     REFUSAL_PREFIX + "running as root (effective uid 0); run the service as an unprivileged user\n"
 )
@@ -44,7 +44,7 @@ NON_LINUX_START = textwrap.dedent(
     del os.O_CLOEXEC
     sys.platform = "darwin"
 
-    from agent_service.cli import main
+    from agent_runtime_service.cli import main
 
     sys.exit(main(["--config", sys.argv[1]]))
     """
@@ -278,7 +278,7 @@ SERVICE_UNDER_READER = textwrap.dedent(
 
     import uvicorn
 
-    from agent_service.cli import main
+    from agent_runtime_service.cli import main
 
     reader, environment_canary, memory_canary, bound = sys.argv[1:5]
     libc = ctypes.CDLL(None, use_errno=True)

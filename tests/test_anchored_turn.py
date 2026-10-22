@@ -29,11 +29,11 @@ from provider_test_support import (
     scenario_holds,
 )
 
-from agent_providers import anchored_turn, lost_groups, process
-from agent_providers.anchored_turn import CliProcessPool, ReapBounds, anchored_turn_child
-from agent_providers.errors import ContainmentLost, RetainedGroup
-from agent_providers.procfs import GroupCensus
-from agent_providers.spawn import (
+from agent_runtime import anchored_turn, lost_groups, process
+from agent_runtime.anchored_turn import CliProcessPool, ReapBounds, anchored_turn_child
+from agent_runtime.errors import ContainmentLost, RetainedGroup
+from agent_runtime.procfs import GroupCensus
+from agent_runtime.spawn import (
     ChildIdentityLost,
     ChildProcess,
     KillUntilGoneResult,

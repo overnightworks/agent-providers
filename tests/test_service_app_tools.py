@@ -39,10 +39,10 @@ from mcp_app_fake import (
 )
 from service_support import fake_app_authority  # noqa: F401 - a fixture, requested by name
 
-from agent_client.mcp_wire import NON_TEXT_BLOCK_MESSAGE, WireRefusal
-from agent_client.wire import MAX_EVENT_BYTES
-from agent_service import app_tools
-from agent_service.app_tools import (
+from agent_runtime_client.mcp_wire import NON_TEXT_BLOCK_MESSAGE, WireRefusal
+from agent_runtime_client.wire import MAX_EVENT_BYTES
+from agent_runtime_service import app_tools
+from agent_runtime_service.app_tools import (
     AppToolsSession,
     ProtocolFailure,
     UpstreamCallLost,

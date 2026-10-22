@@ -21,19 +21,19 @@ from service_support import (
     service_config,
 )
 
-from agent_client.wire import MAX_EVENT_BYTES, Failed, FailureCode, Succeeded
-from agent_providers.events import (
+from agent_runtime.events import (
     AssistantTextEvent,
     FinalEvent,
     StreamEvent,
     ToolCallEvent,
     ToolResultEvent,
 )
-from agent_service.app import create_app
-from agent_service.config import RunConfig
-from agent_service.run_events import TOO_MANY_TOOL_CALLS_MESSAGE, TOO_MUCH_DATA_MESSAGE
-from agent_service.run_liveness import LIMIT_EXCEEDED_MESSAGE
-from agent_service.runners import Runners
+from agent_runtime_client.wire import MAX_EVENT_BYTES, Failed, FailureCode, Succeeded
+from agent_runtime_service.app import create_app
+from agent_runtime_service.config import RunConfig
+from agent_runtime_service.run_events import TOO_MANY_TOOL_CALLS_MESSAGE, TOO_MUCH_DATA_MESSAGE
+from agent_runtime_service.run_liveness import LIMIT_EXCEEDED_MESSAGE
+from agent_runtime_service.runners import Runners
 
 TEXT = AssistantTextEvent(text="Still here.")
 FINAL = FinalEvent(text="Done.")

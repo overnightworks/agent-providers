@@ -46,13 +46,13 @@ from test_service_config import (
     cli_section,
 )
 
-import agent_providers.process as core_process
-from agent_providers.config import reset_config
-from agent_providers.procfs import GroupCensus
-from agent_providers.spawn import KillUntilGoneResult
-from agent_service import cli_version
-from agent_service.cli import EXIT_BAD_CONFIG, main
-from agent_service.cli_version import claude_version_output
+import agent_runtime.process as core_process
+from agent_runtime.config import reset_config
+from agent_runtime.procfs import GroupCensus
+from agent_runtime.spawn import KillUntilGoneResult
+from agent_runtime_service import cli_version
+from agent_runtime_service.cli import EXIT_BAD_CONFIG, main
+from agent_runtime_service.cli_version import claude_version_output
 
 PRINTS_THE_PIN = f"{PINNED_CLAUDE_VERSION} (Claude Code)\n"
 WORKING_ROOT_NAME = "working-root"

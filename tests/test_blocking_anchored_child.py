@@ -31,9 +31,9 @@ from bounds import TEST_WAIT_SECONDS
 from descendant_support import DescendantRow, Handshake, lingering_descendant, process_identity
 from provider_test_support import make_the_first_parent_close_of_a_door_fail
 
-from agent_providers import spawn
-from agent_providers.procfs import GroupCensus
-from agent_providers.spawn import (
+from agent_runtime import spawn
+from agent_runtime.procfs import GroupCensus
+from agent_runtime.spawn import (
     GROUP_CENSUS_INTERVAL_SECONDS,
     AnchoredLeader,
     AnchorStateError,

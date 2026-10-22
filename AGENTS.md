@@ -7,8 +7,8 @@
 `.importlinter` owns the layering and the forbidden imports; `uv run lint-imports`
 proves it. The traps it cannot show:
 
-- The service's wire has one owner, `agent_client.wire`.
-- `agent_providers.events` is the core's in-process turn event, never a second wire.
+- The service's wire has one owner, `agent_runtime_client.wire`.
+- `agent_runtime.events` is the core's in-process turn event, never a second wire.
 - The `[api]`, `[image]` and `[mcp-server]` extras stay optional: their libraries are imported only inside the route or module that needs them.
 
 ## Code patterns
@@ -29,8 +29,8 @@ proves it. The traps it cannot show:
   (`ImagePolicy`) arrive from the host; the library never invents them.
 - One spawn owner, one bounded runner. Every child is a `ChildProcess`
   (complete environment, absolute binary, explicit `cwd`) created only in
-  `agent_providers.spawn`; the bounded runner
-  `agent_providers.process.run_cli_bounded` owns start, stdin, first line,
+  `agent_runtime.spawn`; the bounded runner
+  `agent_runtime.process.run_cli_bounded` owns start, stdin, first line,
   deadline, and process-group cleanup, and the async Claude turns run on
   `spawn.AnchoredChild`, whose leader only its own handle reaps.
 - Tests use the builders in `tests/provider_test_support.py` rather than a
@@ -65,8 +65,8 @@ holds `## Migrating to <version>` gets a release page that opens with a link to
 that section, so a breaking release writes that section before the tag. A tag
 is never moved — a broken release gets the next patch tag — so the pull
 request that precedes the tag raises all seven version literals together:
-the three `pyproject.toml` files, `agent_providers.__version__`, core's exact
-`overnightworks-agent-client` pin, and the service's exact pins on core and
+the three `pyproject.toml` files, `agent_runtime.__version__`, core's exact
+`overnightworks-agent-runtime-client` pin, and the service's exact pins on core and
 client.
 `tests/test_distribution_contract.py` fails while they disagree, because uv
 ignores those pins inside the workspace.

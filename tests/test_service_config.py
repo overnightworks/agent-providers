@@ -33,10 +33,10 @@ from service_support import (
     reaches_text,
 )
 
-from agent_providers.secret_file import UnsoundSecretFile, read_token_file
-from agent_service import app as app_module
-from agent_service.cli import EXIT_BAD_CONFIG, main
-from agent_service.config import (
+from agent_runtime.secret_file import UnsoundSecretFile, read_token_file
+from agent_runtime_service import app as app_module
+from agent_runtime_service.cli import EXIT_BAD_CONFIG, main
+from agent_runtime_service.config import (
     AppConfig,
     ConfigError,
     ProfileConfig,
@@ -110,7 +110,7 @@ def _never_really_serve(monkeypatch):
 
 
 def _written(tmp_path: Path, text: str) -> Path:
-    path = tmp_path / "agent-service.toml"
+    path = tmp_path / "agent-runtime-service.toml"
     path.write_text(text, encoding="utf-8")
     return path
 
@@ -400,11 +400,11 @@ def test_an_explicit_parallel_run_limit_loads_and_gives_that_many_places(tmp_pat
     assert runs.max_parallel_cli_runs == 2
 
 
-def _refused_on_one_line(config_file: Path, capsys) -> str:
-    assert main(["--config", str(config_file)]) == EXIT_BAD_CONFIG
+def _refused_on_one_line(path: Path, capsys) -> str:
+    assert main(["--config", str(path)]) == EXIT_BAD_CONFIG
     refusal = capsys.readouterr().err
     assert refusal.count("\n") == 1
-    return refusal.removeprefix(f"agent-service: refusing to start: {config_file}: ").rstrip("\n")
+    return refusal.removeprefix(f"agent-runtime-service: refusing to start: {path}: ").rstrip("\n")
 
 
 MEMBER_NAMED_WITH_A_NEWLINE = '"extra\\nfield" = 1'
@@ -473,8 +473,8 @@ def test_a_config_path_with_a_newline_is_shown_escaped_on_one_line_in_every_refu
     shown = capsys.readouterr().err
     assert shown.count("\n") == 1
     assert shown.startswith(
-        f"agent-service: refusing to start: {str(config_file).replace(chr(10), chr(92) + 'n')}:"
-        f" {refusal}"
+        "agent-runtime-service: refusing to start: "
+        f"{str(config_file).replace(chr(10), chr(92) + 'n')}: {refusal}"
     )
 
 
@@ -1303,7 +1303,7 @@ NOT_PRIVATE_ROOTS = (
 
 
 def _core_config_seeing(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> None:
-    from agent_providers import config as core_config
+    from agent_runtime import config as core_config
 
     seen = types.SimpleNamespace(**{"lstat": os.lstat, "geteuid": os.geteuid, **overrides})
     monkeypatch.setattr(core_config, "os", seen)
@@ -1638,8 +1638,8 @@ def no_secret_is_read(monkeypatch):
     def fail_instead_of_reading(*_arguments, **_where):
         raise AssertionError("a secret file was read before the models table was refused")
 
-    monkeypatch.setattr("agent_service.config.load_signing_key", fail_instead_of_reading)
-    monkeypatch.setattr("agent_service.config.read_token_file", fail_instead_of_reading)
+    monkeypatch.setattr("agent_runtime_service.config.load_signing_key", fail_instead_of_reading)
+    monkeypatch.setattr("agent_runtime_service.config.read_token_file", fail_instead_of_reading)
 
 
 @pytest.mark.parametrize(

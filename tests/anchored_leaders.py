@@ -20,8 +20,8 @@ from anchored_support import ChildCleanup, OwnedChild
 from bounds import TEST_WAIT_SECONDS, within_the_bound
 from test_zombie_anchor import EXIT_WITH_LINE
 
-from agent_providers import spawn
-from agent_providers.spawn import (
+from agent_runtime import spawn
+from agent_runtime.spawn import (
     AnchoredChild,
     AnchoredLeader,
     AnchorState,
@@ -29,7 +29,7 @@ from agent_providers.spawn import (
     closed_environment,
 )
 
-SPAWN_LOGGER = "agent_providers.spawn"
+SPAWN_LOGGER = "agent_runtime.spawn"
 LEADER_WITH_GRANDCHILD = (
     "import os, signal, sys\n"
     "if os.fork() == 0:\n"

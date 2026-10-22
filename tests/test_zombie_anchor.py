@@ -34,7 +34,7 @@ from anchored_support import (
 )
 from bounds import TEST_WAIT_SECONDS
 
-from agent_providers.spawn import closed_environment
+from agent_runtime.spawn import closed_environment
 
 SUPPORT_MODULE = Path(anchored_support.__file__)
 EXIT_WITH_LINE = (

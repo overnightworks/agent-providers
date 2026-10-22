@@ -3,7 +3,7 @@ import os
 
 import pytest
 
-from agent_providers.spawn import (
+from agent_runtime.spawn import (
     AnchorState,
     AnchorStateError,
     ChildIdentityLost,

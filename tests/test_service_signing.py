@@ -29,9 +29,9 @@ from service_support import (
 from test_service_config import SIGNING_KEY_LINE, VALID_CONFIG, _written
 from webauth.jwt_verification import JwtVerifier, Rejected, RejectionReason, VerifiedClaims
 
-from agent_service.cli import EXIT_BAD_CONFIG, main
-from agent_service.config import ConfigError, ServiceConfig, load_config
-from agent_service.signing import (
+from agent_runtime_service.cli import EXIT_BAD_CONFIG, main
+from agent_runtime_service.config import ConfigError, ServiceConfig, load_config
+from agent_runtime_service.signing import (
     EmptyTokenType,
     SigningKey,
     UnsoundSigningKey,
@@ -256,7 +256,7 @@ def test_an_unsound_key_file_stops_startup_with_one_line_naming_its_path_and_no_
 
     assert exit_status == EXIT_BAD_CONFIG
     assert capsys.readouterr().err == (
-        f"agent-service: refusing to start: {config_file}: signing.key_file: "
+        f"agent-runtime-service: refusing to start: {config_file}: signing.key_file: "
         f"{shown_key_file} {reason}\n"
     )
 

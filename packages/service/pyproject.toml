@@ -1,0 +1,39 @@
+[project]
+name = "overnightworks-agent-runtime-service"
+version = "0.7.0"
+description = "The overnightworks agent service: the one authenticated entrance through which apps start agent runs"
+authors = [{ name = "Flex0r (Felix Hummert)", email = "felix.hummert@gmail.com" }]
+license = { text = "MIT" }
+requires-python = ">=3.12"
+
+dependencies = [
+    "overnightworks-agent-runtime==0.7.0",
+    "overnightworks-agent-runtime-client==0.7.0",
+    "overnightworks-webauth @ https://github.com/overnightworks/webauth/releases/download/v0.20.1/overnightworks_webauth-0.20.1-py3-none-any.whl",
+    "fastapi>=0.133,<1",
+    "httpx>=0.27,<1",
+    "h11>=0.16,<1",
+    "starlette>=1,<2",
+    "uvicorn>=0.32.1,<1",
+    "pydantic>=2.7,<3",
+    "anyio>=4.12,<5",
+    "pyjwt[crypto]>=2.15.1,<3",
+    "cryptography>=50.0.2",
+]
+
+[project.scripts]
+agent-runtime-service = "agent_runtime_service.cli:main"
+
+[project.urls]
+Repository = "https://github.com/overnightworks/agent-providers"
+
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["agent_runtime_service*"]
+
+[tool.setuptools.package-data]
+agent_runtime_service = ["py.typed"]

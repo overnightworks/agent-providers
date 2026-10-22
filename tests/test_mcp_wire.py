@@ -8,8 +8,8 @@ from typing import Any
 
 import pytest
 
-from agent_client.capability import MCP_ENDPOINT_PATH
-from agent_client.mcp_wire import (
+from agent_runtime_client.capability import MCP_ENDPOINT_PATH
+from agent_runtime_client.mcp_wire import (
     ACKNOWLEDGEMENT,
     NON_TEXT_BLOCK_MESSAGE,
     SUPPORTED_PROTOCOL_VERSIONS,
@@ -54,7 +54,7 @@ from agent_client.mcp_wire import (
     tool_result_response,
     tools_list_response,
 )
-from agent_client.wire import MAX_EVENT_BYTES, MAX_TOOL_INPUT_DEPTH
+from agent_runtime_client.wire import MAX_EVENT_BYTES, MAX_TOOL_INPUT_DEPTH
 
 SECRET = "capability-token-must-not-leak"
 NEGOTIATED = ProtocolVersion.V2025_11_25

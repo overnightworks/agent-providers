@@ -5,15 +5,15 @@ from __future__ import annotations
 import tomllib
 from pathlib import Path
 
-import agent_client.errors
-import agent_client.tools
-import agent_providers
-import agent_providers.errors
-import agent_providers.tools
+import agent_runtime
+import agent_runtime.errors
+import agent_runtime.tools
+import agent_runtime_client.errors
+import agent_runtime_client.tools
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-_CLIENT_DISTRIBUTION = "overnightworks-agent-client"
-_CORE_DISTRIBUTION = "overnightworks-agent-providers"
+_CLIENT_DISTRIBUTION = "overnightworks-agent-runtime-client"
+_CORE_DISTRIBUTION = "overnightworks-agent-runtime"
 
 
 def _project_table(pyproject: Path) -> dict:
@@ -32,14 +32,14 @@ def _exact_pin(requirements: list[str], distribution: str) -> str:
 
 def test_core_client_service_and_pins_carry_one_lockstep_version() -> None:
     core = _project_table(_REPOSITORY_ROOT / "pyproject.toml")
-    client = _project_table(_REPOSITORY_ROOT / "packages" / "agent-client" / "pyproject.toml")
-    service = _project_table(_REPOSITORY_ROOT / "packages" / "agent-service" / "pyproject.toml")
+    client = _project_table(_REPOSITORY_ROOT / "packages" / "client" / "pyproject.toml")
+    service = _project_table(_REPOSITORY_ROOT / "packages" / "service" / "pyproject.toml")
 
     versions = {
         core["version"],
         client["version"],
         service["version"],
-        agent_providers.__version__,
+        agent_runtime.__version__,
         _exact_pin(core["dependencies"], _CLIENT_DISTRIBUTION),
         _exact_pin(service["dependencies"], _CLIENT_DISTRIBUTION),
         _exact_pin(service["dependencies"], _CORE_DISTRIBUTION),
@@ -49,10 +49,10 @@ def test_core_client_service_and_pins_carry_one_lockstep_version() -> None:
 
 
 def test_core_re_exports_the_client_tool_declaration_itself() -> None:
-    assert agent_providers.tools.ToolDeclaration is agent_client.tools.ToolDeclaration
+    assert agent_runtime.tools.ToolDeclaration is agent_runtime_client.tools.ToolDeclaration
 
 
 def test_core_re_exports_the_client_raise_without_chain_itself() -> None:
     assert (
-        agent_providers.errors.raise_without_chain is agent_client.errors.raise_without_chain
+        agent_runtime.errors.raise_without_chain is agent_runtime_client.errors.raise_without_chain
     )

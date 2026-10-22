@@ -8,9 +8,9 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from agent_client.agents import AgentDefinition, AgentFileError, load_agent
-from agent_client.tools import ToolDeclaration, ToolEffect
-from agent_client.wire import RunRequest, TurnMessage, TurnRole
+from agent_runtime_client.agents import AgentDefinition, AgentFileError, load_agent
+from agent_runtime_client.tools import ToolDeclaration, ToolEffect
+from agent_runtime_client.wire import RunRequest, TurnMessage, TurnRole
 
 READ_NOTE = ToolDeclaration(
     name="read_note", description="Read a note", parameters={}, effect=ToolEffect.READ_ONLY

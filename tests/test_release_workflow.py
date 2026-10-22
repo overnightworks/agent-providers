@@ -77,9 +77,9 @@ def test_the_release_notice_exists_only_for_a_tag_with_its_migration_section(
 
 def _wheel_list_output(tmp_path: Path) -> tuple[dict[str, bytes], str]:
     wheels = {
-        "overnightworks_agent_client-0.3.0-py3-none-any.whl": b"client",
-        "overnightworks_agent_providers-0.3.0-py3-none-any.whl": b"core",
-        "overnightworks_agent_service-0.3.0-py3-none-any.whl": b"service",
+        "overnightworks_agent_runtime_client-0.3.0-py3-none-any.whl": b"client",
+        "overnightworks_agent_runtime-0.3.0-py3-none-any.whl": b"core",
+        "overnightworks_agent_runtime_service-0.3.0-py3-none-any.whl": b"service",
     }
     (tmp_path / "dist").mkdir()
     for name, content in wheels.items():

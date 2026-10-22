@@ -71,9 +71,9 @@ from provider_test_support import (
 )
 from pydantic import SecretStr
 
-from agent_providers import anchored_turn, lost_groups, process, spawn
-from agent_providers.claude import provider
-from agent_providers.claude.provider import (
+from agent_runtime import anchored_turn, lost_groups, process, spawn
+from agent_runtime.claude import provider
+from agent_runtime.claude.provider import (
     CLAUDE_CLI_BINARY_NOT_FOUND_DETAIL,
     CLAUDE_CLI_LOGIN_NOT_CONFIGURED_DETAIL,
     CLAUDE_CLI_UNAVAILABLE_DETAIL,
@@ -105,7 +105,7 @@ from agent_providers.claude.provider import (
     verify_cli_tool_surface,
     verify_no_builtin_cli_tools,
 )
-from agent_providers.config import (
+from agent_runtime.config import (
     McpServerSpec,
     ProviderNotConfiguredError,
     current_claude_runtime,
@@ -113,29 +113,29 @@ from agent_providers.config import (
     current_turn_config,
     reset_config,
 )
-from agent_providers.constants import (
+from agent_runtime.constants import (
     CLAUDE_CLI_COMPLETION_TIMEOUT_SECONDS,
     CLAUDE_NO_SESSION_PERSISTENCE_FLAG,
     CLAUDE_OAUTH_TOKEN_VARIABLE,
 )
-from agent_providers.dispatch import call_provider_once
-from agent_providers.errors import (
+from agent_runtime.dispatch import call_provider_once
+from agent_runtime.errors import (
     ContainmentLost,
     ProviderUnavailableError,
     RetainedGroup,
     SafeRouteReasonCode,
 )
-from agent_providers.events import AssistantTextEvent, FinalEvent, StreamEvent
-from agent_providers.grok import transport as grok_transport
-from agent_providers.process import CliRun, CliRunOutcome, CliRunReason
-from agent_providers.procfs import GroupCensus
-from agent_providers.spawn import (
+from agent_runtime.events import AssistantTextEvent, FinalEvent, StreamEvent
+from agent_runtime.grok import transport as grok_transport
+from agent_runtime.process import CliRun, CliRunOutcome, CliRunReason
+from agent_runtime.procfs import GroupCensus
+from agent_runtime.spawn import (
     AnchorStateError,
     ChildIdentityLost,
     ChildProcess,
     KillUntilGoneResult,
 )
-from agent_providers.tool_loop import ToolOutcome, stream_tool_loop
+from agent_runtime.tool_loop import ToolOutcome, stream_tool_loop
 
 ROUTE_FAILED = SafeRouteReasonCode.ROUTE_FAILED
 
@@ -221,7 +221,7 @@ def _leaked_secret_env_values() -> dict[str, str]:
 
 def test_call_claude_routes_to_api_with_key() -> None:
     resp = ClaudeResponse(text="hi")
-    with patch("agent_providers.claude.provider._call_api", return_value=resp) as mock:
+    with patch("agent_runtime.claude.provider._call_api", return_value=resp) as mock:
         result = call_claude("hello", api_key="sk-test", model="claude-sonnet-4-6")
     mock.assert_called_once()
     assert result.text == "hi"
@@ -229,7 +229,7 @@ def test_call_claude_routes_to_api_with_key() -> None:
 
 def test_call_claude_routes_to_cli_without_key() -> None:
     resp = ClaudeResponse(text="yo")
-    with patch("agent_providers.claude.provider._call_cli", return_value=resp) as mock:
+    with patch("agent_runtime.claude.provider._call_cli", return_value=resp) as mock:
         result = call_claude("hello")
     mock.assert_called_once()
     assert result.text == "yo"
@@ -244,7 +244,7 @@ def test_acall_claude_routes_to_api_with_key() -> None:
 
     resp = ClaudeResponse(text="async hi")
     mock = AsyncMock(return_value=resp)
-    with patch("agent_providers.claude.provider._acall_api", mock):
+    with patch("agent_runtime.claude.provider._acall_api", mock):
         result = asyncio.run(acall_claude("hello", api_key="sk-test", model="claude-sonnet-4-6"))
     mock.assert_called_once()
     assert result.text == "async hi"
@@ -256,7 +256,7 @@ def test_acall_claude_routes_to_cli_without_key() -> None:
 
     resp = ClaudeResponse(text="async yo")
     mock = AsyncMock(return_value=resp)
-    with patch("agent_providers.claude.provider._acall_cli", mock):
+    with patch("agent_runtime.claude.provider._acall_cli", mock):
         result = asyncio.run(acall_claude("hello"))
     mock.assert_called_once()
     assert result.text == "async yo"
@@ -271,14 +271,14 @@ def test_is_available_with_api_key() -> None:
 
 def test_is_available_with_cli_binary() -> None:
     with patch(
-        "agent_providers.claude.provider._find_claude_binary",
+        "agent_runtime.claude.provider._find_claude_binary",
         return_value=Path("/usr/bin/claude"),
     ):
         assert is_available(api_key=None) is True
 
 
 def test_is_available_neither() -> None:
-    with patch("agent_providers.claude.provider._find_claude_binary", return_value=None):
+    with patch("agent_runtime.claude.provider._find_claude_binary", return_value=None):
         assert is_available(api_key=None) is False
 
 
@@ -289,11 +289,11 @@ def test_cli_login_status_delegates_to_the_shared_runner() -> None:
     runner_status = provider.CliLogin(logged_in=True, auth_method="claude.ai")
     with (
         patch(
-            "agent_providers.claude.provider._find_claude_binary",
+            "agent_runtime.claude.provider._find_claude_binary",
             return_value=Path("/mounted/claude"),
         ),
         patch(
-            "agent_providers.claude.provider.claude_cli_login",
+            "agent_runtime.claude.provider.claude_cli_login",
             return_value=runner_status,
         ) as login,
     ):
@@ -306,9 +306,9 @@ def test_cli_login_status_delegates_to_the_shared_runner() -> None:
 def test_cli_login_status_without_a_binary_delegates_the_unavailable_probe() -> None:
     logged_out = provider.CliLogin(logged_in=False, auth_method=None)
     with (
-        patch("agent_providers.claude.provider._find_claude_binary", return_value=None),
+        patch("agent_runtime.claude.provider._find_claude_binary", return_value=None),
         patch(
-            "agent_providers.claude.provider.claude_cli_login",
+            "agent_runtime.claude.provider.claude_cli_login",
             return_value=logged_out,
         ) as login,
     ):
@@ -320,7 +320,7 @@ def test_cli_login_status_without_a_binary_delegates_the_unavailable_probe() -> 
 
 def test_clearing_the_provider_login_cache_delegates_to_the_runner() -> None:
     with patch(
-        "agent_providers.claude.provider.clear_claude_cli_login_cache",
+        "agent_runtime.claude.provider.clear_claude_cli_login_cache",
     ) as clear:
         clear_cli_login_status_cache()
 
@@ -351,11 +351,11 @@ AVAILABLE_LINE = "Usage: /model <name>. Available: sonnet, opus.\n"
 def _catalog_read_from(stdout: str) -> provider.ClaudeCliModelCatalog:
     with (
         patch(
-            "agent_providers.claude.provider._find_claude_binary",
+            "agent_runtime.claude.provider._find_claude_binary",
             return_value=Path("/usr/bin/claude"),
         ),
         patch(
-            "agent_providers.claude.provider.run_claude_catalog_cli",
+            "agent_runtime.claude.provider.run_claude_catalog_cli",
             return_value=_catalog_run(stdout),
         ),
     ):
@@ -396,11 +396,11 @@ def test_a_current_model_line_alone_is_not_a_catalog() -> None:
 def test_the_model_catalog_timeout_raises_named_error() -> None:
     with (
         patch(
-            "agent_providers.claude.provider._find_claude_binary",
+            "agent_runtime.claude.provider._find_claude_binary",
             return_value=Path("/usr/bin/claude"),
         ),
         patch(
-            "agent_providers.claude.provider.run_claude_catalog_cli",
+            "agent_runtime.claude.provider.run_claude_catalog_cli",
             return_value=_catalog_run(complete=False),
         ),
     ):
@@ -411,11 +411,11 @@ def test_the_model_catalog_timeout_raises_named_error() -> None:
 def test_the_model_catalog_spawn_failure_raises_named_error() -> None:
     with (
         patch(
-            "agent_providers.claude.provider._find_claude_binary",
+            "agent_runtime.claude.provider._find_claude_binary",
             return_value=Path("/usr/bin/claude"),
         ),
         patch(
-            "agent_providers.claude.provider.run_claude_catalog_cli",
+            "agent_runtime.claude.provider.run_claude_catalog_cli",
             return_value=None,
         ),
     ):
@@ -426,11 +426,11 @@ def test_the_model_catalog_spawn_failure_raises_named_error() -> None:
 def test_the_model_catalog_nonzero_exit_raises_named_error() -> None:
     with (
         patch(
-            "agent_providers.claude.provider._find_claude_binary",
+            "agent_runtime.claude.provider._find_claude_binary",
             return_value=Path("/usr/bin/claude"),
         ),
         patch(
-            "agent_providers.claude.provider.run_claude_catalog_cli",
+            "agent_runtime.claude.provider.run_claude_catalog_cli",
             return_value=_catalog_run("", returncode=1),
         ),
     ):
@@ -452,7 +452,7 @@ def test_the_model_catalog_runs_the_closed_catalog_spawn(
     install_cli_door(monkeypatch, catalog_door)
     monkeypatch.setenv("CATALOG_ENV_LEAK", "should-not-appear")
     with patch(
-        "agent_providers.claude.provider._find_claude_binary",
+        "agent_runtime.claude.provider._find_claude_binary",
         return_value=fake,
     ):
         catalog = cli_model_catalog()
@@ -570,7 +570,7 @@ def test_one_shot_api_timeout_uses_the_shared_timeout_reason() -> None:
 
     with (
         patch.dict("sys.modules", {"anthropic": mock_anthropic}),
-        patch("agent_providers.claude.provider.time.monotonic", return_value=100.0),
+        patch("agent_runtime.claude.provider.time.monotonic", return_value=100.0),
     ):
         with pytest.raises(UnavailableError) as exc:
             _call_api("hello", "sk-test", None, "claude-sonnet-4-6", 1024, deadline=110.0)
@@ -600,7 +600,7 @@ def test_one_shot_cli_gives_the_provider_request_the_remaining_budget(
 
     incrementing_monotonic_clock.step = 2.5
     with (
-        patch("agent_providers.claude.provider.verify_no_builtin_cli_tools", gate),
+        patch("agent_runtime.claude.provider.verify_no_builtin_cli_tools", gate),
         patch("subprocess.run", return_value=completed) as run,
     ):
         result = call_claude(
@@ -1121,7 +1121,7 @@ def test_call_cli_no_binary(monkeypatch) -> None:
     # safety; undo that here so this test proves the real gate — not a
     # stand-in for it — is what surfaces "no binary" through _call_cli.
     monkeypatch.setattr(provider, "verify_no_builtin_cli_tools", verify_no_builtin_cli_tools)
-    with patch("agent_providers.claude.provider._find_claude_binary", return_value=None):
+    with patch("agent_runtime.claude.provider._find_claude_binary", return_value=None):
         with pytest.raises(UnavailableError, match="Claude CLI not found"):
             _call_cli("hello")
 
@@ -1833,7 +1833,7 @@ def test_a_tool_surface_probe_that_fails_before_the_runner_holds_nothing(
 
 def test_find_binary_on_the_configured_search_path() -> None:
     with patch(
-        "agent_providers.claude.provider.resolve_cli_binary",
+        "agent_runtime.claude.provider.resolve_cli_binary",
         return_value=Path("/usr/bin/claude"),
     ):
         assert _find_claude_binary() == Path("/usr/bin/claude")
@@ -1859,7 +1859,7 @@ def test_find_binary_takes_the_newest_match_from_a_configured_search_location(
         ),
     )
 
-    with patch("agent_providers.claude.provider.resolve_cli_binary", return_value=None):
+    with patch("agent_runtime.claude.provider.resolve_cli_binary", return_value=None):
         assert _find_claude_binary() == newest
 
 
@@ -1872,14 +1872,14 @@ def test_find_binary_refuses_a_search_location_match_it_cannot_run(tmp_path: Pat
         ),
     )
 
-    with patch("agent_providers.claude.provider.resolve_cli_binary", return_value=None):
+    with patch("agent_runtime.claude.provider.resolve_cli_binary", return_value=None):
         assert _find_claude_binary() is None
 
 
 def test_find_binary_not_found() -> None:
     override_claude_runtime(binary_search_globs=())
 
-    with patch("agent_providers.claude.provider.resolve_cli_binary", return_value=None):
+    with patch("agent_runtime.claude.provider.resolve_cli_binary", return_value=None):
         assert _find_claude_binary() is None
 
 
@@ -2099,7 +2099,7 @@ def claude_binary(tmp_path: Path):
     binary = tmp_path / "claude"
     binary.write_bytes(b"cli-build-one")
     with patch(
-        "agent_providers.claude.provider._require_claude_binary",
+        "agent_runtime.claude.provider._require_claude_binary",
         return_value=binary,
     ):
         yield binary
@@ -2993,7 +2993,7 @@ def test_tool_surface_is_reprobed_after_a_genuine_symlink_retarget(
     symlink.symlink_to(target_a)
 
     with patch(
-        "agent_providers.claude.provider._require_claude_binary",
+        "agent_runtime.claude.provider._require_claude_binary",
         return_value=symlink,
     ):
         commands = _answer_with(
@@ -4042,7 +4042,7 @@ def test_public_claude_stream_skips_malformed_cli_output(monkeypatch, caplog) ->
     )
     monkeypatch.setattr(provider, "_write_mcp_config", lambda _spec, _user_id: "unused")
     monkeypatch.setattr(provider, "_unlink_quiet", lambda _path: None)
-    caplog.set_level("WARNING", logger="agent_providers.claude.provider")
+    caplog.set_level("WARNING", logger="agent_runtime.claude.provider")
 
     events = asyncio.run(
         _collect_stream_events(

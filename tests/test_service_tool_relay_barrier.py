@@ -52,7 +52,8 @@ from service_support import (
     quarantine_on,
 )
 
-from agent_client.mcp_wire import (
+from agent_runtime.events import FinalEvent, ToolCallEvent, ToolResultEvent
+from agent_runtime_client.mcp_wire import (
     CallToolParams,
     JsonRpcError,
     Reply,
@@ -61,8 +62,8 @@ from agent_client.mcp_wire import (
     ToolOutcome,
     tool_result_response,
 )
-from agent_client.tools import ToolEffect
-from agent_client.wire import (
+from agent_runtime_client.tools import ToolEffect
+from agent_runtime_client.wire import (
     Failed,
     FailureCode,
     RunStarted,
@@ -70,19 +71,18 @@ from agent_client.wire import (
     ToolCall,
     ToolResult,
 )
-from agent_providers.events import FinalEvent, ToolCallEvent, ToolResultEvent
-from agent_service.app_tools import UpstreamCallLost, open_app_tools
-from agent_service.config import RunConfig
-from agent_service.run_events import (
+from agent_runtime_service.app_tools import UpstreamCallLost, open_app_tools
+from agent_runtime_service.config import RunConfig
+from agent_runtime_service.run_events import (
     RUNNER_FAILED_MESSAGE,
     TOO_MANY_TOOL_CALLS_MESSAGE,
     TOO_MUCH_DATA_MESSAGE,
     run_frames,
 )
-from agent_service.run_liveness import LoopClock
-from agent_service.run_records import RunRecords
-from agent_service.runners import AdmittedRun
-from agent_service.tool_relay import (
+from agent_runtime_service.run_liveness import LoopClock
+from agent_runtime_service.run_records import RunRecords
+from agent_runtime_service.runners import AdmittedRun
+from agent_runtime_service.tool_relay import (
     CALL_FAILED_TEXT,
     CALL_GIVEN_UP_TEXT,
     MAX_PENDING_TOOL_CALLS,

@@ -25,11 +25,11 @@ from service_support import (
     respond_through_the_app,
 )
 
-from agent_client.run_stream import ViolationKind
-from agent_client.sse import RunStreamDecoder
-from agent_client.wire import Succeeded
-from agent_providers.events import AssistantTextEvent, FinalEvent, ToolCallEvent
-from agent_service.config import RunConfig
+from agent_runtime.events import AssistantTextEvent, FinalEvent, ToolCallEvent
+from agent_runtime_client.run_stream import ViolationKind
+from agent_runtime_client.sse import RunStreamDecoder
+from agent_runtime_client.wire import Succeeded
+from agent_runtime_service.config import RunConfig
 
 TEXT = AssistantTextEvent(text="Still here.")
 FINAL = FinalEvent(text="Done.")

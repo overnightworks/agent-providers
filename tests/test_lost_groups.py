@@ -49,17 +49,17 @@ from provider_test_support import (
     start_then_raise,
 )
 
-from agent_providers import lost_groups
-from agent_providers.claude.provider import UnavailableError
-from agent_providers.errors import (
+from agent_runtime import lost_groups
+from agent_runtime.claude.provider import UnavailableError
+from agent_runtime.errors import (
     ContainmentLost,
     ProviderError,
     RetainedGroup,
 )
-from agent_providers.lost_groups import confirm_group_gone, retain_lost_group
-from agent_providers.process import ClaimedStartThread
-from agent_providers.procfs import GroupCensus
-from agent_providers.spawn import AnchorStateError, ChildIdentityLost
+from agent_runtime.lost_groups import confirm_group_gone, retain_lost_group
+from agent_runtime.process import ClaimedStartThread
+from agent_runtime.procfs import GroupCensus
+from agent_runtime.spawn import AnchorStateError, ChildIdentityLost
 
 PID = 4242
 KILL, RELEASE, SLOT = "kill", "release", "slot"

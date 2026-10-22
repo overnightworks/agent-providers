@@ -5,13 +5,13 @@ from __future__ import annotations
 import pytest
 from provider_test_support import override_codex_turn_runtime, override_turn_runtime
 
-from agent_providers.codex.pool import (
+from agent_runtime.codex.pool import (
     CodexProcessKind,
     CodexProcessPool,
     get_codex_process_pool,
 )
-from agent_providers.config import ProviderNotConfiguredError
-from agent_providers.errors import CodexProcessPoolSaturatedError
+from agent_runtime.config import ProviderNotConfiguredError
+from agent_runtime.errors import CodexProcessPoolSaturatedError
 
 
 def test_the_process_wide_pool_admits_only_as_many_runs_as_the_runtime_allows() -> None:

@@ -28,23 +28,23 @@ from service_support import (
     service_config,
 )
 
-from agent_client.wire import (
+from agent_runtime.events import AssistantTextEvent, FinalEvent, ToolCallEvent
+from agent_runtime_client.wire import (
     Failed,
     FailureCode,
     Heartbeat,
     RunStarted,
     Succeeded,
 )
-from agent_providers.events import AssistantTextEvent, FinalEvent, ToolCallEvent
-from agent_service.app import create_app
-from agent_service.config import RunConfig
-from agent_service.run_liveness import (
+from agent_runtime_service.app import create_app
+from agent_runtime_service.config import RunConfig
+from agent_runtime_service.run_liveness import (
     IDLE_TIMEOUT_MESSAGE,
     Action,
     Deadlines,
     decide,
 )
-from agent_service.runners import Runners
+from agent_runtime_service.runners import Runners
 
 TEXT = AssistantTextEvent(text="Still here.")
 FINAL = FinalEvent(text="Done.")

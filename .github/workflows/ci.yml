@@ -57,20 +57,20 @@ jobs:
 
       - name: Ruff
         env:
-          PYTHONPATH: src:packages/agent-client/src:packages/agent-service/src
+          PYTHONPATH: src:packages/client/src:packages/service/src
         run: uv run --locked --no-sync --no-build ruff check src tests packages
 
       - name: Import boundaries
         env:
-          PYTHONPATH: src:packages/agent-client/src:packages/agent-service/src
+          PYTHONPATH: src:packages/client/src:packages/service/src
         run: uv run --locked --no-sync --no-build lint-imports
 
       - name: Tests
         env:
-          PYTHONPATH: src:packages/agent-client/src:packages/agent-service/src
+          PYTHONPATH: src:packages/client/src:packages/service/src
         run: >-
           uv run --locked --no-sync --no-build pytest tests -q
-          --cov=src --cov=packages/agent-client/src --cov=packages/agent-service/src
+          --cov=src --cov=packages/client/src --cov=packages/service/src
           --cov-report=xml:coverage.xml
 
       - name: Upload the coverage report for the quality gate
@@ -86,29 +86,29 @@ jobs:
       - name: The client wheel carries the repository licence
         run: |
           licence="$(mktemp -d "$RUNNER_TEMP/client-licence.XXXXXX")"
-          python3 -I -m zipfile -e dist/overnightworks_agent_client-*-py3-none-any.whl "$licence"
-          cmp LICENSE "$licence"/overnightworks_agent_client-*.dist-info/licenses/LICENSE
+          python3 -I -m zipfile -e dist/overnightworks_agent_runtime_client-*-py3-none-any.whl "$licence"
+          cmp LICENSE "$licence"/overnightworks_agent_runtime_client-*.dist-info/licenses/LICENSE
 
       - name: The client wheel imports alone, outside the workspace
         run: |
           proof="$(mktemp -d "$RUNNER_TEMP/client-only.XXXXXX")"
           uv venv "$proof/venv"
           uv pip install --python "$proof/venv/bin/python" \
-            "$GITHUB_WORKSPACE"/dist/overnightworks_agent_client-*-py3-none-any.whl
+            "$GITHUB_WORKSPACE"/dist/overnightworks_agent_runtime_client-*-py3-none-any.whl
           cd "$proof"
           "$proof/venv/bin/python" -I -c '
           import importlib
           import importlib.util
           import pkgutil
 
-          import agent_client
+          import agent_runtime_client
 
-          assert importlib.util.find_spec("agent_providers") is None, "core leaked in"
+          assert importlib.util.find_spec("agent_runtime") is None, "core leaked in"
           assert importlib.util.find_spec("jwt") is None, "the mcp-server extra leaked in"
           assert importlib.util.find_spec("cryptography") is None, "cryptography leaked in"
-          for module in pkgutil.walk_packages(agent_client.__path__, "agent_client."):
-              if module.name == "agent_client.mcp_server" or module.name.startswith(
-                  "agent_client.mcp_server."
+          for module in pkgutil.walk_packages(agent_runtime_client.__path__, "agent_runtime_client."):
+              if module.name == "agent_runtime_client.mcp_server" or module.name.startswith(
+                  "agent_runtime_client.mcp_server."
               ):
                   continue
               importlib.import_module(module.name)
@@ -119,16 +119,16 @@ jobs:
         run: |
           proof="$(mktemp -d "$RUNNER_TEMP/client-mcp-server.XXXXXX")"
           uv venv "$proof/venv"
-          client_wheel="$(ls "$GITHUB_WORKSPACE"/dist/overnightworks_agent_client-*-py3-none-any.whl)"
+          client_wheel="$(ls "$GITHUB_WORKSPACE"/dist/overnightworks_agent_runtime_client-*-py3-none-any.whl)"
           uv pip install --python "$proof/venv/bin/python" "$client_wheel[mcp-server]"
           cd "$proof"
           "$proof/venv/bin/python" -I -c '
           import importlib.util
 
-          import agent_client.mcp_server
+          import agent_runtime_client.mcp_server
 
-          assert importlib.util.find_spec("agent_providers") is None, "core leaked in"
-          print("imported", agent_client.mcp_server.__name__)
+          assert importlib.util.find_spec("agent_runtime") is None, "core leaked in"
+          print("imported", agent_runtime_client.mcp_server.__name__)
           '
 
       - name: Both wheels install together and the core imports dispatch
@@ -136,18 +136,18 @@ jobs:
           proof="$(mktemp -d "$RUNNER_TEMP/two-wheels.XXXXXX")"
           uv venv "$proof/venv"
           uv pip install --python "$proof/venv/bin/python" \
-            "$GITHUB_WORKSPACE"/dist/overnightworks_agent_client-*-py3-none-any.whl \
-            "$GITHUB_WORKSPACE"/dist/overnightworks_agent_providers-*-py3-none-any.whl
+            "$GITHUB_WORKSPACE"/dist/overnightworks_agent_runtime_client-*-py3-none-any.whl \
+            "$GITHUB_WORKSPACE"/dist/overnightworks_agent_runtime-*-py3-none-any.whl
           cd "$proof"
           "$proof/venv/bin/python" -I -c '
-          import agent_client.tools
-          import agent_providers.dispatch
-          import agent_providers.tools
+          import agent_runtime_client.tools
+          import agent_runtime.dispatch
+          import agent_runtime.tools
 
-          assert agent_providers.tools.ToolDeclaration is agent_client.tools.ToolDeclaration
-          print("imported", agent_providers.dispatch.__name__, "from", agent_providers.__file__)
+          assert agent_runtime.tools.ToolDeclaration is agent_runtime_client.tools.ToolDeclaration
+          print("imported", agent_runtime.dispatch.__name__, "from", agent_runtime.__file__)
           '
-          printf 'from agent_providers.tools import ToolCatalog, ToolDeclaration\n' > consumer.py
+          printf 'from agent_runtime.tools import ToolCatalog, ToolDeclaration\n' > consumer.py
           uvx pyright@1.1.414 --pythonpath "$proof/venv/bin/python" consumer.py
 
       - name: The three wheels install together and the service refuses a bad config
@@ -155,17 +155,17 @@ jobs:
           proof="$(mktemp -d "$RUNNER_TEMP/three-wheels.XXXXXX")"
           uv venv "$proof/venv"
           uv pip install --python "$proof/venv/bin/python" \
-            "$GITHUB_WORKSPACE"/dist/overnightworks_agent_client-*-py3-none-any.whl \
-            "$GITHUB_WORKSPACE"/dist/overnightworks_agent_providers-*-py3-none-any.whl \
-            "$GITHUB_WORKSPACE"/dist/overnightworks_agent_service-*-py3-none-any.whl
+            "$GITHUB_WORKSPACE"/dist/overnightworks_agent_runtime_client-*-py3-none-any.whl \
+            "$GITHUB_WORKSPACE"/dist/overnightworks_agent_runtime-*-py3-none-any.whl \
+            "$GITHUB_WORKSPACE"/dist/overnightworks_agent_runtime_service-*-py3-none-any.whl
           cd "$proof"
-          "$proof/venv/bin/python" -I -c 'import agent_service.app; print("imported", agent_service.app.__name__)'
+          "$proof/venv/bin/python" -I -c 'import agent_runtime_service.app; print("imported", agent_runtime_service.app.__name__)'
           "$proof/venv/bin/python" -I "$GITHUB_WORKSPACE/tests/wheel_smoke/app_tools_discovery.py"
-          printf 'from agent_service.tool_relay import RelayAccess\n' > relay_consumer.py
+          printf 'from agent_runtime_service.tool_relay import RelayAccess\n' > relay_consumer.py
           uvx pyright@1.1.414 --pythonpath "$proof/venv/bin/python" relay_consumer.py
           printf '[identity]\nissuer = "https://issuer.test"\n' > bad.toml
           status=0
-          "$proof/venv/bin/agent-service" --config bad.toml 2> refused.txt || status=$?
+          "$proof/venv/bin/agent-runtime-service" --config bad.toml 2> refused.txt || status=$?
           cat refused.txt
           test "$status" -eq 2
           grep -q 'identity.jwks_url' refused.txt
@@ -233,7 +233,7 @@ jobs:
 
       - name: The service admits real Keycloak tokens end to end
         env:
-          PYTHONPATH: src:packages/agent-client/src:packages/agent-service/src
+          PYTHONPATH: src:packages/client/src:packages/service/src
         run: >-
           uv run --locked --no-sync --no-build pytest -p no:cacheprovider
           tests/test_service_keycloak.py -m keycloak -q -rP
@@ -270,7 +270,7 @@ jobs:
 
       - name: Tests
         env:
-          PYTHONPATH: src:packages/agent-client/src:packages/agent-service/src
+          PYTHONPATH: src:packages/client/src:packages/service/src
         run: uv run --no-sync --no-build pytest tests -q
 
   quality:

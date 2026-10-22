@@ -21,8 +21,8 @@ from anchored_support import ChildCleanup
 from bounds import TEST_WAIT_SECONDS
 from descendant_support import DescendantRow, Handshake, lingering_descendant
 
-from agent_providers.process import CliRunReason, run_catalog_cli, run_cli_bounded
-from agent_providers.spawn import ChildProcess, closed_environment
+from agent_runtime.process import CliRunReason, run_catalog_cli, run_cli_bounded
+from agent_runtime.spawn import ChildProcess, closed_environment
 
 A_READ_DEADLINE_SECONDS = 2.0
 IGNORES_SIGTERM_ITSELF = "trap '' TERM\n"

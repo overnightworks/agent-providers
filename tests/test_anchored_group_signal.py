@@ -48,9 +48,9 @@ from anchored_support import (
 from bounds import TEST_WAIT_SECONDS
 from provider_test_support import call_within_deadline
 
-from agent_providers import procfs, spawn
-from agent_providers.procfs import GroupCensus, RealProcView, group_census
-from agent_providers.spawn import (
+from agent_runtime import procfs, spawn
+from agent_runtime.procfs import GroupCensus, RealProcView, group_census
+from agent_runtime.spawn import (
     AnchorState,
     AnchorStateError,
     ChildIdentityLost,
@@ -100,8 +100,8 @@ signal.signal(signal.SIGCHLD, signal.SIG_IGN)
 launched = []
 real_popen = subprocess.Popen
 subprocess.Popen = lambda *args, **kwargs: launched.append(args) or real_popen(*args, **kwargs)
-from agent_providers import spawn
-from agent_providers.spawn import AnchorStateError, ChildProcess, closed_environment
+from agent_runtime import spawn
+from agent_runtime.spawn import AnchorStateError, ChildProcess, closed_environment
 child = ChildProcess(
     binary=Path(sys.executable),
     arguments=("-I", "-c", "pass"),

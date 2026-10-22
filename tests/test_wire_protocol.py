@@ -1,4 +1,4 @@
-"""The agent service's streamed run contract, owned by ``agent_client``.
+"""The agent service's streamed run contract, owned by ``agent_runtime_client``.
 
 These tests pin decision record 0001, H6 and its A0b sub-ruling: the closed
 wire union, the run-stream rules, and the tool effect class that decides how
@@ -27,9 +27,15 @@ from wire_builders import (
     wire,
 )
 
-from agent_client.run_stream import RunStream, StreamViolation, ViolationKind, parse_event
-from agent_client.tools import ToolDeclaration, ToolEffect
-from agent_client.wire import (
+from agent_runtime.text_tool_protocol import render_tool_catalog
+from agent_runtime.tools import (
+    ToolCatalog,
+    anthropic_tool_schemas,
+    openai_tool_schemas,
+)
+from agent_runtime_client.run_stream import RunStream, StreamViolation, ViolationKind, parse_event
+from agent_runtime_client.tools import ToolDeclaration, ToolEffect
+from agent_runtime_client.wire import (
     MAX_MESSAGE_LENGTH,
     MAX_PURPOSE_LENGTH,
     PROTOCOL_VERSION,
@@ -45,12 +51,6 @@ from agent_client.wire import (
     RunStatus,
     TurnRole,
     is_run_event,
-)
-from agent_providers.text_tool_protocol import render_tool_catalog
-from agent_providers.tools import (
-    ToolCatalog,
-    anthropic_tool_schemas,
-    openai_tool_schemas,
 )
 
 

@@ -39,8 +39,8 @@ from provider_test_support import (
 )
 from pydantic import SecretStr
 
-from agent_providers import catalog, process
-from agent_providers.catalog import (
+from agent_runtime import catalog, process
+from agent_runtime.catalog import (
     ProviderCliUnavailable,
     ProviderNeedsKey,
     ProviderNotLoggedIn,
@@ -52,18 +52,18 @@ from agent_providers.catalog import (
     probe_provider_route,
     provider_configuration,
 )
-from agent_providers.config import ProviderNotConfiguredError, current_claude_runtime
-from agent_providers.constants import (
+from agent_runtime.config import ProviderNotConfiguredError, current_claude_runtime
+from agent_runtime.constants import (
     CLAUDE_NO_SESSION_PERSISTENCE_FLAG,
     CLAUDE_OAUTH_TOKEN_VARIABLE,
     ProviderName,
 )
-from agent_providers.errors import (
+from agent_runtime.errors import (
     ProviderModelCatalogUnavailableError,
     ProviderUnavailableError,
     SafeRouteReasonCode,
 )
-from agent_providers.process import (
+from agent_runtime.process import (
     AgentCliUnavailableError,
     CliEnvironmentCause,
     CliEnvironmentUnavailableError,
@@ -74,7 +74,7 @@ from agent_providers.process import (
     codex_cli_model_catalog,
     grok_cli_status,
 )
-from agent_providers.spawn import ChildProcess
+from agent_runtime.spawn import ChildProcess
 
 CLAUDE_MODEL_CATALOG_ALIASES = sorted([
     "sonnet", "opus", "haiku", "fable", "best", "sonnet[1m]", "opus[1m]",
@@ -231,7 +231,7 @@ def _stub_a_ready_api_listing(
     monkeypatch: pytest.MonkeyPatch, key_setting: str, listed_id: str,
 ) -> None:
     override_provider_runtime(**{key_setting: SecretStr("a-key")})
-    monkeypatch.setattr("agent_providers.catalog._anthropic_sdk_available", lambda: True)
+    monkeypatch.setattr("agent_runtime.catalog._anthropic_sdk_available", lambda: True)
     monkeypatch.setattr(httpx, "get", lambda url, **_: httpx.Response(
         200, json={"data": [{"id": listed_id}]}, request=httpx.Request("GET", url),
     ))
@@ -590,7 +590,7 @@ def test_a_cli_listing_names_the_meaning_of_the_fault_that_stopped_it(
     def fail() -> None:
         raise fault
 
-    monkeypatch.setattr(f"agent_providers.catalog.{probe_name}", fail)
+    monkeypatch.setattr(f"agent_runtime.catalog.{probe_name}", fail)
 
     with pytest.raises(ProviderModelCatalogUnavailableError) as failure:
         list_provider_models(provider, ProviderRoute.CLI)
@@ -899,7 +899,7 @@ def test_cli_setup_tells_whether_the_cli_can_run_here(
     credential: _Credential, binary: _Binary, api_key: bool,
     outcome: _Outcome, warned_class: str | None,
 ) -> None:
-    caplog.set_level("WARNING", logger="agent_providers.catalog")
+    caplog.set_level("WARNING", logger="agent_runtime.catalog")
     calls_log = _a_cli_install(tmp_path, install, credential, binary, api_key=api_key)
 
     configuration = provider_configuration(install.provider, frozenset({install.method}))
@@ -977,7 +977,7 @@ def test_claude_setup_without_a_key_says_the_cli_cannot_run_when_the_environment
     tmp_path: Path, caplog: pytest.LogCaptureFixture, fault, cause: CliEnvironmentCause,
     named_class: str,
 ) -> None:
-    caplog.set_level("WARNING", logger="agent_providers.catalog")
+    caplog.set_level("WARNING", logger="agent_runtime.catalog")
 
     with fault(tmp_path):
         configuration = provider_configuration("claude", frozenset())
@@ -991,7 +991,7 @@ def test_claude_setup_with_a_key_is_ready_whatever_the_cli_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault, cause: CliEnvironmentCause,
     named_class: str,
 ) -> None:
-    monkeypatch.setattr("agent_providers.catalog._anthropic_sdk_available", lambda: True)
+    monkeypatch.setattr("agent_runtime.catalog._anthropic_sdk_available", lambda: True)
     override_provider_runtime(anthropic_api_key=SecretStr("a-key"))
 
     with fault(tmp_path):
@@ -1005,7 +1005,7 @@ def test_claude_setup_with_a_key_is_ready_whatever_the_cli_environment(
 def test_a_wrong_typed_codex_login_is_named_in_the_setup_warning(
     tmp_path: Path, caplog: pytest.LogCaptureFixture,
 ) -> None:
-    caplog.set_level("WARNING", logger="agent_providers.catalog")
+    caplog.set_level("WARNING", logger="agent_runtime.catalog")
 
     configuration = _codex_setup(tmp_path, a_codex_login(tokens={"account_id": 7}))
 

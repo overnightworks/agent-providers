@@ -38,7 +38,7 @@ from anchored_support import (
 from bounds import TEST_WAIT_SECONDS
 from test_zombie_anchor import EXIT_WITH_LINE
 
-from agent_providers.spawn import ChildProcess, closed_environment
+from agent_runtime.spawn import ChildProcess, closed_environment
 
 SHORT_BOUND = 0.2
 

@@ -82,13 +82,13 @@ from provider_test_support import (
     write_claude_token_file,
 )
 
-import agent_client
-from agent_providers import lost_groups, process
-from agent_providers.codex.pool import CodexProcessKind, CodexProcessPool
-from agent_providers.codex.protocol import codex_child_process, create_codex_turn_home
-from agent_providers.codex_login import _blanked_document, assess_codex_login, blanked_copy
-from agent_providers.config import current_claude_runtime, current_codex_runtime, current_config
-from agent_providers.constants import (
+import agent_runtime_client
+from agent_runtime import lost_groups, process
+from agent_runtime.codex.pool import CodexProcessKind, CodexProcessPool
+from agent_runtime.codex.protocol import codex_child_process, create_codex_turn_home
+from agent_runtime.codex_login import _blanked_document, assess_codex_login, blanked_copy
+from agent_runtime.config import current_claude_runtime, current_codex_runtime, current_config
+from agent_runtime.constants import (
     CLAUDE_CLI_AUTH_METHOD_FIELD,
     CLAUDE_CLI_LOGGED_IN_FIELD,
     CLAUDE_CLI_STATUS_ARGS,
@@ -98,7 +98,7 @@ from agent_providers.constants import (
     CLI_TERMINATION_GRACE_SECONDS,
     PROBE_TIMEOUT_SECONDS,
 )
-from agent_providers.process import (
+from agent_runtime.process import (
     CLAUDE_CLI_BINARY_MISSING_DETAIL,
     CLI_PROBE_CALLER_TIMEOUT_SECONDS,
     CODEX_CLI_BINARY_MISSING_DETAIL,
@@ -132,9 +132,9 @@ from agent_providers.process import (
     run_claude_catalog_cli,
     run_cli_bounded,
 )
-from agent_providers.procfs import GroupCensus
-from agent_providers.sandbox.paths import CODEX_TOOL_TURN_DIRECTORY_PREFIX
-from agent_providers.spawn import (
+from agent_runtime.procfs import GroupCensus
+from agent_runtime.sandbox.paths import CODEX_TOOL_TURN_DIRECTORY_PREFIX
+from agent_runtime.spawn import (
     INHERITED_MACHINE_VARIABLES,
     AnchorStateError,
     BlockingAnchoredChild,
@@ -167,15 +167,15 @@ def _clear_probe_caches():
 
 
 def _a_cli_that_says(output: str | None):
-    return patch("agent_providers.process._catalog_cli_output", return_value=output)
+    return patch("agent_runtime.process._catalog_cli_output", return_value=output)
 
 
 def _a_claude_cli_that_says(output: str | None):
-    return patch("agent_providers.process._claude_output", return_value=output)
+    return patch("agent_runtime.process._claude_output", return_value=output)
 
 
 def _a_shell_pretending_to_be_a_cli():
-    return patch("agent_providers.process.resolve_cli_binary", return_value=Path("/bin/sh"))
+    return patch("agent_runtime.process.resolve_cli_binary", return_value=Path("/bin/sh"))
 
 
 def test_claude_reports_the_account_its_json_status_names() -> None:
@@ -214,8 +214,8 @@ def test_a_claude_probe_that_exceeds_its_caller_budget_is_logged_out(monkeypatch
         release.wait(timeout=1)
         return None
 
-    monkeypatch.setattr("agent_providers.process._claude_output", _hanging_output)
-    monkeypatch.setattr("agent_providers.process.CLI_PROBE_CALLER_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr("agent_runtime.process._claude_output", _hanging_output)
+    monkeypatch.setattr("agent_runtime.process.CLI_PROBE_CALLER_TIMEOUT_SECONDS", 0.05)
     try:
         login = claude_cli_login(Path("/mounted/claude"))
     finally:
@@ -365,7 +365,7 @@ def test_a_second_claude_ask_reuses_the_recent_answer() -> None:
 def test_expired_cache_asks_the_cli_again() -> None:
     with (
         _a_cli_that_says(CODEX_LOGGED_IN) as spawn,
-        patch("agent_providers.process.CLI_LOGIN_STATUS_CACHE_SECONDS", 0),
+        patch("agent_runtime.process.CLI_LOGIN_STATUS_CACHE_SECONDS", 0),
     ):
         codex_cli_login()
         codex_cli_login()
@@ -489,7 +489,7 @@ def test_a_follower_waits_only_its_own_single_flight_budget(monkeypatch) -> None
         return "answer"
 
     cached = CachedProbe(probe)
-    monkeypatch.setattr("agent_providers.process.CLI_PROBE_CALLER_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr("agent_runtime.process.CLI_PROBE_CALLER_TIMEOUT_SECONDS", 0.05)
 
     def first_ask() -> None:
         try:
@@ -517,8 +517,8 @@ def test_run_cli_returns_after_its_answer_budget_and_cleanup_grace(
 ) -> None:
     answer_budget = 0.05
     cleanup_grace = 0.05
-    monkeypatch.setattr("agent_providers.process.PROBE_TIMEOUT_SECONDS", answer_budget)
-    monkeypatch.setattr("agent_providers.process.CLI_TERMINATION_GRACE_SECONDS", cleanup_grace)
+    monkeypatch.setattr("agent_runtime.process.PROBE_TIMEOUT_SECONDS", answer_budget)
+    monkeypatch.setattr("agent_runtime.process.CLI_TERMINATION_GRACE_SECONDS", cleanup_grace)
 
     started_at = time.monotonic()
     run = run_catalog_cli(shell_child("-c", "trap '' TERM; while :; do :; done"))
@@ -625,7 +625,7 @@ def test_a_probe_thread_that_cannot_start_leaves_no_flight_behind(monkeypatch) -
     assert raised.value is cannot_start
     assert probe.calls == 0
     monkeypatch.setattr(
-        "agent_providers.process.CLI_PROBE_CALLER_TIMEOUT_SECONDS", _PROBE_THREAD_BOUND_SECONDS,
+        "agent_runtime.process.CLI_PROBE_CALLER_TIMEOUT_SECONDS", _PROBE_THREAD_BOUND_SECONDS,
     )
     assert cached.get() == "answer"
     assert probe.calls == 1
@@ -637,7 +637,7 @@ def test_a_login_probe_that_cannot_start_a_thread_is_retried_by_the_next_call(
     probed = CachedProbe(lambda: CliLogin(logged_in=True, auth_method="chatgpt"))
     monkeypatch.setattr(process, "_codex_login_probe", probed)
     monkeypatch.setattr(
-        "agent_providers.process.CLI_PROBE_CALLER_TIMEOUT_SECONDS", _PROBE_THREAD_BOUND_SECONDS,
+        "agent_runtime.process.CLI_PROBE_CALLER_TIMEOUT_SECONDS", _PROBE_THREAD_BOUND_SECONDS,
     )
     cannot_start = RuntimeError("can't start new thread")
 
@@ -740,7 +740,7 @@ def test_a_cli_that_floods_us_is_read_only_up_to_the_limit() -> None:
 def test_a_cli_that_never_answers_is_given_up_on() -> None:
     with (
         _a_shell_pretending_to_be_a_cli(),
-        patch("agent_providers.process.PROBE_TIMEOUT_SECONDS", 0.2),
+        patch("agent_runtime.process.PROBE_TIMEOUT_SECONDS", 0.2),
     ):
         assert run_catalog_cli(shell_child("-c", "while :; do :; done")).complete is False
 
@@ -757,8 +757,8 @@ def test_a_cli_that_leaves_a_child_behind_is_terminated_with_its_group() -> None
 
     with (
         _a_shell_pretending_to_be_a_cli(),
-        patch("agent_providers.process.PROBE_TIMEOUT_SECONDS", 0.2),
-        patch("agent_providers.spawn.subprocess.Popen", side_effect=capture_process),
+        patch("agent_runtime.process.PROBE_TIMEOUT_SECONDS", 0.2),
+        patch("agent_runtime.spawn.subprocess.Popen", side_effect=capture_process),
     ):
         assert run_catalog_cli(shell_child("-c", command)).complete is False
 
@@ -781,9 +781,9 @@ def test_a_sigterm_ignoring_cli_and_child_are_reaped_after_sigkill() -> None:
 
     with (
         _a_shell_pretending_to_be_a_cli(),
-        patch("agent_providers.process.PROBE_TIMEOUT_SECONDS", 0.05),
-        patch("agent_providers.process.CLI_TERMINATION_GRACE_SECONDS", 0.1),
-        patch("agent_providers.spawn.subprocess.Popen", side_effect=capture_process),
+        patch("agent_runtime.process.PROBE_TIMEOUT_SECONDS", 0.05),
+        patch("agent_runtime.process.CLI_TERMINATION_GRACE_SECONDS", 0.1),
+        patch("agent_runtime.spawn.subprocess.Popen", side_effect=capture_process),
     ):
         assert run_catalog_cli(shell_child("-c", command)).complete is False
 
@@ -815,9 +815,9 @@ def test_a_spawn_that_returns_after_its_deadline_is_reaped() -> None:
             reaped.set()
 
     with (
-        patch("agent_providers.process.PROBE_TIMEOUT_SECONDS", 0.1),
-        patch("agent_providers.spawn.subprocess.Popen", side_effect=late_process),
-        patch("agent_providers.process._reap_process_group", side_effect=capture_reap),
+        patch("agent_runtime.process.PROBE_TIMEOUT_SECONDS", 0.1),
+        patch("agent_runtime.spawn.subprocess.Popen", side_effect=late_process),
+        patch("agent_runtime.process._reap_process_group", side_effect=capture_reap),
     ):
         assert run_catalog_cli(shell_child("-c", "while :; do :; done")) is None
         release_spawn.set()
@@ -857,8 +857,8 @@ def test_bounded_runner_returns_on_a_stalled_spawn_and_reaps_its_late_process() 
         callbacks_reaped.set()
 
     with (
-        patch("agent_providers.spawn.subprocess.Popen", side_effect=late_process),
-        patch("agent_providers.process._reap_process_group", side_effect=capture_reap),
+        patch("agent_runtime.spawn.subprocess.Popen", side_effect=late_process),
+        patch("agent_runtime.process._reap_process_group", side_effect=capture_reap),
     ):
         deadline = time.monotonic() + 0.05
         assert run_cli_bounded(
@@ -935,7 +935,7 @@ def test_bounded_runner_carries_an_output_io_error(monkeypatch) -> None:
     def fail_to_set_blocking(_fd: int, _value: bool) -> None:
         raise error
 
-    monkeypatch.setattr("agent_providers.process.os.set_blocking", fail_to_set_blocking)
+    monkeypatch.setattr("agent_runtime.process.os.set_blocking", fail_to_set_blocking)
 
     outcome = run_cli_bounded(
         shell_child("-c", "printf output"),
@@ -959,7 +959,7 @@ def test_bounded_runner_reports_a_stdin_close_error_after_spawning(monkeypatch) 
     def record_reaped(process_id: int, became_zombie: bool) -> None:
         reaped_processes.append((process_id, became_zombie))
 
-    monkeypatch.setattr("agent_providers.process._close_stdin", fail_to_close_stdin)
+    monkeypatch.setattr("agent_runtime.process._close_stdin", fail_to_close_stdin)
     outcome = run_cli_bounded(
         shell_child("-c", "exec sleep 10"),
         stdin_payload=None,
@@ -978,9 +978,9 @@ def test_bounded_runner_reports_a_stdin_close_error_after_spawning(monkeypatch) 
 def test_bounded_runner_returns_at_the_settle_instant_when_its_cleanup_overruns(
     monkeypatch, failure_watch,
 ) -> None:
-    monkeypatch.setattr("agent_providers.process.CLI_TERMINATION_GRACE_SECONDS", 0.01)
-    monkeypatch.setattr("agent_providers.process.CLI_GROUP_CONFIRMATION_SECONDS", 0.2)
-    monkeypatch.setattr("agent_providers.process.CLI_PROBE_CALLER_TIMEOUT_MARGIN_SECONDS", 0.01)
+    monkeypatch.setattr("agent_runtime.process.CLI_TERMINATION_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr("agent_runtime.process.CLI_GROUP_CONFIRMATION_SECONDS", 0.2)
+    monkeypatch.setattr("agent_runtime.process.CLI_PROBE_CALLER_TIMEOUT_MARGIN_SECONDS", 0.01)
     release_cleanup = threading.Event()
     reaped = threading.Event()
     real_reap = process._reap_process_group
@@ -992,7 +992,7 @@ def test_bounded_runner_returns_at_the_settle_instant_when_its_cleanup_overruns(
         finally:
             reaped.set()
 
-    monkeypatch.setattr("agent_providers.process._reap_process_group", delayed_reap)
+    monkeypatch.setattr("agent_runtime.process._reap_process_group", delayed_reap)
     deadline = time.monotonic() + 0.02
     outcome = run_cli_bounded(
         shell_child("-c", "exec sleep 10"),
@@ -1029,8 +1029,8 @@ class _LateWakingEvent(threading.Event):
 def test_the_second_wait_ends_at_the_settle_instant_however_late_the_first_one_woke(
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr("agent_providers.process.CLI_TERMINATION_GRACE_SECONDS", 0.2)
-    monkeypatch.setattr("agent_providers.process.CLI_GROUP_CONFIRMATION_SECONDS", 0.2)
+    monkeypatch.setattr("agent_runtime.process.CLI_TERMINATION_GRACE_SECONDS", 0.2)
+    monkeypatch.setattr("agent_runtime.process.CLI_GROUP_CONFIRMATION_SECONDS", 0.2)
 
     @dataclass
     class LateWakingState(process._BoundedRunState):
@@ -1083,8 +1083,8 @@ def test_bounded_runner_notifies_a_zombie_reap_only_after_background_confirmatio
         callbacks.append((process_id, became_zombie))
         callback_finished.set()
 
-    monkeypatch.setattr("agent_providers.process._reap_process_group", lambda _process: True)
-    monkeypatch.setattr("agent_providers.process._reap_in_background", await_background_reap)
+    monkeypatch.setattr("agent_runtime.process._reap_process_group", lambda _process: True)
+    monkeypatch.setattr("agent_runtime.process._reap_in_background", await_background_reap)
 
     outcome = run_cli_bounded(
         shell_child("-c", "printf ready"),
@@ -1114,7 +1114,7 @@ def test_bounded_runner_stops_a_cli_that_never_reads_its_full_stdin_pipe() -> No
         original_start_times.append(process_start_time(child.pid))
         return child
 
-    with patch("agent_providers.spawn.subprocess.Popen", side_effect=capture_process):
+    with patch("agent_runtime.spawn.subprocess.Popen", side_effect=capture_process):
         outcome = run_cli_bounded(
             shell_child("-c", "exec sleep 10"),
             stdin_payload=b"x" * (1024 * 1024),
@@ -1139,7 +1139,7 @@ def test_bounded_runner_stops_a_cli_that_never_writes_output() -> None:
         original_start_times.append(process_start_time(child.pid))
         return child
 
-    with patch("agent_providers.spawn.subprocess.Popen", side_effect=capture_process):
+    with patch("agent_runtime.spawn.subprocess.Popen", side_effect=capture_process):
         outcome = run_cli_bounded(
             shell_child("-c", "exec sleep 10"),
             stdin_payload=None,
@@ -1679,10 +1679,10 @@ from pathlib import Path
 sys.path.insert(0, sys.argv[3])
 from provider_test_support import KillUntilGoneResult, fake_cli_process
 
-from agent_providers import process
-from agent_providers.config import ProviderRuntimeConfig, configure
-from agent_providers.process import PrivateCredentialHome
-from agent_providers.procfs import GroupCensus
+from agent_runtime import process
+from agent_runtime.config import ProviderRuntimeConfig, configure
+from agent_runtime.process import PrivateCredentialHome
+from agent_runtime.procfs import GroupCensus
 
 configure(ProviderRuntimeConfig.model_validate_json(sys.argv[1]))
 home = PrivateCredentialHome(
@@ -1735,7 +1735,7 @@ def test_a_zombie_whose_group_never_dies_frees_its_runner_thread(
 
 
 def test_bounded_runner_stops_collecting_at_the_byte_limit(monkeypatch) -> None:
-    monkeypatch.setattr("agent_providers.process.CLI_OUTPUT_READ_LIMIT_BYTES", 32)
+    monkeypatch.setattr("agent_runtime.process.CLI_OUTPUT_READ_LIMIT_BYTES", 32)
 
     outcome = run_cli_bounded(
         shell_child("-c", "while :; do printf x; done"),
@@ -1750,8 +1750,8 @@ def test_bounded_runner_stops_collecting_at_the_byte_limit(monkeypatch) -> None:
 
 
 def test_run_cli_discards_partial_output_when_its_read_deadline_expires(monkeypatch) -> None:
-    monkeypatch.setattr("agent_providers.process.PROBE_TIMEOUT_SECONDS", 0.2)
-    monkeypatch.setattr("agent_providers.process.CLI_TERMINATION_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr("agent_runtime.process.PROBE_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr("agent_runtime.process.CLI_TERMINATION_GRACE_SECONDS", 0.01)
 
     run = run_catalog_cli(shell_child("-c", "printf partial; exec sleep 10"))
 
@@ -1820,7 +1820,7 @@ def test_bounded_runner_drains_both_output_streams_in_all_mode() -> None:
 
 
 def test_bounded_runner_applies_its_byte_limit_to_both_streams(monkeypatch) -> None:
-    monkeypatch.setattr("agent_providers.process.CLI_OUTPUT_READ_LIMIT_BYTES", 4)
+    monkeypatch.setattr("agent_runtime.process.CLI_OUTPUT_READ_LIMIT_BYTES", 4)
 
     outcome = run_cli_bounded(
         shell_child("-c", "printf 123; printf abc >&2"),
@@ -1856,7 +1856,7 @@ def test_bounded_runner_can_discard_stderr() -> None:
     ],
 )
 def test_an_incomplete_or_failed_run_is_not_accepted_as_authenticated(run: CliRun) -> None:
-    with patch("agent_providers.process.run_claude_catalog_cli", return_value=run):
+    with patch("agent_runtime.process.run_claude_catalog_cli", return_value=run):
         login = codex_cli_login()
 
     assert login.logged_in is False
@@ -1866,7 +1866,7 @@ def test_claude_parses_only_stdout() -> None:
     stdout = json.dumps({CLAUDE_CLI_LOGGED_IN_FIELD: True})
     stderr = json.dumps({CLAUDE_CLI_LOGGED_IN_FIELD: False})
     run = CliRun(returncode=0, stdout=stdout, stderr=stderr, complete=True)
-    with patch("agent_providers.process.run_claude_catalog_cli", return_value=run):
+    with patch("agent_runtime.process.run_claude_catalog_cli", return_value=run):
         login = claude_cli_login(Path("/mounted/claude"))
 
     assert login.logged_in is True
@@ -1880,7 +1880,7 @@ def test_claude_parses_only_stdout() -> None:
     ],
 )
 def test_claude_does_not_accept_a_failed_or_incomplete_run(run: CliRun) -> None:
-    with patch("agent_providers.process.run_claude_catalog_cli", return_value=run):
+    with patch("agent_runtime.process.run_claude_catalog_cli", return_value=run):
         login = claude_cli_login(Path("/mounted/claude"))
 
     assert login.logged_in is False
@@ -2283,12 +2283,12 @@ def test_private_credential_home_repair_passes_a_link_in_a_read_only_directory_u
 @pytest.mark.parametrize("flag", ["O_PATH", "O_NOFOLLOW", "O_DIRECTORY", "O_CLOEXEC"])
 def test_process_module_imports_where_os_lacks_a_repair_flag(flag: str) -> None:
     source_root = Path(process.__file__).parents[1]
-    client_source_root = Path(agent_client.__file__).parents[1]
+    client_source_root = Path(agent_runtime_client.__file__).parents[1]
     subprocess.run(
         [
             sys.executable, "-I", "-c",
             "import os, sys; sys.path[:0] = sys.argv[1:3]; delattr(os, sys.argv[3]);"
-            " import agent_providers.process",
+            " import agent_runtime.process",
             str(source_root), str(client_source_root), flag,
         ],
         check=True,
@@ -3029,8 +3029,8 @@ _ABANDONED_HOME_SCRIPT = """
 import sys
 from pathlib import Path
 
-from agent_providers.config import ProviderRuntimeConfig, configure
-from agent_providers.process import PrivateCredentialHome
+from agent_runtime.config import ProviderRuntimeConfig, configure
+from agent_runtime.process import PrivateCredentialHome
 
 configure(ProviderRuntimeConfig.model_validate_json(sys.argv[1]))
 home = PrivateCredentialHome(
@@ -3074,8 +3074,8 @@ import shutil
 import sys
 from pathlib import Path
 
-from agent_providers.config import ProviderRuntimeConfig, configure
-from agent_providers.process import PrivateCredentialHome
+from agent_runtime.config import ProviderRuntimeConfig, configure
+from agent_runtime.process import PrivateCredentialHome
 
 configure(ProviderRuntimeConfig.model_validate_json(sys.argv[1]))
 real_rmtree = shutil.rmtree
@@ -3159,8 +3159,8 @@ import os
 import sys
 from pathlib import Path
 
-from agent_providers.config import ProviderRuntimeConfig, configure
-from agent_providers.process import PrivateCredentialHome
+from agent_runtime.config import ProviderRuntimeConfig, configure
+from agent_runtime.process import PrivateCredentialHome
 
 configure(ProviderRuntimeConfig.model_validate_json(sys.argv[1]))
 home = PrivateCredentialHome(
@@ -3675,9 +3675,9 @@ import sys
 import threading
 from pathlib import Path
 
-from agent_providers import process
-from agent_providers.config import ProviderRuntimeConfig, configure
-from agent_providers.process import PrivateCredentialHome
+from agent_runtime import process
+from agent_runtime.config import ProviderRuntimeConfig, configure
+from agent_runtime.process import PrivateCredentialHome
 
 configure(ProviderRuntimeConfig.model_validate_json(sys.argv[1]))
 
@@ -4185,7 +4185,7 @@ def test_bounded_runner_uses_and_removes_a_private_prompt_file() -> None:
         observed.append((prompt_path, os.stat(prompt_path).st_mode & 0o777))
         return real_popen(command, **kwargs)
 
-    with patch("agent_providers.spawn.subprocess.Popen", side_effect=capture_process):
+    with patch("agent_runtime.spawn.subprocess.Popen", side_effect=capture_process):
         outcome = run_cli_bounded(
             shell_child("-c", "cat \"$1\"", "unused", "placeholder"),
             stdin_payload=None,
@@ -4214,7 +4214,7 @@ def test_bounded_runner_treats_a_missing_prompt_file_as_already_removed(monkeypa
         raise FileNotFoundError
 
     try:
-        with patch("agent_providers.spawn.subprocess.Popen", side_effect=capture_process):
+        with patch("agent_runtime.spawn.subprocess.Popen", side_effect=capture_process):
             monkeypatch.setattr(process.os, "unlink", report_missing_file)
             outcome = run_cli_bounded(
                 shell_child("-c", ":", "unused", "placeholder"),
@@ -4256,7 +4256,7 @@ def test_bounded_runner_publishes_prompt_unlink_errors_to_waiting_consumers(monk
     consumer.start()
     assert ready_to_receive.wait(timeout=1)
     try:
-        with patch("agent_providers.spawn.subprocess.Popen", side_effect=capture_process):
+        with patch("agent_runtime.spawn.subprocess.Popen", side_effect=capture_process):
             monkeypatch.setattr(process.os, "unlink", fail_to_unlink)
             outcome = run_cli_bounded(
                 shell_child("-c", ":", "unused", "placeholder"),
@@ -4281,7 +4281,7 @@ def test_bounded_runner_publishes_prompt_unlink_errors_to_waiting_consumers(monk
 
 
 def test_bounded_runner_creates_no_prompt_file_without_prompt_bytes() -> None:
-    with patch("agent_providers.process.tempfile.mkstemp") as create_prompt_file:
+    with patch("agent_runtime.process.tempfile.mkstemp") as create_prompt_file:
         outcome = run_cli_bounded(
             shell_child("-c", "printf ready"),
             stdin_payload=None,
@@ -4938,7 +4938,7 @@ def test_a_memory_error_inside_the_malformed_handler_holds_no_credential_bytes(
     open_descriptors = len(os.listdir("/proc/self/fd"))
 
     def enter_failing(handled: BaseException | None):
-        with patch("agent_providers.codex_login.CodexLogin", side_effect=MemoryError):
+        with patch("agent_runtime.codex_login.CodexLogin", side_effect=MemoryError):
             with pytest.raises(MemoryError) as raised:
                 enter(tmp_path)
         return raised.value, handled
@@ -5541,7 +5541,7 @@ def test_a_report_made_while_the_log_handler_fails_never_prints_the_failure_text
 ) -> None:
     process_pool, callbacks = pooled_run
     handler = FailingLogHandler()
-    process_logger = logging.getLogger("agent_providers.process")
+    process_logger = logging.getLogger("agent_runtime.process")
     process_logger.addHandler(handler)
     monkeypatch.setattr(process, "_exchange_bounded", _raising(ValueError(A_RUNNER_FAILURE_CANARY)))
     try:
@@ -5570,7 +5570,7 @@ def test_a_log_handler_that_raises_does_not_strand_the_hand_off_or_the_backgroun
     callbacks["on_reaped"] = release_and_signal
 
     handler = RaisingLogHandler(then=OSError)
-    process_logger = logging.getLogger("agent_providers.process")
+    process_logger = logging.getLogger("agent_runtime.process")
     process_logger.addHandler(handler)
     monkeypatch.setattr(process, "_reap_process_group", _raising(
         PermissionError(A_RUNNER_FAILURE_CANARY),
@@ -5591,9 +5591,9 @@ def test_a_cleanup_that_outlasts_the_settle_instant_is_published_by_the_channel_
     monkeypatch, failure_watch, pooled_run,
 ) -> None:
     process_pool, callbacks = pooled_run
-    monkeypatch.setattr("agent_providers.process.CLI_TERMINATION_GRACE_SECONDS", 0.01)
-    monkeypatch.setattr("agent_providers.process.CLI_GROUP_CONFIRMATION_SECONDS", 0.2)
-    monkeypatch.setattr("agent_providers.process.CLI_PROBE_CALLER_TIMEOUT_MARGIN_SECONDS", 0.01)
+    monkeypatch.setattr("agent_runtime.process.CLI_TERMINATION_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr("agent_runtime.process.CLI_GROUP_CONFIRMATION_SECONDS", 0.2)
+    monkeypatch.setattr("agent_runtime.process.CLI_PROBE_CALLER_TIMEOUT_MARGIN_SECONDS", 0.01)
     channel = CliLineChannel(maximum_lines=1)
     release_reap = threading.Event()
     released = threading.Event()
@@ -5642,8 +5642,8 @@ def test_the_returned_outcome_is_the_overrun_a_consumer_already_published(
     monkeypatch, failure_watch, pooled_run,
 ) -> None:
     process_pool, callbacks = pooled_run
-    monkeypatch.setattr("agent_providers.process.CLI_TERMINATION_GRACE_SECONDS", 0.2)
-    monkeypatch.setattr("agent_providers.process.CLI_GROUP_CONFIRMATION_SECONDS", 0.2)
+    monkeypatch.setattr("agent_runtime.process.CLI_TERMINATION_GRACE_SECONDS", 0.2)
+    monkeypatch.setattr("agent_runtime.process.CLI_GROUP_CONFIRMATION_SECONDS", 0.2)
     channel = CliLineChannel(maximum_lines=1)
     release_reap = threading.Event()
     real_reap = process._reap_process_group
@@ -5814,9 +5814,9 @@ def test_whichever_thread_settles_first_decides_the_return_and_the_channel(
     monkeypatch, failure_watch, pooled_run, runner_thread_first, expected_reason,
 ) -> None:
     process_pool, callbacks = pooled_run
-    monkeypatch.setattr("agent_providers.process.CLI_TERMINATION_GRACE_SECONDS", 0.01)
-    monkeypatch.setattr("agent_providers.process.CLI_GROUP_CONFIRMATION_SECONDS", 0.2)
-    monkeypatch.setattr("agent_providers.process.CLI_PROBE_CALLER_TIMEOUT_MARGIN_SECONDS", 0.01)
+    monkeypatch.setattr("agent_runtime.process.CLI_TERMINATION_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr("agent_runtime.process.CLI_GROUP_CONFIRMATION_SECONDS", 0.2)
+    monkeypatch.setattr("agent_runtime.process.CLI_PROBE_CALLER_TIMEOUT_MARGIN_SECONDS", 0.01)
     returned, runner_settled = _settle_in_order(
         monkeypatch, runner_thread_first=runner_thread_first,
     )
@@ -5886,9 +5886,9 @@ def test_control_flow_raised_by_the_channel_close_on_the_callers_thread_propagat
     monkeypatch, failure_watch, pooled_run,
 ) -> None:
     process_pool, callbacks = pooled_run
-    monkeypatch.setattr("agent_providers.process.CLI_TERMINATION_GRACE_SECONDS", 0.01)
-    monkeypatch.setattr("agent_providers.process.CLI_GROUP_CONFIRMATION_SECONDS", 0.2)
-    monkeypatch.setattr("agent_providers.process.CLI_PROBE_CALLER_TIMEOUT_MARGIN_SECONDS", 0.01)
+    monkeypatch.setattr("agent_runtime.process.CLI_TERMINATION_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr("agent_runtime.process.CLI_GROUP_CONFIRMATION_SECONDS", 0.2)
+    monkeypatch.setattr("agent_runtime.process.CLI_PROBE_CALLER_TIMEOUT_MARGIN_SECONDS", 0.01)
     channel = CliLineChannel(maximum_lines=1)
     caller = threading.current_thread()
     release_reap = threading.Event()
@@ -5941,7 +5941,7 @@ def test_a_later_failing_report_never_displaces_earlier_control_flow(
     process_pool, callbacks = pooled_run
     fail_to_start_the_runner_thread(monkeypatch, RuntimeError(A_RUNNER_FAILURE_CANARY))
     handler = RaisingLogHandler(raised_by_records)
-    process_logger = logging.getLogger("agent_providers.process")
+    process_logger = logging.getLogger("agent_runtime.process")
     process_logger.addHandler(handler)
     callbacks["on_spawn_failed"] = _raising(RuntimeError(ANOTHER_RUNNER_FAILURE_CANARY))
     channel = CliLineChannel(maximum_lines=1)
@@ -5962,7 +5962,7 @@ def test_control_flow_raised_by_the_log_handler_while_reporting_propagates_after
     channel = CliLineChannel(maximum_lines=1)
 
     handler = RaisingLogHandler(then=SystemExit)
-    process_logger = logging.getLogger("agent_providers.process")
+    process_logger = logging.getLogger("agent_runtime.process")
     process_logger.addHandler(handler)
     try:
         with pytest.raises(SystemExit):

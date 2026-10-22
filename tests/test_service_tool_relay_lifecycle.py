@@ -31,8 +31,8 @@ from relay_support import (
 )
 from service_support import StepClock
 
-from agent_client.mcp_wire import JSON_MEDIA_TYPE, HttpAnswer
-from agent_service.tool_relay import (
+from agent_runtime_client.mcp_wire import JSON_MEDIA_TYPE, HttpAnswer
+from agent_runtime_service.tool_relay import (
     BODY_RECEIVE_SECONDS,
     HEAD_RECEIVE_SECONDS,
     MAX_RELAY_CONNECTIONS,
@@ -68,7 +68,7 @@ def handlers() -> dict[signal.Signals, object]:
 
 
 def relay_log_records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
-    return [r for r in caplog.records if r.name.startswith("agent_service")]
+    return [r for r in caplog.records if r.name.startswith("agent_runtime_service")]
 
 
 def unretrieved_task_errors(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:

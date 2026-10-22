@@ -19,8 +19,7 @@ from provider_test_support import (
 )
 from pydantic import ValidationError
 
-from agent_client.tools import ToolDeclaration
-from agent_providers.text_tool_protocol import (
+from agent_runtime.text_tool_protocol import (
     FinalText,
     TextToolCall,
     TextToolProtocolError,
@@ -31,7 +30,8 @@ from agent_providers.text_tool_protocol import (
     render_tool_catalog,
     render_tool_result,
 )
-from agent_providers.tools import ToolCatalog, ToolProtocolMarkup
+from agent_runtime.tools import ToolCatalog, ToolProtocolMarkup
+from agent_runtime_client.tools import ToolDeclaration
 
 
 def _call(payload: str) -> str:

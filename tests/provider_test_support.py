@@ -1,4 +1,4 @@
-"""Library-local test support for the ``agent_providers`` package tests.
+"""Library-local test support for the ``agent_runtime`` package tests.
 
 A sibling ``conftest.py`` in this directory would make ``from conftest import``
 ambiguous under pytest's prepend import mode — the root ``tests/conftest.py``
@@ -6,7 +6,7 @@ and this package's own ``conftest.py`` both import as ``conftest``. The lib
 tests therefore reach their shared helpers here, by basename, which resolves
 the same way wherever the suite runs.
 
-Self-contained by design: it imports only ``agent_providers`` and the standard
+Self-contained by design: it imports only ``agent_runtime`` and the standard
 library, never a host application. The deployment facts below are the package's
 own sample — a notes host with its twelve tools — not
 an import of the application's constants, so the tests prove the provider layer
@@ -55,12 +55,11 @@ from anchored_kernel import join_watcher, recorded_watcher_starts
 from anchored_support import ChildCleanup
 from bounds import TEST_WAIT_SECONDS
 
-from agent_client.tools import ToolDeclaration
-from agent_providers import anchored_turn, lost_groups, process, spawn
-from agent_providers.anchored_turn import CliProcessPool, ReapBounds
-from agent_providers.catalog import ProviderRoute
-from agent_providers.claude import provider as claude_provider
-from agent_providers.config import (
+from agent_runtime import anchored_turn, lost_groups, process, spawn
+from agent_runtime.anchored_turn import CliProcessPool, ReapBounds
+from agent_runtime.catalog import ProviderRoute
+from agent_runtime.claude import provider as claude_provider
+from agent_runtime.config import (
     ClaudeCliRuntime,
     CodexCliRuntime,
     CodexTurnRuntime,
@@ -73,9 +72,9 @@ from agent_providers.config import (
     current_config,
     reset_config,
 )
-from agent_providers.constants import CLAUDE_OAUTH_TOKEN_VARIABLE, CLAUDE_RUN_SWITCHES
-from agent_providers.dispatch import stream_turn
-from agent_providers.errors import (
+from agent_runtime.constants import CLAUDE_OAUTH_TOKEN_VARIABLE, CLAUDE_RUN_SWITCHES
+from agent_runtime.dispatch import stream_turn
+from agent_runtime.errors import (
     ProviderUnavailableError,
     RetainedGroup,
     SafeRouteReasonCode,
@@ -83,11 +82,11 @@ from agent_providers.errors import (
     ToolProtocolRejectionCode,
     normalize_route_failure,
 )
-from agent_providers.events import AssistantTextEvent, FinalEvent, StreamEvent
-from agent_providers.process import CliRunOutcome, CliRunReason
-from agent_providers.procfs import GroupCensus
-from agent_providers.secret_file import MAX_SECRET_FILE_BYTES
-from agent_providers.spawn import (
+from agent_runtime.events import AssistantTextEvent, FinalEvent, StreamEvent
+from agent_runtime.process import CliRunOutcome, CliRunReason
+from agent_runtime.procfs import GroupCensus
+from agent_runtime.secret_file import MAX_SECRET_FILE_BYTES
+from agent_runtime.spawn import (
     AnchorStateError,
     BlockingAnchoredChild,
     ChildIdentityLost,
@@ -96,14 +95,15 @@ from agent_providers.spawn import (
     StderrPolicy,
     closed_environment,
 )
-from agent_providers.text_tool_protocol import TextToolRejectionRule
-from agent_providers.tool_loop import (
+from agent_runtime.text_tool_protocol import TextToolRejectionRule
+from agent_runtime.tool_loop import (
     InitialTurn,
     ToolOutcome,
     ToolResult,
     ToolResultBatch,
 )
-from agent_providers.tools import ToolCatalog, ToolProtocolMarkup
+from agent_runtime.tools import ToolCatalog, ToolProtocolMarkup
+from agent_runtime_client.tools import ToolDeclaration
 
 _fake_cli_processes: list[FakeBlockingChild] = []
 
@@ -780,7 +780,7 @@ def override_codex_turn_runtime(**codex_turn_facts: Any) -> None:
 
 def use_codex_process_pool(monkeypatch, process_pool) -> None:
     """Give every Codex module that admits a process the same test pool."""
-    from agent_providers.codex import image, transport
+    from agent_runtime.codex import image, transport
 
     for module in (image, transport):
         monkeypatch.setattr(module, "get_codex_process_pool", lambda: process_pool)
@@ -1163,7 +1163,7 @@ def assert_the_canary_reaches_only_the_host(
 
     refusal_lines = [r for r in records if "text_tool_response_invalid" in r.getMessage()]
     assert [(r.name, r.levelno, r.exc_info) for r in refusal_lines] == [
-        ("agent_providers.tool_loop", logging.WARNING, None),
+        ("agent_runtime.tool_loop", logging.WARNING, None),
     ]
     rejection = error.rejection
     assert refusal_lines[0].getMessage() == (

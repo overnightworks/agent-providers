@@ -3,14 +3,14 @@
 For the operator who runs the agent service: what it enforces at start, who may
 run what, what the configuration owns, and how to provide and renew the
 subscription login. The service's deployment lives in edge, not here.
-`agent_service.config` documents the configuration file, and the decision record
+`agent_runtime_service.config` documents the configuration file, and the decision record
 [0001](decisions/0001-agent-service.md) owns the rulings behind it. The model of
 the system is [ARCHITECTURE.md](ARCHITECTURE.md); what an app sends is
 [wire.md](wire.md).
 
 ## Starting the service
 
-`agent-service --config PATH` takes a TOML file whose required keys have no
+`agent-runtime-service --config PATH` takes a TOML file whose required keys have no
 default; startup names the field of any unknown or missing one and exits 2. The
 service runs only on Linux, as an unprivileged effective user, and makes itself
 non-dumpable at startup before it reads its configuration; it refuses to start
@@ -23,7 +23,7 @@ file and the Claude token file are read and checked with it.
 ## Who may run what
 
 A caller presents a workload token bound to one registered app and a user token
-bound to one principal (`agent_service.identity`). The checks run in this order:
+bound to one principal (`agent_runtime_service.identity`). The checks run in this order:
 
 1. The user must be a member of the app: one of their groups is `/apps/<app>` or
    a path below it (`/apps/notes-other` is not a member of `notes`). This holds
@@ -33,7 +33,7 @@ bound to one principal (`agent_service.identity`). The checks run in this order:
    request whose `roles` lacks it gets 403 `forbidden`.
 3. An app without an MCP origin whose request names a tool gets 403
    `forbidden`.
-4. `agent_service.routing.route` decides the route; the second picture in
+4. `agent_runtime_service.routing.route` decides the route; the second picture in
    [ARCHITECTURE.md](ARCHITECTURE.md) owns the order. The keys that feed it: the
    app's model override (`[apps.<app>.models]`, the agent's name to
    `<provider>/<model>`), the subscription groups (`[identity]

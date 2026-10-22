@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
-from agent_client.capability import (
+from agent_runtime_client.capability import (
     CAPABILITY_ISSUER,
     CAPABILITY_TOKEN_TYPE,
     MAX_CAPABILITY_CHARACTERS,

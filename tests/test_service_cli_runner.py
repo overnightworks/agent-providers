@@ -85,10 +85,15 @@ from service_support import (
     the_app_on,
 )
 
-import agent_service.app as app_module
-import agent_service.config as config_module
-from agent_client.sse import RunStreamDecoder
-from agent_client.wire import (
+import agent_runtime_service.app as app_module
+import agent_runtime_service.config as config_module
+from agent_runtime import lost_groups, spawn
+from agent_runtime.config import PrivateWorkingRoot, reset_config
+from agent_runtime.events import AssistantTextEvent
+from agent_runtime.procfs import GroupCensus
+from agent_runtime.spawn import KillUntilGoneResult
+from agent_runtime_client.sse import RunStreamDecoder
+from agent_runtime_client.wire import (
     ClientLoss,
     Failed,
     FailureCode,
@@ -97,28 +102,23 @@ from agent_client.wire import (
     RunState,
     RunStatus,
 )
-from agent_providers import lost_groups, spawn
-from agent_providers.config import PrivateWorkingRoot, reset_config
-from agent_providers.events import AssistantTextEvent
-from agent_providers.procfs import GroupCensus
-from agent_providers.spawn import KillUntilGoneResult
-from agent_service.admission import AdmissionSlot
-from agent_service.app import create_app
-from agent_service.capability import Capability
-from agent_service.cli import main
-from agent_service.cli_runner import RUN_ADAPTERS, CliRunner, ProfileLaunch, installed_runners
-from agent_service.config import McpConfig, Provider, ServiceConfig
-from agent_service.quarantine import Quarantine
-from agent_service.routing import Cli
-from agent_service.run_events import (
+from agent_runtime_service import cli_runner
+from agent_runtime_service.admission import AdmissionSlot
+from agent_runtime_service.app import create_app
+from agent_runtime_service.capability import Capability
+from agent_runtime_service.cli import main
+from agent_runtime_service.config import McpConfig, Provider, ServiceConfig
+from agent_runtime_service.quarantine import Quarantine
+from agent_runtime_service.routing import Cli
+from agent_runtime_service.run_events import (
     INVALID_EVENT_MESSAGE,
     NO_RUNNER_MESSAGE,
     RUNNER_FAILED_MESSAGE,
     run_frames,
 )
-from agent_service.run_liveness import LoopClock
-from agent_service.run_records import RunRecords
-from agent_service.runners import Runners
+from agent_runtime_service.run_liveness import LoopClock
+from agent_runtime_service.run_records import RunRecords
+from agent_runtime_service.runners import Runners
 
 MINT = TokenMint()
 CANARY = "cli-text-" + uuid.uuid4().hex
@@ -165,7 +165,7 @@ def trusting(config: ServiceConfig, authority: TestAuthority) -> ServiceConfig:
 
 
 def tool_free_runners(config: ServiceConfig) -> Runners:
-    return installed_runners(config, None, LoopClock())
+    return cli_runner.installed_runners(config, None, LoopClock())
 
 
 def private_root_of(config: ServiceConfig) -> Path:
@@ -314,11 +314,11 @@ def test_the_run_adapter_passes_the_routes_model_and_not_the_requests(tmp_path: 
         request=RunRequest.model_validate(run_body(model="claude/opus")),
         route=Cli("claude-main", LISTED_MODEL),
     )
-    launch = ProfileLaunch(
+    launch = cli_runner.ProfileLaunch(
         Provider.CLAUDE, tmp_path / "claude", tmp_path / "token", 7, 600.0
     )
 
-    adapter = RUN_ADAPTERS[Provider.CLAUDE](launch, SecretStr("token"), admitted, None)
+    adapter = cli_runner.RUN_ADAPTERS[Provider.CLAUDE](launch, SecretStr("token"), admitted, None)
 
     arguments = adapter.start(tmp_path / "home", tmp_path / "work").child.arguments
     assert [a for a in arguments if a.startswith("--model")] == [f"--model={LISTED_MODEL}"]
@@ -957,7 +957,7 @@ def test_a_closed_runner_has_reaped_the_cli_before_its_close_returns(
     config = a_config(tmp_path, a_parked_claude(tmp_path, for_the_client_socket=True))
 
     async def scenario() -> tuple[AssistantTextEvent, int, list[Path], list[bool]]:
-        runner = CliRunner(config, tls_context=None, clock=StepClock())
+        runner = cli_runner.CliRunner(config, tls_context=None, clock=StepClock())
         events = runner.run(alice_admitted_run(uuid.uuid4()))
         first = await anext(events)
         await events.aclose()
@@ -1034,7 +1034,7 @@ def a_scripted_run(
     run_id = uuid.uuid4()
     frames = run_frames(
         dataclasses.replace(alice_admitted_run(run_id), capability=capability),
-        CliRunner(config, tls_context=tls_context, clock=clock),
+        cli_runner.CliRunner(config, tls_context=tls_context, clock=clock),
         config.runs,
         clock,
         records,
@@ -1111,7 +1111,7 @@ def through_the_service_entry[Result](
     monkeypatch.setattr(app_module, "create_app", create_app_with_the_test_key_set)
 
     def start_and_play() -> Result:
-        assert main(["--config", str(tmp_path / "agent-service.toml")]) == 0
+        assert main(["--config", str(tmp_path / "agent-runtime-service.toml")]) == 0
         with served(served_apps[0]) as base_url:
             return scenario(base_url)
 
@@ -1147,4 +1147,4 @@ def test_a_profile_loads_only_for_a_provider_with_a_run_adapter(provider: Provid
         refusal_names_the_provider = True
         loads = True
 
-    assert (loads, refusal_names_the_provider) == (provider in RUN_ADAPTERS, True)
+    assert (loads, refusal_names_the_provider) == (provider in cli_runner.RUN_ADAPTERS, True)

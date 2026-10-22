@@ -1,8 +1,0 @@
-claim_id = "489be743e28549e3ba196260aaba9dba"
-agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
-role = "builder"
-base = "e5d988213ba98fcd9066277cc30a39e3ed096b19"
-branch = "claude/issue-435-s1-agent-runtime-code-umbenennung-versio"
-scope = [".github/workflows/ci.yml", ".github/workflows/release.yml", ".importlinter", "AGENTS.md", "README.md", "docs/ARCHITECTURE.md", "docs/MIGRATING.md", "docs/host.md", "docs/operations.md", "docs/wire.md", "packages/agent-client", "packages/agent-service", "packages/client", "packages/service", "pyproject.toml", "quality/baseline.toml", "scripts", "sonar-project.properties", "src/agent_providers", "src/agent_runtime", "tests", "uv.lock"]
-opened_commit = "99c2c1ed7b1c4711eab2ea330048c7737319f537"
-whole_reason = "One rename across the workspace: the three imports, their distributions, CI paths and lockstep pins only work when they move together; a split needs shims."

@@ -1,11 +1,6 @@
 # Repository agent guidance
 
-`agent-providers` is a library and the agent service built on it (README has the
-overview). Every change here is a change to a public contract that a tag has
-already frozen elsewhere. Python 3.12+, managed with uv, a uv workspace of three
-distributions: the core under `src/agent_providers/`, the client under
-`packages/agent-client/`, the service under `packages/agent-service/`. Decision
-records live in `docs/decisions/`. Keep the root to what a tool must find there.
+`agent-providers` is a library and the agent service built on it; every change here is a change to a public contract that a tag has already frozen elsewhere. Overview: README; decisions: `docs/decisions/`; breaking changes: `docs/MIGRATING.md`.
 
 ## Boundaries
 
@@ -15,6 +10,7 @@ proves it. The traps it cannot show:
 - The service's wire has one owner, `agent_client.wire`.
 - `agent_providers.events` is the core's in-process turn event, never a second wire.
 - Only the service imports a web framework.
+- The `[api]`, `[image]` and `[mcp-server]` extras stay optional: their libraries are imported only inside the route or module that needs them, and no base module imports `agent_client.mcp_server`.
 
 ## Code patterns
 
@@ -56,7 +52,7 @@ The suite needs no live provider, and `[image]` is required at collection
 `src packages tests docs` for host words; `.github/host-vocabulary-allowed.txt`
 owns the allowed hits. The required check is `quality / verdict`
 (`quality/config.toml`, `.github/workflows/ci.yml`).
-`tests/test_service_keycloak.py` skips outside the `keycloak-token-shapes` job.
+`tests/test_service_keycloak.py` skips without `KEYCLOAK_URL`, which CI's `keycloak-token-shapes` job sets.
 
 ## Releasing
 

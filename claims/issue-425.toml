@@ -1,7 +1,0 @@
-claim_id = "36832c9bc4e14c46b3362edeb98032c1"
-agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
-role = "builder"
-base = "c7816f2f46ebf36f1279afc29a5f30f6c66324fb"
-branch = "claude/issue-425-quality-auf-v0-5-0-klon-paare-in-die-bas"
-scope = [".github/workflows/ci.yml", ".github/workflows/code-scanning.yml", "quality/baseline.toml"]
-opened_commit = "e4d6adb09460e6d7ba0f88ee6a4b7ed72bcc14e6"

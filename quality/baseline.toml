@@ -1,0 +1,89 @@
+# Measured by `quality baseline write`. Entries only ever go down.
+
+[ccn."tests/test_service_run_recording.py"]
+"_end_a_run" = 22
+
+[ccn."tests/test_zombie_anchor.py"]
+"test_the_support_module_names_no_pid_number" = 26
+
+[file_lines]
+"packages/agent-service/src/agent_service/run_liveness.py" = 827
+"packages/agent-service/src/agent_service/tool_relay.py" = 928
+"src/agent_providers/claude/provider.py" = 2156
+"src/agent_providers/process.py" = 2417
+"src/agent_providers/spawn.py" = 1137
+"tests/provider_test_support.py" = 2195
+"tests/service_support.py" = 1582
+"tests/test_anchored_group_signal.py" = 812
+"tests/test_catalog.py" = 1045
+"tests/test_claude_provider.py" = 5486
+"tests/test_claude_provider_streaming.py" = 1168
+"tests/test_claude_run.py" = 876
+"tests/test_codex_cli_adapter.py" = 3089
+"tests/test_grok_cli_adapter.py" = 1213
+"tests/test_process.py" = 6199
+"tests/test_procfs.py" = 838
+"tests/test_run_directories.py" = 852
+"tests/test_service_app_tools.py" = 1087
+"tests/test_service_capability.py" = 886
+"tests/test_service_cli_runner.py" = 1150
+"tests/test_service_cli_runner_tools.py" = 1738
+"tests/test_service_config.py" = 1724
+"tests/test_service_entrance.py" = 950
+"tests/test_service_quarantine.py" = 870
+"tests/test_service_run_recording.py" = 2268
+"tests/test_service_run_tools.py" = 920
+"tests/test_service_tool_relay.py" = 1309
+"tests/test_service_tool_relay_barrier.py" = 2010
+"tests/test_text_tool_protocol.py" = 888
+
+[function_lines."packages/agent-service/src/agent_service/app.py"]
+"create_app" = 65
+
+[function_lines."src/agent_providers/claude/provider.py"]
+"_call_cli" = 67
+
+[function_lines."src/agent_providers/codex/transport.py"]
+"CodexCliToolTransport.stream" = 91
+
+[function_lines."src/agent_providers/dispatch.py"]
+"_stream_for_route" = 62
+
+[function_lines."src/agent_providers/grok/transport.py"]
+"GrokCliToolTransport.stream" = 81
+
+[function_lines."src/agent_providers/openai_adapter.py"]
+"stream_openai_compatible_turn" = 62
+
+[function_lines."src/agent_providers/tool_loop.py"]
+"stream_tool_loop" = 60
+
+[function_lines."tests/provider_test_support.py"]
+"ScriptedClaudeChild.__init__" = 64
+"a_fake_claude" = 66
+
+[function_lines."tests/test_anchored_group_signal.py"]
+"test_a_kill_and_census_runs_in_one_hold_that_keeps_a_release_waiting" = 63
+
+[function_lines."tests/test_claude_provider.py"]
+"test_no_builtin_gate_sync_single_flight_waits_for_the_real_result_not_a_placeholder" = 68
+"test_probe_with_a_stalled_pipe_reaps_and_releases_its_admission" = 93
+"test_stream_reap_does_not_spin_under_anyio_level_cancellation" = 66
+"test_tool_surface_single_flight_waits_for_the_real_result_not_a_placeholder" = 63
+
+[function_lines."tests/test_codex_cli_adapter.py"]
+"test_codex_tool_transport_uses_an_empty_private_work_directory_on_resume" = 68
+
+[function_lines."tests/test_grok_cli_adapter.py"]
+"test_grok_tool_transport_starts_then_resumes_in_one_private_credential_home" = 84
+
+[function_lines."tests/test_process.py"]
+"test_parallel_cold_asks_share_one_failure" = 67
+"test_private_credential_home_never_follows_an_inner_directory_swapped_for_a_symlink" = 73
+
+[function_lines."tests/test_service_cli_runner_tools.py"]
+"a_tool_run" = 63
+"test_a_real_group_keeps_its_place_through_the_service_until_the_reap_ends" = 75
+
+[function_lines."tests/test_service_run_recording.py"]
+"_end_a_run" = 94

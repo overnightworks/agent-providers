@@ -2,6 +2,20 @@
 
 Read by a host bumping its pin; each release that breaks a host has one section, newest first.
 
+## Migrating to 0.8.0
+
+The service no longer replaces a requested model: `[apps.<app>.models]` is removed. An app
+that kept a model per agent in the service configuration stores the choice itself and sends
+`model` on every run.
+
+| Before | Now |
+| --- | --- |
+| `[apps.<app>.models]`, a table of `<agent> = "<provider>/<model>"`, replaced the model of a run by its `purpose` | Removed. A configuration that still holds the table stops startup with exit 2, and the line starts with `apps.<app>.models`. |
+| A run without `model` could take the table's model | A run without `model` takes the default of the subscription profile. |
+
+An app's change of choice takes effect on its next run, with no restart of the service. The wire
+stays version 2: `RunRequest` keeps its shape.
+
 ## Migrating to 0.7.0
 
 A host migrates at its pin bump to 0.7.0, by renaming. Nothing behaves differently: the wire

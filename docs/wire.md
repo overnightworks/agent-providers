@@ -24,7 +24,7 @@ workload token in the `Agent-Workload-Token` header.
 | Field | Meaning |
 |---|---|
 | `v` | The protocol version, `2`. Any other body answers 400 `unsupported_version`. |
-| `purpose` | The agent's name, `[a-z][a-z0-9-]{0,63}`. It labels the run and its capability and keys the app's model override; it chooses no route. |
+| `purpose` | The agent's name, `[a-z][a-z0-9-]{0,63}`. It labels the run and its capability; it chooses no route and no model. |
 | `turn` | The system prompt and the messages (`Turn`, `TurnMessage`). |
 | `roles` | The agent's allowed roles, exactly `["admin"]` or `["admin", "user"]`; `AgentDefinition.request` fills it from the agent file. |
 | `tools` | A map from each tool the run may call to its `ToolEffect`; required, possibly `{}`. |
@@ -123,8 +123,8 @@ protocol version and the status.
 request and neither stored nor passed to the CLI. The service hands the CLI nothing
 derived from them either: not the subject, issuer, groups, client id, app name or
 run id, and not the capability, which it sends only to the app's MCP server. From
-the service the CLI receives the app's turn, the model when the service's override
-for the app's agent or the request names one, the app's tool definitions and tool
+the service the CLI receives the app's turn, the model the request
+names, the app's tool definitions and tool
 results through the relay, the run's fixed flags and limits, the path of its system
 prompt file and, when the run offers tools, of its relay file with the relay's
 loopback address and per-run secret, and the service's own subscription credential;

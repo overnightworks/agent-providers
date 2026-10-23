@@ -16,6 +16,9 @@ that kept a model per agent in the service configuration stores the choice itsel
 An app's change of choice takes effect on its next run, with no restart of the service. The wire
 stays version 2: `RunRequest` keeps its shape.
 
+`GET /offer` is new: it lists the models the asking person can run in this app, with the same
+two tokens as `POST /runs`. It needs no action ([wire.md](wire.md), "The offer").
+
 ## Migrating to 0.7.0
 
 A host migrates at its pin bump to 0.7.0, by renaming. Nothing behaves differently: the wire

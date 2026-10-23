@@ -72,6 +72,27 @@ everything below it. The service issues a ticket even to a person who could not 
 right now, limits no count per person, stores nothing and cannot revoke one. The ticket is shown
 only in this response: never in a URL, a log, a header or another body.
 
+## The offer
+
+`GET /offer` answers `{v: 2, object: "list", data: [...]}` (`Offer`), shaped like OpenAI's
+`GET /v1/models`: `data` lists the models the asking person can run in this app, sorted by
+`id`. Each entry (`OfferedModel`) is `{id, object: "model", created: 0, owned_by, route,
+ready, reason}`: `id` is `<provider>/<model>` as `RunRequest.model` writes it, `owned_by` the
+provider, `route` is `cli` (the subscription) or `api`, and `reason` is `null` when `ready` is
+true and `not_built` when it is not (the route has no runner installed). `OfferReason` is
+closed; a new reason is a wire change, because a new variant is a new `PROTOCOL_VERSION`.
+
+The call has no body and carries the same two tokens as `POST /runs`, refused the same way
+(401, 403, 503). Every member of the app may ask, not only admins, and the answer is for the
+asking person only: a member in no subscription or API group gets `200` with an empty `data`.
+It is computed on every request from the configuration and the installed runners, never
+cached (`Cache-Control: no-store`), and never opens the login file. A model the person
+cannot run is absent, not listed as `not_enabled`.
+
+It is not a list of what `/runs` admits. Only the models a `[cli.<provider>]` table lists
+appear, so a model that only the API could serve is absent although `/runs` would admit it on
+`api`, and `ready` does not say whether the subscription has a free place (`busy`).
+
 ## Agent files
 
 An app declares its agents as Claude Code subagent files,

@@ -38,7 +38,6 @@
 "tests/test_text_tool_protocol.py" = 888
 
 [function_lines."packages/service/src/agent_runtime_service/app.py"]
-"create_app" = 65
 
 [function_lines."src/agent_runtime/claude/provider.py"]
 "_call_cli" = 67

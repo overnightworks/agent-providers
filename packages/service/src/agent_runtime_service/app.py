@@ -1,8 +1,10 @@
 """The HTTP surface: ``POST /runs``, the one entrance through which an app starts a run,
 ``GET /runs/{id}``, through which the app and user that started it read where it stands,
-and ``POST /job-tickets``, through which an app gets a ticket for a later background run.
+``POST /job-tickets``, through which an app gets a ticket for a later background run, and
+``GET /offer``, which lists the models the asking person can run in this app
+(``agent_runtime_service.offer``).
 
-All routes check the two tokens first, with the same answers. A ``POST`` is then
+All three routes check the two tokens first, with the same answers. A ``POST`` is then
 checked in a fixed order, and the first failure answers:
 
 1. the workload token, then the user token, then membership of the app
@@ -58,6 +60,7 @@ from agent_runtime_client.capability import MAX_CAPABILITY_CHARACTERS
 from agent_runtime_client.wire import (
     PROTOCOL_VERSION,
     JobTicketRequest,
+    Offer,
     RejectionCode,
     RunRejection,
     RunRequest,
@@ -77,6 +80,7 @@ from agent_runtime_service.job_ticket import (
     parse_job_ticket_request,
     signed_job_ticket,
 )
+from agent_runtime_service.offer import offered_models
 from agent_runtime_service.quarantine import GroupConfirmation, Quarantine
 from agent_runtime_service.routing import Cli, NotEnabled, ServedRoute, route
 from agent_runtime_service.run_events import run_frames
@@ -165,24 +169,8 @@ def create_app(
             run_request,
         )
 
-    @app.get("/runs/{run_id}")
-    async def run_status(request: Request, run_id: str) -> Response:
-        caller = await _caller_of(callers, request)
-        if isinstance(caller, RejectionCode):
-            return rejection(caller)
-        parsed_id = _run_id_from(run_id)
-        status = (
-            None
-            if parsed_id is None
-            else installed_records.read(parsed_id, caller.app, caller.principal)
-        )
-        if status is None:
-            return rejection(RejectionCode.NOT_FOUND)
-        return Response(
-            content=status.model_dump_json(),
-            media_type=_JSON_MEDIA_TYPE,
-            headers={"Cache-Control": "no-store"},
-        )
+    app.get("/runs/{run_id}")(_run_status_route(callers, installed_records))
+    app.get("/offer")(_offer_route(callers, config, installed_runners))
 
     return app
 
@@ -336,6 +324,49 @@ def _capability_of(
         max_duration_s=config.runs.max_duration_s,
     )
     return signed_capability(scope, claims)
+
+
+def _run_status_route(
+    callers: CallerCheck, records: RunRecords
+) -> Callable[[Request, str], Awaitable[Response]]:
+    async def run_status(request: Request, run_id: str) -> Response:
+        caller = await _caller_of(callers, request)
+        if isinstance(caller, RejectionCode):
+            return rejection(caller)
+        parsed_id = _run_id_from(run_id)
+        status = (
+            None if parsed_id is None else records.read(parsed_id, caller.app, caller.principal)
+        )
+        if status is None:
+            return rejection(RejectionCode.NOT_FOUND)
+        return Response(
+            content=status.model_dump_json(),
+            media_type=_JSON_MEDIA_TYPE,
+            headers={"Cache-Control": "no-store"},
+        )
+
+    return run_status
+
+
+def _offer_route(
+    callers: CallerCheck, config: ServiceConfig, runners: Runners
+) -> Callable[[Request], Awaitable[Response]]:
+    async def offer(request: Request) -> Response:
+        caller = await _caller_of(callers, request)
+        if isinstance(caller, RejectionCode):
+            return rejection(caller)
+        body = Offer(
+            v=PROTOCOL_VERSION,
+            object="list",
+            data=list(offered_models(config, runners, caller.groups)),
+        )
+        return Response(
+            content=body.model_dump_json(),
+            media_type=_JSON_MEDIA_TYPE,
+            headers={"Cache-Control": "no-store"},
+        )
+
+    return offer
 
 
 def _job_ticket_route(

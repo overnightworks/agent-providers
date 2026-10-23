@@ -27,7 +27,7 @@ bound to one principal (`agent_runtime_service.identity`). The checks run in thi
 
 1. The user must be a member of the app: one of their groups is `/apps/<app>` or
    a path below it (`/apps/notes-other` is not a member of `notes`). This holds
-   for `POST /runs` and `GET /runs/{id}`; anyone else gets 403 `forbidden`,
+   for `POST /runs`, `GET /runs/{id}` and `GET /offer`; anyone else gets 403 `forbidden`,
    before the body is read.
 2. Their role is `admin` in `/apps/<app>/admin` or below, else `user`; a
    request whose `roles` lacks it gets 403 `forbidden`.

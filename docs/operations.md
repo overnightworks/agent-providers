@@ -66,8 +66,8 @@ The agent service holds the one login per provider for all apps. Only the
 subscriber himself may use it, because the provider's terms allow no use on behalf
 of others. The service keeps no user list; Keycloak decides, so the operator keeps
 the subscription groups (`subscription_groups`) to the subscriber alone. Everyone
-else is admitted through `api_groups` to the API route, which is not built yet,
-so their runs end `failed: provider_unavailable` ([ARCHITECTURE.md](ARCHITECTURE.md)).
+else reaches the API route only as a member of `api_groups`; a person in neither
+group is refused `not_enabled` ([ARCHITECTURE.md](ARCHITECTURE.md)).
 The file is the operator's to make and to keep
 fresh, named as `profiles.<name>.token_file`; the library never creates, renews
 or rewrites it. Claude is the only profile today: the service refuses a profile

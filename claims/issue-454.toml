@@ -1,0 +1,8 @@
+claim_id = "426ec4427091472cacc851dcc289937d"
+agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
+role = "builder"
+base = "f2b05333c31b386adc6a1ca1aeed1d67e8447366"
+branch = "claude/issue-454-o3-offer-reads-the-get-offer-answer-in-t"
+scope = ["docs/MIGRATING.md", "docs/wire.md", "packages/client/src/agent_runtime_client/wire.py", "tests/test_client_offer.py", "tests/test_service_offer.py"]
+opened_commit = "ad5291824f6108f54842a1e3f64e8633334f1db1"
+whole_reason = "parse_offer, its proof against the real service, its pure tests and its two docs are one contract and land together"

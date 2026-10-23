@@ -270,6 +270,20 @@ def test_the_offer_background_names_whether_a_ticket_run_gets_the_same_route(
     assert (entry.route, entry.background) == (route, expected)
 
 
+@pytest.mark.parametrize("profile_background", [True, False])
+def test_a_member_without_an_ai_group_is_offered_nothing_whatever_the_profile_background(
+    profile_background,
+):
+    """A4: no AI group is an empty offer for either profile background"""
+    config = _with_background(
+        with_listed_models(service_config(), [LISTED_MODEL]), profile_background
+    )
+    with _served(config, _runners(cli=True, api=True)) as app:
+        offer = _the_offer(_get_offer(app, [SONGMAKER_GROUP]))
+
+    assert offer.data == []
+
+
 def test_an_entry_that_is_not_ready_still_says_whether_a_ticket_run_gets_the_same_route():
     """A5"""
     config = without_profiles(with_listed_models(service_config(), [LISTED_MODEL]))
@@ -410,7 +424,6 @@ def test_the_offer_refuses_tokens_as_runs_does(headers, code, status):
 
 def test_an_unfetchable_key_set_answers_unavailable_as_runs_does():
     """O7"""
-
     def unreachable_issuer(_url: str) -> bytes:
         raise KeySetFetchError("the issuer cannot be reached")
 

@@ -36,15 +36,12 @@ from agent_runtime.tools import (
 from agent_runtime_client.run_stream import RunStream, StreamViolation, ViolationKind, parse_event
 from agent_runtime_client.tools import ToolDeclaration, ToolEffect
 from agent_runtime_client.wire import (
-    MAX_JOB_TICKET_SECONDS,
     MAX_MESSAGE_LENGTH,
     MAX_PURPOSE_LENGTH,
     PROTOCOL_VERSION,
     AgentRoles,
     ClientLoss,
     FailureCode,
-    JobTicket,
-    JobTicketRequest,
     Purpose,
     RejectionCode,
     RunEvent,
@@ -770,50 +767,3 @@ def test_a_run_request_with_a_model_outside_the_grammar_is_refused(model: object
 @pytest.mark.parametrize("model", [pytest.param("claude/sonnet"), pytest.param(None)])
 def test_a_run_request_may_name_a_model_or_an_explicit_null(model: str | None) -> None:
     assert RunRequest.model_validate({**REQUEST, "model": model}).model == model
-
-
-JOB_TICKET_REQUEST = {"v": PROTOCOL_VERSION, "purpose": "reviewer", "expires_in_s": 3600}
-JOB_TICKET = {"v": PROTOCOL_VERSION, "ticket": "a.b.c", "expires_at": "2026-10-24T12:00:00Z"}
-
-
-def test_a_job_ticket_request_round_trips_through_its_json() -> None:
-    request = JobTicketRequest.model_validate_json(json.dumps(JOB_TICKET_REQUEST))
-
-    assert json.loads(request.model_dump_json()) == JOB_TICKET_REQUEST
-
-
-@pytest.mark.parametrize(
-    "overrides",
-    [
-        {"v": 1},
-        {"expires_in_s": 0},
-        {"expires_in_s": MAX_JOB_TICKET_SECONDS + 1},
-        {"expires_in_s": 3600.0},
-        {"expires_in_s": "3600"},
-        {"purpose": "Not A Purpose"},
-        {"surplus": 1},
-    ],
-)
-def test_a_job_ticket_request_off_the_contract_is_refused(overrides: dict[str, object]) -> None:
-    with pytest.raises(ValidationError):
-        JobTicketRequest.model_validate({**JOB_TICKET_REQUEST, **overrides})
-
-
-def test_a_job_ticket_request_has_no_default_lifetime() -> None:
-    with pytest.raises(ValidationError):
-        JobTicketRequest.model_validate({"v": PROTOCOL_VERSION, "purpose": "reviewer"})
-
-
-def test_a_job_ticket_round_trips_and_its_repr_hides_the_ticket() -> None:
-    ticket = JobTicket.model_validate_json(json.dumps(JOB_TICKET))
-
-    assert json.loads(ticket.model_dump_json()) == JOB_TICKET
-    assert "a.b.c" not in repr(ticket)
-
-
-@pytest.mark.parametrize(
-    "overrides", [{"ticket": ""}, {"expires_at": "2026-10-24T12:00:00+02:00"}, {"surplus": 1}]
-)
-def test_a_job_ticket_off_the_contract_is_refused(overrides: dict[str, object]) -> None:
-    with pytest.raises(ValidationError):
-        JobTicket.model_validate_json(json.dumps({**JOB_TICKET, **overrides}))

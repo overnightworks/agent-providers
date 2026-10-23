@@ -50,11 +50,13 @@ from provider_test_support import (
     RaisingLogHandler,
     RunnerFailureWatch,
     ThreadedOperation,
+    a_blanked_grok_login,
     a_codex_login,
     a_credential_destination_that_fails,
     a_dangling_symlink,
     a_directory,
     a_fifo,
+    a_grok_login,
     a_path_through_a_regular_file,
     a_symlink_to_a_login,
     a_usable_login_over_the_bound,
@@ -4539,9 +4541,11 @@ def test_an_unusable_codex_login_makes_the_probe_answer_logged_out(
     assert codex_cli_login().logged_in is False
 
 
-def test_the_grok_probe_hands_its_child_the_login_byte_for_byte(tmp_path, monkeypatch) -> None:
+def test_the_grok_probe_hands_its_child_the_login_with_its_renewal_members_blank(
+    tmp_path, monkeypatch,
+) -> None:
     auth_file = tmp_path / "grok-auth.json"
-    auth_file.write_bytes(b'{"realm": {"key": "grok-synthetic-key"}}')
+    auth_file.write_bytes(a_grok_login())
     override_grok_runtime(token_file=auth_file)
     monkeypatch.setattr(process, "resolve_cli_binary", lambda _binary: Path("/usr/bin/grok"))
     copies: list[bytes] = []
@@ -4558,7 +4562,32 @@ def test_the_grok_probe_hands_its_child_the_login_byte_for_byte(tmp_path, monkey
     clear_agent_cli_caches()
 
     assert grok_cli_status().login.logged_in is True
-    assert copies == [auth_file.read_bytes()]
+    assert copies == [a_blanked_grok_login()]
+
+
+@pytest.mark.parametrize("document", (b"[]", b"not json"), ids=("array", "not-json"))
+def test_the_grok_probe_hands_its_child_no_login_when_the_source_is_not_a_json_object(
+    tmp_path, monkeypatch, document: bytes,
+) -> None:
+    auth_file = tmp_path / "grok-auth.json"
+    auth_file.write_bytes(document)
+    override_grok_runtime(token_file=auth_file)
+    monkeypatch.setattr(process, "resolve_cli_binary", lambda _binary: Path("/usr/bin/grok"))
+    homes_with_a_login: list[bool] = []
+
+    def run_cli_bounded(child, **kwargs):
+        homes_with_a_login.append((Path(child.environment["GROK_HOME"]) / "auth.json").exists())
+        kwargs["on_reaped"](0, False)
+        return CliRunOutcome(
+            started=True, spawn_error=None, returncode=0, stdout=GROK_LOGGED_OUT, stderr="",
+            complete=True, became_zombie=False, reason=CliRunReason.COMPLETE,
+        )
+
+    monkeypatch.setattr(process, "run_cli_bounded", run_cli_bounded)
+    clear_agent_cli_caches()
+
+    assert grok_cli_status().login.logged_in is False
+    assert homes_with_a_login == [False]
 
 
 _NOT_A_PLAIN_FILE = [

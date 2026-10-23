@@ -170,7 +170,7 @@ containment brings the sandbox described below.
 **Private homes and logins.** Every Claude, Grok or Codex turn, catalog probe and
 subscription run gets a fresh private home below the working root (directories
 0700, credential copies 0400, a Codex turn's blanked copy 0600); the source is
-opened only for reading. Grok and Codex copy the host-named file into the home. A
+opened only for reading. Grok and Codex copy the host-named file into the home, and both copies are blanked: every renewal member (a Grok `refresh_token`, `refreshToken` or `refresh`, at any depth; Codex's `refresh_token`) is the empty string, so a child never holds a token it could rotate. A
 Claude turn gets no copy: the setup token in `claude.token_file` reaches the child
 only as `CLAUDE_CODE_OAUTH_TOKEN`, never in its arguments, and is read through
 `secret_file` at every child start. A file `agent_runtime.secret_file` refuses (how the operator writes it:

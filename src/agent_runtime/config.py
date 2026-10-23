@@ -143,7 +143,7 @@ class GrokCliRuntime(BaseModel):
     """The deployment facts of the Grok CLI, present only on a host that runs it.
 
     ``token_file`` is the provider's login source; Grok defines its format, an
-    ``auth.json`` copied whole, mode 0400.
+    ``auth.json``; a child gets a copy whose renewal members are blank, mode 0400.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")

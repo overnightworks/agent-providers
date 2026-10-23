@@ -24,10 +24,12 @@ from provider_test_support import (
     CliCall,
     Hold,
     RunnerFailureWatch,
+    a_blanked_grok_login,
     a_call_nested_too_deeply_to_decode,
     a_call_to_a_declared_tool,
     a_call_to_an_undeclared_tool_carrying,
     a_credential_destination_that_fails,
+    a_grok_login,
     a_symlink_to_a_login,
     a_usable_login_over_the_bound,
     assert_a_multi_result_batch_is_rejected,
@@ -86,6 +88,20 @@ def _transport() -> grok_cli_adapter.GrokCliToolTransport:
     return grok_cli_adapter.GrokCliToolTransport(
         model="grok-test", catalog=SAMPLE_TOOL_CATALOG,
     )
+
+
+@pytest.mark.parametrize("document", (b"[]", b"not json"), ids=("array", "not-json"))
+def test_grok_turn_whose_login_is_not_a_json_object_is_logged_out(
+    tmp_path: Path, document: bytes,
+) -> None:
+    source = tmp_path / "source"
+    source.write_bytes(document)
+    override_grok_runtime(token_file=source)
+
+    with pytest.raises(ProviderUnavailableError) as raised:
+        _transport()
+
+    assert raised.value.reason.code is SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED
 
 
 def test_grok_turn_without_a_configured_credential_is_logged_out(tmp_path: Path) -> None:
@@ -335,13 +351,13 @@ def test_grok_tool_transport_starts_then_resumes_in_one_private_credential_home(
 ) -> None:
     calls: list[CliCall] = []
     homes: list[Path] = []
-    source = current_grok_runtime().token_file
+    current_grok_runtime().token_file.write_bytes(a_grok_login())
 
     def assert_private_home(child) -> None:
         homes.append(assert_private_credential_child(
             child,
             root=tmp_path,
-            source=source,
+            expected_copy=a_blanked_grok_login(),
             destination=Path(".grok/auth.json"),
         ))
 
@@ -412,7 +428,7 @@ def test_grok_tool_transport_starts_then_resumes_in_one_private_credential_home(
     assert homes == [first_home, first_home, third_home]
     assert not first.child.working_directory.exists()
     assert not third_home.exists()
-    assert source.read_text() == "{}"
+    assert current_grok_runtime().token_file.read_bytes() == a_grok_login()
 
 
 def _grok_runner_that_fails_by(failure: str, monkeypatch):
@@ -516,12 +532,14 @@ def test_grok_turn_keeps_its_private_home_until_late_runner_confirmation(
 ) -> None:
     captured: dict[str, object] = {}
 
+    current_grok_runtime().token_file.write_bytes(a_grok_login())
+
     def run_cli_bounded(child, **kwargs):
         captured.update(kwargs)
         captured["home"] = assert_private_credential_child(
             child,
             root=tmp_path,
-            source=current_grok_runtime().token_file,
+            expected_copy=a_blanked_grok_login(),
             destination=Path(".grok/auth.json"),
         )
         outcome = CliRunOutcome(
@@ -1112,12 +1130,14 @@ def test_closing_the_tool_loop_keeps_the_grok_home_until_confirmed_reap(
     aborted = threading.Event()
     captured: dict[str, object] = {}
 
+    current_grok_runtime().token_file.write_bytes(a_grok_login())
+
     def run_cli_bounded(child, **kwargs):
         captured.update(kwargs)
         captured["home"] = assert_private_credential_child(
             child,
             root=tmp_path,
-            source=current_grok_runtime().token_file,
+            expected_copy=a_blanked_grok_login(),
             destination=Path(".grok/auth.json"),
         )
         channel = kwargs["stdout_line_channel"]

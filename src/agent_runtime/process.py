@@ -38,7 +38,7 @@ from typing import (
     cast,
 )
 
-from agent_runtime import procfs
+from agent_runtime import grok_login, procfs
 from agent_runtime.codex_login import CodexLoginVerdict, assess_codex_login, blanked_copy
 from agent_runtime.config import (
     PrivateWorkingRoot,
@@ -2238,6 +2238,7 @@ def _probe_grok_status() -> GrokCliStatus:
         GROK_CLI_STATUS_ARGS,
         credential_home_variable=_GROK_CREDENTIAL_HOME_VARIABLE,
         auth_file=grok.token_file,
+        credential_copy=grok_login.blanked_copy,
         missing_binary_detail=GROK_CLI_BINARY_MISSING_DETAIL,
     )
     if output is None:

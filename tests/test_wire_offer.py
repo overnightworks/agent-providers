@@ -77,8 +77,10 @@ def test_an_offer_with_a_malformed_entry_is_refused(entry: dict[str, object]) ->
 )
 def test_an_offered_model_needs_a_boolean_background(entry: dict[str, object]) -> None:
     """J18"""
+    raw = _offer(entry)
+
     with pytest.raises(ValidationError):
-        Offer.model_validate_json(_offer(entry))
+        Offer.model_validate_json(raw)
 
 
 @pytest.mark.parametrize("background", [True, False])

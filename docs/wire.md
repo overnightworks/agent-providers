@@ -130,7 +130,7 @@ prompt file and, when the run offers tools, of its relay file with the relay's
 loopback address and per-run secret, and the service's own subscription credential;
 [host.md](host.md), "The child environment is closed", lists the rest of its
 environment. What the app writes is the app's: the definitions of the tools it
-grants, its turn and the text of its tool results can reach the provider, including
+names, its turn and the text of its tool results can reach the provider, including
 any value it takes from its capability's claims, such as the person's subject. The
 service filters some of that content on the way, for example anything that carries
 the capability verbatim, but it adds nothing of its own that identifies the person

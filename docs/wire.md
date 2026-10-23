@@ -129,12 +129,12 @@ results through the relay, the run's fixed flags and limits, the path of its sys
 prompt file and, when the run offers tools, of its relay file with the relay's
 loopback address and per-run secret, and the service's own subscription credential;
 [host.md](host.md), "The child environment is closed", lists the rest of its
-environment. What the app writes is the app's: its turn, its tool definitions and
-the text of its tool results reach the provider as written, including any value it
-takes from its capability's claims, such as the person's subject. The only
-exceptions are that the service holds back a result that carries the capability,
-whole or as its signature, and passes an error text instead of a result that holds
-a block other than text or whose call failed.
+environment. What the app writes is the app's: the definitions of the tools it
+grants, its turn and the text of its tool results can reach the provider, including
+any value it takes from its capability's claims, such as the person's subject. The
+service filters some of that content on the way, for example anything that carries
+the capability verbatim, but it adds nothing of its own that identifies the person
+or the app.
 
 **What the CLI writes.** Every subscription run passes switches that limit what the
 CLI keeps and sends ([host.md](host.md), "The child environment is closed").

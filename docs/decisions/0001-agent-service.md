@@ -4240,6 +4240,17 @@ capability, H3) and A1a5 (job tickets); one service-owned signing key covers bot
 **Consequence.** Background runs carry the same verified identity as the live
 request that started them, for at most a day.
 
+*Amendment (23.10.2026, #447, authority: #445, J1-J3, J11, J12, J14, J16, J17).* The minting half
+is built. `POST /job-tickets` answers a request with both tokens, and never one that carries a ticket instead. It takes
+`{v: 2, purpose, expires_in_s}` and answers `{v: 2, ticket, expires_at}`; the protocol version
+stays 2. The lifetime is required, at most 86,400 seconds. The ticket is signed with the one
+signing key under type `agent-job-ticket+jwt` and audience `agent-job-ticket`, so a capability
+verifier refuses it. It binds the app, its workload client, the person, the purpose, the expiry
+and the person's configured subscription groups, API groups and `/apps/<app>` with its
+subgroups. Without a `[signing]` section the route answers 403 `not_enabled`. The service issues
+a ticket whether or not the person could run now, limits none and stores none. The run half
+(presenting the ticket) is left to its own change.
+
 ## Out of scope at this size
 
 - arbitrary MCP endpoints and dynamic discovery;

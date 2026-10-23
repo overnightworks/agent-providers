@@ -1,0 +1,8 @@
+claim_id = "d5166df648844e61bed60708c3a86067"
+agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
+role = "builder"
+base = "444d51cef95aa261f5345eed1e1d422985e17cd9"
+branch = "claude/issue-452-o2-get-offer-through-routing-route"
+scope = ["docs/ARCHITECTURE.md", "docs/MIGRATING.md", "docs/decisions/0001-agent-service.md", "docs/operations.md", "docs/wire.md", "packages/client/src/agent_runtime_client/wire.py", "packages/service/src/agent_runtime_service/app.py", "packages/service/src/agent_runtime_service/offer.py", "quality/baseline.toml", "tests/test_service_offer.py", "tests/test_wire_protocol.py"]
+opened_commit = "5bbbbef9f64e0010d6b812cfcca4c79b7e14b3ce"
+whole_reason = "One new read-only route: the decider call, the wire types and the docs state one contract, and the create_app size ratchet forces the status handler out in the same change."

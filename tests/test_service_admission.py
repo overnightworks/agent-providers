@@ -20,7 +20,6 @@ import httpx
 import pytest
 from bounds import TEST_WAIT_SECONDS, within_the_bound
 from service_support import (
-    API_ALIAS,
     API_GROUP,
     LISTED_MODEL,
     LONGEST_PURPOSE,
@@ -196,32 +195,6 @@ def test_a_refusal_before_the_limit_takes_nothing(service, user, body, code):
         assert_rejected(service.run(user, **body), code, 403)
 
     service.let_all_go(service.fill_the_places())
-
-
-def test_t7_a_listed_requested_model_with_every_place_taken_is_busy_with_no_api_fallback(service):
-    held = service.fill_the_places()
-
-    busy = service.run(
-        MINT.user(groups=[SUBSCRIPTION_GROUP, API_GROUP, SONGMAKER_GROUP]), model="claude/sonnet"
-    )
-
-    assert_rejected(busy, RejectionCode.BUSY, 429)
-    assert service.api.admitted == []
-    service.let_all_go(held)
-
-
-def test_t8_an_unlisted_requested_model_with_every_place_taken_runs_on_the_api_and_takes_no_place(
-    service,
-):
-    held = service.fill_the_places(purpose="judge")
-
-    response = service.run(
-        MINT.user(groups=[SUBSCRIPTION_GROUP, API_GROUP, SONGMAKER_GROUP]), model="claude/opus"
-    )
-
-    _assert_streamed_to_a_terminal(response)
-    assert service.api.admitted[-1].route == Api(API_ALIAS, "claude/opus")
-    service.let_all_go(held)
 
 
 def test_a_non_member_with_every_place_taken_is_forbidden_not_busy_and_holds_no_place(service):

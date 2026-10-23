@@ -806,11 +806,8 @@ def test_o13_two_runs_of_one_purpose_each_run_the_model_they_ask_for_without_a_r
 
     assert _admitted_events(first)
     assert _admitted_events(admitted_second_run[0])
-    assert (runners.cli.admitted[-1].route, runners.api.admitted[-1].route) == (
-        CLI_ON_SONNET,
-        Api(API_ALIAS, OPUS),
-    )
-    assert len(runners.cli.admitted + runners.api.admitted) == 2
+    admitted = runners.cli.admitted + runners.api.admitted
+    assert [run.route for run in admitted] == [CLI_ON_SONNET, Api(API_ALIAS, OPUS)]
 
 
 def _run_on_the_file(tmp_path, subscription_groups):

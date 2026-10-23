@@ -120,6 +120,10 @@ service's container ([host.md](host.md)).
   registered MCP origin. The request names the tools and their effects; the
   service signs a per-run capability that grants exactly those names, and the app
   verifies it with the public key ([wire.md](wire.md) has the details).
+- *A job ticket needs a live request.* The service mints one only for a request with both
+  tokens, signs it with the capability's key under its own type and audience, binds the app,
+  its workload client, the person, the agent, the expiry and the named groups, and stores
+  nothing ([wire.md](wire.md#job-tickets)).
 - *No credential in an app.* The subscription login is one file the operator
   names; an app that starts runs through the service holds none (the interim core
   path in [operations.md](operations.md) is the exception).

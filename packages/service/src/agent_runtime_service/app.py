@@ -1,7 +1,8 @@
 """The HTTP surface: ``POST /runs``, the one entrance through which an app starts a run,
-and ``GET /runs/{id}``, through which the app and user that started it read where it stands.
+``GET /runs/{id}``, through which the app and user that started it read where it stands,
+and ``POST /job-tickets``, through which an app gets a ticket for a later background run.
 
-Both routes check the two tokens first, with the same answers. A ``POST`` is then
+All routes check the two tokens first, with the same answers. A ``POST`` is then
 checked in a fixed order, and the first failure answers:
 
 1. the workload token, then the user token, then membership of the app
@@ -21,6 +22,9 @@ checked in a fixed order, and the first failure answers:
    request's tool names, fits the 8,192 characters every verifier accepts
    (``capability_too_large``).
 
+Steps 3 to 7 are ``POST /runs``'s. ``POST /job-tickets`` answers ``not_enabled`` right after
+step 2 when the installation has no ``[signing]`` key, and otherwise mints.
+
 An admitted run answers ``200 text/event-stream`` with its frames
 (``agent_runtime_service.run_events``), and its response closes those frames whenever it
 ends, however it ends, and hands its runner one capability when its app has an MCP
@@ -36,7 +40,7 @@ from __future__ import annotations
 import logging
 import time
 import uuid
-from collections.abc import AsyncGenerator, Callable, Mapping
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 from contextlib import aclosing
 from datetime import datetime
 from http import HTTPStatus
@@ -51,7 +55,13 @@ from webauth.jwt_verification import KeySetFetch, MonotonicClock
 
 from agent_runtime import lost_groups
 from agent_runtime_client.capability import MAX_CAPABILITY_CHARACTERS
-from agent_runtime_client.wire import PROTOCOL_VERSION, RejectionCode, RunRejection, RunRequest
+from agent_runtime_client.wire import (
+    PROTOCOL_VERSION,
+    JobTicketRequest,
+    RejectionCode,
+    RunRejection,
+    RunRequest,
+)
 from agent_runtime_service.admission import AdmissionSlot, Lease
 from agent_runtime_service.capability import (
     Capability,
@@ -62,6 +72,11 @@ from agent_runtime_service.capability import (
 )
 from agent_runtime_service.config import ServiceConfig
 from agent_runtime_service.identity import Caller, CallerCheck, build_verifier
+from agent_runtime_service.job_ticket import (
+    job_ticket_claims,
+    parse_job_ticket_request,
+    signed_job_ticket,
+)
 from agent_runtime_service.quarantine import GroupConfirmation, Quarantine
 from agent_runtime_service.routing import Cli, NotEnabled, ServedRoute, route
 from agent_runtime_service.run_events import run_frames
@@ -74,6 +89,7 @@ WORKLOAD_TOKEN_HEADER: Final = "Agent-Workload-Token"
 RETRY_UNAVAILABLE_AFTER_SECONDS: Final = 30
 RETRY_BUSY_AFTER_SECONDS: Final = 10
 _BEARER_SCHEME: Final = "bearer"
+_JSON_MEDIA_TYPE: Final = "application/json"
 
 _log = logging.getLogger(__name__)
 
@@ -90,13 +106,13 @@ _STATUS: Final[Mapping[RejectionCode, HTTPStatus]] = {
 }
 
 _MESSAGE: Final[Mapping[RejectionCode, str]] = {
-    RejectionCode.NOT_ENABLED: "AI is not enabled for this user and purpose.",
+    RejectionCode.NOT_ENABLED: "AI is not enabled for this request.",
     RejectionCode.BUSY: "The service is busy; retry later.",
     RejectionCode.UNSUPPORTED_VERSION: f"This service speaks protocol version {PROTOCOL_VERSION}.",
     RejectionCode.UNAUTHORIZED: "Both a user token and a workload token are required and must"
     " be valid.",
     RejectionCode.FORBIDDEN: "The tokens do not permit this request.",
-    RejectionCode.INVALID_REQUEST: "The body is not a valid run request.",
+    RejectionCode.INVALID_REQUEST: "The body is not a valid request for the route.",
     RejectionCode.UNAVAILABLE: "The service cannot check tokens right now; retry later.",
     RejectionCode.NOT_FOUND: "No such run.",
     RejectionCode.CAPABILITY_TOO_LARGE: "This run's capability would exceed"
@@ -116,11 +132,10 @@ def create_app(
 ) -> FastAPI:
     """The service's ASGI app.
 
-    ``wall_clock`` (aware UTC) stamps each capability's issue and expiry and the
-    default run-record store. An injected ``records`` keeps its own clock, so the
-    two can differ; ``wall_clock`` never reaches the token verifier, which reads
-    webauth's own. ``confirm_group_gone`` is how the one quarantine asks whether a
-    lost process group is gone.
+    ``wall_clock`` (aware UTC) stamps each capability's and job ticket's issue and expiry and
+    the default run-record store. An injected ``records`` keeps its own clock, so the two can
+    differ; ``wall_clock`` never reaches the token verifier, which reads webauth's own.
+    ``confirm_group_gone`` is how the one quarantine asks whether a lost process group is gone.
     """
     callers = CallerCheck(build_verifier(config.identity, fetch_key_set, monotonic_clock), config)
     installed_runners = runners or Runners()
@@ -128,6 +143,7 @@ def create_app(
     subscription_slot = AdmissionSlot(config.runs.max_parallel_cli_runs)
     quarantine = Quarantine(LoopClock(), confirm_group_gone)
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    app.post("/job-tickets")(_job_ticket_route(callers, config, wall_clock))
 
     @app.post("/runs")
     async def start_run(request: Request) -> Response:
@@ -164,7 +180,7 @@ def create_app(
             return rejection(RejectionCode.NOT_FOUND)
         return Response(
             content=status.model_dump_json(),
-            media_type="application/json",
+            media_type=_JSON_MEDIA_TYPE,
             headers={"Cache-Control": "no-store"},
         )
 
@@ -322,6 +338,40 @@ def _capability_of(
     return signed_capability(scope, claims)
 
 
+def _job_ticket_route(
+    callers: CallerCheck, config: ServiceConfig, wall_clock: Callable[[], datetime]
+) -> Callable[[Request], Awaitable[Response]]:
+    async def mint_job_ticket(request: Request) -> Response:
+        caller = await _caller_of(callers, request)
+        if isinstance(caller, RejectionCode):
+            return rejection(caller)
+        body = await _limited_body(request)
+        ticket_request = (
+            RejectionCode.INVALID_REQUEST if body is None else parse_job_ticket_request(body)
+        )
+        if isinstance(ticket_request, RejectionCode):
+            return rejection(ticket_request)
+        return _minted(config, caller, ticket_request, wall_clock)
+
+    return mint_job_ticket
+
+
+def _minted(
+    config: ServiceConfig,
+    caller: Caller,
+    ticket_request: JobTicketRequest,
+    wall_clock: Callable[[], datetime],
+) -> Response:
+    if config.signing is None:
+        return rejection(RejectionCode.NOT_ENABLED)
+    claims = job_ticket_claims(config, caller, ticket_request, wall_clock().timestamp())
+    return Response(
+        content=signed_job_ticket(config.signing.key, claims).model_dump_json(),
+        media_type=_JSON_MEDIA_TYPE,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 def rejection(code: RejectionCode) -> Response:
     headers = {"Cache-Control": "no-store"}
     if code is RejectionCode.UNAUTHORIZED:
@@ -334,7 +384,7 @@ def rejection(code: RejectionCode) -> Response:
     return Response(
         content=body.model_dump_json(),
         status_code=_STATUS[code],
-        media_type="application/json",
+        media_type=_JSON_MEDIA_TYPE,
         headers=headers,
     )
 

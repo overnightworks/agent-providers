@@ -4,7 +4,7 @@
 ``GET /offer``, which lists the models the asking person can run in this app
 (``agent_runtime_service.offer``).
 
-All three routes check the two tokens first, with the same answers. A ``POST`` is then
+All four routes check the two tokens first, with the same answers. A ``POST`` is then
 checked in a fixed order, and the first failure answers:
 
 1. the workload token, then the user token, then membership of the app
@@ -31,7 +31,7 @@ An admitted run answers ``200 text/event-stream`` with its frames
 (``agent_runtime_service.run_events``), and its response closes those frames whenever it
 ends, however it ends, and hands its runner one capability when its app has an MCP
 origin. Every refusal is a typed ``RunRejection``
-that is never cached. No answer echoes a token. A ``GET`` answers the run's
+that is never cached. No answer echoes a token. A ``GET /runs/{id}`` answers the run's
 ``RunStatus`` to its owner, and one ``not_found`` to everyone else: for an id
 nobody began, an expired or evicted run, another app's or user's run, and a
 path segment that is not a run id's text form.

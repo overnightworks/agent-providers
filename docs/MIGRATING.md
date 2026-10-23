@@ -66,7 +66,7 @@ dependency `ruamel.yaml>=0.19,<0.20`: a host that pins the client's dependencies
 verifies a run capability and accepts only an RSA key of `capability.SIGNING_KEY_BITS`
 (3072) bits; no base module imports it.
 
-The per-app model override `[apps.<app>.models]` below exists in 0.7.0 only; [0.8.0](#migrating-to-080) removes it again, so a host upgrading from 0.6 sets none up.
+The per-app model override `[apps.<app>.models]` below exists in 0.6.0 and 0.7.0; [0.8.0](#migrating-to-080) removes it again, so a host upgrading to 0.8.0 sets none up.
 
 | Before | Now |
 |---|---|

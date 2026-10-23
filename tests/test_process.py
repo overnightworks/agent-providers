@@ -50,13 +50,11 @@ from provider_test_support import (
     RaisingLogHandler,
     RunnerFailureWatch,
     ThreadedOperation,
-    a_blanked_grok_login,
     a_codex_login,
     a_credential_destination_that_fails,
     a_dangling_symlink,
     a_directory,
     a_fifo,
-    a_grok_login,
     a_path_through_a_regular_file,
     a_symlink_to_a_login,
     a_usable_login_over_the_bound,
@@ -4542,8 +4540,9 @@ def test_an_unusable_codex_login_makes_the_probe_answer_logged_out(
 
 
 def test_the_grok_probe_hands_its_child_the_login_with_renewal_blank(tmp_path, monkeypatch) -> None:
+    """(#255 E10, E10a; defect:#442) The probe child holds the login, renewal members empty."""
     auth_file = tmp_path / "grok-auth.json"
-    auth_file.write_bytes(a_grok_login())
+    auth_file.write_text(json.dumps(provider_test_support.a_grok_login()))
     override_grok_runtime(token_file=auth_file)
     copies: list[bytes] = []
 
@@ -4559,7 +4558,7 @@ def test_the_grok_probe_hands_its_child_the_login_with_renewal_blank(tmp_path, m
     clear_agent_cli_caches()
 
     assert grok_cli_status().login.logged_in is True
-    assert [json.loads(copy) for copy in copies] == [a_blanked_grok_login()]
+    assert [json.loads(copy) for copy in copies] == [provider_test_support.a_grok_login("")]
 
 
 _NOT_A_PLAIN_FILE = [

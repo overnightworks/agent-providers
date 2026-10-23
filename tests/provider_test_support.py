@@ -109,7 +109,6 @@ _fake_cli_processes: list[FakeBlockingChild] = []
 
 CANARY_ACCESS_TOKEN = "canary-access-token"
 CANARY_ID_TOKEN = "canary-id-token"
-CANARY_GROK_REFRESH_TOKEN = "canary-grok-refresh-token"
 A_CODEX_LOGIN_WITH_INVALID_UTF8 = b'{"auth_mode": "\xff"}'
 
 
@@ -132,17 +131,8 @@ def a_codex_login(*, tokens: dict[str, Any] | None = None, **top_level: Any) -> 
 CREDENTIAL_FILE_BOUND_BYTES: Final = 256 * 1024
 
 
-def a_grok_login() -> bytes:
-    return json.dumps({
-        "xai.example": {
-            "key": "grok-synthetic-key",
-            "refresh_token": CANARY_GROK_REFRESH_TOKEN,
-        },
-    }).encode()
-
-
-def a_blanked_grok_login() -> dict[str, Any]:
-    return {"xai.example": {"key": "grok-synthetic-key", "refresh_token": ""}}
+def a_grok_login(refresh_token: str = "canary-grok-refresh-token") -> dict[str, Any]:
+    return {"xai.example": {"key": "grok-synthetic-key", "refresh_token": refresh_token}}
 
 
 def a_fifo(directory: Path) -> Path:
@@ -380,11 +370,7 @@ def assert_claude_token_child(child: ChildProcess, *, root: Path, token: str) ->
 
 
 def assert_private_credential_child(
-    child: ChildProcess,
-    *,
-    root: Path,
-    expected_login: dict[str, Any],
-    destination: Path,
+    child: ChildProcess, *, root: Path, expected_login: dict[str, Any], destination: Path
 ) -> Path:
     """Assert the disposable credential home visible at a real spawn boundary."""
     home = Path(child.environment["HOME"])

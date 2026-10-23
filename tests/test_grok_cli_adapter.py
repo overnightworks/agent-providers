@@ -24,7 +24,6 @@ from provider_test_support import (
     CliCall,
     Hold,
     RunnerFailureWatch,
-    a_blanked_grok_login,
     a_call_nested_too_deeply_to_decode,
     a_call_to_a_declared_tool,
     a_call_to_an_undeclared_tool_carrying,
@@ -337,11 +336,11 @@ def test_grok_tool_transport_starts_then_resumes_in_one_private_credential_home(
 ) -> None:
     calls: list[CliCall] = []
     homes: list[Path] = []
-    current_grok_runtime().token_file.write_bytes(a_grok_login())
+    current_grok_runtime().token_file.write_text(json.dumps(a_grok_login()))
 
     def assert_private_home(child) -> None:
         homes.append(assert_private_credential_child(
-            child, root=tmp_path, expected_login=a_blanked_grok_login(),
+            child, root=tmp_path, expected_login=a_grok_login(""),
             destination=Path(".grok/auth.json"),
         ))
 
@@ -412,7 +411,7 @@ def test_grok_tool_transport_starts_then_resumes_in_one_private_credential_home(
     assert homes == [first_home, first_home, third_home]
     assert not first.child.working_directory.exists()
     assert not third_home.exists()
-    assert current_grok_runtime().token_file.read_bytes() == a_grok_login()
+    assert current_grok_runtime().token_file.read_text() == json.dumps(a_grok_login())
 
 
 def _grok_runner_that_fails_by(failure: str, monkeypatch):
@@ -516,12 +515,12 @@ def test_grok_turn_keeps_its_private_home_until_late_runner_confirmation(
 ) -> None:
     captured: dict[str, object] = {}
 
-    current_grok_runtime().token_file.write_bytes(a_grok_login())
+    current_grok_runtime().token_file.write_text(json.dumps(a_grok_login()))
 
     def run_cli_bounded(child, **kwargs):
         captured.update(kwargs)
         captured["home"] = assert_private_credential_child(
-            child, root=tmp_path, expected_login=a_blanked_grok_login(),
+            child, root=tmp_path, expected_login=a_grok_login(""),
             destination=Path(".grok/auth.json"),
         )
         outcome = CliRunOutcome(
@@ -1112,12 +1111,12 @@ def test_closing_the_tool_loop_keeps_the_grok_home_until_confirmed_reap(
     aborted = threading.Event()
     captured: dict[str, object] = {}
 
-    current_grok_runtime().token_file.write_bytes(a_grok_login())
+    current_grok_runtime().token_file.write_text(json.dumps(a_grok_login()))
 
     def run_cli_bounded(child, **kwargs):
         captured.update(kwargs)
         captured["home"] = assert_private_credential_child(
-            child, root=tmp_path, expected_login=a_blanked_grok_login(),
+            child, root=tmp_path, expected_login=a_grok_login(""),
             destination=Path(".grok/auth.json"),
         )
         channel = kwargs["stdout_line_channel"]

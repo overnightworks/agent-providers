@@ -173,7 +173,7 @@ subscription run gets a fresh private home below the working root (directories
 opened only for reading. Grok and Codex copy the host-named file into the home,
 and both copies are blanked: every renewal member (a Grok `refresh_token`,
 `refreshToken` or `refresh`, at any depth; Codex's `refresh_token`) is the empty
-string, so a child holds no member under those names. A
+string, so those members contain no renewal value. A
 Claude turn gets no copy: the setup token in `claude.token_file` reaches the child
 only as `CLAUDE_CODE_OAUTH_TOKEN`, never in its arguments, and is read through
 `secret_file` at every child start. A file `agent_runtime.secret_file` refuses (how the operator writes it:

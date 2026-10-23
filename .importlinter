@@ -67,7 +67,6 @@ source_modules =
     agent_runtime.outlasting
     agent_runtime.secret_file
     agent_runtime.codex_login
-    agent_runtime.grok_login
     agent_runtime.openai_adapter
     agent_runtime.images
     agent_runtime.sandbox

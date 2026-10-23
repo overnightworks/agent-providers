@@ -1,0 +1,7 @@
+claim_id = "e998a9861bb547ea881376f3ea56a4ae"
+agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
+role = "builder"
+base = "80ae70a3e06e61ab573e2809337f136aa8acdc52"
+branch = "claude/issue-378-a1b-g0b-the-grok-cli-measured-live-under"
+scope = ["docs/decisions/0001-agent-service.md"]
+opened_commit = "19bfa1a7e9337a93fd9e7a422ead15bbdb63bfc2"

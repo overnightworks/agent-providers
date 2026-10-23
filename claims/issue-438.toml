@@ -1,7 +1,0 @@
-claim_id = "8331ee6d44734ee38a47fcec55d456e2"
-agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
-role = "builder"
-base = "5dafa50897654fedd4c40f7c9c8d67faec44f207"
-branch = "claude/issue-438-what-a-run-keeps-kein-vom-token-abgeleit"
-scope = ["docs/host.md", "docs/wire.md"]
-opened_commit = "5981eb28c2d3f974349706dc1a7cd5fb88cb0686"

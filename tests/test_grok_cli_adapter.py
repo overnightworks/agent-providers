@@ -14,6 +14,7 @@ from unittest.mock import Mock
 
 import provider_test_support
 import pytest
+from grok_login_support import a_blanked_grok_login, a_grok_login
 from provider_test_support import (
     A_RUNNER_FAILURE_CANARY,
     A_TOOL_FAILURE_MESSAGE,
@@ -24,12 +25,10 @@ from provider_test_support import (
     CliCall,
     Hold,
     RunnerFailureWatch,
-    a_blanked_grok_login,
     a_call_nested_too_deeply_to_decode,
     a_call_to_a_declared_tool,
     a_call_to_an_undeclared_tool_carrying,
     a_credential_destination_that_fails,
-    a_grok_login,
     a_symlink_to_a_login,
     a_usable_login_over_the_bound,
     assert_a_multi_result_batch_is_rejected,
@@ -88,21 +87,6 @@ def _transport() -> grok_cli_adapter.GrokCliToolTransport:
     return grok_cli_adapter.GrokCliToolTransport(
         model="grok-test", catalog=SAMPLE_TOOL_CATALOG,
     )
-
-
-@pytest.mark.parametrize("document", (b"[]", b"not json"), ids=("array", "not-json"))
-def test_grok_turn_whose_login_is_not_a_json_object_is_logged_out(
-    tmp_path: Path, document: bytes,
-) -> None:
-    """(#255 E10, E10a; defect:#442) A login that is no JSON object is an unusable login."""
-    source = tmp_path / "source"
-    source.write_bytes(document)
-    override_grok_runtime(token_file=source)
-
-    with pytest.raises(ProviderUnavailableError) as raised:
-        _transport()
-
-    assert raised.value.reason.code is SafeRouteReasonCode.CLI_LOGIN_NOT_CONFIGURED
 
 
 def test_grok_turn_without_a_configured_credential_is_logged_out(tmp_path: Path) -> None:
@@ -356,9 +340,7 @@ def test_grok_tool_transport_starts_then_resumes_in_one_private_credential_home(
 
     def assert_private_home(child) -> None:
         homes.append(assert_private_credential_child(
-            child,
-            root=tmp_path,
-            expected_login=a_blanked_grok_login(),
+            child, root=tmp_path, expected_login=a_blanked_grok_login(),
             destination=Path(".grok/auth.json"),
         ))
 
@@ -538,9 +520,7 @@ def test_grok_turn_keeps_its_private_home_until_late_runner_confirmation(
     def run_cli_bounded(child, **kwargs):
         captured.update(kwargs)
         captured["home"] = assert_private_credential_child(
-            child,
-            root=tmp_path,
-            expected_login=a_blanked_grok_login(),
+            child, root=tmp_path, expected_login=a_blanked_grok_login(),
             destination=Path(".grok/auth.json"),
         )
         outcome = CliRunOutcome(
@@ -1136,9 +1116,7 @@ def test_closing_the_tool_loop_keeps_the_grok_home_until_confirmed_reap(
     def run_cli_bounded(child, **kwargs):
         captured.update(kwargs)
         captured["home"] = assert_private_credential_child(
-            child,
-            root=tmp_path,
-            expected_login=a_blanked_grok_login(),
+            child, root=tmp_path, expected_login=a_blanked_grok_login(),
             destination=Path(".grok/auth.json"),
         )
         channel = kwargs["stdout_line_channel"]

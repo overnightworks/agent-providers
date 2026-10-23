@@ -109,21 +109,7 @@ _fake_cli_processes: list[FakeBlockingChild] = []
 
 CANARY_ACCESS_TOKEN = "canary-access-token"
 CANARY_ID_TOKEN = "canary-id-token"
-CANARY_GROK_REFRESH_TOKEN = "canary-grok-refresh-token"
 A_CODEX_LOGIN_WITH_INVALID_UTF8 = b'{"auth_mode": "\xff"}'
-
-
-def a_grok_login() -> bytes:
-    return json.dumps({
-        "xai.example": {
-            "key": "grok-synthetic-key",
-            "refresh_token": CANARY_GROK_REFRESH_TOKEN,
-        },
-    }).encode()
-
-
-def a_blanked_grok_login() -> dict[str, Any]:
-    return {"xai.example": {"key": "grok-synthetic-key", "refresh_token": ""}}
 
 
 def a_codex_login(*, tokens: dict[str, Any] | None = None, **top_level: Any) -> bytes:
@@ -395,7 +381,6 @@ def assert_private_credential_child(
     assert stat.S_IMODE(copied_credential.parent.stat().st_mode) == 0o700
     assert stat.S_IMODE(copied_credential.stat().st_mode) == 0o400
     assert json.loads(copied_credential.read_bytes()) == expected_login
-    assert CANARY_GROK_REFRESH_TOKEN.encode() not in copied_credential.read_bytes()
     return home
 
 

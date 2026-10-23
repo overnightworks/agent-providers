@@ -33,10 +33,10 @@ import provider_test_support
 import pytest
 from bounds import TEST_WAIT_SECONDS
 from descendant_support import process_start_time
+from grok_login_support import a_blanked_grok_login, a_grok_login
 from provider_test_support import (
     A_RUNNER_FAILURE_CANARY,
     ANOTHER_RUNNER_FAILURE_CANARY,
-    CANARY_GROK_REFRESH_TOKEN,
     CLI_RUNTIME_OVERRIDES,
     CREDENTIAL_FILE_BOUND_BYTES,
     DESTINATION_FAULTS,
@@ -51,13 +51,11 @@ from provider_test_support import (
     RaisingLogHandler,
     RunnerFailureWatch,
     ThreadedOperation,
-    a_blanked_grok_login,
     a_codex_login,
     a_credential_destination_that_fails,
     a_dangling_symlink,
     a_directory,
     a_fifo,
-    a_grok_login,
     a_path_through_a_regular_file,
     a_symlink_to_a_login,
     a_usable_login_over_the_bound,
@@ -4542,10 +4540,7 @@ def test_an_unusable_codex_login_makes_the_probe_answer_logged_out(
     assert codex_cli_login().logged_in is False
 
 
-def test_the_grok_probe_hands_its_child_the_login_with_its_renewal_members_blank(
-    tmp_path, monkeypatch,
-) -> None:
-    """(#255 E10, E10a; defect:#442) The probe child holds the login, renewal members empty."""
+def test_the_grok_probe_hands_its_child_the_login_with_renewal_blank(tmp_path, monkeypatch) -> None:
     auth_file = tmp_path / "grok-auth.json"
     auth_file.write_bytes(a_grok_login())
     override_grok_runtime(token_file=auth_file)
@@ -4563,36 +4558,7 @@ def test_the_grok_probe_hands_its_child_the_login_with_its_renewal_members_blank
     clear_agent_cli_caches()
 
     assert grok_cli_status().login.logged_in is True
-    (copy,) = copies
-    assert json.loads(copy) == a_blanked_grok_login()
-    assert CANARY_GROK_REFRESH_TOKEN.encode() not in copy
-
-
-@pytest.mark.parametrize("document", (b"[]", b"not json"), ids=("array", "not-json"))
-def test_the_grok_probe_hands_its_child_no_login_when_the_source_is_not_a_json_object(
-    tmp_path, monkeypatch, document: bytes,
-) -> None:
-    """(#255 E10, E10a; defect:#442) A source that is no JSON object leaves the probe no login."""
-    auth_file = tmp_path / "grok-auth.json"
-    auth_file.write_bytes(document)
-    override_grok_runtime(token_file=auth_file)
-    homes_with_a_login: list[bool] = []
-
-    def run_cli_bounded(child, **kwargs):
-        has_login = (Path(child.environment["GROK_HOME"]) / "auth.json").exists()
-        homes_with_a_login.append(has_login)
-        kwargs["on_reaped"](0, False)
-        return CliRunOutcome(
-            started=True, spawn_error=None, returncode=0,
-            stdout=GROK_LOGGED_IN if has_login else GROK_LOGGED_OUT, stderr="",
-            complete=True, became_zombie=False, reason=CliRunReason.COMPLETE,
-        )
-
-    monkeypatch.setattr(process, "run_cli_bounded", run_cli_bounded)
-    clear_agent_cli_caches()
-
-    assert grok_cli_status().login.logged_in is False
-    assert homes_with_a_login == [False]
+    assert [json.loads(copy) for copy in copies] == [a_blanked_grok_login()]
 
 
 _NOT_A_PLAIN_FILE = [

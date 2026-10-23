@@ -2244,9 +2244,8 @@ def _probe_grok_status() -> GrokCliStatus:
     if output is None:
         return GrokCliStatus(login=LOGGED_OUT, model_names=())
     login = _parse_grok_login(output)
-    if not login.logged_in:
-        return GrokCliStatus(login=login, model_names=())
-    return GrokCliStatus(login=login, model_names=_parse_grok_model_names(output))
+    model_names = _parse_grok_model_names(output) if login.logged_in else ()
+    return GrokCliStatus(login=login, model_names=model_names)
 
 
 def grok_cli_token_is_present() -> bool:

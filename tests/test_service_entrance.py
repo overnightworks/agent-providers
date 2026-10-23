@@ -797,19 +797,20 @@ def test_s3_a_run_is_routed_on_exactly_the_model_it_requests(groups, request_mod
 
 
 def test_o13_two_runs_of_one_purpose_each_run_the_model_they_ask_for_without_a_restart():
-    runners = Runners(cli=ScriptedRunner(CLI_SCRIPT), api=ScriptedRunner(API_SCRIPT))
-    app = create_app(service_config(), runners=runners, fetch_key_set=MINT.fetch_key_set)
-    with served(app) as base_url:
-        headers = run_headers(MINT.workload(), MINT.user(groups=BOTH_RIGHTS))
-        for model in (LISTED, OPUS):
-            assert _admitted_events(post_run(base_url, headers, run_body(model=model)))
+    admitted_second_run = []
 
-    admitted = runners.cli.admitted + runners.api.admitted
+    def second_run(base_url, headers):
+        admitted_second_run.append(post_run(base_url, headers, run_body(model=OPUS)))
+
+    first, runners = _routed_run(service_config(), BOTH_RIGHTS, afterwards=second_run, model=LISTED)
+
+    assert _admitted_events(first)
+    assert _admitted_events(admitted_second_run[0])
     assert (runners.cli.admitted[-1].route, runners.api.admitted[-1].route) == (
         CLI_ON_SONNET,
         Api(API_ALIAS, OPUS),
     )
-    assert len(admitted) == 2
+    assert len(runners.cli.admitted + runners.api.admitted) == 2
 
 
 def _run_on_the_file(tmp_path, subscription_groups):

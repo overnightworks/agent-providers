@@ -66,6 +66,8 @@ dependency `ruamel.yaml>=0.19,<0.20`: a host that pins the client's dependencies
 verifies a run capability and accepts only an RSA key of `capability.SIGNING_KEY_BITS`
 (3072) bits; no base module imports it.
 
+The per-app model override `[apps.<app>.models]` below exists in 0.7.0 only; [0.8.0](#migrating-to-080) removes it again, so a host upgrading from 0.6 sets none up.
+
 | Before | Now |
 |---|---|
 | `[identity] subscription_group`, one string | `subscription_groups`, a non-empty array of full group paths, each beginning with `/` as in the token's group claim (`"members"` is refused; write `"/members"` if that is the token's group); write `["/ki-abo", "/ai-subscription"]` while tokens still carry the old name, and drop the old entry once they expire; a leftover `subscription_group` stops startup naming it |

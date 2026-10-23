@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 import uvicorn
 from service_support import (
+    CLI_PROFILE,
     SUBSCRIPTION_GROUP,
     logging_state_snapshot,  # noqa: F401 - a fixture, requested by name
     service_config,
@@ -17,7 +18,6 @@ from service_support import (
 from agent_runtime_service.cli import EXIT_BAD_CONFIG, main
 from agent_runtime_service.config import load_config
 
-PROFILE_NAME = "claude-main"
 BACKGROUND_LINE = "background = true"
 SIGNING_TABLE = re.compile(r"\n\[signing\]\nkey_file = [^\n]*\n")
 ORIGIN_LINE = 'mcp_origin = "https://songmaker.internal"'
@@ -69,7 +69,7 @@ def test_a_profile_with_a_non_boolean_background_stops_the_start(tmp_path, capsy
     """J9/A1: a background that is not a boolean refuses the start on one line"""
     path = _configuration(tmp_path, background_line=background_line, signing=True, origin=True)
 
-    assert f"profiles.{PROFILE_NAME}.background" in _refusal(path, capsys)
+    assert f"profiles.{CLI_PROFILE}.background" in _refusal(path, capsys)
 
 
 @pytest.mark.parametrize("background_line", ["background = true", "background = false"])
@@ -80,14 +80,14 @@ def test_background_is_a_required_boolean(
     path = _configuration(tmp_path, background_line=background_line, signing=True, origin=False)
 
     assert len(_start(path, monkeypatch)) == 1
-    assert load_config(path).profiles[PROFILE_NAME].background is ("true" in background_line)
+    assert load_config(path).profiles[CLI_PROFILE].background is ("true" in background_line)
 
 
 def test_a_profile_without_background_stops_the_start(tmp_path, capsys):
     """J9/A1: a profile that omits background refuses the start on one line"""
     path = _configuration(tmp_path, background_line="", signing=True, origin=True)
 
-    assert f"profiles.{PROFILE_NAME}.background" in _refusal(path, capsys)
+    assert f"profiles.{CLI_PROFILE}.background" in _refusal(path, capsys)
 
 
 def test_a_background_profile_needs_a_signing_key(tmp_path, capsys):
@@ -96,7 +96,7 @@ def test_a_background_profile_needs_a_signing_key(tmp_path, capsys):
         tmp_path, background_line="background = true", signing=False, origin=False
     )
 
-    assert f"profiles.{PROFILE_NAME}.background" in _refusal(path, capsys)
+    assert f"profiles.{CLI_PROFILE}.background" in _refusal(path, capsys)
 
 
 @pytest.mark.parametrize(
@@ -122,8 +122,8 @@ def test_the_origin_rule_still_speaks_first(tmp_path, capsys):
 def test_background_profiles_are_those_marked_true():
     """J9/A7: of a true and a false profile, only the true one is a background profile"""
     config = service_config()
-    assert set(config.background_profiles()) == {PROFILE_NAME}
-    profile = config.profiles[PROFILE_NAME]
+    assert set(config.background_profiles()) == {CLI_PROFILE}
+    profile = config.profiles[CLI_PROFILE]
     mixed = config.model_copy(
         update={
             "profiles": {

@@ -20,7 +20,7 @@
 "tests/test_claude_provider_streaming.py" = 1168
 "tests/test_claude_run.py" = 876
 "tests/test_codex_cli_adapter.py" = 3089
-"tests/test_grok_cli_adapter.py" = 1213
+"tests/test_grok_cli_adapter.py" = 1212
 "tests/test_process.py" = 6199
 "tests/test_procfs.py" = 838
 "tests/test_run_directories.py" = 852
@@ -75,7 +75,7 @@
 "test_codex_tool_transport_uses_an_empty_private_work_directory_on_resume" = 68
 
 [function_lines."tests/test_grok_cli_adapter.py"]
-"test_grok_tool_transport_starts_then_resumes_in_one_private_credential_home" = 84
+"test_grok_tool_transport_starts_then_resumes_in_one_private_credential_home" = 82
 
 [function_lines."tests/test_process.py"]
 "test_parallel_cold_asks_share_one_failure" = 67

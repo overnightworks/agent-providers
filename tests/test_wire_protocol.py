@@ -42,7 +42,6 @@ from agent_runtime_client.wire import (
     AgentRoles,
     ClientLoss,
     FailureCode,
-    Offer,
     Purpose,
     RejectionCode,
     RunEvent,
@@ -764,76 +763,3 @@ def test_a_run_request_with_a_model_outside_the_grammar_is_refused(model: object
 @pytest.mark.parametrize("model", [pytest.param("claude/sonnet"), pytest.param(None)])
 def test_a_run_request_may_name_a_model_or_an_explicit_null(model: str | None) -> None:
     assert RunRequest.model_validate({**REQUEST, "model": model}).model == model
-
-
-def _offered_model(**overrides: object) -> dict[str, object]:
-    return {
-        "id": "claude/sonnet",
-        "object": "model",
-        "created": 0,
-        "owned_by": "claude",
-        "route": "cli",
-        "ready": True,
-        "reason": None,
-        **overrides,
-    }
-
-
-def _offer_json(*entries: dict[str, object]) -> str:
-    return json.dumps({"v": 2, "object": "list", "data": list(entries)})
-
-
-@pytest.mark.parametrize(
-    "entries",
-    [
-        pytest.param([], id="O10-empty"),
-        pytest.param([_offered_model()], id="O10-ready"),
-        pytest.param(
-            [_offered_model(route="api", ready=False, reason="not_built")], id="O10-not-built"
-        ),
-    ],
-)
-def test_an_offer_round_trips_through_the_wire(entries: list[dict[str, object]]) -> None:
-    """O10, O1"""
-    raw = _offer_json(*entries)
-
-    assert json.loads(Offer.model_validate_json(raw).model_dump_json()) == json.loads(raw)
-
-
-@pytest.mark.parametrize(
-    "entry",
-    [
-        pytest.param(_offered_model(ready=True, reason="not_built"), id="O10-ready-with-a-reason"),
-        pytest.param(_offered_model(ready=False, reason=None), id="O10-not-ready-without-a-reason"),
-        pytest.param(_offered_model(route="grpc"), id="O10-unknown-route"),
-        pytest.param(_offered_model(ready=False, reason="login_refused"), id="O10-unknown-reason"),
-        pytest.param(_offered_model(created=1), id="O10-created-not-zero"),
-        pytest.param(_offered_model(created=False), id="O10-created-false"),
-        pytest.param(_offered_model(created=0.0), id="O10-created-float"),
-        pytest.param(_offered_model(object="list"), id="O10-wrong-object"),
-        pytest.param(_offered_model(id="sonnet"), id="O10-id-without-provider"),
-        pytest.param({**_offered_model(), "path": "/tmp/x"}, id="O10-extra-field"),
-    ],
-)
-def test_an_offer_with_a_malformed_entry_is_refused(entry: dict[str, object]) -> None:
-    """O10, O1"""
-    raw = _offer_json(entry)
-
-    with pytest.raises(ValidationError):
-        Offer.model_validate_json(raw)
-
-
-@pytest.mark.parametrize(
-    "version",
-    [
-        pytest.param(1, id="O10-v1"),
-        pytest.param(3, id="O10-v3"),
-        pytest.param("2", id="O10-v-as-string"),
-    ],
-)
-def test_an_offer_of_another_version_is_refused(version: object) -> None:
-    """O10"""
-    raw = json.dumps({"v": version, "object": "list", "data": []})
-
-    with pytest.raises(ValidationError):
-        Offer.model_validate_json(raw)

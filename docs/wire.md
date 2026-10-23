@@ -83,7 +83,8 @@ true and `not_built` when it is not (the route has no runner installed). `OfferR
 closed; a new reason is a wire change, because a new variant is a new `PROTOCOL_VERSION`.
 
 The call has no body and carries the same two tokens as `POST /runs`, refused the same way
-(401, 403, 503). Every member of the app may ask, not only admins, and the answer is for the
+(401, 403, 503). The app is the one the workload token names; a query parameter naming
+another app is ignored. Every member of the app may ask, not only admins, and the answer is for the
 asking person only: a member in no subscription or API group gets `200` with an empty `data`.
 It is computed on every request from the configuration and the installed runners, never
 cached (`Cache-Control: no-store`), and never opens the login file. A model the person

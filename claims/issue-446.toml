@@ -3,6 +3,6 @@ agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
 role = "builder"
 base = "80ae70a3e06e61ab573e2809337f136aa8acdc52"
 branch = "claude/issue-446-remove-apps-models-and-model-for"
-scope = ["docs/ARCHITECTURE.md", "docs/MIGRATING.md", "docs/decisions/0001-agent-service.md", "docs/operations.md", "docs/wire.md", "packages/client/src/agent_runtime_client/wire.py", "packages/service/src/agent_runtime_service/app.py", "packages/service/src/agent_runtime_service/config.py", "quality/baseline.toml", "tests/service_support.py", "tests/test_service_config.py", "tests/test_service_entrance.py"]
+scope = ["docs/ARCHITECTURE.md", "docs/MIGRATING.md", "docs/decisions/0001-agent-service.md", "docs/operations.md", "docs/wire.md", "packages/client/src/agent_runtime_client/wire.py", "packages/service/src/agent_runtime_service/app.py", "packages/service/src/agent_runtime_service/config.py", "quality/baseline.toml", "tests/service_support.py", "tests/test_service_admission.py", "tests/test_service_config.py", "tests/test_service_entrance.py"]
 opened_commit = "81476dc05860545a9ba0d9c7f79b1c9ca9785987"
 whole_reason = "One deletion across a config key, its only decider and the docs that describe it; splitting would leave the key removed but still documented, or documented as removed but still read."

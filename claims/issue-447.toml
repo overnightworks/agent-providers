@@ -1,0 +1,8 @@
+claim_id = "5b655a87a46c4447bfdb8944fb4f437f"
+agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
+role = "builder"
+base = "80ae70a3e06e61ab573e2809337f136aa8acdc52"
+branch = "claude/issue-447-mint-a-job-ticket"
+scope = ["docs/ARCHITECTURE.md", "docs/decisions/0001-agent-service.md", "docs/wire.md", "packages/client/src/agent_runtime_client/wire.py", "packages/service/src/agent_runtime_service/app.py", "packages/service/src/agent_runtime_service/job_ticket.py", "packages/service/src/agent_runtime_service/run_request.py", "tests/test_service_job_tickets.py", "tests/test_wire_protocol.py"]
+opened_commit = "d05edb794fc303b473f67a1a6322687ecedbae89"
+whole_reason = "One credential across its claims, its request and response types and its route; a part alone would be code reached only by tests."

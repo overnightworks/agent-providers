@@ -120,13 +120,21 @@ request: the caller's address, the method, the path including its query string, 
 protocol version and the status.
 
 **Tokens.** The end user's token and the app's workload token are checked on the
-request and neither stored nor passed to the CLI, and nothing derived from either
-reaches it: not the subject, issuer, groups, client id, app name or run id, and
-not the capability, which goes only to the app's MCP server. The CLI receives the
-app's turn and tools, the per-run relay secret and the service's own subscription
-credential ([host.md](host.md), "The child environment is closed", owns the rest of
-its environment); what the app writes into the turn or its tool results reaches the
-provider as written.
+request and neither stored nor passed to the CLI. The service hands the CLI nothing
+derived from them either: not the subject, issuer, groups, client id, app name or
+run id, and not the capability, which it sends only to the app's MCP server. From
+the service the CLI receives the app's turn, the model when the service's override
+for the app's agent or the request names one, the app's tool definitions and tool
+results through the relay, the run's fixed flags and limits, the path of its system
+prompt file and, when the run offers tools, of its relay file with the relay's
+loopback address and per-run secret, and the service's own subscription credential;
+[host.md](host.md), "The child environment is closed", lists the rest of its
+environment. What the app writes is the app's: its turn, its tool definitions and
+the text of its tool results reach the provider as written, including any value it
+takes from its capability's claims, such as the person's subject. The only
+exceptions are that the service holds back a result that carries the capability,
+whole or as its signature, and passes an error text instead of a result that holds
+a block other than text or whose call failed.
 
 **What the CLI writes.** Every subscription run passes switches that limit what the
 CLI keeps and sends ([host.md](host.md), "The child environment is closed").
@@ -137,6 +145,6 @@ home, and with a login (A1b-0b1 c3), which lists the home only. A turn with the
 run's full flags and switches in the real deployment, inside its home and outside
 it, is not measured yet; issue #115, step 12b, owns that measurement.
 
-**The provider.** The turn's text, and the results of the app's tools the run calls,
-reach the provider (Anthropic for Claude) under the operator's subscription. What
-the provider keeps follows its terms, not this service.
+**The provider.** The turn's text, the app's tool definitions, and the results of the
+app's tools the run calls, reach the provider (Anthropic for Claude) under the
+operator's subscription. What the provider keeps follows its terms, not this service.

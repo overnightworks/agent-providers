@@ -178,7 +178,8 @@ only as `CLAUDE_CODE_OAUTH_TOKEN`, never in its arguments, and is read through
 and leaves no home behind (the error is `CliLoginNotConfiguredError`); a token the provider
 rejects ends a streaming turn with the safe code `cli_auth_rejected`. The model list asks the
 Claude CLI without a login and names no default. Every Claude child also gets the run switches
-(`constants.CLAUDE_RUN_SWITCHES`) and every `-p` run passes
+(`constants.CLAUDE_RUN_SWITCHES`), a subscription run that offers tools also gets
+`MCP_TOOL_TIMEOUT` (`[runs] max_duration_s` in milliseconds), and every `-p` run passes
 `--no-session-persistence`, so no Claude child keeps a session on disk and its
 telemetry and nonessential traffic stay off; the model request itself still
 reaches the provider, and a Claude managed-settings export the host configures is

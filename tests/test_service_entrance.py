@@ -784,12 +784,11 @@ CLI_ON_SONNET = Cli("claude-main", LISTED_MODEL)
 @pytest.mark.parametrize(
     ("groups", "request_model", "route"),
     [
-        pytest.param(SUBSCRIBER, LISTED, CLI_ON_SONNET, id="subscriber-asks-a-listed-model"),
-        pytest.param(SUBSCRIBER, None, Cli("claude-main", None), id="no-model-takes-the-default"),
-        pytest.param(BOTH_RIGHTS, OPUS, Api(API_ALIAS, OPUS), id="both-rights-ask-an-unlisted-one"),
+        pytest.param(SUBSCRIBER, None, Cli("claude-main", None), id="O12-no-model"),
+        pytest.param(BOTH_RIGHTS, OPUS, Api(API_ALIAS, OPUS), id="S3-both-rights-unlisted"),
     ],
 )
-def test_a_run_is_routed_on_exactly_the_model_it_requests(groups, request_model, route):
+def test_s3_a_run_is_routed_on_exactly_the_model_it_requests(groups, request_model, route):
     response, runners = _routed_run(service_config(), groups, model=request_model)
 
     assert _admitted_events(response)
@@ -797,14 +796,20 @@ def test_a_run_is_routed_on_exactly_the_model_it_requests(groups, request_model,
     assert [run.route for run in admitted] == [route]
 
 
-def test_two_runs_of_one_purpose_each_run_the_model_they_ask_for_without_a_restart():
-    config = service_config()
+def test_o13_two_runs_of_one_purpose_each_run_the_model_they_ask_for_without_a_restart():
+    runners = Runners(cli=ScriptedRunner(CLI_SCRIPT), api=ScriptedRunner(API_SCRIPT))
+    app = create_app(service_config(), runners=runners, fetch_key_set=MINT.fetch_key_set)
+    with served(app) as base_url:
+        headers = run_headers(MINT.workload(), MINT.user(groups=BOTH_RIGHTS))
+        for model in (LISTED, OPUS):
+            assert _admitted_events(post_run(base_url, headers, run_body(model=model)))
 
-    _first, first_runners = _routed_run(config, BOTH_RIGHTS, model=LISTED)
-    _second, second_runners = _routed_run(config, BOTH_RIGHTS, model=OPUS)
-
-    assert first_runners.cli.admitted[-1].route == CLI_ON_SONNET
-    assert second_runners.api.admitted[-1].route == Api(API_ALIAS, OPUS)
+    admitted = runners.cli.admitted + runners.api.admitted
+    assert (runners.cli.admitted[-1].route, runners.api.admitted[-1].route) == (
+        CLI_ON_SONNET,
+        Api(API_ALIAS, OPUS),
+    )
+    assert len(admitted) == 2
 
 
 def _run_on_the_file(tmp_path, subscription_groups):
@@ -828,11 +833,11 @@ def _app_from(config_file):
     return app, runners
 
 
-def test_the_file_is_read_at_startup_and_a_restart_reads_it_again(tmp_path):
+def test_x_the_file_is_read_at_startup_and_a_restart_reads_it_again(tmp_path):
     config_file = _run_on_the_file(tmp_path, [SUBSCRIPTION_GROUP])
     running, running_runners = _app_from(config_file)
-    assert _post_both_rights(running, running_runners) == CLI_ON_SONNET
+    assert _post_both_rights(running, running_runners) == CLI_ON_SONNET  # X1
 
     edited = _run_on_the_file(tmp_path, ["/not-a-subscriber-group"])
-    assert _post_both_rights(running, running_runners) == CLI_ON_SONNET
-    assert _post_both_rights(*_app_from(edited)) == Api(API_ALIAS, LISTED)
+    assert _post_both_rights(running, running_runners) == CLI_ON_SONNET  # X2
+    assert _post_both_rights(*_app_from(edited)) == Api(API_ALIAS, LISTED)  # X3

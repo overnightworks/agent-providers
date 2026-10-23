@@ -159,7 +159,7 @@ def test_a_leftover_tools_table_of_an_app_stops_startup_naming_the_field(tmp_pat
     assert _refused_on_one_line(_written(tmp_path, text), capsys).startswith("apps.songmaker.tools")
 
 
-def test_a_leftover_models_table_of_an_app_stops_startup_naming_the_field(tmp_path, capsys):
+def test_o11_a_leftover_models_table_of_an_app_stops_startup_naming_the_field(tmp_path, capsys):
     text = VALID_CONFIG + '\n[apps.songmaker.models]\ncowriter = "claude/sonnet"\n'
 
     assert _refused_on_one_line(_written(tmp_path, text), capsys).startswith(

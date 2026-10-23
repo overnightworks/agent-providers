@@ -324,6 +324,13 @@ edge owns, and both names are accepted while tokens carry either. Where this rec
 says `/ki-abo` elsewhere (H1's measured token shapes, H11, H12, A1a5), it reads as
 "the configured subscription groups". Authority: „/ai-subscription /ai-api“ and „lauf abo oder litellm nicht am dienst entscheiden => sondern wie rechte per keycloak“.
 
+**Amendment (23.10.2026, #448).** The subscription serves its subscriber only. The
+subscription groups hold only the subscriber himself, and everyone else runs over the
+API route (#18 A2a/A2b); the service keeps no user list, so the admin enforces this
+in Keycloak. This replaces "everyone with `/ki-abo` may use it" and the accepted
+residual risk above. Authority: the operator's ruling of 23.10.2026, relayed on
+edge#357: „ja a … ich bin ALS ADMIN dafür verantwortlich das n ich über keycloaks den usern das richtige gebe! momentan bin nur ich das!“. Trigger: Anthropic's terms (code.claude.com/docs/en/legal-and-compliance, read 23.10.2026): "Anthropic does not permit third-party developers … to route requests through Free, Pro, or Max plan credentials on behalf of their users".
+
 **Amendment (21.10.2026, #382, #391).** Every route also requires membership of the app:
 one of the caller's groups is `/apps/<app>` or a path below it (segment-aware, so
 `/apps/songmaker/team` is a member of `songmaker` and `/apps/songmaker-other` is not),
@@ -1509,7 +1516,7 @@ the parallel-run limit stands once, in H7's Decision.
 
 #### The ruled lines 2, 9, 14, 15, 16, 17 and 20 (verbatim from #115's expectation list)
 
-2. [ruled by the operator 17.10.2026: "OK"] [neutral wording ruled by the operator 18.10.2026: "ja"] [re-ruled by the operator 20.10.2026: "Ja", #255 rule 4 and "ein auth und alle können ihn nutzen die das ki-abo in keycloak haben"] **Ein Profil nennt seine Login-Datei. Es ist das eine Login dieses Anbieters für alle Apps; nutzen darf es jeder mit dem KI-Abo. Ein neues Login heißt: Datei tauschen, fertig; der nächste Lauf liest sie (daneben schreiben, dann `mv -T`). Wie das Login entsteht, legt der Anbieter fest (Claude: `claude setup-token`; Codex und Grok: nach Entscheid HQ2). Dein eigenes Login des Anbieters bleibt unberührt.**
+2. [ruled by the operator 17.10.2026: "OK"] [neutral wording ruled by the operator 18.10.2026: "ja"] [re-ruled by the operator 20.10.2026: "Ja", #255 rule 4 and "ein auth und alle können ihn nutzen die das ki-abo in keycloak haben"] [re-ruled by the operator 23.10.2026, #448: „ja a … ich bin ALS ADMIN dafür verantwortlich das n ich über keycloaks den usern das richtige gebe! momentan bin nur ich das!“] **Ein Profil nennt seine Login-Datei. Es ist das eine Login dieses Anbieters für alle Apps; nutzen darf es nur der Inhaber des Abos selbst. Dafür sorgt der Admin in Keycloak: die Abo-Gruppe (`subscription_groups`) hält nur ihn. Jeder andere Mensch läuft über den API-Weg (#18 A2a/A2b). Ein neues Login heißt: Datei tauschen, fertig; der nächste Lauf liest sie (daneben schreiben, dann `mv -T`). Wie das Login entsteht, legt der Anbieter fest (Claude: `claude setup-token`; Codex und Grok: nach Entscheid HQ2). Dein eigenes Login des Anbieters bleibt unberührt.**
    - *Erbt (Betreiber):* Kein App-Container hält ein Abo-Login (`:64`). *Erbt (Kopf):* H2b. Neu ist die Form des Logins (Q2 = a, das Setup-Token).
    - *Beispiel:* Läuft das Token nach einem Jahr ab, erzeugst du mit `claude setup-token` ein neues, schreibst es neben die Datei unter `~/.secrets/agent-service/` und machst `mv -T`. Der nächste Lauf nutzt es, ohne Neustart. Dein Claude im Terminal bleibt angemeldet, weil der Dienst `~/.claude` nie liest.
    - *Gegenbeispiel:* Der Dienst liest die Datei nur beim Start, und ein Tausch braucht einen Neustart (so bis 20.10.2026). Oder eine App bekommt ein eigenes Token.
@@ -1517,6 +1524,7 @@ the parallel-run limit stands once, in H7's Decision.
    - *Beleg:* A1b-0b1, A1b-6a, A1b-6r.
    - *Terminology (21.10.2026, #382, #385):* the meaning is unchanged. "Das KI-Abo" is membership in a configured subscription group, `/ai-subscription` after the rename (H2). Authority: „/ai-subscription /ai-api“.
    - *Terminology (21.10.2026, #382, #391):* the meaning is narrowed: "nutzen darf es jeder mit dem KI-Abo" now means everyone with it who is a member of the app (`/apps/<app>` or a path below it, H2). Authority: the line of #382's accepted design „/apps/<app> (or a descendant): may use the app at all; the service checks this at admission, segment-aware“, which the operator was shown and accepted with „ja klingt gut! gib es dem head!“ and „wir bauen das entsprechend“ (21.10.2026).
+   - *Re-ruled (23.10.2026, #448):* the use sentence now reads as above; the terminology notes above are history of the 20.10.2026 wording "nutzen darf es jeder mit dem KI-Abo". Authority: Anthropic's terms (code.claude.com/docs/en/legal-and-compliance, read 23.10.2026): "Anthropic does not permit third-party developers … to route requests through Free, Pro, or Max plan credentials on behalf of their users"; Pro and Max limits "assume ordinary, individual usage".
 9. [ruled by the operator 17.10.2026: "ja 5"] **Es gibt N Plätze für den ganzen Dienst, Default 5, in der Konfiguration des Dienstes. Erst wenn alle belegt sind, kommt sofort „beschäftigt“ mit Wiederholzeit. Kein automatisches Ausweichen auf den API-Weg.**
    - *Geerbt (Kopf):* H7 „one active subscription run … 429 Retry-After … no queue“ (jetzt: N parallele Abo-Läufe, ein Limit für den Dienst, nicht je Profil) und #68 „die Weigerung kommt vor der Capability“. Nur Abo-Läufe belegen einen Platz.
    - *Beispiel:* Mit den fünf Plätzen belegt will Songmaker einen sechsten Abo-Lauf: Er bekommt sofort „The service is busy; retry later.“ mit `Retry-After: 10`. Ein Lauf auf dem API-Weg, den er ausdrücklich verlangt, startet trotzdem und belegt nichts; ein abgewiesener Antrag belegt nichts. Steht in der Konfiguration `max_parallel_cli_runs = 2`, sind es zwei Plätze.

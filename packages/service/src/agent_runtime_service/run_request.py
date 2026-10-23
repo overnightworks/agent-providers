@@ -1,4 +1,4 @@
-"""The body that starts a run, read strictly.
+"""The body that starts a run, read strictly (``versioned_document`` reads every request body).
 
 The body is strict JSON — no ``NaN`` or infinities, no member named twice — and
 is parsed before its protocol version is read, so only a parsed object whose
@@ -10,7 +10,7 @@ the transport's to enforce before it buffers the body.
 
 from __future__ import annotations
 
-from typing import Final
+from typing import Any, Final
 
 from pydantic import TypeAdapter, ValidationError
 
@@ -22,7 +22,8 @@ MAX_REQUEST_BYTES: Final = 256 * 1024
 _PROTOCOL_VERSION: Final[TypeAdapter[ProtocolVersion]] = TypeAdapter(ProtocolVersion)
 
 
-def parse_run_request(body: bytes) -> RunRequest | RejectionCode:
+def versioned_document(body: bytes) -> dict[str, Any] | RejectionCode:
+    """The body's JSON object, once it is strict JSON and speaks this protocol version."""
     try:
         document = read_strict_json(body.decode("utf-8-sig"))
     except ValueError:
@@ -33,6 +34,13 @@ def parse_run_request(body: bytes) -> RunRequest | RejectionCode:
         _PROTOCOL_VERSION.validate_python(document.get("v"))
     except ValidationError:
         return RejectionCode.UNSUPPORTED_VERSION
+    return document
+
+
+def parse_run_request(body: bytes) -> RunRequest | RejectionCode:
+    document = versioned_document(body)
+    if isinstance(document, RejectionCode):
+        return document
     try:
         return RunRequest.model_validate(document)
     except ValidationError:

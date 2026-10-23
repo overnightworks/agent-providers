@@ -4,8 +4,8 @@ This module is the one owner of what travels between a client and the
 service (decision record 0001, H6): the request that starts a run, the run's
 event stream as a closed union discriminated on ``type`` with every event
 carrying the protocol version, the run id and its sequence number, and the
-typed body the service answers with when it refuses a request, and the status
-body it answers ``GET /runs/{id}`` with.
+typed body the service answers with when it refuses a request, the status
+body it answers ``GET /runs/{id}`` with, and the two bodies of ``POST /job-tickets``.
 A new variant or a new field is a new ``PROTOCOL_VERSION``.
 
 Validation is strict, so the wire's JSON types are the contract: a sequence
@@ -41,6 +41,7 @@ MAX_EVENT_BYTES: Final = 1_048_576
 MAX_TOOL_INPUT_DEPTH: Final = 128
 MAX_MESSAGE_LENGTH: Final = 500
 MAX_PURPOSE_LENGTH: Final = 64
+MAX_JOB_TICKET_SECONDS: Final = 86_400
 MODEL_PART_PATTERN: Final = re.compile(r"[a-z0-9.-]+")
 _MODEL_NAME_PATTERN: Final = re.compile(rf"[a-z0-9-]+/{MODEL_PART_PATTERN.pattern}")
 _PURPOSE_PATTERN: Final = re.compile(rf"[a-z][a-z0-9-]{{0,{MAX_PURPOSE_LENGTH - 1}}}")
@@ -362,6 +363,20 @@ class RunStatus(_WireModel):
         if (self.ended_at is None) != (self.state is RunState.RUNNING):
             raise ValueError("ended_at is set exactly when the run is over")
         return self
+
+
+class JobTicketRequest(_WireModel):
+    """The HTTP body of ``POST /job-tickets``: the agent and how long the ticket lives."""
+
+    purpose: Purpose
+    expires_in_s: int = Field(ge=1, le=MAX_JOB_TICKET_SECONDS)
+
+
+class JobTicket(_WireModel):
+    """The HTTP body of a minted ticket; ``ticket`` is a bearer credential shown only here."""
+
+    ticket: NonEmptyUnicodeText = Field(repr=False)
+    expires_at: UtcInstant
 
 
 class TurnRole(StrEnum):

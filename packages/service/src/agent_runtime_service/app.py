@@ -1,7 +1,8 @@
 """The HTTP surface: ``POST /runs``, the one entrance through which an app starts a run,
-and ``GET /runs/{id}``, through which the app and user that started it read where it stands.
+``GET /runs/{id}``, through which the app and user that started it read where it stands,
+and ``POST /job-tickets``, through which an app gets a ticket for a later background run.
 
-Both routes check the two tokens first, with the same answers. A ``POST`` is then
+All routes check the two tokens first, with the same answers. A ``POST`` is then
 checked in a fixed order, and the first failure answers:
 
 1. the workload token, then the user token, then membership of the app
@@ -51,7 +52,13 @@ from webauth.jwt_verification import KeySetFetch, MonotonicClock
 
 from agent_runtime import lost_groups
 from agent_runtime_client.capability import MAX_CAPABILITY_CHARACTERS
-from agent_runtime_client.wire import PROTOCOL_VERSION, RejectionCode, RunRejection, RunRequest
+from agent_runtime_client.wire import (
+    PROTOCOL_VERSION,
+    JobTicketRequest,
+    RejectionCode,
+    RunRejection,
+    RunRequest,
+)
 from agent_runtime_service.admission import AdmissionSlot, Lease
 from agent_runtime_service.capability import (
     Capability,
@@ -62,6 +69,11 @@ from agent_runtime_service.capability import (
 )
 from agent_runtime_service.config import ServiceConfig
 from agent_runtime_service.identity import Caller, CallerCheck, build_verifier
+from agent_runtime_service.job_ticket import (
+    job_ticket_claims,
+    parse_job_ticket_request,
+    signed_job_ticket,
+)
 from agent_runtime_service.quarantine import GroupConfirmation, Quarantine
 from agent_runtime_service.routing import Cli, NotEnabled, ServedRoute, route
 from agent_runtime_service.run_events import run_frames
@@ -96,7 +108,7 @@ _MESSAGE: Final[Mapping[RejectionCode, str]] = {
     RejectionCode.UNAUTHORIZED: "Both a user token and a workload token are required and must"
     " be valid.",
     RejectionCode.FORBIDDEN: "The tokens do not permit this request.",
-    RejectionCode.INVALID_REQUEST: "The body is not a valid run request.",
+    RejectionCode.INVALID_REQUEST: "The body is not a valid request for the route.",
     RejectionCode.UNAVAILABLE: "The service cannot check tokens right now; retry later.",
     RejectionCode.NOT_FOUND: "No such run.",
     RejectionCode.CAPABILITY_TOO_LARGE: "This run's capability would exceed"
@@ -148,6 +160,19 @@ def create_app(
             caller,
             run_request,
         )
+
+    @app.post("/job-tickets")
+    async def mint_job_ticket(request: Request) -> Response:
+        caller = await _caller_of(callers, request)
+        if isinstance(caller, RejectionCode):
+            return rejection(caller)
+        body = await _limited_body(request)
+        ticket_request = (
+            RejectionCode.INVALID_REQUEST if body is None else parse_job_ticket_request(body)
+        )
+        if isinstance(ticket_request, RejectionCode):
+            return rejection(ticket_request)
+        return _minted(config, caller, ticket_request, wall_clock)
 
     @app.get("/runs/{run_id}")
     async def run_status(request: Request, run_id: str) -> Response:
@@ -320,6 +345,22 @@ def _capability_of(
         max_duration_s=config.runs.max_duration_s,
     )
     return signed_capability(scope, claims)
+
+
+def _minted(
+    config: ServiceConfig,
+    caller: Caller,
+    ticket_request: JobTicketRequest,
+    wall_clock: Callable[[], datetime],
+) -> Response:
+    if config.signing is None:
+        return rejection(RejectionCode.NOT_ENABLED)
+    claims = job_ticket_claims(config, caller, ticket_request, wall_clock().timestamp())
+    return Response(
+        content=signed_job_ticket(config.signing.key, claims).model_dump_json(),
+        media_type="application/json",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 def rejection(code: RejectionCode) -> Response:

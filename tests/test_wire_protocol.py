@@ -117,9 +117,7 @@ def test_every_variant_round_trips_through_its_json(raw: dict[str, object]) -> N
 @pytest.mark.parametrize(
     ("raw", "kind"),
     [
-        pytest.param(
-            wire("thinking", 1, text="hm"), ViolationKind.UNKNOWN_TYPE, id="unknown type"
-        ),
+        pytest.param(wire("thinking", 1, text="hm"), ViolationKind.UNKNOWN_TYPE, id="unknown type"),
         pytest.param(
             {**wire("heartbeat", 1), "v": 1}, ViolationKind.UNSUPPORTED_VERSION, id="older version"
         ),
@@ -406,9 +404,7 @@ def test_a_run_request_round_trips_through_its_json() -> None:
     assert json.loads(request.model_dump_json()) == REQUEST
 
 
-@pytest.mark.parametrize(
-    "field", ["provider", "route", "user_id", "mcp_url", "mcp_token"]
-)
+@pytest.mark.parametrize("field", ["provider", "route", "user_id", "mcp_url", "mcp_token"])
 def test_a_run_request_naming_what_the_service_decides_is_refused(field: str) -> None:
     request_json = json.dumps({**REQUEST, field: "chosen by the client"})
 

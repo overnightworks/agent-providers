@@ -5,7 +5,8 @@ service (decision record 0001, H6): the request that starts a run, the run's
 event stream as a closed union discriminated on ``type`` with every event
 carrying the protocol version, the run id and its sequence number, and the
 typed body the service answers with when it refuses a request, the status
-body it answers ``GET /runs/{id}`` with, and the two bodies of ``POST /job-tickets``.
+body it answers ``GET /runs/{id}`` with, the two bodies of ``POST /job-tickets``, and the
+offer ``GET /offer`` answers with.
 A new variant or a new field is a new ``PROTOCOL_VERSION``.
 
 Validation is strict, so the wire's JSON types are the contract: a sequence
@@ -377,6 +378,44 @@ class JobTicket(_WireModel):
 
     ticket: NonEmptyUnicodeText = Field(repr=False)
     expires_at: UtcInstant
+
+
+class OfferRoute(StrEnum):
+    """The route an offered model would run on."""
+
+    CLI = "cli"
+    API = "api"
+
+
+class OfferReason(StrEnum):
+    """Why an offered model is not ready."""
+
+    NOT_BUILT = "not_built"
+
+
+class OfferedModel(_StrictModel):
+    """One entry of the offer, shaped like an entry of OpenAI's ``GET /v1/models``."""
+
+    id: ModelName
+    object: Literal["model"]
+    created: Annotated[Literal[0], BeforeValidator(_json_integer)]
+    owned_by: str
+    route: Annotated[OfferRoute, Field(strict=False)]
+    ready: bool
+    reason: Annotated[OfferReason | None, Field(strict=False)]
+
+    @model_validator(mode="after")
+    def _reason_matches_readiness(self) -> Self:
+        if (self.reason is None) != self.ready:
+            raise ValueError("reason is set exactly when the model is not ready")
+        return self
+
+
+class Offer(_WireModel):
+    """The HTTP body of ``GET /offer``: the models this person can run in this app."""
+
+    object: Literal["list"]
+    data: list[OfferedModel]
 
 
 class TurnRole(StrEnum):

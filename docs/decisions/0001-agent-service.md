@@ -1040,6 +1040,16 @@ configuration that still holds the table stops startup naming `apps.<app>.models
 operator's „ja“ on the head's proposal of #444, sentence 3, relayed by songmaker's head on
 23.10.2026, and „ja macht sinn“ for the list O1-O15 (O11-O13 here).
 
+**Amendment (23.10.2026, #444, #452).** `GET /offer` is a new read-only route. It takes the
+same two tokens as `POST /runs`, answers for the asking person in the asking app, and puts
+each model a `[cli.<provider>]` table lists to `routing.route` exactly as `/runs` admission
+does: a model `route` does not enable is absent, and the others are listed with their route and
+whether a runner is installed for it (`not_built` when none is). It never opens the login file,
+is never cached, and lets every member of the app ask. Wire version 2 stays; `RejectionCode`
+gains nothing. Authority: the operator's „ja“ on the head's proposal of #444, relayed by
+songmaker's head on 23.10.2026, „ja macht sinn“ for O1-O10 and O14, and the spoken yes for O6,
+O7 and O8.
+
 **Consequence.** The app-local provider/model/route settings for a moved purpose
 are removed from settings, API and UI.
 

@@ -83,7 +83,8 @@ flowchart TB
 ```
 
 *Question: which route serves this caller? Source:
-`agent_runtime_service.app._admitted`, `agent_runtime_service.routing.route`. The groups and models are
+`agent_runtime_service.app._admitted`, `agent_runtime_service.routing.route`; `GET /offer`
+(`agent_runtime_service.offer`) is the second reader of `route`. The groups and models are
 operator configuration ([operations.md](operations.md)).*
 
 Keycloak decides who may use the subscription and who the paid route, through

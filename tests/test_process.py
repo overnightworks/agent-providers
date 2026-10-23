@@ -4539,11 +4539,11 @@ def test_an_unusable_codex_login_makes_the_probe_answer_logged_out(
     assert codex_cli_login().logged_in is False
 
 
-def test_the_grok_probe_hands_its_child_the_login_byte_for_byte(tmp_path, monkeypatch) -> None:
+def test_the_grok_probe_hands_its_child_the_login_with_renewal_blank(tmp_path, monkeypatch) -> None:
+    """(#255 E10, E10a; defect:#442) The probe child holds the login, renewal members empty."""
     auth_file = tmp_path / "grok-auth.json"
-    auth_file.write_bytes(b'{"realm": {"key": "grok-synthetic-key"}}')
+    auth_file.write_text(json.dumps(provider_test_support.a_grok_login()))
     override_grok_runtime(token_file=auth_file)
-    monkeypatch.setattr(process, "resolve_cli_binary", lambda _binary: Path("/usr/bin/grok"))
     copies: list[bytes] = []
 
     def run_cli_bounded(child, **kwargs):
@@ -4558,7 +4558,7 @@ def test_the_grok_probe_hands_its_child_the_login_byte_for_byte(tmp_path, monkey
     clear_agent_cli_caches()
 
     assert grok_cli_status().login.logged_in is True
-    assert copies == [auth_file.read_bytes()]
+    assert [json.loads(copy) for copy in copies] == [provider_test_support.a_grok_login("")]
 
 
 _NOT_A_PLAIN_FILE = [

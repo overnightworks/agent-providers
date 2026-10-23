@@ -131,6 +131,10 @@ def a_codex_login(*, tokens: dict[str, Any] | None = None, **top_level: Any) -> 
 CREDENTIAL_FILE_BOUND_BYTES: Final = 256 * 1024
 
 
+def a_grok_login(refresh_token: str = "canary-grok-refresh-token") -> dict[str, Any]:
+    return {"xai.example": {"key": "grok-synthetic-key", "refresh_token": refresh_token}}
+
+
 def a_fifo(directory: Path) -> Path:
     path = directory / "source"
     os.mkfifo(path)
@@ -366,11 +370,7 @@ def assert_claude_token_child(child: ChildProcess, *, root: Path, token: str) ->
 
 
 def assert_private_credential_child(
-    child: ChildProcess,
-    *,
-    root: Path,
-    source: Path,
-    destination: Path,
+    child: ChildProcess, *, root: Path, expected_login: dict[str, Any], destination: Path
 ) -> Path:
     """Assert the disposable credential home visible at a real spawn boundary."""
     home = Path(child.environment["HOME"])
@@ -380,7 +380,7 @@ def assert_private_credential_child(
     assert stat.S_IMODE(home.stat().st_mode) == 0o700
     assert stat.S_IMODE(copied_credential.parent.stat().st_mode) == 0o700
     assert stat.S_IMODE(copied_credential.stat().st_mode) == 0o400
-    assert copied_credential.read_bytes() == source.read_bytes()
+    assert json.loads(copied_credential.read_bytes()) == expected_login
     return home
 
 

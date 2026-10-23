@@ -27,6 +27,7 @@ from agent_runtime.errors import (
     raise_without_chain,
     refuse_empty_model,
 )
+from agent_runtime.grok_login import blanked_copy
 from agent_runtime.process import (
     CliEnvironmentUnavailableError,
     CliLineChannel,
@@ -110,6 +111,7 @@ class GrokCliToolTransport:
                 current_grok_runtime().token_file,
                 Path(".grok/auth.json"),
                 prefix=GROK_CLI_TURN_DIRECTORY_PREFIX,
+                credential_copy=blanked_copy,
                 missing_credential_is_error=True,
             )
         except CliLoginUnusableError as exc:

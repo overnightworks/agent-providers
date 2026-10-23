@@ -204,8 +204,8 @@ def test_the_offer_equals_what_runs_decides_for_the_same_caller(caller, config_n
 
     offered = {entry.id: (entry.route, entry.ready) for entry in _the_offer(offer_response).data}
     assert offered == expected
-    if isinstance(unlisted_decision, Api):
-        assert UNLISTED not in offered
+    assert isinstance(unlisted_decision, Api) == (API_GROUP in groups)
+    assert UNLISTED not in offered
 
 
 @pytest.mark.parametrize(

@@ -1,0 +1,7 @@
+claim_id = "2846c2531d1247bd9823c2576b681ef2"
+agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
+role = "builder"
+base = "80ae70a3e06e61ab573e2809337f136aa8acdc52"
+branch = "claude/issue-448-the-subscription-serves-its-subscriber"
+scope = ["docs/decisions/0001-agent-service.md", "docs/operations.md"]
+opened_commit = "4e8127bf3a5ef12c73477b02158c1fc7cb049e67"

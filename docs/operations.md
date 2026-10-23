@@ -62,8 +62,13 @@ its key; generation and rotation are the A1a4 ruling in the decision record.
 
 ## The subscription login
 
-The agent service holds the one login per provider for all apps; every member of
-a subscription group may use it. The file is the operator's to make and to keep
+The agent service holds the one login per provider for all apps. Only the
+subscriber himself may use it, because the provider's terms allow no use on behalf
+of others. The service keeps no user list; Keycloak decides, so the operator keeps
+the subscription groups (`subscription_groups`) to the subscriber alone. Everyone
+else reaches the API route only as a member of `api_groups`; a person in neither
+group is refused `not_enabled` ([ARCHITECTURE.md](ARCHITECTURE.md)).
+The file is the operator's to make and to keep
 fresh, named as `profiles.<name>.token_file`; the library never creates, renews
 or rewrites it. Claude is the only profile today: the service refuses a profile
 for another provider.

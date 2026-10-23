@@ -353,6 +353,7 @@ def _user_outside_the_app() -> dict[str, str]:
     ],
 )
 def test_the_offer_refuses_tokens_as_runs_does(headers, code, status):
+    """O7, cell 6: the refusal reads as a RunRejection and equals the runs answer."""
     with _served(_full_config(), _runners(cli=True, api=False)) as app:
         offer_response = httpx.get(f"{app}/offer", headers=headers(), timeout=10)
         runs_response = post_run(app, headers())

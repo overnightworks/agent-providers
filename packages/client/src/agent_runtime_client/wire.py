@@ -419,7 +419,7 @@ class Offer(_WireModel):
     data: list[OfferedModel]
 
 
-_OFFER_ANSWER: Final = TypeAdapter(Offer | RunRejection)
+_OFFER_ANSWER: Final[TypeAdapter[Offer | RunRejection]] = TypeAdapter(Offer | RunRejection)
 
 
 def parse_offer(body: bytes | str) -> Offer | RunRejection:

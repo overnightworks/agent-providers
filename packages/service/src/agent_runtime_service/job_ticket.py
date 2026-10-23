@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Final, Literal, Self
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 from webauth.oidc_login import app_role
 
 from agent_runtime_client.capability import CAPABILITY_ISSUER, CapabilityPrincipal
@@ -48,7 +48,7 @@ class JobTicketClaims(BaseModel):
     client: NonEmptyUnicodeText
     principal: CapabilityPrincipal
     purpose: Purpose
-    groups: list[NonEmptyUnicodeText]
+    groups: Annotated[tuple[NonEmptyUnicodeText, ...], Field(strict=False)]
 
     @model_validator(mode="after")
     def _expires_after_it_is_issued(self) -> Self:
@@ -63,7 +63,7 @@ def parse_job_ticket_request(body: bytes) -> JobTicketRequest | RejectionCode:
         return document
     try:
         return JobTicketRequest.model_validate(document)
-    except ValueError:
+    except ValidationError:
         return RejectionCode.INVALID_REQUEST
 
 
@@ -80,7 +80,7 @@ def job_ticket_claims(
         client=config.apps[caller.app].workload_client,
         principal=CapabilityPrincipal(iss=caller.principal.issuer, sub=caller.principal.subject),
         purpose=request.purpose,
-        groups=sorted(_groups_the_service_reads(config, caller)),
+        groups=tuple(sorted(_groups_the_service_reads(config, caller))),
     )
 
 

@@ -10,7 +10,7 @@ the transport's to enforce before it buffers the body.
 
 from __future__ import annotations
 
-from typing import Any, Final
+from typing import Final
 
 from pydantic import TypeAdapter, ValidationError
 
@@ -22,7 +22,7 @@ MAX_REQUEST_BYTES: Final = 256 * 1024
 _PROTOCOL_VERSION: Final[TypeAdapter[ProtocolVersion]] = TypeAdapter(ProtocolVersion)
 
 
-def versioned_document(body: bytes) -> dict[str, Any] | RejectionCode:
+def versioned_document(body: bytes) -> dict[str, object] | RejectionCode:
     """The body's JSON object, once it is strict JSON and speaks this protocol version."""
     try:
         document = read_strict_json(body.decode("utf-8-sig"))

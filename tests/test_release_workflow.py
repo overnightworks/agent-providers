@@ -11,7 +11,7 @@ import pytest
 from ruamel.yaml import YAML
 
 _WORKFLOW = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "release.yml"
-_REPOSITORY = "overnightworks/agent-providers"
+_REPOSITORY = "overnightworks/agent-runtime"
 _MIGRATION_LINK = (
     "**Breaking release.** Read [Migrating to 0.3.0]"
     f"(https://github.com/{_REPOSITORY}/blob/v0.3.0/docs/MIGRATING.md#migrating-to-030)"
@@ -110,8 +110,9 @@ def test_the_release_page_lists_each_wheel_with_its_url_and_sha256(tmp_path):
 
 
 _INSTALL_LINES = [
-    f"overnightworks-agent-{name} @ https://example.test/{name}.whl#sha256={digest}"
-    for name, digest in (("client", "aa"), ("providers", "bb"), ("service", "cc"))
+    f"overnightworks-agent-runtime{suffix} @ "
+    f"https://example.test/overnightworks-agent-runtime{suffix}.whl#sha256={digest}"
+    for suffix, digest in (("-client", "aa"), ("", "bb"), ("-service", "cc"))
 ]
 
 

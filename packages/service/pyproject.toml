@@ -25,7 +25,7 @@ dependencies = [
 agent-runtime-service = "agent_runtime_service.cli:main"
 
 [project.urls]
-Repository = "https://github.com/overnightworks/agent-providers"
+Repository = "https://github.com/overnightworks/agent-runtime"
 
 [build-system]
 requires = ["setuptools>=68.0", "wheel"]

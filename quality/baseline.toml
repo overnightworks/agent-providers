@@ -13,7 +13,7 @@
 "src/agent_runtime/process.py" = 2417
 "src/agent_runtime/spawn.py" = 1137
 "tests/provider_test_support.py" = 2195
-"tests/service_support.py" = 1582
+"tests/service_support.py" = 1573
 "tests/test_anchored_group_signal.py" = 812
 "tests/test_catalog.py" = 1045
 "tests/test_claude_provider.py" = 5486
@@ -28,8 +28,8 @@
 "tests/test_service_capability.py" = 886
 "tests/test_service_cli_runner.py" = 1150
 "tests/test_service_cli_runner_tools.py" = 1738
-"tests/test_service_config.py" = 1724
-"tests/test_service_entrance.py" = 950
+"tests/test_service_config.py" = 1637
+"tests/test_service_entrance.py" = 841
 "tests/test_service_quarantine.py" = 870
 "tests/test_service_run_recording.py" = 2268
 "tests/test_service_run_tools.py" = 920

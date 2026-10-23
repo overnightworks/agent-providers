@@ -13,8 +13,8 @@ checked in a fixed order, and the first failure answers:
 3. the person's role in the app (``admin`` in ``/apps/<app>/admin`` or below, else
    ``user``) must be one of the body's ``roles``, else ``forbidden``;
 4. tools named by an app without an MCP origin answer ``forbidden``, before the route;
-5. the route (``agent_runtime_service.routing``), which reads the resolved model (the app's
-   per-agent override, else the request's) and the installation's listed models;
+5. the route (``agent_runtime_service.routing``), which reads the request's model and the
+   installation's listed models;
 6. for the CLI route, the service's admission limit (``agent_runtime_service.admission``): a
    subscription run beyond it answers ``busy`` with ``Retry-After`` before anything is
    signed;
@@ -233,7 +233,7 @@ def _admitted(
         config.route,
         config.profiles,
         caller.groups,
-        config.model_for(caller.app, run_request.purpose, run_request.model),
+        run_request.model,
         config.subscription_models(),
     )
     if isinstance(served, NotEnabled):

@@ -68,7 +68,7 @@ flowchart TB
     role -->|no| forbidden
     role -->|yes| tools{"tools named but app<br/>has no MCP origin?"}
     tools -->|yes| forbidden
-    tools -->|no| model["resolved model =<br/>app override for the purpose,<br/>else the requested model"]
+    tools -->|no| model["the request's model,<br/>or none"]
     model --> subscription{"subscription group member,<br/>and a profile serves it?<br/>(no model asked: any profile;<br/>model asked: a profile of that<br/>provider exists and<br/>[cli.&lt;provider&gt;] models lists it)"}
     subscription -->|yes| slot{"CLI place free?"}
     slot -->|yes| cli["CLI route<br/>claude under the subscription profile"]
@@ -83,13 +83,12 @@ flowchart TB
 ```
 
 *Question: which route serves this caller? Source:
-`agent_runtime_service.app._admitted`, `agent_runtime_service.routing.route`,
-`agent_runtime_service.config.ServiceConfig.model_for`. The groups and models are
+`agent_runtime_service.app._admitted`, `agent_runtime_service.routing.route`. The groups and models are
 operator configuration ([operations.md](operations.md)).*
 
 Keycloak decides who may use the subscription and who the paid route, through
 groups; the service holds no user list. A requested model is never replaced by
-another, except by the app's per-agent override. The API runner is not built, so
+another. The API runner is not built, so
 an admitted run on the paid route ends `failed: provider_unavailable`.
 
 ## Crosscutting concepts

@@ -18,8 +18,8 @@ use the operator's subscription, and which route serves the caller. The app
 never names a provider, a model, a route or a user id, and never holds an LLM or
 subscription credential.
 
-*Amendment (22.10.2026, #382, #406).* The purpose still labels the run and its capability and now
-also keys the model override of its app (H5); it chooses no route itself.
+*Amendment (22.10.2026, #382, #406).* The purpose labels the run and its capability; it chooses
+no route and no model (amended 23.10.2026, H5).
 
 There are exactly two routes:
 
@@ -1030,6 +1030,15 @@ startup check (an override may name a model the subscription does not list, whic
 „a“ on #390 and supersedes #390's line that P4 checks every override against the listed
 models) and the rule that an override for an agent the app never sends simply never matches
 are the head's decisions on #406.
+
+**Amendment (23.10.2026, #444, #446).** The route reads the request's model only, else none;
+`[apps.<app>.models]` is removed, and with it `AppConfig.models` and `ServiceConfig.model_for`.
+The app owns the per-agent choice: its admin page stores it in the app's own store and sends
+`model` on every run, and the service stores nothing of it. A run without `model` takes the
+subscription profile's default, and a requested model is still never substituted. A
+configuration that still holds the table stops startup naming `apps.<app>.models`. Authority: the
+operator's „ja“ on the head's proposal of #444, sentence 3, relayed by songmaker's head on
+23.10.2026, and „ja macht sinn“ for the list O1-O15 (O11-O13 here).
 
 **Consequence.** The app-local provider/model/route settings for a moved purpose
 are removed from settings, API and UI.

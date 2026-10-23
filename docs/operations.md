@@ -35,14 +35,13 @@ bound to one principal (`agent_runtime_service.identity`). The checks run in thi
    `forbidden`.
 4. `agent_runtime_service.routing.route` decides the route; the second picture in
    [ARCHITECTURE.md](ARCHITECTURE.md) owns the order. The keys that feed it: the
-   app's model override (`[apps.<app>.models]`, the agent's name to
-   `<provider>/<model>`), the subscription groups (`[identity]
+   subscription groups (`[identity]
    subscription_groups`), the profiles (`[profiles.<name>]`), the names the
    subscription lists (`[cli.claude] models`), and the API groups (`api_groups`,
    set together with `[route] api_alias`). A model name the subscription does not
    list sends that agent to the paid API for every caller with API rights and
-   gives subscription-only callers `not_enabled`; an override for a name the app
-   never sends matches nothing, with no error.
+   gives subscription-only callers `not_enabled`. The app chooses the model per
+   agent and sends it on each run; the service stores nothing of the choice.
 
 At most `[runs] max_parallel_cli_runs` (default 5) CLI runs are admitted; one
 beyond gets 429 `busy` with `Retry-After` and never falls back to the API

@@ -153,8 +153,9 @@ def test_a_ticket_has_the_capability_issuer_its_own_audience_and_no_run_subject(
     assert "sub" not in claims
     assert isinstance(claims["iat"], int)
     assert isinstance(claims["exp"], int)
+    origin_check = TypeAdapter(McpOrigin)
     with pytest.raises(ValidationError):
-        TypeAdapter(McpOrigin).validate_python(JOB_TICKET_AUDIENCE)
+        origin_check.validate_python(JOB_TICKET_AUDIENCE)
 
 
 def test_two_tickets_for_the_same_person_and_agent_are_two_tickets(service):
@@ -388,5 +389,6 @@ def test_a_job_ticket_round_trips_and_its_repr_hides_the_ticket() -> None:
 def test_a_job_ticket_off_the_contract_is_refused(overrides: dict[str, object]) -> None:
     """J14: an answer off the contract is refused."""
 
+    document = json.dumps({**JOB_TICKET, **overrides})
     with pytest.raises(ValidationError):
-        JobTicket.model_validate_json(json.dumps({**JOB_TICKET, **overrides}))
+        JobTicket.model_validate_json(document)

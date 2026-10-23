@@ -89,6 +89,7 @@ WORKLOAD_TOKEN_HEADER: Final = "Agent-Workload-Token"
 RETRY_UNAVAILABLE_AFTER_SECONDS: Final = 30
 RETRY_BUSY_AFTER_SECONDS: Final = 10
 _BEARER_SCHEME: Final = "bearer"
+_JSON_MEDIA_TYPE: Final = "application/json"
 
 _log = logging.getLogger(__name__)
 
@@ -179,7 +180,7 @@ def create_app(
             return rejection(RejectionCode.NOT_FOUND)
         return Response(
             content=status.model_dump_json(),
-            media_type="application/json",
+            media_type=_JSON_MEDIA_TYPE,
             headers={"Cache-Control": "no-store"},
         )
 
@@ -366,7 +367,7 @@ def _minted(
     claims = job_ticket_claims(config, caller, ticket_request, wall_clock().timestamp())
     return Response(
         content=signed_job_ticket(config.signing.key, claims).model_dump_json(),
-        media_type="application/json",
+        media_type=_JSON_MEDIA_TYPE,
         headers={"Cache-Control": "no-store"},
     )
 
@@ -383,7 +384,7 @@ def rejection(code: RejectionCode) -> Response:
     return Response(
         content=body.model_dump_json(),
         status_code=_STATUS[code],
-        media_type="application/json",
+        media_type=_JSON_MEDIA_TYPE,
         headers=headers,
     )
 

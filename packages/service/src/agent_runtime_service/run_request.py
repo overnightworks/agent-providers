@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Final
 
-from pydantic import TypeAdapter, ValidationError
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from agent_runtime_client.mcp_wire import read_strict_json
 from agent_runtime_client.wire import ProtocolVersion, RejectionCode, RunRequest
@@ -37,11 +37,18 @@ def versioned_document(body: bytes) -> dict[str, object] | RejectionCode:
     return document
 
 
-def parse_run_request(body: bytes) -> RunRequest | RejectionCode:
+def parse_versioned_model[Model: BaseModel](
+    body: bytes, model: type[Model]
+) -> Model | RejectionCode:
+    """The body as ``model``, or the rejection a versioned request body earns."""
     document = versioned_document(body)
     if isinstance(document, RejectionCode):
         return document
     try:
-        return RunRequest.model_validate(document)
+        return model.model_validate(document)
     except ValidationError:
         return RejectionCode.INVALID_REQUEST
+
+
+def parse_run_request(body: bytes) -> RunRequest | RejectionCode:
+    return parse_versioned_model(body, RunRequest)

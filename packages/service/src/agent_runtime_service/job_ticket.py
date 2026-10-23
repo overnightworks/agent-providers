@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Final, Literal, Self
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from webauth.oidc_login import app_role
 
 from agent_runtime_client.capability import CAPABILITY_ISSUER, CapabilityPrincipal
@@ -27,7 +27,7 @@ from agent_runtime_client.wire import (
 )
 from agent_runtime_service.config import ServiceConfig
 from agent_runtime_service.identity import Caller
-from agent_runtime_service.run_request import versioned_document
+from agent_runtime_service.run_request import parse_versioned_model
 from agent_runtime_service.signing import SigningKey
 
 JOB_TICKET_TOKEN_TYPE: Final = "agent-job-ticket+jwt"
@@ -58,13 +58,7 @@ class JobTicketClaims(BaseModel):
 
 
 def parse_job_ticket_request(body: bytes) -> JobTicketRequest | RejectionCode:
-    document = versioned_document(body)
-    if isinstance(document, RejectionCode):
-        return document
-    try:
-        return JobTicketRequest.model_validate(document)
-    except ValidationError:
-        return RejectionCode.INVALID_REQUEST
+    return parse_versioned_model(body, JobTicketRequest)
 
 
 def job_ticket_claims(

@@ -22,6 +22,9 @@ checked in a fixed order, and the first failure answers:
    request's tool names, fits the 8,192 characters every verifier accepts
    (``capability_too_large``).
 
+Steps 3 to 7 are ``POST /runs``'s. ``POST /job-tickets`` answers ``not_enabled`` right after
+step 2 when the installation has no ``[signing]`` key, and otherwise mints.
+
 An admitted run answers ``200 text/event-stream`` with its frames
 (``agent_runtime_service.run_events``), and its response closes those frames whenever it
 ends, however it ends, and hands its runner one capability when its app has an MCP
@@ -37,7 +40,7 @@ from __future__ import annotations
 import logging
 import time
 import uuid
-from collections.abc import AsyncGenerator, Callable, Mapping
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 from contextlib import aclosing
 from datetime import datetime
 from http import HTTPStatus
@@ -102,7 +105,7 @@ _STATUS: Final[Mapping[RejectionCode, HTTPStatus]] = {
 }
 
 _MESSAGE: Final[Mapping[RejectionCode, str]] = {
-    RejectionCode.NOT_ENABLED: "AI is not enabled for this user and purpose.",
+    RejectionCode.NOT_ENABLED: "AI is not enabled for this request.",
     RejectionCode.BUSY: "The service is busy; retry later.",
     RejectionCode.UNSUPPORTED_VERSION: f"This service speaks protocol version {PROTOCOL_VERSION}.",
     RejectionCode.UNAUTHORIZED: "Both a user token and a workload token are required and must"
@@ -128,11 +131,10 @@ def create_app(
 ) -> FastAPI:
     """The service's ASGI app.
 
-    ``wall_clock`` (aware UTC) stamps each capability's issue and expiry and the
-    default run-record store. An injected ``records`` keeps its own clock, so the
-    two can differ; ``wall_clock`` never reaches the token verifier, which reads
-    webauth's own. ``confirm_group_gone`` is how the one quarantine asks whether a
-    lost process group is gone.
+    ``wall_clock`` (aware UTC) stamps each capability's and job ticket's issue and expiry and
+    the default run-record store. An injected ``records`` keeps its own clock, so the two can
+    differ; ``wall_clock`` never reaches the token verifier, which reads webauth's own.
+    ``confirm_group_gone`` is how the one quarantine asks whether a lost process group is gone.
     """
     callers = CallerCheck(build_verifier(config.identity, fetch_key_set, monotonic_clock), config)
     installed_runners = runners or Runners()
@@ -140,6 +142,7 @@ def create_app(
     subscription_slot = AdmissionSlot(config.runs.max_parallel_cli_runs)
     quarantine = Quarantine(LoopClock(), confirm_group_gone)
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    app.post("/job-tickets")(_job_ticket_route(callers, config, wall_clock))
 
     @app.post("/runs")
     async def start_run(request: Request) -> Response:
@@ -160,19 +163,6 @@ def create_app(
             caller,
             run_request,
         )
-
-    @app.post("/job-tickets")
-    async def mint_job_ticket(request: Request) -> Response:
-        caller = await _caller_of(callers, request)
-        if isinstance(caller, RejectionCode):
-            return rejection(caller)
-        body = await _limited_body(request)
-        ticket_request = (
-            RejectionCode.INVALID_REQUEST if body is None else parse_job_ticket_request(body)
-        )
-        if isinstance(ticket_request, RejectionCode):
-            return rejection(ticket_request)
-        return _minted(config, caller, ticket_request, wall_clock)
 
     @app.get("/runs/{run_id}")
     async def run_status(request: Request, run_id: str) -> Response:
@@ -345,6 +335,24 @@ def _capability_of(
         max_duration_s=config.runs.max_duration_s,
     )
     return signed_capability(scope, claims)
+
+
+def _job_ticket_route(
+    callers: CallerCheck, config: ServiceConfig, wall_clock: Callable[[], datetime]
+) -> Callable[[Request], Awaitable[Response]]:
+    async def mint_job_ticket(request: Request) -> Response:
+        caller = await _caller_of(callers, request)
+        if isinstance(caller, RejectionCode):
+            return rejection(caller)
+        body = await _limited_body(request)
+        ticket_request = (
+            RejectionCode.INVALID_REQUEST if body is None else parse_job_ticket_request(body)
+        )
+        if isinstance(ticket_request, RejectionCode):
+            return rejection(ticket_request)
+        return _minted(config, caller, ticket_request, wall_clock)
+
+    return mint_job_ticket
 
 
 def _minted(

@@ -45,7 +45,7 @@ A request the service refuses answers a `RunRejection` with one `RejectionCode`:
 |---|---|---|
 | `unauthorized` | 401 | A user token and a workload token are both required and must be valid. |
 | `forbidden` | 403 | The user is no member of the app, the request's `roles` lack the caller's role, the request names a tool while the app has no MCP origin, or the two tokens do not belong together (`agent_runtime_service.identity` lists every cause). |
-| `not_enabled` | 403 | No route is enabled for this caller and model. |
+| `not_enabled` | 403 | No route is enabled for this caller and model, or a job ticket was asked for and the installation has no `[signing]` section. |
 | `unsupported_version` | 400 | `v` is not 2. |
 | `invalid_request` | 422 | The body is not a valid request for the route. |
 | `capability_too_large` | 422 | The run's capability would exceed 8,192 characters. |

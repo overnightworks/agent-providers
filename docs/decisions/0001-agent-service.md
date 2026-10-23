@@ -4241,7 +4241,7 @@ capability, H3) and A1a5 (job tickets); one service-owned signing key covers bot
 request that started them, for at most a day.
 
 *Amendment (23.10.2026, #447, authority: #445, J1-J3, J11, J12, J14, J16, J17).* The minting half
-is built. `POST /job-tickets` answers a request with both tokens, and never a ticket. It takes
+is built. `POST /job-tickets` answers a request with both tokens, and never one that carries a ticket instead. It takes
 `{v: 2, purpose, expires_in_s}` and answers `{v: 2, ticket, expires_at}`; the protocol version
 stays 2. The lifetime is required, at most 86,400 seconds. The ticket is signed with the one
 signing key under type `agent-job-ticket+jwt` and audience `agent-job-ticket`, so a capability

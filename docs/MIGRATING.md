@@ -17,7 +17,7 @@ An app's change of choice takes effect on its next run, with no restart of the s
 stays version 2: `RunRequest` keeps its shape.
 
 `GET /offer` is new: it lists the models the asking person can run in this app, with the same
-two tokens as `POST /runs`. It needs no action ([wire.md](wire.md), "The offer").
+two tokens as `POST /runs`, and `agent_runtime_client.wire.parse_offer` reads its body. It needs no action ([wire.md](wire.md), "The offer").
 
 ## Migrating to 0.7.0
 

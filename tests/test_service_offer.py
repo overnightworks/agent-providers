@@ -18,6 +18,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from pydantic import ValidationError
 from service_support import (
     API_ALIAS,
     API_GROUP,
@@ -54,6 +55,7 @@ from agent_runtime_client.wire import (
     OfferRoute,
     RejectionCode,
     RunRejection,
+    parse_offer,
 )
 from agent_runtime_service.app import create_app
 from agent_runtime_service.config import ServiceConfig
@@ -104,7 +106,15 @@ def _served(config: ServiceConfig, runners: Runners | None = None) -> Iterator[s
 
 def _the_offer(response: httpx.Response) -> Offer:
     assert response.status_code == 200, response.text
-    return Offer.model_validate_json(response.content)
+    answer = parse_offer(response.content)
+    assert isinstance(answer, Offer)
+    return answer
+
+
+def _the_refusal(response: httpx.Response) -> RunRejection:
+    answer = parse_offer(response.content)
+    assert isinstance(answer, RunRejection)
+    return answer
 
 
 def test_a_subscriber_is_offered_the_listed_model_on_the_cli_route_as_ready():
@@ -264,6 +274,7 @@ def test_a_standard_models_reader_finds_the_ids():
     assert [model["id"] for model in json.loads(response.content)["data"]] == _listed_ids(
         _full_config()
     )
+    assert [entry.id for entry in _the_offer(response).data] == _listed_ids(_full_config())
     assert _the_offer(response).v == 2
 
 
@@ -342,11 +353,13 @@ def _user_outside_the_app() -> dict[str, str]:
     ],
 )
 def test_the_offer_refuses_tokens_as_runs_does(headers, code, status):
+    """O7, cell 6: the refusal reads as a RunRejection and equals the runs answer."""
     with _served(_full_config(), _runners(cli=True, api=False)) as app:
         offer_response = httpx.get(f"{app}/offer", headers=headers(), timeout=10)
         runs_response = post_run(app, headers())
 
     assert_rejected(offer_response, code, status)
+    assert _the_refusal(offer_response).code is code
     assert answer_of(offer_response) == answer_of(runs_response)
 
 
@@ -361,6 +374,7 @@ def test_an_unfetchable_key_set_answers_unavailable_as_runs_does():
         runs_response = post_run(base_url, _headers(SUBSCRIBER))
 
     assert_rejected(offer_response, RejectionCode.UNAVAILABLE, 503)
+    assert _the_refusal(offer_response).code is RejectionCode.UNAVAILABLE
     assert answer_of(offer_response) == answer_of(runs_response)
 
 
@@ -393,6 +407,8 @@ def test_the_offer_answers_get_only():
         head = httpx.head(f"{app}/offer", headers=headers, timeout=10)
 
     assert (posted.status_code, below.status_code, head.status_code) == (405, 404, 405)
+    with pytest.raises(ValidationError):
+        parse_offer(posted.content)
 
 
 @pytest.mark.parametrize(

@@ -4270,6 +4270,13 @@ subgroups. Without a `[signing]` section the route answers 403 `not_enabled`. Th
 a ticket whether or not the person could run now, limits none and stores none. The run half
 (presenting the ticket) is left to its own change.
 
+*Amendment (23.10.2026, #456, authority: #445, J9, J16, J18).* The mark is the profile setting
+`[profiles.<name>] background`, required, `true` or `false`; a profile without it does not start
+(exit 2, naming `profiles.<name>.background`), and `true` without `[signing]` stops the start the
+same way. `GET /offer` entries carry `background`: whether a ticket run gets that model on the
+same route, profile included, as a live run for the asking person, computed by the one `route`
+with all profiles and again with the background ones.
+
 ## Out of scope at this size
 
 - arbitrary MCP endpoints and dynamic discovery;

@@ -12,12 +12,14 @@ that kept a model per agent in the service configuration stores the choice itsel
 | --- | --- |
 | `[apps.<app>.models]`, a table of `<agent> = "<provider>/<model>"`, replaced the model of a run by its `purpose` | Removed. A configuration that still holds the table stops startup with exit 2, and the refusal names `apps.<app>.models`. |
 | A run without `model` could take the table's model | A run without `model` takes the default of the subscription profile. |
+| `[profiles.<name>]` held a provider and a token file | `background` is required, `true` or `false`. A configuration without it, or with a non-boolean, stops startup with exit 2 and the refusal names `profiles.<name>.background`; `true` also needs `[signing]`. Write `false` to keep today's behaviour. |
 
 An app's change of choice takes effect on its next run, with no restart of the service. The wire
 stays version 2: `RunRequest` keeps its shape.
 
 `GET /offer` is new: it lists the models the asking person can run in this app, with the same
-two tokens as `POST /runs`, and `agent_runtime_client.wire.parse_offer` reads its body. It needs no action ([wire.md](wire.md), "The offer").
+two tokens as `POST /runs`, and `agent_runtime_client.wire.parse_offer` reads its body. Each entry
+carries `background`. It needs no action ([wire.md](wire.md), "The offer").
 
 ## Migrating to 0.7.0
 

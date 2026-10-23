@@ -40,7 +40,6 @@ from service_support import (
     assert_rejected,
     decoded_events,
     post_run,
-    record_signed_tokens,
     run_body,
     run_headers,
     served,
@@ -512,18 +511,6 @@ def _routed_run(config, groups, *, afterwards=None, **body):
     return response, runners
 
 
-def _presentator_run(config, groups, **body):
-    runners = Runners(cli=ScriptedRunner(CLI_SCRIPT), api=ScriptedRunner(API_SCRIPT))
-    app = create_app(config, runners=runners, fetch_key_set=MINT.fetch_key_set)
-    headers = run_headers(
-        MINT.workload(client=PRESENTATOR_CLIENT),
-        MINT.user(azp=PRESENTATOR_CLIENT, groups=groups),
-    )
-    with served(app) as base_url:
-        response = post_run(base_url, headers, run_body(**body))
-    return response, runners
-
-
 def test_h1_a_listed_model_reaches_the_cli_route_by_name():
     response, runners = _routed_run(service_config(), SUBSCRIBER, model=LISTED)
 
@@ -790,134 +777,38 @@ def test_a_capability_too_large_rejection_is_422_with_its_own_message_and_no_ret
 
 
 OPUS = "claude/opus"
-GROK = "xai/grok-4.6"
 BOTH_RIGHTS = [SUBSCRIPTION_GROUP, API_GROUP, SONGMAKER_GROUP]
-PRESENTATOR_BOTH_RIGHTS = [SUBSCRIPTION_GROUP, API_GROUP, "/apps/presentator"]
 CLI_ON_SONNET = Cli("claude-main", LISTED_MODEL)
 
 
-def _songmaker_models(**overrides: str):
-    return service_config(models={"songmaker": overrides})
-
-
 @pytest.mark.parametrize(
-    ("config", "groups", "request_model", "route"),
+    ("groups", "request_model", "route"),
     [
-        pytest.param(
-            _songmaker_models(cowriter=LISTED), SUBSCRIBER, UNLISTED, CLI_ON_SONNET, id="O1"
-        ),
-        pytest.param(
-            _songmaker_models(cowriter=OPUS), BOTH_RIGHTS, LISTED, Api(API_ALIAS, OPUS), id="O2"
-        ),
-        pytest.param(_songmaker_models(cowriter=LISTED), SUBSCRIBER, None, CLI_ON_SONNET, id="O3"),
-        pytest.param(service_config(), SUBSCRIBER, LISTED, CLI_ON_SONNET, id="O4"),
-        pytest.param(service_config(), SUBSCRIBER, None, Cli("claude-main", None), id="O5"),
-        pytest.param(_songmaker_models(judge=OPUS), SUBSCRIBER, LISTED, CLI_ON_SONNET, id="O6"),
-        pytest.param(
-            service_config(models={"presentator": {"cowriter": OPUS}}),
-            SUBSCRIBER,
-            LISTED,
-            CLI_ON_SONNET,
-            id="O7",
-        ),
+        pytest.param(SUBSCRIBER, LISTED, CLI_ON_SONNET, id="subscriber-asks-a-listed-model"),
+        pytest.param(SUBSCRIBER, None, Cli("claude-main", None), id="no-model-takes-the-default"),
+        pytest.param(BOTH_RIGHTS, OPUS, Api(API_ALIAS, OPUS), id="both-rights-ask-an-unlisted-one"),
     ],
 )
-def test_the_override_of_the_agent_replaces_the_requested_model_before_the_route(
-    config, groups, request_model, route
-):
-    response, runners = _routed_run(config, groups, model=request_model)
+def test_a_run_is_routed_on_exactly_the_model_it_requests(groups, request_model, route):
+    response, runners = _routed_run(service_config(), groups, model=request_model)
 
     assert _admitted_events(response)
     admitted = runners.cli.admitted + runners.api.admitted
     assert [run.route for run in admitted] == [route]
 
 
-def test_o8_the_override_is_the_one_of_the_verified_callers_app():
-    config = service_config(models={"presentator": {"cowriter": OPUS}})
+def test_two_runs_of_one_purpose_each_run_the_model_they_ask_for_without_a_restart():
+    config = service_config()
 
-    response, runners = _presentator_run(config, PRESENTATOR_BOTH_RIGHTS, model=LISTED)
+    _first, first_runners = _routed_run(config, BOTH_RIGHTS, model=LISTED)
+    _second, second_runners = _routed_run(config, BOTH_RIGHTS, model=OPUS)
 
-    assert _admitted_events(response)
-    assert runners.api.admitted[-1].route == Api(API_ALIAS, OPUS)
-    assert runners.cli.admitted == []
-
-
-def test_o9_a_malformed_request_model_is_invalid_even_when_an_override_would_replace_it():
-    response, runners = _routed_run(_songmaker_models(cowriter=LISTED), SUBSCRIBER, model="sonnet")
-
-    assert_rejected(response, RejectionCode.INVALID_REQUEST, 422)
-    assert runners.cli.admitted == runners.api.admitted == []
+    assert first_runners.cli.admitted[-1].route == CLI_ON_SONNET
+    assert second_runners.api.admitted[-1].route == Api(API_ALIAS, OPUS)
 
 
-@pytest.mark.parametrize(
-    ("override", "groups", "route", "configure"),
-    [
-        pytest.param(OPUS, SUBSCRIBER, None, None, id="T1"),
-        pytest.param(OPUS, API_MEMBER, Api(API_ALIAS, OPUS), None, id="T2"),
-        pytest.param(OPUS, BOTH_RIGHTS, Api(API_ALIAS, OPUS), None, id="T3"),
-        pytest.param(LISTED, BOTH_RIGHTS, CLI_ON_SONNET, None, id="T4"),
-        pytest.param(GROK, SUBSCRIBER, None, None, id="T5"),
-        pytest.param(GROK, API_MEMBER, Api(API_ALIAS, GROK), None, id="T6"),
-        pytest.param(LISTED, API_MEMBER, Api(API_ALIAS, LISTED), without_cli, id="T9"),
-        pytest.param(LISTED, SUBSCRIBER, None, without_cli, id="T10"),
-        pytest.param(LISTED, API_MEMBER, Api(API_ALIAS, LISTED), None, id="T11"),
-    ],
-)
-def test_the_routing_table_applies_unchanged_to_the_overridden_model(
-    override, groups, route, configure, monkeypatch
-):
-    signed = record_signed_tokens(monkeypatch)
-    config = service_config(
-        models={"songmaker": {"cowriter": override}}, runs={"max_parallel_cli_runs": 1}
-    )
-    at_the_refusal = {}
-
-    def probe_the_refused_app(base_url, headers):
-        at_the_refusal["signed"] = list(signed)
-        if configure is None and route is None:
-            at_the_refusal["place"] = post_run(
-                base_url, headers, run_body(purpose="summarizer", model=LISTED)
-            )
-
-    response, runners = _routed_run(
-        (configure or (lambda built: built))(config),
-        groups,
-        model=None,
-        tools=SONGMAKER_TOOLS,
-        afterwards=probe_the_refused_app,
-    )
-
-    admitted = runners.cli.admitted + runners.api.admitted
-    if route is None:
-        assert_rejected(response, RejectionCode.NOT_ENABLED, 403)
-        assert at_the_refusal["signed"] == []
-        if configure is None:
-            assert _admitted_events(at_the_refusal["place"])
-            assert [run.route for run in admitted] == [CLI_ON_SONNET]
-        else:
-            assert admitted == []
-    else:
-        assert _admitted_events(response)
-        assert [run.route for run in admitted] == [route]
-
-
-def _frame_kinds_and_model_members(config, **body):
-    response, _runners = _routed_run(config, SUBSCRIBER, **body)
-    kinds = _admitted_events(response)
-    return kinds, b'"model"' in response.content
-
-
-def test_w1_an_overridden_run_streams_the_same_frames_as_a_requested_one():
-    overridden = _frame_kinds_and_model_members(_songmaker_models(cowriter=LISTED), model=None)
-    requested = _frame_kinds_and_model_members(service_config(), model=LISTED)
-
-    assert overridden == requested == (["run_started", "assistant_text", "succeeded"], False)
-
-
-def _run_on_the_file(tmp_path, models):
-    return service_config_file(
-        tmp_path, subscription_groups=[SUBSCRIPTION_GROUP, OLD_SUBSCRIPTION_GROUP], models=models
-    )
+def _run_on_the_file(tmp_path, subscription_groups):
+    return service_config_file(tmp_path, subscription_groups=subscription_groups)
 
 
 def _post_both_rights(app, runners):
@@ -925,7 +816,7 @@ def _post_both_rights(app, runners):
         response = post_run(
             base_url,
             run_headers(MINT.workload(), MINT.user(groups=BOTH_RIGHTS)),
-            run_body(model=GROK),
+            run_body(model=LISTED),
         )
     assert _admitted_events(response)
     return (runners.cli.admitted + runners.api.admitted)[-1].route
@@ -937,14 +828,11 @@ def _app_from(config_file):
     return app, runners
 
 
-def test_x_the_file_is_read_at_startup_and_a_restart_reads_it_again(tmp_path):
-    config_file = _run_on_the_file(tmp_path, {"songmaker": {"cowriter": LISTED}})
+def test_the_file_is_read_at_startup_and_a_restart_reads_it_again(tmp_path):
+    config_file = _run_on_the_file(tmp_path, [SUBSCRIPTION_GROUP])
     running, running_runners = _app_from(config_file)
-    assert _post_both_rights(running, running_runners) == CLI_ON_SONNET  # X1
+    assert _post_both_rights(running, running_runners) == CLI_ON_SONNET
 
-    edited = _run_on_the_file(tmp_path, {"songmaker": {"cowriter": OPUS}})
-    assert _post_both_rights(running, running_runners) == CLI_ON_SONNET  # X2
-    assert _post_both_rights(*_app_from(edited)) == Api(API_ALIAS, OPUS)  # X3a
-
-    removed = _run_on_the_file(tmp_path, None)
-    assert _post_both_rights(*_app_from(removed)) == Api(API_ALIAS, GROK)  # X3b
+    edited = _run_on_the_file(tmp_path, ["/not-a-subscriber-group"])
+    assert _post_both_rights(running, running_runners) == CLI_ON_SONNET
+    assert _post_both_rights(*_app_from(edited)) == Api(API_ALIAS, LISTED)

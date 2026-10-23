@@ -159,6 +159,14 @@ def test_a_leftover_tools_table_of_an_app_stops_startup_naming_the_field(tmp_pat
     assert _refused_on_one_line(_written(tmp_path, text), capsys).startswith("apps.songmaker.tools")
 
 
+def test_a_leftover_models_table_of_an_app_stops_startup_naming_the_field(tmp_path, capsys):
+    text = VALID_CONFIG + '\n[apps.songmaker.models]\ncowriter = "claude/sonnet"\n'
+
+    assert _refused_on_one_line(_written(tmp_path, text), capsys).startswith(
+        "apps.songmaker.models"
+    )
+
+
 SECOND_CLAUDE_PROFILE = f'\n[profiles.claude-spare]\nprovider = "claude"\n{TOKEN_FILE_LINE}\n'
 SECOND_APP_WITH_SAME_CLIENT = '\n[apps.presentator]\nworkload_client = "songmaker-test"\n'
 
@@ -1627,98 +1635,3 @@ def test_an_app_may_name_no_origin_explicitly_and_needs_no_signing():
     config = ServiceConfig.model_validate(document)
 
     assert config.apps["songmaker"].mcp_origin is None
-
-
-def _with_models_table(*lines: str) -> str:
-    return VALID_CONFIG + "\n[apps.songmaker.models]\n" + "".join(f"{line}\n" for line in lines)
-
-
-@pytest.fixture
-def no_secret_is_read(monkeypatch):
-    def fail_instead_of_reading(*_arguments, **_where):
-        raise AssertionError("a secret file was read before the models table was refused")
-
-    monkeypatch.setattr("agent_runtime_service.config.load_signing_key", fail_instead_of_reading)
-    monkeypatch.setattr("agent_runtime_service.config.read_token_file", fail_instead_of_reading)
-
-
-@pytest.mark.parametrize(
-    ("agent", "shown"),
-    [
-        pytest.param('"Cowriter"', "Cowriter", id="C1-capital"),
-        pytest.param('"1a"', "1a", id="C2-starts-with-a-digit"),
-        pytest.param('""', "", id="C3-empty"),
-        pytest.param(f'"a{"b" * 64}"', f"a{'b' * 64}", id="C4-65-characters"),
-        pytest.param('"a/b"', "a/b", id="C5-slash"),
-    ],
-)
-def test_c1_to_c5_an_agent_name_outside_the_grammar_stops_startup_naming_it(
-    tmp_path, capsys, no_secret_is_read, agent, shown
-):
-    config_file = _written(tmp_path, _with_models_table(f'{agent} = "claude/sonnet"'))
-
-    refusal = _refused_on_one_line(config_file, capsys)
-
-    assert refusal.startswith(f"apps.songmaker.models.{shown}: agent name")
-
-
-@pytest.mark.parametrize(
-    "value",
-    [
-        pytest.param('"sonnet"', id="C6-no-provider"),
-        pytest.param('"claude/sonnet@2"', id="C7-versioned"),
-        pytest.param('""', id="C8-empty"),
-        pytest.param("5", id="C9-not-a-string"),
-    ],
-)
-def test_c6_to_c9_a_model_outside_the_grammar_stops_startup_naming_the_agent(
-    tmp_path, capsys, no_secret_is_read, value
-):
-    config_file = _written(tmp_path, _with_models_table(f"cowriter = {value}"))
-
-    refusal = _refused_on_one_line(config_file, capsys)
-
-    assert refusal.startswith("apps.songmaker.models.cowriter: model")
-
-
-def test_c10_a_models_entry_that_is_not_a_table_stops_startup_naming_the_table(
-    tmp_path, capsys, no_secret_is_read
-):
-    config_file = _written(
-        tmp_path,
-        VALID_CONFIG.replace(
-            SONGMAKER_ORIGIN_LINE, SONGMAKER_ORIGIN_LINE + 'models = "claude/sonnet"\n'
-        ),
-    )
-
-    refusal = _refused_on_one_line(config_file, capsys)
-
-    assert refusal.startswith("apps.songmaker.models: must be a table")
-
-
-def test_c11_an_override_loads_and_replaces_the_requested_model_of_its_agent(tmp_path):
-    config = load_config(_written(tmp_path, _with_models_table('cowriter = "claude/sonnet"')))
-
-    assert config.model_for("songmaker", "cowriter", "claude/opus") == "claude/sonnet"
-
-
-def test_c12_without_a_models_table_the_requested_model_stays(tmp_path):
-    config = load_config(_written(tmp_path, VALID_CONFIG))
-
-    assert config.model_for("songmaker", "cowriter", "claude/opus") == "claude/opus"
-    assert config.model_for("songmaker", "cowriter", None) is None
-
-
-@pytest.mark.parametrize(
-    "model",
-    [
-        pytest.param("claude/opus", id="C13-unlisted"),
-        pytest.param("xai/grok-4.6", id="C14-another-provider"),
-    ],
-)
-def test_c13_c14_a_model_the_subscription_does_not_list_is_a_valid_override(tmp_path, model):
-    text = _with_models_table(f'cowriter = "{model}"').replace(MODELS_LINE, 'models = ["sonnet"]')
-
-    config = load_config(_written(tmp_path, text))
-
-    assert config.model_for("songmaker", "cowriter", None) == model

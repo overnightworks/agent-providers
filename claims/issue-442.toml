@@ -3,6 +3,6 @@ agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
 role = "builder"
 base = "fc9c3ecebd2fa2c9cbce1ae64baf21a26cd23665"
 branch = "claude/issue-442-s4g-copy-a-grok-child-and-the-grok-catal"
-scope = ["docs/host.md", "src/agent_runtime/config.py", "src/agent_runtime/grok/transport.py", "src/agent_runtime/grok_login.py", "src/agent_runtime/process.py", "tests/provider_test_support.py", "tests/test_grok_cli_adapter.py", "tests/test_grok_login.py", "tests/test_process.py"]
+scope = [".importlinter", "docs/host.md", "src/agent_runtime/config.py", "src/agent_runtime/grok/transport.py", "src/agent_runtime/grok_login.py", "src/agent_runtime/process.py", "tests/provider_test_support.py", "tests/test_grok_cli_adapter.py", "tests/test_grok_login.py", "tests/test_process.py"]
 opened_commit = "3b4408c6e82ecf38601abba8d247eb9270f2f700"
 whole_reason = "One copy function and its two call sites; the config docstring, the host sentence and the tests that pin the old whole copy change with it, and splitting would leave a pinned test or a statement false."

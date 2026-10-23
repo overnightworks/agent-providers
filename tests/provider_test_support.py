@@ -122,8 +122,8 @@ def a_grok_login() -> bytes:
     }).encode()
 
 
-def a_blanked_grok_login() -> bytes:
-    return json.dumps({"xai.example": {"key": "grok-synthetic-key", "refresh_token": ""}}).encode()
+def a_blanked_grok_login() -> dict[str, Any]:
+    return {"xai.example": {"key": "grok-synthetic-key", "refresh_token": ""}}
 
 
 def a_codex_login(*, tokens: dict[str, Any] | None = None, **top_level: Any) -> bytes:
@@ -383,7 +383,7 @@ def assert_private_credential_child(
     child: ChildProcess,
     *,
     root: Path,
-    expected_copy: bytes,
+    expected_login: dict[str, Any],
     destination: Path,
 ) -> Path:
     """Assert the disposable credential home visible at a real spawn boundary."""
@@ -394,7 +394,8 @@ def assert_private_credential_child(
     assert stat.S_IMODE(home.stat().st_mode) == 0o700
     assert stat.S_IMODE(copied_credential.parent.stat().st_mode) == 0o700
     assert stat.S_IMODE(copied_credential.stat().st_mode) == 0o400
-    assert copied_credential.read_bytes() == expected_copy
+    assert json.loads(copied_credential.read_bytes()) == expected_login
+    assert CANARY_GROK_REFRESH_TOKEN.encode() not in copied_credential.read_bytes()
     return home
 
 

@@ -1,4 +1,4 @@
-"""The copy of the Grok login a child may hold."""
+"""The copy of the Grok login a child may hold (#255 E10, E10a; defect:#442)."""
 
 from __future__ import annotations
 
@@ -50,6 +50,8 @@ def test_a_member_whose_name_only_resembles_a_renewal_name_is_kept() -> None:
         pytest.param(b'"refresh_token"', id="string"),
         pytest.param(b"null", id="null"),
         pytest.param(b'{"refresh_token": "\xff"}', id="invalid-utf8"),
+        pytest.param('{"a": 1}'.encode("utf-16"), id="utf-16"),
+        pytest.param(b'\xef\xbb\xbf{"a": 1}', id="utf-8-byte-order-mark"),
         pytest.param(b"[" * 100_000, id="excessive-nesting"),
     ],
 )

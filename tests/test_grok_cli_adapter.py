@@ -94,6 +94,7 @@ def _transport() -> grok_cli_adapter.GrokCliToolTransport:
 def test_grok_turn_whose_login_is_not_a_json_object_is_logged_out(
     tmp_path: Path, document: bytes,
 ) -> None:
+    """(#255 E10, E10a; defect:#442) A login that is no JSON object is an unusable login."""
     source = tmp_path / "source"
     source.write_bytes(document)
     override_grok_runtime(token_file=source)
@@ -357,7 +358,7 @@ def test_grok_tool_transport_starts_then_resumes_in_one_private_credential_home(
         homes.append(assert_private_credential_child(
             child,
             root=tmp_path,
-            expected_copy=a_blanked_grok_login(),
+            expected_login=a_blanked_grok_login(),
             destination=Path(".grok/auth.json"),
         ))
 
@@ -539,7 +540,7 @@ def test_grok_turn_keeps_its_private_home_until_late_runner_confirmation(
         captured["home"] = assert_private_credential_child(
             child,
             root=tmp_path,
-            expected_copy=a_blanked_grok_login(),
+            expected_login=a_blanked_grok_login(),
             destination=Path(".grok/auth.json"),
         )
         outcome = CliRunOutcome(
@@ -1137,7 +1138,7 @@ def test_closing_the_tool_loop_keeps_the_grok_home_until_confirmed_reap(
         captured["home"] = assert_private_credential_child(
             child,
             root=tmp_path,
-            expected_copy=a_blanked_grok_login(),
+            expected_login=a_blanked_grok_login(),
             destination=Path(".grok/auth.json"),
         )
         channel = kwargs["stdout_line_channel"]

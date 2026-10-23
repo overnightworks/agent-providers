@@ -7,7 +7,12 @@ from pathlib import Path
 
 import pytest
 import uvicorn
-from service_support import SUBSCRIPTION_GROUP, service_config, service_config_file
+from service_support import (
+    SUBSCRIPTION_GROUP,
+    logging_state_snapshot,  # noqa: F401 - a fixture, requested by name
+    service_config,
+    service_config_file,
+)
 
 from agent_runtime_service.cli import EXIT_BAD_CONFIG, main
 from agent_runtime_service.config import load_config
@@ -41,7 +46,16 @@ def _configuration(tmp_path: Path, *, background_line: str, signing: bool, origi
 
 def _refusal(path: Path, capsys) -> str:
     assert main(["--config", str(path)]) == EXIT_BAD_CONFIG
-    return capsys.readouterr().err
+    refusal = capsys.readouterr().err
+    assert refusal.count("\n") == 1
+    return refusal
+
+
+def _start(path: Path, monkeypatch) -> list[object]:
+    served_apps: list[object] = []
+    monkeypatch.setattr(uvicorn, "run", lambda app, **_where: served_apps.append(app))
+    assert main(["--config", str(path)]) == 0
+    return served_apps
 
 
 @pytest.mark.parametrize(
@@ -52,25 +66,32 @@ def _refusal(path: Path, capsys) -> str:
     ],
 )
 def test_a_profile_with_a_non_boolean_background_stops_the_start(tmp_path, capsys, background_line):
+    """J9/A1: a background that is not a boolean refuses the start on one line"""
     path = _configuration(tmp_path, background_line=background_line, signing=True, origin=True)
 
     assert f"profiles.{PROFILE_NAME}.background" in _refusal(path, capsys)
 
 
 @pytest.mark.parametrize("background_line", ["background = true", "background = false"])
-def test_background_is_a_required_boolean(tmp_path, background_line):
-    path = _configuration(tmp_path, background_line=background_line, signing=True, origin=True)
+def test_background_is_a_required_boolean(
+    tmp_path, monkeypatch, logging_state_restored, background_line
+):
+    """J9/A1: true and false both start the service and are read as written"""
+    path = _configuration(tmp_path, background_line=background_line, signing=True, origin=False)
 
+    assert len(_start(path, monkeypatch)) == 1
     assert load_config(path).profiles[PROFILE_NAME].background is ("true" in background_line)
 
 
 def test_a_profile_without_background_stops_the_start(tmp_path, capsys):
+    """J9/A1: a profile that omits background refuses the start on one line"""
     path = _configuration(tmp_path, background_line="", signing=True, origin=True)
 
     assert f"profiles.{PROFILE_NAME}.background" in _refusal(path, capsys)
 
 
 def test_a_background_profile_needs_a_signing_key(tmp_path, capsys):
+    """J16/A2: a background profile without a signing key refuses the start"""
     path = _configuration(
         tmp_path, background_line="background = true", signing=False, origin=False
     )
@@ -82,24 +103,33 @@ def test_a_background_profile_needs_a_signing_key(tmp_path, capsys):
     ("background_line", "signing"),
     [("background = false", False), ("background = true", True)],
 )
-def test_a_profile_that_needs_no_signing_key_or_has_one_starts(tmp_path, background_line, signing):
+def test_a_profile_that_needs_no_signing_key_or_has_one_starts(
+    tmp_path, monkeypatch, logging_state_restored, background_line, signing
+):
+    """J16/A2: no signing key is fine for a non-background profile, a key for either"""
     path = _configuration(tmp_path, background_line=background_line, signing=signing, origin=False)
 
-    load_config(path)
+    assert len(_start(path, monkeypatch)) == 1
 
 
 def test_the_origin_rule_still_speaks_first(tmp_path, capsys):
+    """A3: the mcp_origin signing rule is reported before the background rule"""
     path = _configuration(tmp_path, background_line="background = true", signing=False, origin=True)
 
     assert "apps.songmaker.mcp_origin: needs a [signing] section" in _refusal(path, capsys)
 
 
 def test_background_profiles_are_those_marked_true():
+    """J9/A7: of a true and a false profile, only the true one is a background profile"""
     config = service_config()
     profile = config.profiles[PROFILE_NAME]
-    off = config.model_copy(
-        update={"profiles": {PROFILE_NAME: profile.model_copy(update={"background": False})}}
+    mixed = config.model_copy(
+        update={
+            "profiles": {
+                "marked-true": profile.model_copy(update={"background": True}),
+                "marked-false": profile.model_copy(update={"background": False}),
+            }
+        }
     )
 
-    assert set(config.background_profiles()) == {PROFILE_NAME}
-    assert not off.background_profiles()
+    assert set(mixed.background_profiles()) == {"marked-true"}

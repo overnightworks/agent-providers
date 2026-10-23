@@ -21,7 +21,7 @@ IDENTITY = IdentityConfig(
     api_groups=frozenset({"/api-members"}),
     group_claim="groups",
 )
-PROFILES = {"claude-main": ProfileConfig(provider=Provider.CLAUDE)}
+PROFILES = {"claude-main": ProfileConfig(provider=Provider.CLAUDE, background=False)}
 ROUTE = RouteConfig(api_alias="assistant-api")
 CLI = Cli("claude-main")
 API = Api("assistant-api")

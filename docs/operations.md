@@ -76,7 +76,13 @@ for another provider.
 [profiles.subscription]
 provider = "claude"
 token_file = "/run/secrets/claude-token"
+background = false
 ```
+
+`background` is required, `true` or `false`; a profile without it, or with another
+value, stops the service at startup (exit 2, naming `profiles.<name>.background`). `true`
+lets the profile serve runs started by a job ticket; `false` keeps it to live runs. `true`
+also needs the `[signing]` section, because a ticket is signed with its key.
 
 **Provide it.** The file holds one line, the token `claude setup-token` prints,
 at a mode that gives nothing to group or others (0600 or 0400), at most 16 KiB.

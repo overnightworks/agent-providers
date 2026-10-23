@@ -395,13 +395,18 @@ class OfferReason(StrEnum):
 
 
 class OfferedModel(_StrictModel):
-    """One entry of the offer, shaped like an entry of OpenAI's ``GET /v1/models``."""
+    """One entry of the offer, shaped like an entry of OpenAI's ``GET /v1/models``.
+
+    ``background`` says whether a job ticket's run gets this model on the same route as a live
+    run for this person.
+    """
 
     id: ModelName
     object: Literal["model"]
     created: Annotated[Literal[0], BeforeValidator(_json_integer)]
     owned_by: str
     route: Annotated[OfferRoute, Field(strict=False)]
+    background: bool
     ready: bool
     reason: Annotated[OfferReason | None, Field(strict=False)]
 

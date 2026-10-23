@@ -77,9 +77,11 @@ only in this response: never in a URL, a log, a header or another body.
 `GET /offer` answers `{v: 2, object: "list", data: [...]}` (`Offer`), shaped like OpenAI's
 `GET /v1/models`: `data` lists the models the asking person can run in this app, sorted by
 `id`. Each entry (`OfferedModel`) is `{id, object: "model", created: 0, owned_by, route,
-ready, reason}`: `id` is `<provider>/<model>` as `RunRequest.model` writes it, `owned_by` the
-provider, `route` is `cli` (the subscription) or `api`, and `reason` is `null` when `ready` is
-true and `not_built` when it is not (the route has no runner installed). `OfferReason` is
+background, ready, reason}`: `id` is `<provider>/<model>` as `RunRequest.model` writes it,
+`owned_by` the provider, `route` is `cli` (the subscription) or `api`, `background` is whether a
+job ticket's run gets this model on the same route, with the same profile, as a live run for this
+person (a profile with `background = false` makes it `false` on the subscription), and `reason`
+is `null` when `ready` is true and `not_built` when it is not (the route has no runner installed). `OfferReason` is
 closed; a new reason is a wire change, because a new variant is a new `PROTOCOL_VERSION`.
 
 The call has no body and carries the same two tokens as `POST /runs`, refused the same way

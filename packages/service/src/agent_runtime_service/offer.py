@@ -4,6 +4,8 @@ Each model a ``[cli.<provider>]`` table lists is put to ``routing.route`` as ``/
 admission puts it, with the same five fixed arguments; the one decider says whether the
 person is enabled and on which route. This module adds only readiness, read the way
 ``run_frames`` is handed its runner: a route is ready when a runner is installed for it.
+``background`` says whether a ticket run gets the same route: ``route`` is put the same
+question again with only the profiles marked ``background = true``, and the answers are equal.
 """
 
 from __future__ import annotations
@@ -26,6 +28,14 @@ def offered_models(
             served = route(
                 config.identity, config.route, config.profiles, groups, model, listed_models
             )
+            served_to_a_ticket = route(
+                config.identity,
+                config.route,
+                config.background_profiles(),
+                groups,
+                model,
+                listed_models,
+            )
             if isinstance(served, NotEnabled):
                 continue
             ready = runners.for_route(served) is not None
@@ -36,6 +46,7 @@ def offered_models(
                     created=0,
                     owned_by=provider,
                     route=OfferRoute.CLI if isinstance(served, Cli) else OfferRoute.API,
+                    background=served == served_to_a_ticket,
                     ready=ready,
                     reason=None if ready else OfferReason.NOT_BUILT,
                 )

@@ -128,11 +128,11 @@ class _Service:
             _assert_streamed_to_a_terminal(self.let_go(run))
 
 
-def _serving(tmp_path, monkeypatch, runs: RunConfig, songmaker=None) -> Iterator[_Service]:
+def _serving(tmp_path, monkeypatch, runs: RunConfig) -> Iterator[_Service]:
     held = HeldRunner()
     api = ScriptedRunner(FINAL)
     signed = record_signed_tokens(monkeypatch)
-    config = capable_service_config(tmp_path, songmaker=songmaker).model_copy(update={"runs": runs})
+    config = capable_service_config(tmp_path).model_copy(update={"runs": runs})
     app = create_app(config, runners=Runners(cli=held, api=api), fetch_key_set=MINT.fetch_key_set)
     with served(app) as base_url, ThreadPoolExecutor() as pool:
         try:
@@ -145,13 +145,6 @@ def _serving(tmp_path, monkeypatch, runs: RunConfig, songmaker=None) -> Iterator
 def service(request, tmp_path, monkeypatch) -> Iterator[_Service]:
     runs = getattr(request, "param", RunConfig(max_parallel_cli_runs=PLACES))
     yield from _serving(tmp_path, monkeypatch, runs)
-
-
-@pytest.fixture
-def service_overriding_cowriter(request, tmp_path, monkeypatch) -> Iterator[_Service]:
-    """The service whose ``cowriter`` runs on the model of the test's parameter."""
-    runs = RunConfig(max_parallel_cli_runs=PLACES)
-    yield from _serving(tmp_path, monkeypatch, runs, {"models": {"cowriter": request.param}})
 
 
 def _assert_streamed_to_a_terminal(response: httpx.Response) -> None:
@@ -205,28 +198,26 @@ def test_a_refusal_before_the_limit_takes_nothing(service, user, body, code):
     service.let_all_go(service.fill_the_places())
 
 
-@pytest.mark.parametrize("service_overriding_cowriter", ["claude/sonnet"], indirect=True)
-def test_t7_a_listed_override_with_every_place_taken_is_busy_with_no_api_fallback(
-    service_overriding_cowriter,
-):
-    service = service_overriding_cowriter
+def test_t7_a_listed_requested_model_with_every_place_taken_is_busy_with_no_api_fallback(service):
     held = service.fill_the_places()
 
-    busy = service.run(MINT.user(groups=[SUBSCRIPTION_GROUP, API_GROUP, SONGMAKER_GROUP]))
+    busy = service.run(
+        MINT.user(groups=[SUBSCRIPTION_GROUP, API_GROUP, SONGMAKER_GROUP]), model="claude/sonnet"
+    )
 
     assert_rejected(busy, RejectionCode.BUSY, 429)
     assert service.api.admitted == []
     service.let_all_go(held)
 
 
-@pytest.mark.parametrize("service_overriding_cowriter", ["claude/opus"], indirect=True)
-def test_t8_an_unlisted_override_with_every_place_taken_runs_on_the_api_and_takes_no_place(
-    service_overriding_cowriter,
+def test_t8_an_unlisted_requested_model_with_every_place_taken_runs_on_the_api_and_takes_no_place(
+    service,
 ):
-    service = service_overriding_cowriter
     held = service.fill_the_places(purpose="judge")
 
-    response = service.run(MINT.user(groups=[SUBSCRIPTION_GROUP, API_GROUP, SONGMAKER_GROUP]))
+    response = service.run(
+        MINT.user(groups=[SUBSCRIPTION_GROUP, API_GROUP, SONGMAKER_GROUP]), model="claude/opus"
+    )
 
     _assert_streamed_to_a_terminal(response)
     assert service.api.admitted[-1].route == Api(API_ALIAS, "claude/opus")

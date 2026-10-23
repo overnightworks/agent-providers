@@ -52,5 +52,6 @@ def test_a_body_that_is_not_json_raises(body):
 )
 def test_a_drifted_body_is_refused_not_read_as_either_type(body):
     """O10, wire, cells 9-10."""
+    text = json.dumps(body)
     with pytest.raises(ValidationError):
-        parse_offer(json.dumps(body))
+        parse_offer(text)

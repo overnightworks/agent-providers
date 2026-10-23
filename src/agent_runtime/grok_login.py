@@ -13,7 +13,8 @@ def blanked_copy(document: bytes) -> bytes | None:
 
     A child that renews would rotate the operator's real refresh token and break
     the stored login, so every Grok child receives this copy instead of the
-    operator's file. A document that is not UTF-8 JSON, or not a JSON object, has no copy.
+    operator's file. A document that is not UTF-8 JSON, or not a JSON object, has
+    no copy.
     """
     try:
         parsed = json.loads(document.decode("utf-8"))

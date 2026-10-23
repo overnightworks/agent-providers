@@ -139,8 +139,7 @@ class LoggerState:
         logger.setLevel(self.level)
         logger.handlers[:] = self.handlers
         logger.filters[:] = self.filters
-        logger.propagate = self.propagate
-        logger.disabled = self.disabled
+        logger.propagate, logger.disabled = self.propagate, self.disabled
 
 
 UNTOUCHED_LOGGER: Final = LoggerState(logging.NOTSET, (), (), True, False)
@@ -258,6 +257,7 @@ def _service_config_document(
             CLI_PROFILE: {
                 "provider": "claude",
                 "token_file": str(token_file or process_token_file()),
+                "background": True,
             }
         },
         "route": {"api_alias": API_ALIAS},

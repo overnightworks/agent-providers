@@ -235,6 +235,50 @@ def test_an_entry_is_ready_exactly_when_a_runner_serves_its_route(groups, cli, a
     assert (entry.route, entry.ready, entry.reason) == (route, reason is None, reason)
 
 
+def _with_background(config: ServiceConfig, background: bool) -> ServiceConfig:
+    (name, profile), *_ = config.profiles.items()
+    return config.model_copy(
+        update={"profiles": {name: profile.model_copy(update={"background": background})}}
+    )
+
+
+@pytest.mark.parametrize("profile_background", [True, False])
+@pytest.mark.parametrize(
+    ("groups", "route", "same_route_for_a_ticket"),
+    [
+        pytest.param(SUBSCRIBER, OfferRoute.CLI, None, id="A4-subscription-only"),
+        pytest.param(API_CALLER, OfferRoute.API, True, id="A4-api-only"),
+        pytest.param(
+            [SUBSCRIPTION_GROUP, API_GROUP, SONGMAKER_GROUP],
+            OfferRoute.CLI,
+            None,
+            id="A4-both-groups",
+        ),
+    ],
+)
+def test_the_offer_background_names_whether_a_ticket_run_gets_the_same_route(
+    profile_background, groups, route, same_route_for_a_ticket
+):
+    """J18: the profile decides only where the live run is on the subscription"""
+    config = _with_background(
+        with_listed_models(service_config(), [LISTED_MODEL]), profile_background
+    )
+    with _served(config, _runners(cli=True, api=True)) as app:
+        (entry,) = _the_offer(_get_offer(app, groups)).data
+
+    expected = profile_background if same_route_for_a_ticket is None else same_route_for_a_ticket
+    assert (entry.route, entry.background) == (route, expected)
+
+
+def test_an_entry_that_is_not_ready_still_says_whether_a_ticket_run_gets_the_same_route():
+    """A5"""
+    config = without_profiles(with_listed_models(service_config(), [LISTED_MODEL]))
+    with _served(config, _runners(cli=False, api=False)) as app:
+        (entry,) = _the_offer(_get_offer(app, API_CALLER)).data
+
+    assert (entry.ready, entry.reason, entry.background) == (False, OfferReason.NOT_BUILT, True)
+
+
 def test_a_member_without_an_ai_group_gets_an_empty_list_not_not_enabled():
     """O4"""
     with _served(_full_config(), _runners(cli=True, api=True)) as app:
@@ -258,6 +302,7 @@ def test_the_offer_has_the_shape_of_a_models_list():
                 "created": 0,
                 "owned_by": "claude",
                 "route": "cli",
+                "background": True,
                 "ready": True,
                 "reason": None,
             }
@@ -365,6 +410,7 @@ def test_the_offer_refuses_tokens_as_runs_does(headers, code, status):
 
 def test_an_unfetchable_key_set_answers_unavailable_as_runs_does():
     """O7"""
+
     def unreachable_issuer(_url: str) -> bytes:
         raise KeySetFetchError("the issuer cannot be reached")
 

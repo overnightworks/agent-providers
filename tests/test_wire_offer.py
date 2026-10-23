@@ -17,6 +17,7 @@ def _offered(**overrides: object) -> dict[str, object]:
         "created": 0,
         "owned_by": "claude",
         "route": "cli",
+        "background": True,
         "ready": True,
         "reason": None,
         **overrides,
@@ -63,6 +64,29 @@ def test_an_offer_with_a_malformed_entry_is_refused(entry: dict[str, object]) ->
 
     with pytest.raises(ValidationError):
         Offer.model_validate_json(raw)
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        pytest.param({k: v for k, v in _offered().items() if k != "background"}, id="A6-missing"),
+        pytest.param(_offered(background="yes"), id="A6-text"),
+        pytest.param(_offered(background=1), id="A6-integer"),
+        pytest.param(_offered(background=None), id="A6-null"),
+    ],
+)
+def test_an_offered_model_needs_a_boolean_background(entry: dict[str, object]) -> None:
+    """J18"""
+    with pytest.raises(ValidationError):
+        Offer.model_validate_json(_offer(entry))
+
+
+@pytest.mark.parametrize("background", [True, False])
+def test_an_offered_model_round_trips_its_background(background: bool) -> None:
+    """J18"""
+    (entry,) = Offer.model_validate_json(_offer(_offered(background=background))).data
+
+    assert entry.background is background
 
 
 @pytest.mark.parametrize(

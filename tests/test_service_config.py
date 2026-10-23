@@ -92,6 +92,7 @@ port = 8099
 {CLI_SECTION}{SIGNING_SECTION}{MCP_SECTION}[profiles.claude-main]
 provider = "claude"
 {TOKEN_FILE_LINE}
+background = false
 
 [route]
 api_alias = "assistant-api"
@@ -177,9 +178,7 @@ def _with(old: str, new: str) -> str:
 
 
 def _without_origin_and_signing() -> str:
-    return (
-        _with(SIGNING_SECTION, "").replace(SONGMAKER_ORIGIN_LINE, "")
-    )
+    return _with(SIGNING_SECTION, "").replace(SONGMAKER_ORIGIN_LINE, "")
 
 
 REFUSED_RUN_SETTINGS = (
@@ -937,7 +936,9 @@ def test_a_path_swapped_after_the_open_is_judged_by_the_opened_token_file(tmp_pa
     assert config.profiles["claude-main"].token_file == token_file
 
 
-PROFILE_TABLE = '[profiles.claude-main]\nprovider = "claude"\n' + TOKEN_FILE_LINE + "\n\n"
+PROFILE_TABLE = (
+    '[profiles.claude-main]\nprovider = "claude"\n' + TOKEN_FILE_LINE + "\nbackground = false\n\n"
+)
 NO_PROFILE = _with(PROFILE_TABLE, "")
 WITHOUT_TOKEN_FILE = _with(TOKEN_FILE_LINE + "\n", "")
 WITHOUT_ORIGIN = _with(SONGMAKER_ORIGIN_LINE, "")
@@ -958,9 +959,7 @@ def _with_profile_of(provider: str, name: str = '"codex-main"', token: bool = Fa
 @pytest.mark.parametrize(
     "text",
     [
-        pytest.param(
-            _without_origin_and_signing().replace(PROFILE_TABLE, ""), id="no-profile"
-        ),
+        pytest.param(_without_origin_and_signing().replace(PROFILE_TABLE, ""), id="no-profile"),
         pytest.param(VALID_CONFIG, id="one-claude-profile-with-its-token"),
     ],
 )
@@ -1563,6 +1562,7 @@ def _profiles_edit(profiles: dict[Any, Any]) -> Callable[[dict[str, Any]], None]
 NO_ROUTE_REFUSAL = "has no subscription route yet; only claude can have a profile"
 UNIQUE_CLAUDE_PROFILE_REFUSAL = "claude already has profile"
 
+_OFF_CLAUDE = ProfileConfig(provider=Provider.CLAUDE, background=False)
 REFUSED_REPRESENTATIONS = [
     pytest.param(
         _profile_edit(token_file=None),
@@ -1570,19 +1570,17 @@ REFUSED_REPRESENTATIONS = [
         id="token-file-none",
     ),
     pytest.param(
-        _profiles_edit({"claude-main": ProfileConfig(provider=Provider.CLAUDE)}),
+        _profiles_edit({"claude-main": _OFF_CLAUDE}),
         "profiles.claude-main.token_file: required for a claude profile",
         id="tokenless-claude-instance",
     ),
     pytest.param(
-        _profiles_edit({"codex-main": ProfileConfig(provider=Provider.CODEX)}),
+        _profiles_edit({"codex-main": ProfileConfig(provider=Provider.CODEX, background=False)}),
         NO_ROUTE_REFUSAL,
         id="codex-instance",
     ),
     pytest.param(
-        _profiles_edit(
-            {"first": ProfileConfig(provider="claude"), "second": ProfileConfig(provider="claude")}
-        ),
+        _profiles_edit({"first": _OFF_CLAUDE, "second": _OFF_CLAUDE}),
         UNIQUE_CLAUDE_PROFILE_REFUSAL,
         id="two-claude-instances",
     ),

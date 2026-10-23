@@ -155,10 +155,10 @@ Every child this library starts is one immutable `ChildProcess` (created only in
 the child's *complete* environment. Only `PATH` and the named locale, proxy and
 certificate variables (`spawn.INHERITED_MACHINE_VARIABLES`) are copied from the host
 process, and nothing is merged onto a host baseline, because an optional set of
-extras on an inherited environment is a denylist seen from the other side. `HOME`
-is always set — an agent CLI with no `HOME` falls back to the passwd home, which is
-worse than a wrong one. Its `repr` omits the environment, since it can hold a
-token.
+extras on an inherited environment is a denylist seen from the other side. `HOME`,
+and `TMPDIR` as the same private home, are always set — an agent CLI with no `HOME`
+falls back to the passwd home, which is worse than a wrong one. Its `repr` omits the
+environment, since it can hold a token.
 
 **This is process configuration, not access control.** A closed environment stops
 discovery by convention — `HOME`, `PATH`, `CODEX_HOME`, `GROK_HOME`, `XDG_*` — and
@@ -178,7 +178,8 @@ only as `CLAUDE_CODE_OAUTH_TOKEN`, never in its arguments, and is read through
 and leaves no home behind (the error is `CliLoginNotConfiguredError`); a token the provider
 rejects ends a streaming turn with the safe code `cli_auth_rejected`. The model list asks the
 Claude CLI without a login and names no default. Every Claude child also gets the run switches
-(`constants.CLAUDE_RUN_SWITCHES`) and every `-p` run passes
+(`constants.CLAUDE_RUN_SWITCHES`), a subscription run that offers tools also gets
+`MCP_TOOL_TIMEOUT` (`[runs] max_duration_s` in milliseconds), and every `-p` run passes
 `--no-session-persistence`, so no Claude child keeps a session on disk and its
 telemetry and nonessential traffic stay off; the model request itself still
 reaches the provider, and a Claude managed-settings export the host configures is

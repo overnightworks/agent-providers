@@ -120,9 +120,21 @@ request: the caller's address, the method, the path including its query string, 
 protocol version and the status.
 
 **Tokens.** The end user's token and the app's workload token are checked on the
-request and neither stored nor passed to the CLI. The CLI is handed the profile's
-subscription login and the deployment's proxy variables ([host.md](host.md), "The
-child environment is closed") and the per-run relay secret.
+request and neither stored nor passed to the CLI. The service hands the CLI nothing
+derived from them either: not the subject, issuer, groups, client id, app name or
+run id, and not the capability, which it sends only to the app's MCP server. From
+the service the CLI receives the app's turn, the model when the service's override
+for the app's agent or the request names one, the app's tool definitions and tool
+results through the relay, the run's fixed flags and limits, the path of its system
+prompt file and, when the run offers tools, of its relay file with the relay's
+loopback address and per-run secret, and the service's own subscription credential;
+[host.md](host.md), "The child environment is closed", lists the rest of its
+environment. What the app writes is the app's: the definitions of the tools it
+names, its turn and the text of its tool results can reach the provider, including
+any value it takes from its capability's claims, such as the person's subject. The
+service filters some of that content on the way, for example anything that carries
+the capability verbatim, but it adds nothing of its own that identifies the person
+or the app.
 
 **What the CLI writes.** Every subscription run passes switches that limit what the
 CLI keeps and sends ([host.md](host.md), "The child environment is closed").
@@ -133,6 +145,6 @@ home, and with a login (A1b-0b1 c3), which lists the home only. A turn with the
 run's full flags and switches in the real deployment, inside its home and outside
 it, is not measured yet; issue #115, step 12b, owns that measurement.
 
-**The provider.** The turn's text, and the results of the app's tools the run calls,
-reach the provider (Anthropic for Claude) under the operator's subscription. What
-the provider keeps follows its terms, not this service.
+**The provider.** The turn's text, the app's tool definitions, and the results of the
+app's tools the run calls, reach the provider (Anthropic for Claude) under the
+operator's subscription. What the provider keeps follows its terms, not this service.

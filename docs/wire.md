@@ -47,11 +47,30 @@ A request the service refuses answers a `RunRejection` with one `RejectionCode`:
 | `forbidden` | 403 | The user is no member of the app, the request's `roles` lack the caller's role, the request names a tool while the app has no MCP origin, or the two tokens do not belong together (`agent_runtime_service.identity` lists every cause). |
 | `not_enabled` | 403 | No route is enabled for this caller and model. |
 | `unsupported_version` | 400 | `v` is not 2. |
-| `invalid_request` | 422 | The body is not a valid `RunRequest`. |
+| `invalid_request` | 422 | The body is not a valid request for the route. |
 | `capability_too_large` | 422 | The run's capability would exceed 8,192 characters. |
 | `busy` | 429 | The subscription route's places are taken; `Retry-After` is set and the run never falls back to the paid route. |
 | `unavailable` | 503 | The service cannot check tokens right now. |
 | `not_found` | 404 | No such run, or not yours. |
+
+## Job tickets
+
+`POST /job-tickets` takes `{v: 2, purpose, expires_in_s}` (`JobTicketRequest`) and answers
+`{v: 2, ticket, expires_at}` (`JobTicket`). It is for a background job that has no live user
+token when it runs: the app calls it inside the live request that starts the job, stores the
+ticket, and uses it later. The call carries the same two tokens as `POST /runs` and is refused
+the same way (401, 403, 503), then by framing, version and shape (400 `unsupported_version`,
+422 `invalid_request`), and only then `not_enabled` when the installation has no `[signing]`
+section. A ticket cannot fetch a ticket.
+
+`expires_in_s` is required, from 1 to 86,400 seconds (24 hours), and `expires_at` is the ticket's
+`exp`. The ticket is a JWT of type `agent-job-ticket+jwt` and audience `agent-job-ticket`, signed
+with the capability's key, so an app's MCP server refuses it as a capability. It binds the app
+and its workload client, the person (`iss`, `sub`), the agent (`purpose`), the expiry, and of the
+person's groups only the configured subscription groups, the API groups, and `/apps/<app>` with
+everything below it. The service issues a ticket even to a person who could not run an agent
+right now, limits no count per person, stores nothing and cannot revoke one. The ticket is shown
+only in this response: never in a URL, a log, a header or another body.
 
 ## Agent files
 

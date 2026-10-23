@@ -32,6 +32,7 @@ from pydantic import (
     BeforeValidator,
     ConfigDict,
     Field,
+    TypeAdapter,
     model_validator,
 )
 
@@ -416,6 +417,18 @@ class Offer(_WireModel):
 
     object: Literal["list"]
     data: list[OfferedModel]
+
+
+_OFFER_ANSWER: Final = TypeAdapter(Offer | RunRejection)
+
+
+def parse_offer(body: bytes | str) -> Offer | RunRejection:
+    """Read the body of ``GET /offer`` as the offer or as the service's refusal.
+
+    The two types share no field beyond ``v`` and both forbid extra fields, so the body
+    alone says which it is. A body that is neither raises ``ValidationError``.
+    """
+    return _OFFER_ANSWER.validate_json(body)
 
 
 class TurnRole(StrEnum):

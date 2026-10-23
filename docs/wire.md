@@ -94,6 +94,10 @@ It is not a list of what `/runs` admits. Only the models a `[cli.<provider>]` ta
 appear, so a model that only the API could serve is absent although `/runs` would admit it on
 `api`, and `ready` does not say whether the subscription has a free place (`busy`).
 
+An app fetches `GET /offer` with its own HTTP client, as it does `POST /runs`, and passes
+`response.content` to `agent_runtime_client.wire.parse_offer`. That returns an `Offer`, or the
+`RunRejection` of a refused token; any other body raises pydantic's `ValidationError`.
+
 ## Agent files
 
 An app declares its agents as Claude Code subagent files,

@@ -398,7 +398,7 @@ class OfferedModel(_StrictModel):
 
     id: ModelName
     object: Literal["model"]
-    created: Literal[0]
+    created: Annotated[Literal[0], BeforeValidator(_json_integer)]
     owned_by: str
     route: Annotated[OfferRoute, Field(strict=False)]
     ready: bool

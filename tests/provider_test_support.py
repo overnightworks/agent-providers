@@ -109,6 +109,7 @@ _fake_cli_processes: list[FakeBlockingChild] = []
 
 CANARY_ACCESS_TOKEN = "canary-access-token"
 CANARY_ID_TOKEN = "canary-id-token"
+CANARY_GROK_REFRESH_TOKEN = "canary-grok-refresh-token"
 A_CODEX_LOGIN_WITH_INVALID_UTF8 = b'{"auth_mode": "\xff"}'
 
 
@@ -129,6 +130,19 @@ def a_codex_login(*, tokens: dict[str, Any] | None = None, **top_level: Any) -> 
 
 
 CREDENTIAL_FILE_BOUND_BYTES: Final = 256 * 1024
+
+
+def a_grok_login() -> bytes:
+    return json.dumps({
+        "xai.example": {
+            "key": "grok-synthetic-key",
+            "refresh_token": CANARY_GROK_REFRESH_TOKEN,
+        },
+    }).encode()
+
+
+def a_blanked_grok_login() -> dict[str, Any]:
+    return {"xai.example": {"key": "grok-synthetic-key", "refresh_token": ""}}
 
 
 def a_fifo(directory: Path) -> Path:

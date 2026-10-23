@@ -14,7 +14,6 @@ from unittest.mock import Mock
 
 import provider_test_support
 import pytest
-from grok_login_support import a_blanked_grok_login, a_grok_login
 from provider_test_support import (
     A_RUNNER_FAILURE_CANARY,
     A_TOOL_FAILURE_MESSAGE,
@@ -25,10 +24,12 @@ from provider_test_support import (
     CliCall,
     Hold,
     RunnerFailureWatch,
+    a_blanked_grok_login,
     a_call_nested_too_deeply_to_decode,
     a_call_to_a_declared_tool,
     a_call_to_an_undeclared_tool_carrying,
     a_credential_destination_that_fails,
+    a_grok_login,
     a_symlink_to_a_login,
     a_usable_login_over_the_bound,
     assert_a_multi_result_batch_is_rejected,

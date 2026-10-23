@@ -33,7 +33,6 @@ import provider_test_support
 import pytest
 from bounds import TEST_WAIT_SECONDS
 from descendant_support import process_start_time
-from grok_login_support import a_blanked_grok_login, a_grok_login
 from provider_test_support import (
     A_RUNNER_FAILURE_CANARY,
     ANOTHER_RUNNER_FAILURE_CANARY,
@@ -51,11 +50,13 @@ from provider_test_support import (
     RaisingLogHandler,
     RunnerFailureWatch,
     ThreadedOperation,
+    a_blanked_grok_login,
     a_codex_login,
     a_credential_destination_that_fails,
     a_dangling_symlink,
     a_directory,
     a_fifo,
+    a_grok_login,
     a_path_through_a_regular_file,
     a_symlink_to_a_login,
     a_usable_login_over_the_bound,

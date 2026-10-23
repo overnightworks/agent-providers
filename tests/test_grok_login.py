@@ -6,8 +6,8 @@ import json
 from pathlib import Path
 
 import pytest
-from grok_login_support import CANARY_GROK_REFRESH_TOKEN
 from provider_test_support import (
+    CANARY_GROK_REFRESH_TOKEN,
     GROK_LOGGED_IN,
     SAMPLE_TOOL_CATALOG,
     override_grok_runtime,

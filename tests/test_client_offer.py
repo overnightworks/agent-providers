@@ -16,6 +16,7 @@ ENTRY = {
     "owned_by": "claude",
     "route": "cli",
     "ready": True,
+    "background": True,
     "reason": None,
 }
 OFFER = {"v": 2, "object": "list", "data": [ENTRY]}

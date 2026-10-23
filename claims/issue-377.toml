@@ -1,0 +1,7 @@
+claim_id = "b2b7bfb1b7064b388335fba3bc99cb7c"
+agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
+role = "builder"
+base = "fc9c3ecebd2fa2c9cbce1ae64baf21a26cd23665"
+branch = "claude/issue-377-a1b-c0b-the-codex-cli-measured-live-unde"
+scope = ["docs/decisions/0001-agent-service.md"]
+opened_commit = "6c6aeeb7ed0cf2cbf0c090aabe4a374c8b3c62d3"

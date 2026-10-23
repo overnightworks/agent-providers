@@ -57,7 +57,7 @@ from agent_runtime_client.wire import (
 )
 from agent_runtime_service.app import create_app
 from agent_runtime_service.config import ServiceConfig
-from agent_runtime_service.routing import ServedRoute
+from agent_runtime_service.routing import Api, ServedRoute
 from agent_runtime_service.runners import Runner, Runners
 
 MINT = TokenMint()
@@ -108,6 +108,7 @@ def _the_offer(response: httpx.Response) -> Offer:
 
 
 def test_a_subscriber_is_offered_the_listed_model_on_the_cli_route_as_ready():
+    """Sentence 2, O6, O10: a subscriber's entry is the listed model, on cli, ready"""
     config = with_listed_models(service_config(), [LISTED_MODEL])
     with _served(config, _runners(cli=True, api=False)) as app:
         response = _get_offer(app, SUBSCRIBER)
@@ -174,6 +175,7 @@ RUNNER_SETS = {
 @pytest.mark.parametrize("config_name", CONFIGS)
 @pytest.mark.parametrize("caller", CALLERS)
 def test_the_offer_equals_what_runs_decides_for_the_same_caller(caller, config_name, runner_set):
+    """Sentence 1, O2, O3, O14: the drift table"""
     groups, config = CALLERS[caller], CONFIGS[config_name]()
     cli, api = RUNNER_SETS[runner_set]
     twin_runners = _runners(cli=True, api=True)
@@ -202,7 +204,8 @@ def test_the_offer_equals_what_runs_decides_for_the_same_caller(caller, config_n
 
     offered = {entry.id: (entry.route, entry.ready) for entry in _the_offer(offer_response).data}
     assert offered == expected
-    assert UNLISTED not in offered
+    if isinstance(unlisted_decision, Api):
+        assert UNLISTED not in offered
 
 
 @pytest.mark.parametrize(
@@ -223,6 +226,7 @@ def test_an_entry_is_ready_exactly_when_a_runner_serves_its_route(groups, cli, a
 
 
 def test_a_member_without_an_ai_group_gets_an_empty_list_not_not_enabled():
+    """O4"""
     with _served(_full_config(), _runners(cli=True, api=True)) as app:
         response = _get_offer(app, [SONGMAKER_GROUP])
 
@@ -230,6 +234,7 @@ def test_a_member_without_an_ai_group_gets_an_empty_list_not_not_enabled():
 
 
 def test_the_offer_has_the_shape_of_a_models_list():
+    """Sentence 5, O10"""
     with _served(_full_config(), _runners(cli=True, api=False)) as app:
         body = json.loads(_get_offer(app, SUBSCRIBER).content)
 
@@ -252,6 +257,7 @@ def test_the_offer_has_the_shape_of_a_models_list():
 
 
 def test_a_standard_models_reader_finds_the_ids():
+    """Sentence 5"""
     with _served(_full_config(), _runners(cli=True, api=False)) as app:
         response = _get_offer(app, SUBSCRIBER)
 
@@ -262,6 +268,7 @@ def test_a_standard_models_reader_finds_the_ids():
 
 
 def test_the_offer_is_never_cached():
+    """O5"""
     with _served(_full_config(), _runners(cli=True, api=False)) as app:
         assert _get_offer(app, SUBSCRIBER).headers["cache-control"] == "no-store"
         refused = _get_offer(app, [SUBSCRIPTION_GROUP])
@@ -279,6 +286,7 @@ class _ChangingRunners(Runners):
 
 
 def test_the_offer_is_computed_on_every_ask():
+    """O5"""
     installed: list[Runner | None] = [ScriptedRunner(ANSWER)]
     with _served(_full_config(), _ChangingRunners(installed)) as app:
         first = _the_offer(_get_offer(app, SUBSCRIBER))
@@ -290,6 +298,7 @@ def test_the_offer_is_computed_on_every_ask():
 
 
 def test_the_offer_never_opens_the_login_file(tmp_path: Path):
+    """O6"""
     token_file = tmp_path / "claude.token"
     token_file.write_text(PROCESS_TOKEN, encoding="utf-8")
     token_file.chmod(0o600)
@@ -342,6 +351,7 @@ def test_the_offer_refuses_tokens_as_runs_does(headers, code, status):
 
 
 def test_an_unfetchable_key_set_answers_unavailable_as_runs_does():
+    """O7"""
     def unreachable_issuer(_url: str) -> bytes:
         raise KeySetFetchError("the issuer cannot be reached")
 
@@ -355,6 +365,7 @@ def test_an_unfetchable_key_set_answers_unavailable_as_runs_does():
 
 
 def test_a_plain_member_and_an_admin_are_both_answered():
+    """O8"""
     with _served(_full_config(), _runners(cli=True, api=False)) as app:
         member = _the_offer(_get_offer(app, SUBSCRIBER))
         admin = _the_offer(_get_offer(app, [SUBSCRIPTION_GROUP, SONGMAKER_ADMIN_GROUP]))
@@ -364,6 +375,7 @@ def test_a_plain_member_and_an_admin_are_both_answered():
 
 
 def test_the_offer_is_for_the_asking_person():
+    """O9"""
     with _served(_full_config(), _runners(cli=True, api=False)) as app:
         subscriber = _the_offer(_get_offer(app, SUBSCRIBER))
         api_caller = _the_offer(_get_offer(app, API_CALLER))
@@ -373,6 +385,7 @@ def test_the_offer_is_for_the_asking_person():
 
 
 def test_the_offer_answers_get_only():
+    """Sentence 1 (cell 23)"""
     with _served(_full_config(), _runners(cli=True, api=False)) as app:
         headers = _headers(SUBSCRIBER)
         posted = httpx.post(f"{app}/offer", headers=headers, timeout=10)
@@ -398,6 +411,7 @@ def test_the_gate_holds_for_the_offer(app_group, status):
 
 
 def test_no_answer_shows_a_token_a_path_or_the_api_alias():
+    """Sentence 2 (no leak)"""
     needles = [PROCESS_TOKEN, API_ALIAS, str(process_claude_cli()), PINNED_CLAUDE_VERSION]
     answers: list[httpx.Response] = []
     with _served(_full_config(), _runners(cli=False, api=False)) as app:

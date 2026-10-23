@@ -790,12 +790,13 @@ def _offer(*entries: dict[str, object]) -> str:
 @pytest.mark.parametrize(
     "entries",
     [
-        pytest.param([], id="O-empty"),
-        pytest.param([_offered()], id="O-ready"),
-        pytest.param([_offered(route="api", ready=False, reason="not_built")], id="O-not-built"),
+        pytest.param([], id="O10-empty"),
+        pytest.param([_offered()], id="O10-ready"),
+        pytest.param([_offered(route="api", ready=False, reason="not_built")], id="O10-not-built"),
     ],
 )
 def test_an_offer_round_trips_through_the_wire(entries: list[dict[str, object]]) -> None:
+    """O10, O1"""
     raw = _offer(*entries)
 
     assert json.loads(Offer.model_validate_json(raw).model_dump_json()) == json.loads(raw)
@@ -804,23 +805,34 @@ def test_an_offer_round_trips_through_the_wire(entries: list[dict[str, object]])
 @pytest.mark.parametrize(
     "entry",
     [
-        pytest.param(_offered(ready=True, reason="not_built"), id="O-ready-with-a-reason"),
-        pytest.param(_offered(ready=False, reason=None), id="O-not-ready-without-a-reason"),
-        pytest.param(_offered(route="grpc"), id="O-unknown-route"),
-        pytest.param(_offered(ready=False, reason="login_refused"), id="O-unknown-reason"),
-        pytest.param(_offered(created=1), id="O-created-not-zero"),
-        pytest.param(_offered(object="list"), id="O-wrong-object"),
-        pytest.param(_offered(id="sonnet"), id="O-id-without-provider"),
-        pytest.param({**_offered(), "path": "/tmp/x"}, id="O-extra-field"),
+        pytest.param(_offered(ready=True, reason="not_built"), id="O10-ready-with-a-reason"),
+        pytest.param(_offered(ready=False, reason=None), id="O10-not-ready-without-a-reason"),
+        pytest.param(_offered(route="grpc"), id="O10-unknown-route"),
+        pytest.param(_offered(ready=False, reason="login_refused"), id="O10-unknown-reason"),
+        pytest.param(_offered(created=1), id="O10-created-not-zero"),
+        pytest.param(_offered(created=False), id="O10-created-false"),
+        pytest.param(_offered(created=0.0), id="O10-created-float"),
+        pytest.param(_offered(object="list"), id="O10-wrong-object"),
+        pytest.param(_offered(id="sonnet"), id="O10-id-without-provider"),
+        pytest.param({**_offered(), "path": "/tmp/x"}, id="O10-extra-field"),
     ],
 )
 def test_an_offer_with_a_malformed_entry_is_refused(entry: dict[str, object]) -> None:
+    """O10, O1"""
     with pytest.raises(ValidationError):
         Offer.model_validate_json(_offer(entry))
 
 
-@pytest.mark.parametrize("version", [1, 3, "2"])
+@pytest.mark.parametrize(
+    "version",
+    [
+        pytest.param(1, id="O10-v1"),
+        pytest.param(3, id="O10-v3"),
+        pytest.param("2", id="O10-v-as-string"),
+    ],
+)
 def test_an_offer_of_another_version_is_refused(version: object) -> None:
+    """O10"""
     raw = json.dumps({"v": version, "object": "list", "data": []})
 
     with pytest.raises(ValidationError):

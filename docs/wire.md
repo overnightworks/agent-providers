@@ -120,9 +120,13 @@ request: the caller's address, the method, the path including its query string, 
 protocol version and the status.
 
 **Tokens.** The end user's token and the app's workload token are checked on the
-request and neither stored nor passed to the CLI. The CLI is handed the profile's
-subscription login and the deployment's proxy variables ([host.md](host.md), "The
-child environment is closed") and the per-run relay secret.
+request and neither stored nor passed to the CLI, and nothing derived from either
+reaches it: not the subject, issuer, groups, client id, app name or run id, and
+not the capability, which goes only to the app's MCP server. The CLI receives the
+app's turn and tools, the per-run relay secret and the service's own subscription
+credential ([host.md](host.md), "The child environment is closed", owns the rest of
+its environment); what the app writes into the turn or its tool results reaches the
+provider as written.
 
 **What the CLI writes.** Every subscription run passes switches that limit what the
 CLI keeps and sends ([host.md](host.md), "The child environment is closed").

@@ -122,6 +122,7 @@ def test_the_origin_rule_still_speaks_first(tmp_path, capsys):
 def test_background_profiles_are_those_marked_true():
     """J9/A7: of a true and a false profile, only the true one is a background profile"""
     config = service_config()
+    assert set(config.background_profiles()) == {PROFILE_NAME}
     profile = config.profiles[PROFILE_NAME]
     mixed = config.model_copy(
         update={

@@ -1,7 +1,0 @@
-claim_id = "905c44941c7b4828a00cb5b40f40e6dd"
-agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
-role = "builder"
-base = "5cbb006e9027d27ee4ba951ea6c2466af492e34b"
-branch = "docs/migrating-080-grok-copy"
-scope = ["docs/MIGRATING.md"]
-opened_commit = "71a793cb77495f1558af375ad57e948d51ff71a2"

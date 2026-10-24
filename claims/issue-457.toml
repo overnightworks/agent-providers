@@ -1,8 +1,0 @@
-claim_id = "ab64a919fa034153b8ff9bcde9288eba"
-agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
-role = "builder"
-base = "9712458ab251311ba6ea39dd9ca13db90adea0f2"
-branch = "claude/issue-457-j-2b-ticket-runs-on-post-runs-and-get-ru"
-scope = ["docs/ARCHITECTURE.md", "docs/MIGRATING.md", "docs/decisions/0001-agent-service.md", "docs/operations.md", "docs/wire.md", "packages/service/src/agent_runtime_service/app.py", "packages/service/src/agent_runtime_service/identity.py", "packages/service/src/agent_runtime_service/job_ticket.py", "tests/test_service_job_tickets.py", "tests/test_service_offer.py", "tests/test_service_ticket_runs.py", "tests/ticket_run_support.py"]
-opened_commit = "eb69bd6982d32ede646ca26794533ad6ed52c4c4"
-whole_reason = "One credential across its verification, the caller, the two routes and the purpose check: the header has no meaning without the verifier and the binding, and the docs and the jti removal only follow them."

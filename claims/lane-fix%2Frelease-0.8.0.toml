@@ -1,0 +1,8 @@
+claim_id = "9a451c10d82d434ba5a2e8c117ffc9c6"
+agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
+role = "builder"
+base = "c226242c999b0a9042f4419c6bf704b6180f7bf6"
+branch = "fix/release-0.8.0"
+scope = ["packages/client/pyproject.toml", "packages/service/pyproject.toml", "pyproject.toml", "src/agent_runtime/__init__.py", "uv.lock"]
+opened_commit = "2a0f1a43453434d6800df5f08c86e04141e7552f"
+whole_reason = "the seven lockstep version literals of one release live in four files plus the lock and must move together"

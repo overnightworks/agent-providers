@@ -46,7 +46,7 @@ from service_support import (
     without_cli,
     without_profiles,
 )
-from ticket_run_support import minted_ticket, ticket_headers
+from ticket_run_support import minted_ticket, ticket_headers, with_background
 from webauth.https_client import KeySetFetchError
 
 from agent_runtime.events import FinalEvent
@@ -238,13 +238,6 @@ def test_an_entry_is_ready_exactly_when_a_runner_serves_its_route(groups, cli, a
     assert (entry.route, entry.ready, entry.reason) == (route, reason is None, reason)
 
 
-def _with_background(config: ServiceConfig, background: bool) -> ServiceConfig:
-    (name, profile), *_ = config.profiles.items()
-    return config.model_copy(
-        update={"profiles": {name: profile.model_copy(update={"background": background})}}
-    )
-
-
 @pytest.mark.parametrize("profile_background", [True, False])
 @pytest.mark.parametrize(
     ("groups", "route", "same_route_for_a_ticket"),
@@ -263,7 +256,7 @@ def test_the_offer_background_names_whether_a_ticket_run_gets_the_same_route(
     profile_background, groups, route, same_route_for_a_ticket
 ):
     """J18: the profile decides only where the live run is on the subscription"""
-    config = _with_background(
+    config = with_background(
         with_listed_models(service_config(), [LISTED_MODEL]), profile_background
     )
     with _served(config, _runners(cli=True, api=True)) as app:
@@ -293,7 +286,7 @@ def _route_taken(response: httpx.Response, runners: Runners) -> ServedRoute | No
 )
 def test_a_ticket_run_lands_where_the_offer_says(groups, profile_background):
     """J18: `background` is true exactly when a real ticket run takes the route the live run took"""
-    config = _with_background(
+    config = with_background(
         with_listed_models(service_config(), [LISTED_MODEL]), profile_background
     )
     runners = Runners(cli=ScriptedRunner(ANSWER), api=ScriptedRunner(ANSWER))
@@ -312,7 +305,7 @@ def test_a_member_without_an_ai_group_is_offered_nothing_whatever_the_profile_ba
     profile_background,
 ):
     """A4: no AI group is an empty offer for either profile background"""
-    config = _with_background(
+    config = with_background(
         with_listed_models(service_config(), [LISTED_MODEL]), profile_background
     )
     with _served(config, _runners(cli=True, api=True)) as app:

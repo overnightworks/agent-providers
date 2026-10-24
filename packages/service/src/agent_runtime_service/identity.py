@@ -19,8 +19,8 @@ alone proves nothing, since a user token may carry one too.
 
 A job ticket (``agent_runtime_service.job_ticket``) is the second way to be a caller. Its
 text is turned into a ``TicketBinding`` before this module sees it; the workload token is
-checked first, then the ticket's binding to that workload client and to the configured
-issuer is ``forbidden`` when it differs, and the role comes from the groups bound at mint.
+checked first, then the ticket's binding to that workload client, to the app and to the
+configured issuer is ``forbidden`` when any differs, and the role comes from the groups bound at mint.
 """
 
 from __future__ import annotations

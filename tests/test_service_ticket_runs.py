@@ -407,16 +407,16 @@ def test_an_unfetchable_key_set_is_unavailable_for_a_ticket_run():
 @pytest.mark.parametrize(
     ("fetch_key_set", "workload", "expected"),
     [
-        pytest.param(MINT.fetch_key_set, MINT.workload(), UNAUTHORIZED, id="valid-workload-token"),
-        pytest.param(MINT.fetch_key_set, "garbage", UNAUTHORIZED, id="invalid-workload-token"),
-        pytest.param(_unreachable, MINT.workload(), (RejectionCode.UNAVAILABLE, 503), id="key-set"),
+        pytest.param(MINT.fetch_key_set, MINT.workload, UNAUTHORIZED, id="valid-workload-token"),
+        pytest.param(MINT.fetch_key_set, lambda: "garbage", UNAUTHORIZED, id="invalid-workload-token"),
+        pytest.param(_unreachable, MINT.workload, (RejectionCode.UNAVAILABLE, 503), id="key-set"),
     ],
 )
 def test_a_ticket_cannot_be_valid_without_a_signing_key(fetch_key_set, workload, expected):
     """J10, J15: the workload token is checked first"""
     config = service_config().model_copy(update={"signing": None})
     with running_service(config, fetch_key_set) as service:
-        headers = ticket_headers(workload, signed_ticket(ticket_claims()))
+        headers = ticket_headers(workload(), signed_ticket(ticket_claims()))
 
         assert_rejected(post_run(service.base_url, headers, run_body()), *expected)
 
@@ -433,7 +433,9 @@ def test_a_ticket_reads_the_run_it_started():
         )
 
         assert by_ticket.status_code == 200
-        assert set(json.loads(by_ticket.content)) == set(RunStatus.model_fields)
+        assert RunStatus.model_validate_json(by_ticket.content) == RunStatus.model_validate_json(
+            live.content
+        )
         assert answer_of(by_ticket) == answer_of(live)
 
 

@@ -32,6 +32,7 @@ from service_support import (
     SUBSCRIPTION_GROUP,
     TEST_ISSUER,
     WALL_CLOCK_START,
+    ScriptedRunner,
     TokenMint,
     answer_of,
     assert_rejected,
@@ -500,6 +501,25 @@ def test_the_ticket_reaches_no_log_frame_record_or_runner(caplog):
         )
 
         answers = [run, status, *refused]
+        assert all(ticket not in response.text for response in answers)
+        assert all(ticket not in str(response.headers) for response in answers)
+        assert ticket not in caplog.text
+        assert not reaches_text(service.admitted(), [ticket])
+
+
+def test_the_ticket_reaches_no_log_frame_record_or_runner_of_a_failing_run(caplog):
+    """J11: the run is admitted and the runner then fails"""
+    caplog.set_level(logging.DEBUG)
+    failing = ScriptedRunner([RuntimeError("the runner broke")])
+    with _service(cli=failing) as service:
+        ticket = minted_ticket(service.base_url, MINT)
+        run = _ticket_run(service, ticket)
+        status = get_run(
+            service.base_url, ticket_headers(MINT.workload(), ticket), str(run_id_of(run.content))
+        )
+
+        assert service.admitted() != []
+        answers = [run, status]
         assert all(ticket not in response.text for response in answers)
         assert all(ticket not in str(response.headers) for response in answers)
         assert ticket not in caplog.text

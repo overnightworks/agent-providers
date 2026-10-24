@@ -22,10 +22,12 @@ from pydantic import ValidationError
 from service_support import (
     API_ALIAS,
     API_GROUP,
+    COWRITER,
     LISTED_MODEL,
     PINNED_CLAUDE_VERSION,
     PRESENTATOR_CLIENT,
     PROCESS_TOKEN,
+    SONGMAKER_CLIENT,
     SONGMAKER_GROUP,
     SUBSCRIPTION_GROUP,
     UNLISTED_MODEL,
@@ -298,7 +300,7 @@ def test_a_ticket_run_lands_where_the_offer_says(groups, profile_background):
     with _served(config, runners) as app:
         (entry,) = _the_offer(_get_offer(app, groups)).data
         live_route = _route_taken(post_run(app, _headers(groups), run_body()), runners)
-        ticket = minted_ticket(app, MINT, tuple(groups))
+        ticket = minted_ticket(app, MINT, tuple(groups), purpose=COWRITER, client=SONGMAKER_CLIENT)
         ticket_response = post_run(app, ticket_headers(MINT.workload(), ticket), run_body())
         ticket_route = _route_taken(ticket_response, runners)
 

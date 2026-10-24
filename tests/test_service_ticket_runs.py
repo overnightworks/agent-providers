@@ -26,9 +26,11 @@ from service_support import (
     CLI_PROFILE,
     COWRITER,
     PRESENTATOR_CLIENT,
+    SONGMAKER_CLIENT,
     SONGMAKER_GROUP,
     SONGMAKER_TOOLS,
     SUBSCRIPTION_GROUP,
+    TEST_ISSUER,
     WALL_CLOCK_START,
     TokenMint,
     answer_of,
@@ -43,22 +45,21 @@ from service_support import (
     written_key_file,
 )
 from test_service_admission import HeldRunner
+from ticket_run_support import minted_ticket as minted_ticket_for
 from ticket_run_support import (
-    SUBSCRIBER,
-    minted_ticket,
     process_key,
     run_id_of,
     running_service,
     signed_ticket,
-    ticket_claims,
     ticket_headers,
     with_background,
 )
 from webauth.https_client import KeySetFetchError
 
+from agent_runtime_client.capability import CAPABILITY_ISSUER
 from agent_runtime_client.wire import RejectionCode, RunStatus
 from agent_runtime_service.config import SigningConfig
-from agent_runtime_service.job_ticket import JOB_TICKET_TOKEN_TYPE
+from agent_runtime_service.job_ticket import JOB_TICKET_AUDIENCE, JOB_TICKET_TOKEN_TYPE
 from agent_runtime_service.routing import Api, Cli
 
 MINT = TokenMint()
@@ -67,6 +68,32 @@ UNAUTHORIZED = (RejectionCode.UNAUTHORIZED, 401)
 FORBIDDEN = (RejectionCode.FORBIDDEN, 403)
 NOT_ENABLED = (RejectionCode.NOT_ENABLED, 403)
 START = int(WALL_CLOCK_START.timestamp())
+
+
+SUBSCRIBER = (SUBSCRIPTION_GROUP, SONGMAKER_GROUP)
+
+
+def minted_ticket(base_url, mint, groups=SUBSCRIBER, **overrides):
+    """A ticket of the default person and agent from the real ``POST /job-tickets``."""
+    options = {"purpose": COWRITER, "client": SONGMAKER_CLIENT, **overrides}
+    return minted_ticket_for(base_url, mint, groups, **options)
+
+
+def ticket_claims(**overrides: object) -> dict[str, object]:
+    """The claims of a valid ticket for ``user-alice``, at the clock's start."""
+    issued_at = int(WALL_CLOCK_START.timestamp())
+    claims = {
+        "iss": CAPABILITY_ISSUER,
+        "aud": JOB_TICKET_AUDIENCE,
+        "iat": issued_at,
+        "exp": issued_at + 3600,
+        "app": "songmaker",
+        "client": SONGMAKER_CLIENT,
+        "principal": {"iss": TEST_ISSUER, "sub": "user-alice"},
+        "purpose": COWRITER,
+        "groups": [SONGMAKER_GROUP, SUBSCRIPTION_GROUP],
+    }
+    return {**claims, **overrides}
 
 
 def _live(service, groups=SUBSCRIBER, **body: object) -> httpx.Response:

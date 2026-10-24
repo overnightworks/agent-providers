@@ -22,13 +22,15 @@ file and the Claude token file are read and checked with it.
 
 ## Who may run what
 
-A caller presents a workload token bound to one registered app and a user token
-bound to one principal (`agent_runtime_service.identity`). The checks run in this order:
+A caller presents a workload token bound to one registered app and either a user token
+bound to one principal or, for a background job, a job ticket the app got earlier for that
+principal (`agent_runtime_service.identity`). The checks run in this order:
 
 1. The user must be a member of the app: one of their groups is `/apps/<app>` or
    a path below it (`/apps/notes-other` is not a member of `notes`). This holds
    for `POST /runs`, `GET /runs/{id}` and `GET /offer`; anyone else gets 403 `forbidden`,
-   before the body is read.
+   before the body is read. For a ticket the groups are the ones bound at mint, not the
+   person's live groups.
 2. Their role is `admin` in `/apps/<app>/admin` or below, else `user`; a
    request whose `roles` lacks it gets 403 `forbidden`.
 3. An app without an MCP origin whose request names a tool gets 403
@@ -41,7 +43,9 @@ bound to one principal (`agent_runtime_service.identity`). The checks run in thi
    set together with `[route] api_alias`). A model name the subscription does not
    list sends that agent to the paid API for every caller with API rights and
    gives subscription-only callers `not_enabled`. The app chooses the model per
-   agent and sends it on each run; the service stores nothing of the choice.
+   agent and sends it on each run; the service stores nothing of the choice. A ticket run
+   reads only the profiles with `background = true`; without one that serves it, it goes
+   on over the API when the ticket's groups carry API rights, else `not_enabled`.
 
 At most `[runs] max_parallel_cli_runs` (default 5) CLI runs are admitted; one
 beyond gets 429 `busy` with `Retry-After` and never falls back to the API

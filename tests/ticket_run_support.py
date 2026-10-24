@@ -11,12 +11,6 @@ from uuid import UUID
 
 import httpx
 from service_support import (
-    COWRITER,
-    SONGMAKER_CLIENT,
-    SONGMAKER_GROUP,
-    SUBSCRIPTION_GROUP,
-    TEST_ISSUER,
-    WALL_CLOCK_START,
     ScriptedRunner,
     TokenMint,
     WallClock,
@@ -27,18 +21,13 @@ from service_support import (
 from webauth.jwt_verification import KeySetFetch
 
 from agent_runtime.events import AssistantTextEvent, FinalEvent
-from agent_runtime_client.capability import CAPABILITY_ISSUER
 from agent_runtime_client.wire import PROTOCOL_VERSION
 from agent_runtime_service.app import JOB_TICKET_HEADER, WORKLOAD_TOKEN_HEADER, create_app
 from agent_runtime_service.config import ServiceConfig
-from agent_runtime_service.job_ticket import (
-    JOB_TICKET_AUDIENCE,
-    JOB_TICKET_TOKEN_TYPE,
-)
+from agent_runtime_service.job_ticket import JOB_TICKET_TOKEN_TYPE
 from agent_runtime_service.runners import AdmittedRun, Runner, Runners
 from agent_runtime_service.signing import SigningKey, load_signing_key
 
-SUBSCRIBER: Final = (SUBSCRIPTION_GROUP, SONGMAKER_GROUP)
 CLI_SCRIPT: Final = (AssistantTextEvent(text="via the CLI"), FinalEvent(text="CLI answer"))
 API_SCRIPT: Final = (AssistantTextEvent(text="via the API"), FinalEvent(text="API answer"))
 
@@ -94,10 +83,10 @@ def ticket_headers(workload_token: str | None, ticket: str | None) -> dict[str, 
 def minted_ticket(
     base_url: str,
     mint: TokenMint,
-    groups: tuple[str, ...] = SUBSCRIBER,
+    groups: tuple[str, ...],
     *,
-    purpose: str = COWRITER,
-    client: str = SONGMAKER_CLIENT,
+    purpose: str,
+    client: str,
     subject: str = "user-alice",
 ) -> str:
     """A ticket from the real ``POST /job-tickets`` for the person ``mint.user`` names."""
@@ -113,23 +102,6 @@ def minted_ticket(
     )
     assert response.status_code == 200, response.text
     return response.json()["ticket"]
-
-
-def ticket_claims(**overrides: object) -> dict[str, object]:
-    """The claims of a valid ticket of ``songmaker`` for ``user-alice``, at the clock's start."""
-    issued_at = int(WALL_CLOCK_START.timestamp())
-    claims = {
-        "iss": CAPABILITY_ISSUER,
-        "aud": JOB_TICKET_AUDIENCE,
-        "iat": issued_at,
-        "exp": issued_at + 3600,
-        "app": "songmaker",
-        "client": SONGMAKER_CLIENT,
-        "principal": {"iss": TEST_ISSUER, "sub": "user-alice"},
-        "purpose": COWRITER,
-        "groups": [SONGMAKER_GROUP, SUBSCRIPTION_GROUP],
-    }
-    return {**claims, **overrides}
 
 
 def process_key() -> SigningKey:

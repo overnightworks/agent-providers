@@ -62,16 +62,18 @@ runs on, never from the purpose. Every check precedes any child process.
 
 ```mermaid
 flowchart TB
-    request["POST /runs"] --> gate{"user in /apps/&lt;app&gt;<br/>or below?"}
+    request["POST /runs"] --> gate{"user in /apps/&lt;app&gt;<br/>or below?<br/>(a ticket: its groups at mint)"}
     gate -->|no| forbidden["403 forbidden"]
-    gate -->|yes| role{"caller's role in<br/>request.roles?"}
+    gate -->|yes| purpose{"a ticket's agent is<br/>the request's purpose?"}
+    purpose -->|no| forbidden
+    purpose -->|yes| role{"caller's role in<br/>request.roles?"}
     role -->|no| forbidden
     role -->|yes| tools{"tools named but app<br/>has no MCP origin?"}
     tools -->|yes| forbidden
     tools -->|no| model["the request's model,<br/>or none"]
     model --> subscription{"subscription group member,<br/>and a profile serves it?<br/>(no model asked: any profile;<br/>model asked: a profile of that<br/>provider exists and<br/>[cli.&lt;provider&gt;] models lists it)"}
     subscription -->|yes| slot{"CLI place free?"}
-    slot -->|yes| cli["CLI route<br/>claude under the subscription profile"]
+    slot -->|yes| cli["CLI route<br/>claude under the subscription profile<br/>(a ticket: only profiles with background = true)"]
     slot -->|no| busy["429 busy"]
     subscription -->|no| api{"API group member<br/>and route.api_alias set?"}
     api -->|yes| paid["API route<br/>paid, no runner built"]
@@ -85,7 +87,8 @@ flowchart TB
 *Question: which route serves this caller? Source:
 `agent_runtime_service.app._admitted`, `agent_runtime_service.routing.route`; `GET /offer`
 (`agent_runtime_service.offer`) is the second reader of `route`. The groups and models are
-operator configuration ([operations.md](operations.md)).*
+operator configuration ([operations.md](operations.md)). A ticket run reads only the profiles
+marked `background = true`; the picture is otherwise the same.*
 
 Keycloak decides who may use the subscription and who the paid route, through
 groups; the service holds no user list. A requested model is never replaced by
@@ -124,7 +127,9 @@ service's container ([host.md](host.md)).
 - *A job ticket needs a live request.* The service mints one only for a request with both
   tokens, signs it with the capability's key under its own type and audience, binds the app,
   its workload client, the person, the agent, the expiry and the named groups, and stores
-  nothing ([wire.md](wire.md#job-tickets)).
+  nothing. It also verifies one on `POST /runs` and `GET /runs/{id}` with the workload token,
+  and decides the run from the groups of mint time, not the live ones
+  ([wire.md](wire.md#job-tickets)).
 - *No credential in an app.* The subscription login is one file the operator
   names; an app that starts runs through the service holds none (the interim core
   path in [operations.md](operations.md) is the exception).

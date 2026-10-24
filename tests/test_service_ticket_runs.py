@@ -36,6 +36,7 @@ from service_support import (
     TokenMint,
     answer_of,
     assert_rejected,
+    decoded_events,
     generated_rsa_key,
     get_run,
     post_run,
@@ -46,8 +47,8 @@ from service_support import (
     written_key_file,
 )
 from test_service_admission import HeldRunner
-from ticket_run_support import minted_ticket as minted_ticket_for
 from ticket_run_support import (
+    CLI_SCRIPT,
     process_key,
     run_id_of,
     running_service,
@@ -55,10 +56,11 @@ from ticket_run_support import (
     ticket_headers,
     with_background,
 )
+from ticket_run_support import minted_ticket as minted_ticket_for
 from webauth.https_client import KeySetFetchError
 
 from agent_runtime_client.capability import CAPABILITY_ISSUER
-from agent_runtime_client.wire import RejectionCode, RunStatus
+from agent_runtime_client.wire import Failed, RejectionCode, RunStatus, Succeeded
 from agent_runtime_service.config import SigningConfig
 from agent_runtime_service.job_ticket import JOB_TICKET_AUDIENCE, JOB_TICKET_TOKEN_TYPE
 from agent_runtime_service.routing import Api, Cli
@@ -486,10 +488,15 @@ def test_a_ticket_reads_only_the_run_of_its_app_and_person():
         assert read(other_purpose).status_code == 200
 
 
-def test_the_ticket_reaches_no_log_frame_record_or_runner(caplog):
+@pytest.mark.parametrize(
+    ("script", "last_event"),
+    [(CLI_SCRIPT, Succeeded), ([RuntimeError("the runner broke")], Failed)],
+    ids=["succeeding", "failing"],
+)
+def test_the_ticket_reaches_no_log_frame_record_or_runner(caplog, script, last_event):
     """J11"""
     caplog.set_level(logging.DEBUG)
-    with _service() as service:
+    with _service(cli=ScriptedRunner(script)) as service:
         ticket = minted_ticket(service.base_url, MINT)
         run = _ticket_run(service, ticket)
         refused = [
@@ -500,26 +507,8 @@ def test_the_ticket_reaches_no_log_frame_record_or_runner(caplog):
             service.base_url, ticket_headers(MINT.workload(), ticket), str(run_id_of(run.content))
         )
 
+        assert isinstance(decoded_events(run.content)[-1], last_event)
         answers = [run, status, *refused]
-        assert all(ticket not in response.text for response in answers)
-        assert all(ticket not in str(response.headers) for response in answers)
-        assert ticket not in caplog.text
-        assert not reaches_text(service.admitted(), [ticket])
-
-
-def test_the_ticket_reaches_no_log_frame_record_or_runner_of_a_failing_run(caplog):
-    """J11: the run is admitted and the runner then fails"""
-    caplog.set_level(logging.DEBUG)
-    failing = ScriptedRunner([RuntimeError("the runner broke")])
-    with _service(cli=failing) as service:
-        ticket = minted_ticket(service.base_url, MINT)
-        run = _ticket_run(service, ticket)
-        status = get_run(
-            service.base_url, ticket_headers(MINT.workload(), ticket), str(run_id_of(run.content))
-        )
-
-        assert service.admitted() != []
-        answers = [run, status]
         assert all(ticket not in response.text for response in answers)
         assert all(ticket not in str(response.headers) for response in answers)
         assert ticket not in caplog.text

@@ -17,7 +17,9 @@ operator's configuration ([operations.md](operations.md)).
 `POST /runs` takes a `RunRequest` and answers with the run's event stream
 (SSE), ending every run with exactly one terminal event except the cut stream
 of a dropped client. A call carries two tokens: the end user's, and the app's
-workload token in the `Agent-Workload-Token` header.
+workload token in the `Agent-Workload-Token` header. A background job that has no live user
+token sends the app's workload token and a [job ticket](#job-tickets) in the `Agent-Job-Ticket`
+header instead, with no `Authorization` header; the body is the same `RunRequest`.
 
 `RunRequest`, wire version 2:
 
@@ -43,8 +45,8 @@ A request the service refuses answers a `RunRejection` with one `RejectionCode`:
 
 | Code | Status | Meaning |
 |---|---|---|
-| `unauthorized` | 401 | A user token and a workload token are both required and must be valid. |
-| `forbidden` | 403 | The user is no member of the app, the request's `roles` lack the caller's role, the request names a tool while the app has no MCP origin, or the two tokens do not belong together (`agent_runtime_service.identity` lists every cause). |
+| `unauthorized` | 401 | A workload token and either a user token or a job ticket are required and must be valid; a ticket beside an `Authorization` header is refused too. |
+| `forbidden` | 403 | The user is no member of the app, the request's `roles` lack the caller's role, the request names a tool while the app has no MCP origin, the two tokens do not belong together (`agent_runtime_service.identity` lists every cause), or a ticket is another app's, another workload client's or another issuer's, or its agent (`purpose`) is not the body's. |
 | `not_enabled` | 403 | No route is enabled for this caller and model, or a job ticket was asked for and the installation has no `[signing]` section. |
 | `unsupported_version` | 400 | `v` is not 2. |
 | `invalid_request` | 422 | The body is not a valid request for the route. |
@@ -58,7 +60,7 @@ A request the service refuses answers a `RunRejection` with one `RejectionCode`:
 `POST /job-tickets` takes `{v: 2, purpose, expires_in_s}` (`JobTicketRequest`) and answers
 `{v: 2, ticket, expires_at}` (`JobTicket`). It is for a background job that has no live user
 token when it runs: the app calls it inside the live request that starts the job, stores the
-ticket, and uses it later. The call carries the same two tokens as `POST /runs` and is refused
+ticket, and uses it later. The call carries the same two tokens as a live `POST /runs` (never a ticket) and is refused
 the same way (401, 403, 503), then by framing, version and shape (400 `unsupported_version`,
 422 `invalid_request`), and only then `not_enabled` when the installation has no `[signing]`
 section. A ticket cannot fetch a ticket.
@@ -72,6 +74,23 @@ everything below it. The service issues a ticket even to a person who could not 
 right now, limits no count per person, stores nothing and cannot revoke one. The ticket is shown
 only in this response: never in a URL, a log, a header or another body.
 
+**Running with a ticket.** `POST /runs` and `GET /runs/{id}` read the ticket from the
+`Agent-Job-Ticket` header; its presence, even empty, selects this branch, and any `Authorization`
+header beside it is `401`. The workload token is checked first (401, or 503 while the key set is
+unreachable), then the ticket: a ticket that is expired, wrongly signed, unreadable, or signed by
+another key is `401`, as is every ticket on an installation without `[signing]`; a capability is
+no ticket. A ticket of another app, workload client or issuer is `403`, and so is a body whose
+`purpose` is not the ticket's agent. After that the run is decided as a live one, from the groups
+bound at mint and not from the person's live groups: a person who left a group since still runs
+until the ticket expires, and a changed configuration applies at once. A ticket run reads only
+the profiles marked `background = true`; when the person's route would be the subscription and no
+such profile serves it, it goes on as ever, over the API when the groups carry API rights, else
+`403 not_enabled`, and `max_parallel_cli_runs` still answers `busy`. One ticket carries any number
+of runs of its agent until it expires; it cannot be revoked, and a new signing key ends every
+ticket. `GET /runs/{id}` answers a run of the same app and person, whatever its agent. The
+ticket reaches no log, frame, record, response, CLI or provider. The routes `POST /job-tickets`
+and `GET /offer` never read the header.
+
 ## The offer
 
 `GET /offer` answers `{v: 2, object: "list", data: [...]}` (`Offer`), shaped like OpenAI's
@@ -84,7 +103,7 @@ person (a profile with `background = false` makes it `false` on the subscription
 is `null` when `ready` is true and `not_built` when it is not (the route has no runner installed). `OfferReason` is
 closed; a new reason is a wire change, because a new variant is a new `PROTOCOL_VERSION`.
 
-The call has no body and carries the same two tokens as `POST /runs`, refused the same way
+The call has no body and carries the same two tokens as a live `POST /runs` (never a ticket), refused the same way
 (401, 403, 503). The app is the one the workload token names; a query parameter naming
 another app is ignored. Every member of the app may ask, not only admins, and the answer is for the
 asking person only: a member in no subscription or API group gets `200` with an empty `data`.
@@ -166,8 +185,8 @@ error stream is read and discarded. The HTTP server adds one access line per
 request: the caller's address, the method, the path including its query string, the
 protocol version and the status.
 
-**Tokens.** The end user's token and the app's workload token are checked on the
-request and neither stored nor passed to the CLI. The service hands the CLI nothing
+**Tokens.** The end user's token or job ticket and the app's workload token are checked on the
+request and none stored nor passed to the CLI. The service hands the CLI nothing
 derived from them either: not the subject, issuer, groups, client id, app name or
 run id, and not the capability, which it sends only to the app's MCP server. From
 the service the CLI receives the app's turn, the model the request

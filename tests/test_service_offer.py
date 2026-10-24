@@ -22,10 +22,12 @@ from pydantic import ValidationError
 from service_support import (
     API_ALIAS,
     API_GROUP,
+    COWRITER,
     LISTED_MODEL,
     PINNED_CLAUDE_VERSION,
     PRESENTATOR_CLIENT,
     PROCESS_TOKEN,
+    SONGMAKER_CLIENT,
     SONGMAKER_GROUP,
     SUBSCRIPTION_GROUP,
     UNLISTED_MODEL,
@@ -44,6 +46,7 @@ from service_support import (
     without_cli,
     without_profiles,
 )
+from ticket_run_support import minted_ticket, ticket_headers, with_background
 from webauth.https_client import KeySetFetchError
 
 from agent_runtime.events import FinalEvent
@@ -235,13 +238,6 @@ def test_an_entry_is_ready_exactly_when_a_runner_serves_its_route(groups, cli, a
     assert (entry.route, entry.ready, entry.reason) == (route, reason is None, reason)
 
 
-def _with_background(config: ServiceConfig, background: bool) -> ServiceConfig:
-    (name, profile), *_ = config.profiles.items()
-    return config.model_copy(
-        update={"profiles": {name: profile.model_copy(update={"background": background})}}
-    )
-
-
 @pytest.mark.parametrize("profile_background", [True, False])
 @pytest.mark.parametrize(
     ("groups", "route", "same_route_for_a_ticket"),
@@ -260,7 +256,7 @@ def test_the_offer_background_names_whether_a_ticket_run_gets_the_same_route(
     profile_background, groups, route, same_route_for_a_ticket
 ):
     """J18: the profile decides only where the live run is on the subscription"""
-    config = _with_background(
+    config = with_background(
         with_listed_models(service_config(), [LISTED_MODEL]), profile_background
     )
     with _served(config, _runners(cli=True, api=True)) as app:
@@ -270,12 +266,46 @@ def test_the_offer_background_names_whether_a_ticket_run_gets_the_same_route(
     assert (entry.route, entry.background) == (route, expected)
 
 
+def _route_taken(response: httpx.Response, runners: Runners) -> ServedRoute | None:
+    """The route a run was admitted on, or ``None`` for a refusal; forgets the run."""
+    taken = [*runners.cli.admitted, *runners.api.admitted]
+    runners.cli.admitted.clear()
+    runners.api.admitted.clear()
+    if response.status_code != 200:
+        assert_rejected(response, RejectionCode.NOT_ENABLED, 403)
+        return None
+    (admitted,) = taken
+    return admitted.route
+
+
+@pytest.mark.parametrize("profile_background", [True, False])
+@pytest.mark.parametrize(
+    "groups",
+    [SUBSCRIBER, API_CALLER, [SUBSCRIPTION_GROUP, API_GROUP, SONGMAKER_GROUP]],
+    ids=["subscription-only", "api-only", "both-groups"],
+)
+def test_a_ticket_run_lands_where_the_offer_says(groups, profile_background):
+    """J18: `background` is true exactly when a real ticket run takes the route the live run took"""
+    config = with_background(
+        with_listed_models(service_config(), [LISTED_MODEL]), profile_background
+    )
+    runners = Runners(cli=ScriptedRunner(ANSWER), api=ScriptedRunner(ANSWER))
+    with _served(config, runners) as app:
+        (entry,) = _the_offer(_get_offer(app, groups)).data
+        live_route = _route_taken(post_run(app, _headers(groups), run_body()), runners)
+        ticket = minted_ticket(app, MINT, tuple(groups), purpose=COWRITER, client=SONGMAKER_CLIENT)
+        ticket_response = post_run(app, ticket_headers(MINT.workload(), ticket), run_body())
+        ticket_route = _route_taken(ticket_response, runners)
+
+    assert entry.background == (ticket_route == live_route)
+
+
 @pytest.mark.parametrize("profile_background", [True, False])
 def test_a_member_without_an_ai_group_is_offered_nothing_whatever_the_profile_background(
     profile_background,
 ):
     """A4: no AI group is an empty offer for either profile background"""
-    config = _with_background(
+    config = with_background(
         with_listed_models(service_config(), [LISTED_MODEL]), profile_background
     )
     with _served(config, _runners(cli=True, api=True)) as app:

@@ -4277,6 +4277,21 @@ same way. `GET /offer` entries carry `background`: whether a ticket run gets tha
 same route, profile included, as a live run for the asking person, computed by the one `route`
 with all profiles and again with the background ones.
 
+*Amendment (23.10.2026, #457, authority: #445, J2, J4, J5, J7, J8, J10, J13, J14, J15, J17).* The run
+half is built. `POST /runs` and `GET /runs/{id}` take the workload token and a ticket in the header
+`Agent-Job-Ticket` and no `Authorization` (with one the answer is 401); the protocol version stays 2.
+The service verifies the ticket against its own signing key and the clock that stamped it, without
+leeway. An unreadable, expired or wrongly signed ticket is 401, as is any ticket on an installation
+without `[signing]`; a ticket of another app, workload client or issuer, or for another agent than
+the body's, is 403. The role and the route come from the groups bound at mint, not from live groups,
+so a person who left a group still runs until the ticket expires (J4), and one ticket carries any
+number of runs (J5). A ticket run reads only the profiles with `background = true`; otherwise it
+goes on over the API when the groups carry API rights, else 403 `not_enabled` (J8), and the
+subscription's limit still answers `busy` (J17). `GET /runs/{id}` answers the same app and person
+(J7). The ticket carries no `jti`: the service remembers nothing. A new signing key ends every open
+ticket and no previous public key is kept (J10, answering A1a4 O2). A run-time audit line is a named
+gap on #445.
+
 ## Out of scope at this size
 
 - arbitrary MCP endpoints and dynamic discovery;

@@ -18,8 +18,13 @@ An app's change of choice takes effect on its next run, with no restart of the s
 stays version 2: `RunRequest` keeps its shape.
 
 `GET /offer` is new: it lists the models the asking person can run in this app, with the same
-two tokens as `POST /runs`, and `agent_runtime_client.wire.parse_offer` reads its body. Each entry
+two live tokens as `POST /runs`, and `agent_runtime_client.wire.parse_offer` reads its body. Each entry
 carries `background`. It needs no action ([wire.md](wire.md), "The offer").
+
+Ticket runs are new: `POST /runs` and `GET /runs/{id}` also accept the app's workload token with a
+job ticket in the `Agent-Job-Ticket` header instead of a user token, and refuse a request that sends
+both. The wire stays version 2, and `POST /job-tickets` and `GET /offer` still take a user token only
+([wire.md](wire.md), "Job tickets").
 
 ## Migrating to 0.7.0
 

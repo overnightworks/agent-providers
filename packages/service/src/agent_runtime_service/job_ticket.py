@@ -1,19 +1,19 @@
-"""What a job ticket says and how it is minted (decision record 0001, H12).
+"""What a job ticket says, how it is minted and how it is read back (decision record 0001, H12).
 
 A job ticket lets an app start a run later, with no live user token. It is signed with
 the capability's one key under its own token type and audience, so a verifier of
-capabilities refuses it. The service stores no ticket: this module only builds and signs.
+capabilities refuses it, and this module's verifier refuses a capability. The service
+stores no ticket: this module builds and signs one, and reads one back into the facts it bound.
 """
 
 from __future__ import annotations
 
 import math
-import uuid
 from datetime import UTC, datetime
 from typing import Annotated, Final, Literal, Self
-from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+import jwt
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 from webauth.oidc_login import app_role
 
 from agent_runtime_client.capability import CAPABILITY_ISSUER, CapabilityPrincipal
@@ -26,12 +26,13 @@ from agent_runtime_client.wire import (
     RejectionCode,
 )
 from agent_runtime_service.config import ServiceConfig
-from agent_runtime_service.identity import Caller
+from agent_runtime_service.identity import Caller, Principal, TicketBinding
 from agent_runtime_service.run_request import parse_versioned_model
 from agent_runtime_service.signing import SigningKey
 
 JOB_TICKET_TOKEN_TYPE: Final = "agent-job-ticket+jwt"
 JOB_TICKET_AUDIENCE: Final = "agent-job-ticket"
+_TICKET_ALGORITHM: Final = "RS256"
 
 
 class JobTicketClaims(BaseModel):
@@ -43,7 +44,6 @@ class JobTicketClaims(BaseModel):
     aud: Literal[JOB_TICKET_AUDIENCE]
     iat: int
     exp: int
-    jti: Annotated[UUID, Field(strict=False)]
     app: NonEmptyUnicodeText
     client: NonEmptyUnicodeText
     principal: CapabilityPrincipal
@@ -69,7 +69,6 @@ def job_ticket_claims(
         aud=JOB_TICKET_AUDIENCE,
         iat=math.floor(now),
         exp=math.floor(now + request.expires_in_s),
-        jti=uuid.uuid4(),
         app=caller.app,
         client=config.apps[caller.app].workload_client,
         principal=CapabilityPrincipal(iss=caller.principal.issuer, sub=caller.principal.subject),
@@ -82,6 +81,30 @@ def signed_job_ticket(key: SigningKey, claims: JobTicketClaims) -> JobTicket:
     ticket = key.sign(claims.model_dump(mode="json"), JOB_TICKET_TOKEN_TYPE)
     return JobTicket(
         v=PROTOCOL_VERSION, ticket=ticket, expires_at=datetime.fromtimestamp(claims.exp, UTC)
+    )
+
+
+def verified_job_ticket(key: SigningKey, text: str, now: float) -> TicketBinding | None:
+    """What the ticket bound, or ``None`` for any text that is not this key's live ticket.
+
+    No refusal reason leaves, and none carries any part of ``text``.
+    """
+    try:
+        decoded = jwt.PyJWS().decode_complete(text, key.public_key, algorithms=[_TICKET_ALGORITHM])
+        header = decoded["header"]
+        if header.get("typ") != JOB_TICKET_TOKEN_TYPE or header.get("kid") != key.kid:
+            return None
+        claims = JobTicketClaims.model_validate_json(decoded["payload"])
+    except (jwt.PyJWTError, ValidationError):
+        return None
+    if claims.iat > now or now >= claims.exp:
+        return None
+    return TicketBinding(
+        app=claims.app,
+        client=claims.client,
+        principal=Principal(claims.principal.iss, claims.principal.sub),
+        groups=frozenset(claims.groups),
+        purpose=claims.purpose,
     )
 
 

@@ -13,3 +13,7 @@ mandatory_jobs = [
 allow = [
   { rule = "generic-api-key", file = ".github/workflows/ci.yml", secret_sha256 = "97c7929ce592d4b4ff33087e015faa6948c7ecee9b1e54c5eee600128be26027", reason = "wheel SHA-256 digest in a CI env value (commit d0a85fbd), not a key" },
 ]
+
+[[root.allow]]
+entry = "packages/"
+reason = "the uv workspace's member distributions"

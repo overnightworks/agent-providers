@@ -365,12 +365,27 @@ def test_a_ticket_runs_only_its_own_agent():
     ],
 )
 @pytest.mark.parametrize("with_workload_token", [True, False])
-def test_a_ticket_with_a_user_token_is_unauthorized(extra_headers, with_workload_token):
-    """J14"""
+@pytest.mark.parametrize("empty_ticket", [False, True], ids=["minted", "empty"])
+def test_a_ticket_with_a_user_token_is_unauthorized(
+    extra_headers, with_workload_token, empty_ticket
+):
+    """J14: a ticket header, even empty, selects the ticket branch, which takes no user token"""
     with _service() as service:
-        ticket = minted_ticket(service.base_url, MINT)
+        ticket = "" if empty_ticket else minted_ticket(service.base_url, MINT)
         workload = MINT.workload() if with_workload_token else None
         headers = {**ticket_headers(workload, ticket), **extra_headers()}
+
+        assert_rejected(post_run(service.base_url, headers, run_body()), *UNAUTHORIZED)
+        assert service.admitted() == []
+
+
+def test_a_user_token_with_a_ticket_is_unauthorized_before_any_key_set_is_used():
+    """J14: the user token is refused first, so an unreachable key set does not answer 503"""
+    with running_service(service_config(), _unreachable) as service:
+        headers = {
+            **ticket_headers(MINT.workload(), signed_ticket(ticket_claims())),
+            "Authorization": f"Bearer {MINT.user(SUBSCRIBER)}",
+        }
 
         assert_rejected(post_run(service.base_url, headers, run_body()), *UNAUTHORIZED)
         assert service.admitted() == []
@@ -408,7 +423,9 @@ def test_an_unfetchable_key_set_is_unavailable_for_a_ticket_run():
     ("fetch_key_set", "workload", "expected"),
     [
         pytest.param(MINT.fetch_key_set, MINT.workload, UNAUTHORIZED, id="valid-workload-token"),
-        pytest.param(MINT.fetch_key_set, lambda: "garbage", UNAUTHORIZED, id="invalid-workload-token"),
+        pytest.param(
+            MINT.fetch_key_set, lambda: "garbage", UNAUTHORIZED, id="invalid-workload-token"
+        ),
         pytest.param(_unreachable, MINT.workload, (RejectionCode.UNAVAILABLE, 503), id="key-set"),
     ],
 )

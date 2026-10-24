@@ -295,7 +295,8 @@ def test_a_capability_is_not_a_ticket():
         response = _live(service, tools=SONGMAKER_TOOLS)
         capability = service.admitted()[-1].capability
 
-        assert response.status_code == 200 and capability is not None
+        assert response.status_code == 200
+        assert capability is not None
         assert_rejected(_ticket_run(service, capability.token), *UNAUTHORIZED)
 
 

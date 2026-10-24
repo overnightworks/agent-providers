@@ -1,4 +1,5 @@
-"""Who is asking: the app's workload token and its end user's token, checked together.
+"""Who is asking: the app's workload token and its end user's token, checked together,
+or the workload token and the job ticket the app got for that user earlier.
 
 Both tokens are verified by webauth's RS256 verifier against the configured
 issuer and audience (decision record 0001, H1). The workload token is checked
@@ -15,6 +16,11 @@ A workload token binds its app only through claims a user token cannot carry:
 the realm role ``agent-workload``, which only service accounts hold, and
 ``azp == client_id ==`` the app's registered workload client. ``client_id``
 alone proves nothing, since a user token may carry one too.
+
+A job ticket (``agent_runtime_service.job_ticket``) is the second way to be a caller. Its
+text is turned into a ``TicketBinding`` before this module sees it; the workload token is
+checked first, then the ticket's binding to that workload client and to the configured
+issuer is ``forbidden`` when it differs, and the role comes from the groups bound at mint.
 """
 
 from __future__ import annotations
@@ -36,7 +42,7 @@ from webauth.jwt_verification import (
 )
 from webauth.oidc_login import AppRole, app_role
 
-from agent_runtime_client.wire import AgentRole, RejectionCode, UnicodeText
+from agent_runtime_client.wire import AgentRole, Purpose, RejectionCode, UnicodeText
 from agent_runtime_service.config import IdentityConfig, ServiceConfig
 
 WORKLOAD_ROLE: Final = "agent-workload"
@@ -59,13 +65,28 @@ _AGENT_ROLE_OF: Final[Mapping[AppRole, AgentRole]] = {
 
 
 @dataclass(frozen=True)
+class TicketBinding:
+    """What a verified job ticket bound at mint: one app, one person, one agent."""
+
+    app: str
+    client: str
+    principal: Principal
+    groups: frozenset[str]
+    purpose: Purpose
+
+
+@dataclass(frozen=True)
 class Caller:
-    """A verified app acting for a verified end user, who holds ``role`` in that app."""
+    """A verified app acting for a verified end user, who holds ``role`` in that app.
+
+    ``purpose`` is the one agent a job ticket allows, and ``None`` for a live caller.
+    """
 
     app: str
     principal: Principal
     groups: frozenset[str]
     role: AgentRole
+    purpose: Purpose | None
 
 
 def build_verifier(
@@ -115,15 +136,49 @@ class CallerCheck:
             raise _Refused(RejectionCode.FORBIDDEN)
         if user.subject == workload.subject:
             raise _Refused(RejectionCode.FORBIDDEN)
-        role = app_role(tuple(groups), self._config.app_admission(app))
-        if role is None:
-            raise _Refused(RejectionCode.FORBIDDEN)
         return Caller(
             app=app,
             principal=Principal(user.issuer, user.subject),
             groups=groups,
-            role=_AGENT_ROLE_OF[role],
+            role=self._role_in(app, groups),
+            purpose=None,
         )
+
+    async def ticket_caller(
+        self, workload_token: str | None, binding: TicketBinding | None
+    ) -> Caller | RejectionCode:
+        """``binding`` is ``None`` when the ticket text did not verify."""
+        try:
+            return await self._checked_ticket_caller(workload_token, binding)
+        except _Refused as refusal:
+            return refusal.code
+
+    async def _checked_ticket_caller(
+        self, workload_token: str | None, binding: TicketBinding | None
+    ) -> Caller:
+        workload = await self._verified(workload_token)
+        if binding is None:
+            raise _Refused(RejectionCode.UNAUTHORIZED)
+        app = self._workload_app(workload)
+        if (
+            binding.app != app
+            or binding.client != workload.claims["azp"]
+            or binding.principal.issuer != self._config.identity.issuer
+        ):
+            raise _Refused(RejectionCode.FORBIDDEN)
+        return Caller(
+            app=app,
+            principal=binding.principal,
+            groups=binding.groups,
+            role=self._role_in(app, binding.groups),
+            purpose=binding.purpose,
+        )
+
+    def _role_in(self, app: str, groups: frozenset[str]) -> AgentRole:
+        role = app_role(tuple(groups), self._config.app_admission(app))
+        if role is None:
+            raise _Refused(RejectionCode.FORBIDDEN)
+        return _AGENT_ROLE_OF[role]
 
     async def _verified(self, token: str | None) -> VerifiedClaims:
         if token is None:

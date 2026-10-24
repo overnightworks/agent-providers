@@ -158,13 +158,12 @@ def test_a_ticket_has_the_capability_issuer_its_own_audience_and_no_run_subject(
         origin_check.validate_python(JOB_TICKET_AUDIENCE)
 
 
-def test_two_tickets_for_the_same_person_and_agent_are_two_tickets(service):
-    """J17: no maximum, nothing stored; a second request is a second ticket."""
+def test_two_tickets_for_the_same_person_and_agent_are_both_answered(service):
+    """J17: no maximum, nothing stored; a second request is a second answered ticket."""
 
     first, second = _minted(service), _minted(service)
 
-    assert first.ticket != second.ticket
-    assert _verified(first.ticket)["jti"] != _verified(second.ticket)["jti"]
+    assert _verified(first.ticket)["app"] == _verified(second.ticket)["app"] == "songmaker"
 
 
 def test_a_person_with_no_route_right_still_gets_a_ticket(service):

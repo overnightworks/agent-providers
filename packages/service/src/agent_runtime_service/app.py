@@ -4,19 +4,24 @@
 ``GET /offer``, which lists the models the asking person can run in this app
 (``agent_runtime_service.offer``).
 
-All four routes check the two tokens first, with the same answers. A ``POST`` is then
-checked in a fixed order, and the first failure answers:
+All four routes check the two tokens first, with the same answers. ``POST /runs`` and
+``GET /runs/{id}`` also take a job ticket in ``Agent-Job-Ticket`` in place of the user
+token: the ticket's groups then stand for the person's, and any ``Authorization`` beside it
+is ``unauthorized``. A ``POST`` is then checked in a fixed order, and the first failure
+answers:
 
-1. the workload token, then the user token, then membership of the app
+1. the workload token, then the user token or the job ticket, then membership of the app
    (``/apps/<app>`` or a path below it), before the body is read or anything else
    is decided (``agent_runtime_service.identity``);
 2. the body's framing, then its protocol version, then its shape
    (``agent_runtime_service.run_request``);
-3. the person's role in the app (``admin`` in ``/apps/<app>/admin`` or below, else
-   ``user``) must be one of the body's ``roles``, else ``forbidden``;
+3. a ticket's purpose must equal the body's, else ``forbidden``; then the person's role in
+   the app (``admin`` in ``/apps/<app>/admin`` or below, else ``user``) must be one of the
+   body's ``roles``, else ``forbidden``;
 4. tools named by an app without an MCP origin answer ``forbidden``, before the route;
 5. the route (``agent_runtime_service.routing``), which reads the request's model and the
-   installation's listed models;
+   installation's listed models, and for a ticket run only the profiles marked
+   ``background``;
 6. for the CLI route, the service's admission limit (``agent_runtime_service.admission``): a
    subscription run beyond it answers ``busy`` with ``Retry-After`` before anything is
    signed;
@@ -73,12 +78,13 @@ from agent_runtime_service.capability import (
     capability_claims,
     signed_capability,
 )
-from agent_runtime_service.config import ServiceConfig
+from agent_runtime_service.config import ProfileConfig, ServiceConfig
 from agent_runtime_service.identity import Caller, CallerCheck, build_verifier
 from agent_runtime_service.job_ticket import (
     job_ticket_claims,
     parse_job_ticket_request,
     signed_job_ticket,
+    verified_job_ticket,
 )
 from agent_runtime_service.offer import offered_models
 from agent_runtime_service.quarantine import GroupConfirmation, Quarantine
@@ -90,6 +96,7 @@ from agent_runtime_service.run_request import MAX_REQUEST_BYTES, parse_run_reque
 from agent_runtime_service.runners import AdmittedRun, Runners
 
 WORKLOAD_TOKEN_HEADER: Final = "Agent-Workload-Token"
+JOB_TICKET_HEADER: Final = "Agent-Job-Ticket"
 RETRY_UNAVAILABLE_AFTER_SECONDS: Final = 30
 RETRY_BUSY_AFTER_SECONDS: Final = 10
 _BEARER_SCHEME: Final = "bearer"
@@ -113,8 +120,8 @@ _MESSAGE: Final[Mapping[RejectionCode, str]] = {
     RejectionCode.NOT_ENABLED: "AI is not enabled for this request.",
     RejectionCode.BUSY: "The service is busy; retry later.",
     RejectionCode.UNSUPPORTED_VERSION: f"This service speaks protocol version {PROTOCOL_VERSION}.",
-    RejectionCode.UNAUTHORIZED: "Both a user token and a workload token are required and must"
-    " be valid.",
+    RejectionCode.UNAUTHORIZED: "A workload token and either a user token or a job ticket are"
+    " required and must be valid.",
     RejectionCode.FORBIDDEN: "The tokens do not permit this request.",
     RejectionCode.INVALID_REQUEST: "The body is not a valid request for the route.",
     RejectionCode.UNAVAILABLE: "The service cannot check tokens right now; retry later.",
@@ -136,9 +143,10 @@ def create_app(
 ) -> FastAPI:
     """The service's ASGI app.
 
-    ``wall_clock`` (aware UTC) stamps each capability's and job ticket's issue and expiry and
-    the default run-record store. An injected ``records`` keeps its own clock, so the two can
-    differ; ``wall_clock`` never reaches the token verifier, which reads webauth's own.
+    ``wall_clock`` (aware UTC) stamps each capability's and job ticket's issue and expiry, judges
+    a presented ticket's expiry, and is the default run-record store's clock. An injected
+    ``records`` keeps its own clock, so the two can differ; ``wall_clock`` never reaches the
+    token verifier, which reads webauth's own.
     ``confirm_group_gone`` is how the one quarantine asks whether a lost process group is gone.
     """
     callers = CallerCheck(build_verifier(config.identity, fetch_key_set, monotonic_clock), config)
@@ -151,7 +159,7 @@ def create_app(
 
     @app.post("/runs")
     async def start_run(request: Request) -> Response:
-        caller = await _caller_of(callers, request)
+        caller = await _run_caller_of(callers, config, request, wall_clock)
         if isinstance(caller, RejectionCode):
             return rejection(caller)
         body = await _limited_body(request)
@@ -169,7 +177,7 @@ def create_app(
             run_request,
         )
 
-    app.get("/runs/{run_id}")(_run_status_route(callers, installed_records))
+    app.get("/runs/{run_id}")(_run_status_route(callers, config, installed_records, wall_clock))
     app.get("/offer")(_offer_route(callers, config, installed_runners))
 
     return app
@@ -211,7 +219,7 @@ def _admitted(
     caller: Caller,
     run_request: RunRequest,
 ) -> Response:
-    if caller.role not in run_request.roles:
+    if caller.purpose not in (None, run_request.purpose) or caller.role not in run_request.roles:
         return rejection(RejectionCode.FORBIDDEN)
     scope = config.capability_scope(caller.app, run_request.tools)
     if run_request.tools and scope is None:
@@ -219,7 +227,7 @@ def _admitted(
     served = route(
         config.identity,
         config.route,
-        config.profiles,
+        _profiles_for(caller, config),
         caller.groups,
         run_request.model,
         config.subscription_models(),
@@ -251,6 +259,11 @@ def _admitted(
         _release(lease)
         return rejection(response)
     return response
+
+
+def _profiles_for(caller: Caller, config: ServiceConfig) -> Mapping[str, ProfileConfig]:
+    """A caller with a bound purpose came by a job ticket and may use only background profiles."""
+    return config.profiles if caller.purpose is None else config.background_profiles()
 
 
 def _release(lease: Lease | None) -> None:
@@ -327,10 +340,13 @@ def _capability_of(
 
 
 def _run_status_route(
-    callers: CallerCheck, records: RunRecords
+    callers: CallerCheck,
+    config: ServiceConfig,
+    records: RunRecords,
+    wall_clock: Callable[[], datetime],
 ) -> Callable[[Request, str], Awaitable[Response]]:
     async def run_status(request: Request, run_id: str) -> Response:
-        caller = await _caller_of(callers, request)
+        caller = await _run_caller_of(callers, config, request, wall_clock)
         if isinstance(caller, RejectionCode):
             return rejection(caller)
         parsed_id = _run_id_from(run_id)
@@ -425,6 +441,26 @@ async def _caller_of(callers: CallerCheck, request: Request) -> Caller | Rejecti
         request.headers.get(WORKLOAD_TOKEN_HEADER),
         _bearer_token(request.headers.get("Authorization")),
     )
+
+
+async def _run_caller_of(
+    callers: CallerCheck,
+    config: ServiceConfig,
+    request: Request,
+    wall_clock: Callable[[], datetime],
+) -> Caller | RejectionCode:
+    """The caller of a run route: the live one, or the one a job ticket's header names."""
+    ticket = request.headers.get(JOB_TICKET_HEADER)
+    if ticket is None:
+        return await _caller_of(callers, request)
+    if "Authorization" in request.headers:
+        return RejectionCode.UNAUTHORIZED
+    binding = (
+        None
+        if config.signing is None
+        else verified_job_ticket(config.signing.key, ticket, wall_clock().timestamp())
+    )
+    return await callers.ticket_caller(request.headers.get(WORKLOAD_TOKEN_HEADER), binding)
 
 
 def _run_id_from(segment: str) -> UUID | None:

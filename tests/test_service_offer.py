@@ -44,6 +44,7 @@ from service_support import (
     without_cli,
     without_profiles,
 )
+from ticket_run_support import minted_ticket, ticket_headers
 from webauth.https_client import KeySetFetchError
 
 from agent_runtime.events import FinalEvent
@@ -268,6 +269,40 @@ def test_the_offer_background_names_whether_a_ticket_run_gets_the_same_route(
 
     expected = profile_background if same_route_for_a_ticket is None else same_route_for_a_ticket
     assert (entry.route, entry.background) == (route, expected)
+
+
+def _route_taken(response: httpx.Response, runners: Runners) -> ServedRoute | None:
+    """The route a run was admitted on, or ``None`` for a refusal; forgets the run."""
+    taken = [*runners.cli.admitted, *runners.api.admitted]
+    runners.cli.admitted.clear()
+    runners.api.admitted.clear()
+    if response.status_code != 200:
+        assert_rejected(response, RejectionCode.NOT_ENABLED, 403)
+        return None
+    (admitted,) = taken
+    return admitted.route
+
+
+@pytest.mark.parametrize("profile_background", [True, False])
+@pytest.mark.parametrize(
+    "groups",
+    [SUBSCRIBER, API_CALLER, [SUBSCRIPTION_GROUP, API_GROUP, SONGMAKER_GROUP]],
+    ids=["subscription-only", "api-only", "both-groups"],
+)
+def test_a_ticket_run_lands_where_the_offer_says(groups, profile_background):
+    """J18: `background` is true exactly when a real ticket run takes the route the live run took"""
+    config = _with_background(
+        with_listed_models(service_config(), [LISTED_MODEL]), profile_background
+    )
+    runners = Runners(cli=ScriptedRunner(ANSWER), api=ScriptedRunner(ANSWER))
+    with _served(config, runners) as app:
+        (entry,) = _the_offer(_get_offer(app, groups)).data
+        live_route = _route_taken(post_run(app, _headers(groups), run_body()), runners)
+        ticket = minted_ticket(app, MINT, tuple(groups))
+        ticket_response = post_run(app, ticket_headers(MINT.workload(), ticket), run_body())
+        ticket_route = _route_taken(ticket_response, runners)
+
+    assert entry.background == (ticket_route == live_route)
 
 
 @pytest.mark.parametrize("profile_background", [True, False])

@@ -26,6 +26,16 @@ job ticket in the `Agent-Job-Ticket` header instead of a user token, and refuse 
 both. The wire stays version 2, and `POST /job-tickets` and `GET /offer` still take a user token only
 ([wire.md](wire.md), "Job tickets").
 
+A Grok child no longer holds a byte copy of the login at `grok.token_file`. The Grok turn and the
+Grok catalog probe each hand their child a re-serialized copy in which every member named
+`refresh_token`, `refreshToken` or `refresh`, at any depth, is the empty string, so a child never
+renews and never rotates the stored login; every other member keeps its value. A source that is
+not UTF-8 JSON, or whose top level is not a JSON object, has no copy: a Grok turn then refuses
+with `ProviderUnavailableError` for `grok`/`cli` and the reason `CLI_LOGIN_NOT_CONFIGURED`, and
+the catalog probe reports Grok logged out and logs a warning. Neither shows the file's content.
+A host whose `auth.json` is a JSON object needs no action; one that stores the login in another
+shape fixes the file.
+
 ## Migrating to 0.7.0
 
 A host migrates at its pin bump to 0.7.0, by renaming. Nothing behaves differently: the wire

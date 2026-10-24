@@ -1,0 +1,8 @@
+claim_id = "adeaad39b33547a2bfd150448873afe8"
+agent = "Claude 789b3c8b-3745-4c8e-84cb-42ae4da70b85"
+role = "builder"
+base = "5cbb006e9027d27ee4ba951ea6c2466af492e34b"
+branch = "claude/issue-432-quality-v0-6-0"
+scope = [".github/workflows/ci.yml", ".github/workflows/code-scanning.yml", "quality/baseline.toml", "quality/config.toml"]
+opened_commit = "4c6714609260f918a440bcc8db9d8038c69974dc"
+whole_reason = "One quality version bump: the pins and the config facts its new rule asks for move together."
